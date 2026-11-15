@@ -1101,6 +1101,176 @@ def rv55_clock_install_evidence(tcm, dram, init):
     return result
 
 
+def rv55_vdec_irq_evidence(tcm, dram, init):
+    """Packed registration -> table consumer -> named ISR/ACK/signal edges.
+
+    Full payload identity and independently framed PCs constrain this static
+    interpretation. Descriptor bytes 1/2 are NOT assigned priority/affinity
+    meanings. The control caller does not explicitly set a1 after registration.
+    The mapping helper translates AP-address arguments through a captured table;
+    those arguments are not literal RV55 pointers or an authorized AP mapping.
+    ISR status/ACK and a shared semaphore count do not prove token association,
+    producer exclusion, DMA drain or retirement of any codec buffer.
+    """
+    result = dict(profile_match=False, runtime_registration_proven=False,
+                  runtime_dispatch_target_proven=False,
+                  runtime_irq_enable_proven=False,
+                  runtime_irq_ack_proven=False,
+                  runtime_mapping_proven=False,
+                  runtime_semaphore_wakeup_proven=False,
+                  runtime_buffer_completion_proven=False,
+                  runtime_producer_exclusion_proven=False,
+                  runtime_dma_retirement_proven=False)
+    if (not init['profile_match'] or tcm is None or len(tcm) != 184320 or
+            hashlib.sha256(tcm).hexdigest() !=
+            'f59d646ba74fab1c40500139c40d67c97a0e8ab96c1569f738a0c7403cc49508'):
+        return result
+    spans = (
+        ('DRAM', 'vdec_shared_semaphore_creation_arguments', 0x223a36, 0x223a56),
+        ('DRAM', 'vdec_lat_descriptor_registration_and_control', 0x223a56, 0x223a7a),
+        ('DRAM', 'vdec_core_descriptor_registration_and_control', 0x223a7a, 0x223a9e),
+        ('DRAM', 'vdec_third_descriptor_registration_and_control', 0x223a9e, 0x223ac4),
+        ('DRAM', 'third_descriptor_callback_is_ret_only', 0x223a30, 0x223a32),
+        ('TCM', 'descriptor_validation_vendor_branches', 0x421c, 0x4240),
+        ('TCM', 'descriptor_callback_context_stores_and_failure_clear', 0x4240, 0x4274),
+        ('TCM', 'descriptor_registration_result_and_vendor_epilogue', 0x4274, 0x4288),
+        ('TCM', 'descriptor_unpack_three_fields_and_config_call', 0x3fb0, 0x3fd2),
+        ('TCM', 'descriptor_config_index_bound_and_vendor_field_checks', 0x3eaa, 0x3ebe),
+        ('TCM', 'descriptor_config_bank_mask_and_vendor_register_address', 0x3ebe, 0x3efe),
+        ('TCM', 'descriptor_config_field2_register_or_and_paths', 0x3efe, 0x3f3c),
+        ('TCM', 'descriptor_config_field1_routing_register', 0x3f3c, 0x3f68),
+        ('TCM', 'descriptor_config_final_register_and_vendor_selector', 0x3f68, 0x3fb0),
+        ('TCM', 'descriptor_control_mask_and_nonzero_zero_register_paths', 0x4056, 0x40c0),
+        ('TCM', 'dispatch_hart_gate_and_source_call', 0x4288, 0x42a6),
+        ('TCM', 'dispatch_stride40_callback_and_context_loads', 0x42ae, 0x42ce),
+        ('TCM', 'dispatch_context_argument_and_indirect_call', 0x42f6, 0x4316),
+        ('TCM', 'dispatch_source_registers_and_vendor_index_calculation', 0x43f8, 0x443e),
+        ('TCM', 'ap_address_mapping_lookup_and_vendor_selection', 0x10fdc, 0x11030),
+        ('TCM', 'lat_isr_addresses_and_status_mask', 0x15208, 0x15230),
+        ('TCM', 'lat_isr_status_logs_and_ack_tail', 0x15230, 0x15266),
+        ('TCM', 'lat_isr_ack_and_conditional_signal_frontier', 0x15294, 0x152aa),
+        ('TCM', 'core_isr_addresses_and_status_mask', 0x150dc, 0x15104),
+        ('TCM', 'core_isr_status_logs_and_ack_tail', 0x15104, 0x1513a),
+        ('TCM', 'core_isr_ack_and_conditional_signal_frontier', 0x15168, 0x1517e),
+        ('TCM', 'lat_ack_register_rmw_and_hw_pulse', 0x1517e, 0x15208),
+        ('TCM', 'core_ack_register_rmw_and_hw_pulse', 0x15052, 0x150dc),
+        ('TCM', 'shared_semaphore_signal_isr_thread_paths', 0x14fda, 0x15052),
+        ('TCM', 'isr_signal_queue_count_bound_and_increment', 0x6d92, 0x6dac),
+        ('TCM', 'isr_signal_waiter_and_vendor_wakeup_path', 0x6dec, 0x6e08),
+        ('DRAM', 'semaphore_create_handle_store_and_result', 0x246fb2, 0x246ffe),
+    )
+    descriptors = []
+    for address, callback, role, register_call, control_call in (
+            (0x203a0, 0x15208, 'lat', 0x223a6c, 0x223a76),
+            (0x203a3, 0x150dc, 'core', 0x223a90, 0x223a9a),
+            (0x2039d, 0x223a30, 'ret-only callback, role unresolved',
+             0x223ab6, 0x223ac0)):
+        raw = span(tcm, address, 3)
+        descriptors.append(dict(address=address, bytes=3, raw_hex=raw.hex(),
+            captured_fields=list(raw), callback_argument=callback,
+            context_argument=0, role_from_callback_log=role,
+            registration_call=register_call, control_call=control_call,
+            control_a1_explicitly_initialized_at_callsite=False))
+    mapping_records = []
+    for index in range(7):
+        address = 0x1c1e0 + index * 16
+        raw = span(tcm, address, 16)
+        words = list(struct.unpack('<4I', raw))
+        mapping_records.append(dict(address=address, raw_hex=raw.hex(), words=words,
+            comparison_region=words[0], comparison_attribute=words[1],
+            mapped_region=words[2], fourth_word_semantics_proven=False))
+    callbacks = []
+    for (role, callback, register_argument, ack, ack_call, signal_jump, handle_cell,
+            pulse, log_addresses) in (
+            ('lat', 0x15208, 0x36010000, 0x1517e, 0x15294, 0x152a4,
+             0x1f1b4, 1, (0x2269ee, 0x226a28, 0x226996)),
+            ('core', 0x150dc, 0x36025000, 0x15052, 0x15168, 0x15178,
+             0x1f1b0, 16, (0x22692d, 0x226963, 0x2268d9))):
+        callbacks.append(dict(role=role, callback=callback,
+            register_argument=register_argument, shared_status_argument=0x36000000,
+            mapping_helper=0x10fdc, mapping_attribute_argument=0,
+            shared_status_offset=0, shared_status_mask=16,
+            local_status_offset=164,
+            local_status_test_vendor_semantics_unresolved=True,
+            log_formats=[dict(address=a, text=cstring(dram, a - 0x200000))
+                for a in log_addresses],
+            ack_helper=ack, ack_call=ack_call,
+            ack_register_sequence=dict(local_offset=164,
+                first_rmw_or_mask=17, second_rmw_and_mask_s32=-17,
+                pulse_register_argument=0x36098000, pulse_offset=12,
+                pulse_value=pulse, pulse_final_value=0,
+                saves_and_restores_mstatus=True, interrupt_mask=8,
+                interrupt_mask_bit=3, vendor_fence_semantics_proven=False),
+            signal_jump=signal_jump, signal_helper=0x14fda,
+            signal_handle_cell=handle_cell, signal_isr_argument=1,
+            signal_frontier_vendor_branch_unresolved=True,
+            ack_or_signal_is_not_buffer_retirement=True))
+    result.update(profile_match=True,
+        profile='captured RV55 VDEC packed registration and named IRQ callbacks',
+        initializer=0x223a34, descriptors=descriptors,
+        registration=dict(helper=0x421c, callback_table=0x20fa0,
+            dispatch_table_stride=40, callback_offset=0, context_offset=4,
+            callback_store=0x4264, context_store=0x4268,
+            register_index_arithmetic=0x424c,
+            register_index_vendor_semantics_proven=False,
+            existing_callback_nonzero_branch=0x4260,
+            configure_call=0x426c, configure_helper=0x3fb0,
+            failure_callback_clear=0x4270,
+            failure_path_has_no_explicit_context_clear=True,
+            field_config_helper=0x3eaa, field0_upper_bound=127,
+            field1_routing_shift=4, field2_selects_register_or_and=True,
+            field1_priority_affinity_and_field2_hardware_meanings_proven=False,
+            paired_helpers=[0x5864, 0x58cc],
+            exclusion_scope_and_cross_hart_visibility_proven=False),
+        control=dict(helper=0x4056, field0_bank_shift=5,
+            mask_formula='1 << (field0 & 31)', register_base_literal=0x2120b040,
+            vendor_bank_address_instruction=0x4082,
+            nonzero_a1_selects_or=True, zero_a1_selects_and_not=True,
+            complete_register_address_and_live_enable_proven=False),
+        dispatch=dict(helper_candidate=0x4288, source_helper=0x43f8,
+            source_base_literals=[0x2120b18c, 0x2120b01c],
+            source_register_and_index_vendor_semantics_proven=False,
+            stride_multiply=0x42b6, callback_load=0x42c2,
+            context_load=0x42ca, context_argument=0x4304, indirect_call=0x4306,
+            hart_gate_and_selected_callback_runtime_proven=False),
+        mapping=dict(helper=0x10fdc, captured_table=0x1c1e0,
+            captured_records=mapping_records, region_mask=0xf8000000,
+            attribute_mask=15, offset_mask=0x07ffffff,
+            candidate_output_or_offset_sequence=True,
+            complete_table_extent_proven=False,
+            table_loop_vendor_selection_and_runtime_mutability_proven=False,
+            input_addresses_are_not_literal_rv55_pointers=True,
+            input_addresses_are_not_authorized_ap_mmio=True),
+        callbacks=callbacks,
+        shared_signal=dict(helper=0x14fda, handle_load_offset=0,
+            isr_helper=0x6d36, thread_helper=0x6788,
+            isr_call=0x14fe8, thread_call=0x1502c,
+            conditional_yield_call=0x1500c, yield_helper=0x57da,
+            complete_vendor_result_and_yield_control_flow_proven=False,
+            log_formats=[dict(address=a, text=cstring(dram, a - 0x200000))
+                for a in (0x247eb8, 0x247e8f)],
+            queue_count_offset=56, queue_limit_offset=60,
+            queue_count_increment_store=0x6da6,
+            waiter_operation_call=0x6df6, waiter_operation_helper=0x8378,
+            creator=0x246fb2, create_calls=[0x223a46, 0x223a52],
+            handle_cells=[0x1f1b0, 0x1f1b4],
+            captured_handle_raw_hex=span(tcm, 0x1f1b0, 8).hex(),
+            create_entries_argument=1, create_item_bytes_argument=0,
+            initial_queue_count_proven=False,
+            create_type_literal=3, create_handle_store=0x246fce,
+            captured_zero_handles_are_not_runtime_state=True,
+            shared_hardware_signal_is_not_instance_token_or_buffer_identity=True,
+            wait_consumer_and_reset_lifetime_proven=False,
+            software_signal_or_yield_is_not_dma_drain=True),
+        instruction_evidence=[dict(segment=segment, name=name,
+            link_address=start, end_exclusive=end,
+            payload_offset=start - (0x200000 if segment == 'DRAM' else 0),
+            raw_hex=span(dram if segment == 'DRAM' else tcm,
+                start - (0x200000 if segment == 'DRAM' else 0), end-start).hex())
+            for segment, name, start, end in spans])
+    return result
+
+
 def firmware(blob):
     """MTK extended 512-byte headers; preserve every byte including padding."""
     at, pieces = 0, []
@@ -1165,6 +1335,9 @@ def firmware(blob):
                 service_clock_evidence=rv55_clock_evidence(
                     service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
                 service_clock_install_evidence=rv55_clock_install_evidence(
+                    service_payloads.get('tinysys-vcp-RV55_A'),
+                    service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
+                service_vdec_irq_evidence=rv55_vdec_irq_evidence(
                     service_payloads.get('tinysys-vcp-RV55_A'),
                     service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
                 service_output_evidence=rv55_output_evidence(
