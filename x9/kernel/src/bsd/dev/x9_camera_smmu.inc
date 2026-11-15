@@ -38,6 +38,8 @@ struct x9_camera_smmu {
     uint32_t ste_shift, ste_bytes, native_cr0, native_gbpa;
     uint64_t native_power;
     bool native_retire_attempted,native_restored,native_setup_issued,native_unstarted_retired;
+    bool native_epoch_recycled;
+    struct x9_camera_smmu *native_previous;
     uint32_t native_ste_phase,native_retire_error,native_prior_word[17];
     uint64_t native_retire_epoch,native_prior_base[3];
 };
@@ -93,7 +95,7 @@ static void cam_smmu_unpublished_free(struct x9_camera_smmu *m)
         panic("X9 CAMERA: unpublished SMMU has published Stage-1");
     cam_s1_free_page(&m->evt);cam_s1_free_page(&m->cmd);
     if(m->ste.va)kmem_free(kernel_map,m->ste.va,m->ste_bytes);
-    if(cam_smmu_namespace==m)cam_smmu_namespace=NULL;
+    if(cam_smmu_namespace==m)cam_smmu_namespace=m->native_previous;
     m->magic=0;kfree_type(struct x9_camera_smmu,m);
 }
 
@@ -173,8 +175,8 @@ static int cam_smmu_storage(struct x9_camera_smmu *m)
     __asm__ volatile("dsb sy":::"memory");return 0;
 }
 
-int x9_camera_smmu_prepare(uint32_t idr0,uint32_t idr1,uint32_t idr5,
-    uint64_t iova,uint32_t bytes,struct x9_camera_smmu **out)
+static int cam_smmu_prepare_replacement(uint32_t idr0,uint32_t idr1,uint32_t idr5,
+    uint64_t iova,uint32_t bytes,struct x9_camera_smmu *previous,struct x9_camera_smmu **out)
 {
     struct x9_camera_smmu *m;
     unsigned cmd=(idr1>>21)&31u,evt=(idr1>>16)&31u;
@@ -182,10 +184,15 @@ int x9_camera_smmu_prepare(uint32_t idr0,uint32_t idr1,uint32_t idr5,
     if(!out || *out)return EINVAL;
     if(!cam_smmu_capable(idr0,idr1,idr5))return ENOTSUP;
     lck_mtx_lock(&camera_smmu_lock);
-    if(cam_smmu_namespace){lck_mtx_unlock(&camera_smmu_lock);return EBUSY;}
+    if(cam_smmu_namespace!=previous || (previous &&
+       (!previous->native || !previous->native_restored || !previous->native_epoch_recycled ||
+        previous->native_started || previous->pending || previous->native_retire_error))) {
+        lck_mtx_unlock(&camera_smmu_lock);return EBUSY;
+    }
     m=kalloc_type(struct x9_camera_smmu,Z_WAITOK|Z_ZERO);
     if(!m){lck_mtx_unlock(&camera_smmu_lock);return ENOMEM;}
     m->magic=CAM_SMMU_MAGIC;m->idr0=idr0;m->idr1=idr1;m->idr5=idr5;
+    m->native_previous=previous;
     m->ste_shift=8;m->ste_bytes=CAM_S1_PAGE;
     m->cmd_shift=cmd>8?8:cmd;m->evt_shift=evt>7?7:evt;
     cam_smmu_namespace=m;
@@ -206,6 +213,12 @@ int x9_camera_smmu_prepare(uint32_t idr0,uint32_t idr1,uint32_t idr5,
     else *out=m;
     lck_mtx_unlock(&camera_smmu_lock);return e;
 }
+
+/* Ordinary allocation still cannot replace any namespace. Only the native
+ * fresh-MM/cold-bank reopen path supplies an independently recycled prior. */
+int x9_camera_smmu_prepare(uint32_t idr0,uint32_t idr1,uint32_t idr5,
+    uint64_t iova,uint32_t bytes,struct x9_camera_smmu **out)
+{ return cam_smmu_prepare_replacement(idr0,idr1,idr5,iova,bytes,NULL,out); }
 
 int x9_camera_smmu_export(struct x9_camera_smmu *m,struct x9_camera_smmu_export *out)
 {

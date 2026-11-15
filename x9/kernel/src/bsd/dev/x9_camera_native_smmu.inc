@@ -100,8 +100,9 @@ static int cam_native_full_table(struct x9_camera_smmu *m,unsigned shift,bool by
     }
     return cam_smmu_storage(m);
 }
-int x9_camera_native_smmu_start(uint64_t token,uint64_t iova,uint32_t bytes,
-    struct x9_camera_smmu **out,struct x9_camera_smmu_export *view)
+static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t bytes,
+    struct x9_camera_smmu **out,struct x9_camera_smmu_export *view,
+    struct x9_camera_smmu *previous)
 {
     vm_offset_t mmio;
     struct cam_native_snapshot entry,again;
@@ -131,8 +132,8 @@ int x9_camera_native_smmu_start(uint64_t token,uint64_t iova,uint32_t bytes,
        entry.word[CAM_N_EP] || entry.word[CAM_N_EC] ||
        (entry.word[CAM_N_GBPA]&(1u<<31)))return EBUSY;
     if(entry.word[CAM_N_GE]^entry.word[CAM_N_GEN])return EIO;
-    e=x9_camera_smmu_prepare(entry.word[CAM_N_IDR0],entry.word[CAM_N_IDR1],
-        entry.word[CAM_N_IDR5],iova,bytes,&m);if(e)return e;
+    e=cam_smmu_prepare_replacement(entry.word[CAM_N_IDR0],entry.word[CAM_N_IDR1],
+        entry.word[CAM_N_IDR5],iova,bytes,previous,&m);if(e)return e;
     lck_mtx_lock(&camera_smmu_lock);
     m->native_power=token;m->native_gbpa=entry.word[CAM_N_GBPA];
     memcpy(m->native_prior_word,entry.word,sizeof(entry.word));
@@ -185,6 +186,10 @@ int x9_camera_native_smmu_start(uint64_t token,uint64_t iova,uint32_t bytes,
         sidbits,m->native_bypass,m->native_cr0,m->native_started,m->prod,m->cons,e);
     lck_mtx_unlock(&camera_smmu_lock);return e;
 }
+int x9_camera_native_smmu_start(uint64_t token,uint64_t iova,uint32_t bytes,
+    struct x9_camera_smmu **out,struct x9_camera_smmu_export *view)
+{ return cam_native_smmu_start_impl(token,iova,bytes,out,view,NULL); }
+
 int x9_camera_native_smmu_check(struct x9_camera_smmu *m)
 {
     if(!m || !m->native || !m->native_started || m->native_retire_attempted)return ENXIO;

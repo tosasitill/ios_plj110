@@ -32,5 +32,12 @@ int x9_camera_native_smmu_retirement_check(uint64_t epoch,struct x9_camera_smmu 
  * and actual sensor OFF. Original fault/backing retained, no fake DONE.
  * Partial normal startup or a queue timeout cannot use this cleanup. */
 int x9_camera_native_smmu_unstarted_retire(uint64_t epoch,struct x9_camera_smmu *);
+/* Internal native control-held lifecycle APIs are implemented after IRQ
+ * journals in this TU: cam_native_epoch_recycle_locked(epoch,m),
+ * cam_native_epoch_recycled_check_locked(epoch,m) (history scope only), and
+ * cam_native_reopen_locked(new_epoch,oldm,fresh_power,iova,bytes,&newm,&view).
+ * Recycle is ONLY after actual physical-close success. Up to eight exported
+ * epochs remain pinned; ninth reopen returns ENOSPC before new exposure.
+ * Ordinary x9_camera_smmu_prepare/start still cannot replace a namespace. */
 #endif
 #endif
