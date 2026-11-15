@@ -2156,3 +2156,4 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - **launcher**：板级会话不可用、runtime 缺失、环境设置或 bridge exec 失败时，清掉注入变量后 exec stock bluetoothd，MachServices 始终有人服务。
 - **安装器升级**：`root_header.py/candidate.py --previous-payload`；内核按每文件的旧自有版本 SHA 原子升级，restore 也认旧版本。
 - 只做了 kern_exec.c、x9_bt_hardware.c 单文件编译（测试头含伪造旧版本以覆盖代码生成）。**修复不保证解决 322 的 39 s 挂死，其机制仍未证明。**
+- **构建 rootboot3**：源码 `ee685ffa`，同 rootboot2 输入 + `--previous-payload x9/out/bt-native-rootboot2-20261115/root-payload`，exit0，103/103 overlay，Image 32837632 B / boot 15306752 B。payload 只有 `X9BluetoothLaunch` 变化（其余六个与 rootboot2 字节相同），嵌入 1 个可升级旧版本。产物 `x9/out/bt-native-rootboot3-20261115/boot/boot.img`（x9_bt_init=1 fc=1 root=1）与 `boot-rollback/boot.img`（root=2，不带 init/fc，蓝牙被动）。预期日志：`X9 BT ROOT: upgrade /usr/libexec/X9BluetoothLaunch errno=0`、`installed 1/7`；随后 `X9 BT:` 不再出现 stage=1 EBUSY，若仍拒绝会打印 dev0/dev1/dev2/CON2/STA0。
