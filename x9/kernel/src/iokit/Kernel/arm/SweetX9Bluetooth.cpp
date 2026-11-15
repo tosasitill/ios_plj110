@@ -93,6 +93,7 @@ static IOReturn bt_return(int error)
     case EPERM: return kIOReturnNotPermitted;
     case EAGAIN: return kIOReturnNotReady;
     case EMSGSIZE: return kIOReturnNoSpace;
+    case ENOTSUP: return kIOReturnUnsupported;
     default: return kIOReturnIOError;
     }
 }

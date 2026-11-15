@@ -33,8 +33,8 @@ DXB_COMMIT=663906528d1cd5ea8fde7de6f16de73db9511549
 XNU_REPO=https://github.com/apple-oss-distributions/xnu.git
 XNU_TAG=xnu-8796.141.3
 case $ABI in
-  macos) D=$ROOT/.local/dxb; PATCHES="$P/0001-x9-sweet-xnu-8796.141.3.patch" ;;
-  ios)   D=$ROOT/.local/dxb-iosabi; PATCHES="$P/0001-x9-sweet-xnu-8796.141.3.patch $P/0002-x9-ios-kext-cxx-abi.patch $P/0003-x9-sparse-prelink-kext-memory.patch $P/0004-x9-diag-unaligned-static-mfree.patch $P/0005-x9-diag-prelinked-kext-load.patch" ;;
+  macos) D=$ROOT/.local/dxb; PATCHES="$P/0001-x9-sweet-xnu-8796.141.3.patch $P/0006-x9-bt-uart-irq.patch" ;;
+  ios)   D=$ROOT/.local/dxb-iosabi; PATCHES="$P/0001-x9-sweet-xnu-8796.141.3.patch $P/0002-x9-ios-kext-cxx-abi.patch $P/0003-x9-sparse-prelink-kext-memory.patch $P/0004-x9-diag-unaligned-static-mfree.patch $P/0005-x9-diag-prelinked-kext-load.patch $P/0006-x9-bt-uart-irq.patch" ;;
   *) echo "usage: $0 [macos|ios] [--setup]" >&2; exit 2 ;;
 esac
 
@@ -72,6 +72,10 @@ if [ $SETUP = 1 ]; then
     done
     git -C "$D/xnu" apply "$P/0002-x9-ios-kext-cxx-abi.patch" "$P/0003-x9-sparse-prelink-kext-memory.patch" "$P/0004-x9-diag-unaligned-static-mfree.patch" \
       "$P/0005-x9-diag-prelinked-kext-load.patch"
+    # macOS may already carry 0006; an older fixed tree may not.
+    if ! grep -q x9_bluetooth_irq_filter "$D/xnu/osfmk/arm64/sleh.c"; then
+      git -C "$D/xnu" apply "$P/0006-x9-bt-uart-irq.patch"
+    fi
   else
     git clone "$DXB_REPO" "$D"
     git -C "$D" checkout -q "$DXB_COMMIT"
