@@ -482,6 +482,7 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **生产修复**：全局及逐SIM在take前判`now>=deadline`并terminal hold；迟到原CNF仍drain，不重新推进注册/host-ready、不清hold。control或MIPC失联在job admission之前撤host-ready并hold已启动初始化，但保留原token，可消费已到完整结果；全局hold不会阻挡原逐SIMtoken drain，单SIM超时不hold另一SIM。后续CFG IND只更新真实modem readiness，不能解除host init hold。queued存储/SMSC额外要求control-ready。
 - **普通job边界**：host deadline先返回一次NOT_READY；**不撤销modem副作用、不等于MO未发送/不等于送达失败**。已提交MO/CNF、ACK原token仍take，物理ACK成功仍正常退休对应CMD/incoming，超时txn不再回第二个success、不重发。存储TAG超时/失client不开始延迟mutation；已有明确写入后的hold规则保持。
 - **编译 / 证据**：新增`sms_init_host.cpp`编译实际SMS owner与MD transport，8项人工源码边界（now==deadline、迟到CNF、单SIM隔离、offline drain、MO/ACK、queued control loss），**只编译未运行**。私有compile日志在树`x9/out/sms-init-deadlines-compile/`；最终host C++17严格`clang++ -c` **exit0**（`host-final.log/.exit`），真实recipe`X9Baseband.cpp.o` **true / exit0**（`recipe-final.log/.exit`、`recipe-results-final.json`），`git diff --check`无错误。无测试套件/设备操作/CI/boot pack，未修改audio/GPU/BT。
+- **提交 / 集成交接**：生产源码`b0055a4`（`fix/sms-init-deadlines`，已无冲突rebase main`3b6717a`）；rebase后的实际源码再作host严格`-c` **exit0**、真实recipe`X9Baseband.cpp.o` **true / exit0**（`host-rebased.log/.exit`、`recipe-rebased.log/.exit`、`recipe-results-rebased.json`）。父代理统一合main/push/完整kernel构建，本子项不自行合并或pack；删除树前保留该compile目录到主checkout同名`x9/out/`。
 - **剩余**：独立SMS inbox poison与generic transport readiness的差异仍应后续核实；WMS24/内存满恢复/IMS-only或non-CS短信尚未实现，Messages显示/重开持久化/同token物理ACK及MO对端收到仍缺设备验收，不能称通话短信最终镜像。
 
 #### 2026-11-15 单普通 MO 挂断生产 owner / VOICE44 独立绑定
