@@ -322,13 +322,66 @@ bootstrap`1f2e67398..3a0`注入controller+90的IMSSubscriberEventInterface，rea
 `IMSCallCommandDriver::bootstrap100dd55f4/100dd5734..5784`observe同属性，真实callback
 `handleIMSClientStateChanged_sync100dcc390`；ready true的`100dcc51c`分支在`100dcc570..588`
 调用driver+98 factory的+10，也就是同一CCIMSClientFactory::createCallClient，随后才走上述AP SIP。
-已证可替换抽象点是CC factory的call/SMS创建槽，或更早的subscriber factory+38；
+已定位CC factory的call/SMS创建槽和更早的subscriber factory+38，但前者仅是legacy接口，
+**不是覆盖正常typed dial及全部state callback的完整替换点**，见下节；
 **尚缺返回并持续驱动MTK IMS provider的实际接口实现**，包括Personality、capability、delegate、
 初始化和网络状态，不能补ready常量/普通VOICE20 TLV代替。本窄段未找到可直接启用的modem-managed
 provider，不据此宣称全系统不存在；没有production hook。
 私有复读材料主checkout`x9/out/ims-provider-boundary/`的
 `ims-controller-createclient.asm`、`ims-controller-ready.asm`、`ims-root-vtables.txt`、
 `ims-call-driver-ready-handler.asm`及`root-query.py`。
+
+#### 普通拨出实际typed CallHandle / UUID契约（仅原件静态）
+
+CC factory返回`IMSCallClientInterface`，其legacy +28/dial`100177b88`把
+`IMSStartCall`结果转为bool，**不返回native call ID**。正常IMSCallCommandDriver还有另一条：
+`100dce268→100dcf174`取driver+328的CallFactoryInterface、virtual+40，实际
+CallFactory address point`101532938`+40→`10019c234`。CallInfo里的CFUUID经
+`100fb3980`调用CFUUIDCreateString并assign到C++ string，构造
+`ims::Call(uuid,真实ims::ClientHandle*)`。普通client由`100dd3498`按CallInfo+0xd8 SimSlot
+调用PersonalityIdFromSlotIdEx，再经SystemDeterminationManager取得该Personality的IMS client。
+这不是把MD整数ID/token编码成UUID，也不能借NAS/WMS的默认SIM。
+
+model virtual+118→`1007cb578`接收真实shared_ptr<ims::CallHandle>；normal分支dynamic_cast
+到ims::Call后在`1007cb970`调用virtual+80/dial，number、CallConfig及CallInfo+57的bool
+另有实际上游，不由普通VOICE20/tag10=0推导。更正早报：`1007cbdcc`的+68是
+EmergencyCall分支，不是normal Call::dial/refresh错版。root与OS20H392 CommCenter原件相同，
+root cryptex/sysos MAIN cache UUID都为`8f970452-c9e3-3e88-b114-feb1864bc9e0`；
+同一cache ctor/vtable原字节支持上述消歧，未用不同版本拼ABI。
+
+delegate也不只经legacy Event5：`setDelegatesOnIMSClientHandle100dcb8f0`另取原ims::Client，
+virtual+a0/addCallManagerDelegate和+a8/addDefaultCallDelegate绑定IMSCallModel。
+ACTIVE callback`1007c4d3c`按uuid string→CFUUIDCreateFromString，经model command delegate
++e0找到原CallInfo，再同步状态/通知。生产provider必须同时保有typed client/call、UUID↔
+native epoch/真实ID映射以及delegate生命周期；**单独替换CC factory返回对象不足以修好拨号、
+state/END或handover**。仍在核CallConfig及command delegate，不新增hook/ready常量。
+私有精确切片在IMS树`x9/out/ims-call-provider-contract/`；这是静态契约，不是设备已选此路径。
+
+### 通话专用voice音频契约（仅原件静态，不冒充媒体speaker）
+
+同机HAL `ScpSpeechOn2474a0`先registerAdspFeature14，`247544`以scene0、UL/DL各65536B
+和真实`processDmaMsg246660`/this注册callback；GOT44d3b8由原库relocation确认。
+`AudioMessengerIPI1dceb0→audio_ipi_dma_cbk_register42f790`保存callback/this，
+`42fa5c..6c`发ioctl40046915，20B payload含magic/~magic、scene/reg、UL/DL尺寸。
+Android参考REG_DMA→alloc_region(scene0)按实际task/dsp/controller发双向region的
+offset/size/read_idx/write_idx，再以ADD1 NEED_ACK UPDATE_REGION发布，不能沿用SmartPA布局。
+`247688..6bc`实际scene0/layer2/type0/ack1/AD20，param1是实际时间/on打包值，param2是modem index，
+`42efc0→42f548..55c`落ioctl40046900。没有把本机抓到的单次值当运行默认值。
+
+**更正**：OpenDSP this+158是SpeechDriverNormal；`sendIpcCmd24c720→1b2ac0`最终只有返回0，
+不是MD↔DSP3D00 transport。scene0 callback只分DA00/DA10/DA11/DA12；3D00是另一MD→DSP方向，
+其完整producer/consumer、MD voice DMA、voice AFE与Aurisys参数生命周期仍缺。
+当前native IPI_DMA只拥有coreA/task14或32，板级transport实际只注册core0；Android双核scene0
+路由HiFi3_B，但实际physical routing来自task-info，不把Aurisys core_type1猜为物理core1。
+
+iOS原件VirtualAudio factory21ebc8比较CFString62e790的UID`Baseband Voice`，匹配后21ee7c
+创建592B/vtable621c30的独立设备，包含`Baseband Downlink`/`Baseband Uplink`。
+virtual+30→326560消费`ttye`/4B→异步CTSetTTYMode、`ctsr`/8B double→真实callback
+CTAudioSampleRateSwitchDidComplete；CT callback328944的type0..2经table524698映射
+`vcdt`/`vcdr`/`thsr`并通知。root/os20H392的VirtualAudio LC_UUID同
+`3196333F-5A48-373B-B427-0146DC1177FB`，原件build metadata为20H392/16.7.16。
+不能仅广告设备UID或复用Speaker/Hawking媒体设备就称voice接通。
+全部窄切片/私有原件在主checkout`x9/out/call-audio-analysis/`；没有生产改动/编译/设备验收。
 
 ### SMS集成：未发布MT的原子host queue准入
 
