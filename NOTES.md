@@ -1575,6 +1575,13 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - **未验/限制**：此代码没有下载/修改SCP固件，仅使用LK/TFA已加载的签名原件；还没有ULPOSC校准同步、RTOS feature/DVFS和正常低功耗交接，26M/INFRA/DRAM票与映射保留到重启，停止不声称已断电。DT的gain-cali/面板补偿/LCD参数、固件实际READY、GPR窗口与lux随遮挡变化都待运行验证；不能用ACK称光感/距离可用。**候选基于main的GPU280 allowlist，而319实跑GPU283**；不能当作319的单变量替换。当前GPU worktree需cherry-pick功能提交后按其已stage的283基线重建，或先解决280插件资产，才验iOS自动亮度；本轮没有新plugin-package/mailbox操作。
 - **最小复建/日志定位**：从boot-device拷贝JSON到`x9/out/<新名字>/boot-input.json`，仅把`x9_als=1`替换为3，然后`python3 -I x9/build/build.py all --boot-config x9/out/<新名字>/boot-input.json --name <新名字>`。用户手动临时fastboot boot；遮挡/照亮各数秒，保留原始日志。`rg -n 'X9 SCP FDT|X9 ALS|IONameMatch.*als|open X9AmbientLight' ~/N.txt`，预期真实LIST/ENABLE→stage11→`dispatch seq=... lux=... source=MTK`，无数据时应NULL/invalid而不是0lux。Android侧如需新基线先确认设备状态，再运行只读`capture_android_sensors.py`；默认已改为gitignored `x9/out/sensor-baseline-<time>`，不再在.local创建实验目录。
 
+#### 320 实机核对（2026-11-15）— HID 接入成功，SCP 停在 region-info，光感尚未可用
+
+- **观察**：原始日志 `~/320.txt`，摘录 `x9/out/als-log320.txt`，均不入git。`:393–395`（1.144–1.152 s）native worker进入stage1/2，HID注册为`als`；`:612–613`（2.117–2.120 s）首个`SMC c2000528 op=10 arg=0 -> ffffffffea000000`后即`exit stage=2 errno=45 firmware=0 sensor=0 packets=0 records=0`。`:3625`（14.438 s）backboardd打开X9AmbientLight返回0；`:10899/10901`（35.832 s）SpringBoard的`IONameMatch=als`匹配X9AmbientLight。**iOS服务注册/打开已实跑，但没有READY、ENABLE或真实lux，不能称光感或自动亮度成功。**
+- **源码解释/推断**：`errno45=ENOTSUP`由`x9_als_scp.inc`中getter的`v > 0xffffffffULL`分支生成，并非日志证明固件拒绝SMC。返回值与固件reserve起点`0xea000000`的32位符号扩展一致；安卓`scp_helper.c:2262–2276`把`scp_do_get_region_info()`的64位返回赋给`uint32_t`数组，结构字段也是32位。本实现提前拒绝了该表示，因此**未进入stage3的26M/INFRA/DRAM上电请求**。此结论仅定位首个阻塞，不证明其余region字段或后续初始化正确。
+- **下一步**：针对GET_REGION_INFO窄修复32位字段的零扩展/合法符号扩展解析，保留错误码、结构大小及reserve范围检查；不要把其他SMC一律截断。下一候选应先读完全部8个字段，再验证POWER/READY/LIST/ENABLE/DATA和遮挡下lux变化；继续注意GPU280/283启动基线，不能仅此修复就宣称上电成功。
+- **本轮范围**：只读320和安卓源码，交接分支`feat/als-log320-status`（基线`4793856`）；仅更新NOTES并提交合入main/push。没有驱动修复、编译、新boot、测试套件、CI run或设备操作；320的确切镜像/GPU基线本轮未核定。复核命令沿用上方，将`~/N.txt`换成`~/320.txt`。
+
 ### 5.13 2026-11-15 距离传感器：共享 SCP 初始化/控制与原生 iOS 桥已编译，物理链未验收
 
 - 分支 `feat/proximity-power-init-ios`，worktree `.worktrees/proximity-power-init-ios`；基线 `583f132`。距离 ingress/HID=`b0d8096`、coalesce/stop ACK/只读捕获=`036221a`（均已push）；已merge共享上电依赖`96d3a79`及交接`4793856`，没有覆盖主目录其他会话。**代码已接共享worker，但没有物理距离 DATA/自动熄屏验收**。
