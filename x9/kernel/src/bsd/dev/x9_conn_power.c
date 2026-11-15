@@ -15,6 +15,7 @@ static LCK_GRP_DECLARE(conn_group, "x9.conn.power");
 static LCK_MTX_DECLARE(conn_lock, &conn_group);
 static volatile uint32_t *gpio, *tm1, *lm0;
 static uint32_t radios, completed;
+static bool shared_done;
 static void write_reg(volatile uint32_t *p, unsigned off, uint32_t v)
 { p[off/4] = v; __asm__ volatile("dsb sy" ::: "memory"); }
 static void field(volatile uint32_t *p, unsigned off, uint32_t mask, uint32_t v)
@@ -99,7 +100,7 @@ int x9_conn_power_done(enum x9_conn_radio r)
     if (!error) {
         /* Don't temporarily put live combo UART pins back in GPIO mode
          * when a second radio reports power-done. */
-        if (!completed) combo(1, true);
+        if (!shared_done) { combo(1, true); shared_done=true; }
         completed |= r;
     }
     lck_mtx_unlock(&conn_lock); return error;
@@ -109,7 +110,13 @@ int x9_conn_power_release(enum x9_conn_radio r)
     if (!valid(r)) return EINVAL;
     lck_mtx_lock(&conn_lock);
     int error=!(radios&r)?ENXIO:0;
-    if (!error) { radios &= ~r; completed &= ~r; if (!radios) common_off(); }
+    if (!error) {
+        radios &= ~r; completed &= ~r;
+        /* The first completed owner may leave while another owner is still
+         * booting. Its departure does NOT undo shared pin configuration.
+         * Replaying combo(1) would momentarily disconnect the live UART. */
+        if (!radios) { common_off(); shared_done=false; }
+    }
     printf("X9 CONN: release radio=%u mask=%u errno=%d\n", r, radios, error);
     lck_mtx_unlock(&conn_lock); return error;
 }

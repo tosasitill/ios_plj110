@@ -46,7 +46,11 @@
 - `X9Vendor16.c`仅在显式 `X9_BT_VENDOR=MT6653`、正确UUID/指令与完整board结果为0时安装type0路由；
   null vendor ops返回原生NOT_IMPLEMENTED，不伪造BCM私有能力或成功；保留generic callback及supported-commands真实status。
   LE features回调的日志分支也保留入口status（x20保存，不把日志返回值当作成功），原生8 B mask存储不改。
-- **未完成**：native model capability getters、其它初始化status路径核对、launch/BlueTool编排、实机COW路径。
+- `X9Capabilities16.c`绑定真实supported commands/local/LE features，发布扩展扫描/广播、periodic、PAST、coded/2M PHY及广播数量。
+  广播数量通过真实203b查询（软件容量上限5），回包前不发布部分能力；原provider once初始化后才同步缓存和标准HCI selector。
+  HCI Reset保留真实失败状态，并清理各层能力；旧epoch的未完成203b不能推进新初始化。
+  broadcaster启动时刷新构造阶段的legacy选择（本版本实例+0x88），不套iOS27布局。
+- **未完成**：其它初始化status路径核对、launch/BlueTool编排、实机COW与能力发布/缓存路由验证。
   未来环境 `BT_HCI_TRANSPORT=H4:POSIX` / `X9_BT_VENDOR=MT6653`，当前不改launch plist。
 
 ## 编译与只读核对

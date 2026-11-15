@@ -16,8 +16,9 @@ static volatile uint32_t *peri, *top, *hub, *sram, *pll, *spm, *ack, *ap;
 static volatile uint32_t *ep[4]; /* dev0, MD, ADSP, CMM; not AP UART3 */
 static bool requested, powered, isolated, pins_prepared, config_dirty, ap_saved;
 static uint32_t con2_saved, feedback_saved, fifo_saved[4], default_saved;
-static const unsigned ap_offsets[]={0x0c,0x10,0x24,0x28,0x2c,0x44,0x54,0x58};
-static uint32_t ap_registers[8], ap_feature, ap_divisor[3], ap_fifo;
+static const unsigned ap_offsets[]={0x0c,0x10,0x24,0x28,0x2c,0x40,0x44,0x54,0x58};
+static uint32_t ap_registers[sizeof(ap_offsets)/sizeof(ap_offsets[0])];
+static uint32_t ap_feature, ap_divisor[3], ap_fifo;
 enum { DEV0=0, DEV0_SET=4, DEV0_CLR=8, CON1=0xc4, CON2=0xc8,
        IRQ_STA=0xd0, IRQ_CLR=0xd4, STA0=0xe0, CON4=0xf0,
        /* 60+4 +400+4 +4 +8 +4 = 484 (0x1e4). */
@@ -115,7 +116,8 @@ static int pre_on(void *context)
     field(ep[0],0xb0,1,0); /* is_ready's USB_RX_SEL, NOT AP UART3 */
     if (rd(ap,4) || rd(ap,0x4c) || !(rd(ap,0x14)&0x40) || (rd(ap,0x14)&1)) return EBUSY;
     error=endpoints_idle(); if (error) return error;
-    for (unsigned i=0;i<8;i++) ap_registers[i]=rd(ap,ap_offsets[i]);
+    for (unsigned i=0;i<sizeof(ap_offsets)/sizeof(ap_offsets[0]);i++)
+        ap_registers[i]=rd(ap,ap_offsets[i]);
     ap_feature=rd(ap,0x9c); ap_fifo=rd(ap,0x5c);
     wr(ap,0x9c,1);
     ap_divisor[0]=rd(ap,0x90); ap_divisor[1]=rd(ap,0x94); ap_divisor[2]=rd(ap,0x98);
@@ -170,7 +172,10 @@ static int host_uart(void *context, uint32_t baud, uint8_t flow)
     wr(ap,0x54,baud==24000000?0xdb:fl[fraction]);
     wr(ap,0x58,baud==24000000?1:fm[fraction]);
     wr(ap,0x9c,1); wr(ap,0x90,divisor&0xff); wr(ap,0x94,divisor>>8);
-    wr(ap,0x98,0x10); wr(ap,0x9c,0); wr(ap,0x44,0);
+    wr(ap,0x98,0x10); wr(ap,0x9c,0);
+    /* 8250_mtk mtk8250_set_flow_ctrl(NONE), offsets are register index*4.
+     * Escape character is still programmed even with escape disabled. */
+    wr(ap,0x40,0xdb); wr(ap,0x44,0);
     return 0;
 }
 static int hub_features(void *context, bool *hardware_sleep, bool *inband)
@@ -220,7 +225,8 @@ int x9_bt_hardware_stop(void)
         field(hub,STA0,1u<<10,1u<<10);
         if (ap_saved && !x9_bt_hardware_check()) {
             wr(ap,4,0);
-            for (unsigned i=0;i<8;i++) wr(ap,ap_offsets[i],ap_registers[i]);
+            for (unsigned i=0;i<sizeof(ap_offsets)/sizeof(ap_offsets[0]);i++)
+                wr(ap,ap_offsets[i],ap_registers[i]);
             wr(ap,0x9c,1); wr(ap,0x90,ap_divisor[0]); wr(ap,0x94,ap_divisor[1]);
             wr(ap,0x98,ap_divisor[2]); wr(ap,0x9c,ap_feature);
             wr(ap,8,ap_fifo&~6u); ap_saved=false;

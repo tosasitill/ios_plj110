@@ -17,14 +17,32 @@
 #include <sys/mman.h>
 #include <sys/sysctl.h>
 #include <libkern/OSCacheControl.h>
+#include "X9Capabilities16.h"
 
 _Static_assert(sizeof(vm_address_t) == 8, "20H392 arm64 VM addresses must be 64-bit");
 static intptr_t image_slide;
 static uintptr_t addr(uint64_t va) { return (uintptr_t)(va + image_slide); }
 typedef void (*init_fn)(uint32_t, void *);
 typedef void (*callback_fn)(void *);
+typedef void (*reset_fn)(uint32_t);
 static init_fn original_init;
 static callback_fn original_callbacks;
+static reset_fn original_reset;
+static callback_fn original_advertising;
+
+static void reset_complete(uint32_t status)
+{
+    /* Native HCI Reset starts a new capability epoch even on failure. Keep
+     * its log/special-0x26d handling and propagate status through the patched
+     * native tail. Never retain a previous controller's cached capabilities. */
+    x9_cap16_reset();
+    original_reset(status);
+}
+static void start_advertising(void *broadcaster)
+{
+    x9_cap16_prepare_advertising(broadcaster);
+    original_advertising(broadcaster);
+}
 
 static void vendor_init(uint32_t chip, void *context)
 {
@@ -35,6 +53,7 @@ static void vendor_init(uint32_t chip, void *context)
     memset((void *)addr(0x100850790), 0, 0x28); /* vendor callback bridge */
     *(uintptr_t *)addr(0x10084f930) = 0; /* vendor init parser */
     *(uintptr_t *)addr(0x10084f950) = 0; /* vendor sleep parser */
+    x9_cap16_reset();
     /* Keep registered context 0x100850788 and generic callback 0x1008507b8.
      * Do not install no-op vendor functions returning false success. */
 }
@@ -74,8 +93,8 @@ static uintptr_t trampoline(vm_address_t base, const struct edit *e)
 
 int x9_vendor16_install(intptr_t slide)
 {
-    /* Opt-in only; build manifest remains non-stageable until native model
-     * capability getters and boot/BlueTool orchestration are complete. */
+    /* Opt-in only; build manifest remains non-stageable until board handoff,
+     * complete boot/BlueTool orchestration and device validation are done. */
     const char *selection = getenv("X9_BT_VENDOR");
     if (!selection || strcmp(selection, "MT6653")) return 0;
     int boot = ENXIO; size_t n = sizeof(boot);
@@ -84,7 +103,7 @@ int x9_vendor16_install(intptr_t slide)
         return -1;
     }
     image_slide = slide;
-    struct edit edits[] = {
+    struct edit edits[32] = {
         /* Base and derived constructors: use THIRD_PARTY_DONGLE enum0.
          * Derived constructor's type-dependent BCM capability defaults must
          * not survive a base-only change to object+0x260. */
@@ -95,9 +114,8 @@ int x9_vendor16_install(intptr_t slide)
         {0x100166c74, {0x51000409,0x713e793f}, {0x2a0003e9,0x713e7d3f}, 2},
         {0x100166a04, {0xd100c3ff,0xa9014ff4,0xa9027bfd,0x910083fd}, {0}, 4},
         {0x100166e48, {0xd100c3ff,0xa9014ff4,0xa9027bfd,0x910083fd}, {0}, 4},
-        /* This callback tail has not called logging/functions: x0 still
-         * holds actual HCI status. Preserve it instead of MOV w0,#0. */
-        {0x10010bd3c, {0x52800000}, {0xd503201f}, 1},
+        /* Record real supported-command completion, retain native next step. */
+        {0x10010bd34, {0xd0002f01,0x91271c21,0x52800000,0x17fff5db}, {0}, 4},
         /* LE features callback logs on BOTH paths, and repurposes x19.
          * Its saved x20 is otherwise unused. Save incoming status before
          * CBZ, log that status via x20, restore it for init sequencing.
@@ -105,9 +123,27 @@ int x9_vendor16_install(intptr_t slide)
          * Keep the original 8-byte feature storage at 0x1008638c0+0x24. */
         {0x10010c03c, {0x34000260,0xaa0003f3}, {0xaa0003f4,0x34000240}, 2},
         {0x10010c054, {0xf90003f3}, {0xf90003f4}, 1},
-        {0x10010c11c, {0x52800000}, {0xaa1403e0}, 1},
+        /* Native frame stays intact; a bridge passes x20 to the publisher
+         * then jumps to the ORIGINAL stack-check/epilogue at +16. */
+        {0x10010c114, {0xb0002f01,0x912f0021,0x52800000,0x97fff4e3}, {0}, 4},
+        {0x10010c01c, {0xd10143ff,0xa9034ff4,0xa9047bfd,0x910103fd}, {0}, 4},
+        {0x10010bde8, {0xd100c3ff,0xa9014ff4,0xa9027bfd,0x910083fd}, {0}, 4},
+        {0x10010bbd8, {0xd100c3ff,0xa9014ff4,0xa9027bfd,0x910083fd}, {0}, 4},
+        /* x19 is callee-saved and never repurposed in this callback. Save
+         * incoming status on BOTH paths, retaining native error logging. */
+        {0x10010bbe8, {0x340002c0,0xaa0003f3}, {0xaa0003f3,0x340002a0}, 2},
+        {0x10010bc48, {0x52800000}, {0x2a1303e0}, 1},
+        {0x10050a18c, {0xd10183ff,0xa9025ff8,0xa90357f6,0xa9044ff4}, {0}, 4},
     };
-    const unsigned count = sizeof(edits)/sizeof(edits[0]);
+    unsigned count = 15;
+    if (x9_cap16_hook_count > sizeof(edits)/sizeof(edits[0]) - count) return -1;
+    for (size_t k = 0; k < x9_cap16_hook_count; k++) {
+        const struct x9_cap16_hook *h = &x9_cap16_hooks[k];
+        edits[count].va = h->va; edits[count].words = 4;
+        memcpy(edits[count].before, h->before, 16);
+        jump_words(edits[count].after, h->replacement);
+        count++;
+    }
     for (unsigned k = 0; k < count; k++) {
         if (memcmp((void *)addr(edits[k].va), edits[k].before, edits[k].words*4)) {
             fprintf(stderr, "X9 vendor: unexpected 20H392 instruction at %llx; no text changed\n",
@@ -121,11 +157,33 @@ int x9_vendor16_install(intptr_t slide)
     if (kr) return -1;
     original_init = (init_fn)trampoline(tramp, &edits[3]);
     original_callbacks = (callback_fn)trampoline(tramp+32, &edits[4]);
-    sys_icache_invalidate((void *)(uintptr_t)tramp, 64);
+    x9_cap16_configure(slide,
+        (x9_cap16_features_fn)trampoline(tramp+64, &edits[9]),
+        (x9_cap16_features_fn)trampoline(tramp+96, &edits[10]));
+    original_reset = (reset_fn)trampoline(tramp+128, &edits[11]);
+    original_advertising = (callback_fn)trampoline(tramp+160, &edits[14]);
+    uint32_t bridge[10] = {
+        0xaa1403e0, /* MOV x0,x20: actual status preserved across native logs */
+        0x580000b0, /* LDR x16, literal +24 */
+        0xd63f0200, /* BLR x16: publisher has its own ABI frame */
+        0x580000b0, /* LDR x16, literal +32 */
+        0xd61f0200, /* BR x16: native stack check/epilogue restores saved LR */
+        0xd503201f, 0, 0, 0, 0
+    };
+    uintptr_t publish = (uintptr_t)x9_cap16_publish, epilogue = addr(0x10010c124);
+    memcpy(bridge+6, &publish, 8); memcpy(bridge+8, &epilogue, 8);
+    memcpy((void *)(uintptr_t)(tramp+192), bridge, sizeof(bridge));
+    sys_icache_invalidate((void *)(uintptr_t)tramp, 192+sizeof(bridge));
     kr = vm_protect(mach_task_self(), tramp, page, FALSE, VM_PROT_READ|VM_PROT_EXECUTE);
     if (kr) { vm_deallocate(mach_task_self(), tramp, page); return -1; }
     jump_words(edits[3].after, (uintptr_t)vendor_init);
     jump_words(edits[4].after, (uintptr_t)register_callbacks);
+    jump_words(edits[5].after, (uintptr_t)x9_cap16_supported);
+    jump_words(edits[8].after, (uintptr_t)(tramp+192));
+    jump_words(edits[9].after, (uintptr_t)x9_cap16_le_entry);
+    jump_words(edits[10].after, (uintptr_t)x9_cap16_local_entry);
+    jump_words(edits[11].after, (uintptr_t)reset_complete);
+    jump_words(edits[14].after, (uintptr_t)start_advertising);
 
     /* Preflight ALL pages before modifying ANY instruction. COW mappings
      * preserve the original Apple executable on disk. Constructor installs
@@ -155,6 +213,6 @@ int x9_vendor16_install(intptr_t slide)
     for (unsigned j = 0; j < page_count; j++)
         if (vm_protect(mach_task_self(), pages[j], page, FALSE,
                             VM_PROT_READ|VM_PROT_EXECUTE)) abort();
-    fprintf(stderr, "X9 vendor: native type0 routing; generic callbacks retained, unsupported vendor ops stay null\n");
+    fprintf(stderr, "X9 vendor: native type0 routing and HCI capability publisher; unsupported vendor ops stay null\n");
     return 1;
 }

@@ -33,6 +33,7 @@ def main():
                     '-Os', '-Wall', '-Wextra', '-Werror', '-dynamiclib',
                     '-install_name', '/usr/lib/X9H4Transport.dylib',
                     str(HERE / 'X9H4Transport.c'), str(HERE / 'X9Vendor16.c'),
+                    str(HERE / 'X9Capabilities16.c'),
                     '-o', str(bridge)], check=True)
     subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(bridge)], check=True)
     # Deliberately not a stageable runtime: vendor routing and complete board
@@ -43,8 +44,9 @@ def main():
         'bluetoothd_uuid': 'AA9424E8-0648-34E2-B3CF-E6C793B9D471',
         'bluetoothd_sha256': '8b7c0a0bea51544db82269d7f2775ab7996b8740927283428c4753e032df3a8f',
         'stageable': False,
-        'requires': ['MT6653 SSPM/shared-power board backend',
-                     'native model capability adaptation', 'boot/BlueTool orchestration',
+        'requires': ['SSPM CMM24M configuration and proven firmware handoff',
+                     'on-device validation of 20H392 capability publication and native cache routing',
+                     'boot/BlueTool orchestration',
                      'on-device scan/pair/BLE/audio validation'],
         'transport_environment': {'BT_HCI_TRANSPORT': 'H4:POSIX', 'X9_BT_VENDOR': 'MT6653'},
     }, indent=2) + '\n')
