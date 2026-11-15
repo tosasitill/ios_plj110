@@ -76,6 +76,8 @@ def main():
                     '-install_name', '/usr/lib/X9H4Transport.dylib',
                     str(HERE / 'X9H4Transport.c'), str(HERE / 'X9Vendor16.c'),
                     str(HERE / 'X9Capabilities16.c'),
+                    str(HERE / 'X9Bootstrap16.c'),
+                    '-framework', 'CoreFoundation', '-framework', 'IOKit',
                     '-o', str(bridge)], check=True)
     subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(bridge)], check=True)
     for name in ('X9BluetoothLaunch', 'X9BlueTool'):
@@ -97,11 +99,15 @@ def main():
         'bluetoothd_uuid': 'AA9424E8-0648-34E2-B3CF-E6C793B9D471',
         'bluetoothd_sha256': '8b7c0a0bea51544db82269d7f2775ab7996b8740927283428c4753e032df3a8f',
         'stageable': False,
+        'candidate_ready': False,
+        'runtime_verified': False,
+        'power_interface': 'kern.x9_bt_power',
+        'power_lifecycle': 'closed-transport-only',
         'requires': ['current SSPM request/resources and observed 208MHz dev0/CMM profile readback; XNU handoff hardware-unverified',
                      'on-device completion of the embedded Android HAL constructors and preferred FC37 A2DP append; real function power-on',
                      'explicit effective Android UART_FC selection (x9_bt_fc); MTK SW PIO/escape implemented, hardware-unverified; Linux/HW unsupported',
                      'on-device validation of 20H392 capability publication and native cache routing',
-                     'real deepsleep/firmware-own/resume lifecycle',
+                     'on-device deepsleep/firmware-own/resume validation; worker lifecycle and explicit script/reopen bridge implemented',
                      'launchd/BlueTool integration and on-device injection validation',
                      'on-device scan/pair/BLE/audio validation'],
         'transport_environment': {'BT_HCI_TRANSPORT': 'H4:POSIX', 'X9_BT_VENDOR': 'MT6653'},

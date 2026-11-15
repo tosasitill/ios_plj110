@@ -15,6 +15,7 @@
 #include <sys/sysctl.h>
 #include <termios.h>
 #include <unistd.h>
+#include "X9Bootstrap16.h"
 
 #define BASE UINT64_C(0x100000000)
 #define OPEN_SLOT UINT64_C(0x100844168)
@@ -35,12 +36,15 @@ static int serial_open(uint32_t mode,const char *configuration)
     /* The native H4 driver calls POSIX.open with mode0; do not silently
      * accept H4DS/H4BC callers with different flow-control semantics. */
     if(mode) return 0x65;
-    int result=ENXIO; size_t n=sizeof(result);
-    if(sysctlbyname("kern.x9_bt_boot",&result,&n,NULL,0) || n!=sizeof(result) || result) {
+    if((int32_t)*u32(0x1008441c8)!=-1 || *uptr(0x1008494e0)) return 0x4b1;
+    /* An explicit transport reopen resumes the worker before any UART byte
+     * is accepted. It does not fabricate ready status or start a second
+     * initializer, and ownership errors remain native-open failures. */
+    int result=x9_bootstrap16_resume();
+    if(result) {
         fprintf(stderr,"X9 H4: complete MT6653 initializer not ready (errno=%d)\n",result);
         return 0x4b1;
     }
-    if((int32_t)*u32(0x1008441c8)!=-1 || *uptr(0x1008494e0)) return 0x4b1;
     int fd=open("/dev/cu.bluetooth",O_RDWR|O_NOCTTY);
     if(fd<0) return 0x4b1;
     struct termios line;

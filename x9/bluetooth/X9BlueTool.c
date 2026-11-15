@@ -17,16 +17,23 @@ static void handle(xpc_connection_t peer, xpc_object_t message)
     xpc_object_t reply = xpc_dictionary_create_reply(message);
     if (!reply) return;
     const char *id = xpc_dictionary_get_string(message, "kMsgId");
+    const char *operation = "unsupported";
     int error = ENOTSUP;
     if (id && !strcmp(id, "RunBuiltinScript")) {
         xpc_object_t args = xpc_dictionary_get_value(message, "kMsgArgs");
         const char *script = args && xpc_get_type(args) == XPC_TYPE_DICTIONARY ?
             xpc_dictionary_get_string(args, "script") : NULL;
         if (!script) error = EINVAL;
-        else if (!strcmp(script, "boot") || !strcmp(script, "init"))
-            error = x9_bootstrap16_status();
-        /* deepsleep requires an actual firmware-own/clock-release/resume
-         * lifecycle, not a read of current boot status. Remains unsupported. */
+        else if (!strcmp(script, "boot") || !strcmp(script, "init")) {
+            operation = script;
+            error = x9_bootstrap16_resume();
+        } else if (!strcmp(script, "deepsleep")) {
+            operation = script;
+            error = x9_bootstrap16_sleep();
+        }
+        /* Only the three observed native script names are supported. The
+         * kernel executes and verifies ownership/clock changes; a busy
+         * transport, firmware refusal or permission error is not success. */
     }
     /* Native result is a script code, not BSD errno (10/13 have special
      * meaning). Preserve exact failure separately; never collapse it to0. */
@@ -36,8 +43,9 @@ static void handle(xpc_connection_t peer, xpc_object_t message)
         xpc_dictionary_set_string(reply, "output", "Unsupported controller command");
     /* Firmware/manufacturer fields are deliberately absent: they are not
      * supplied by this board ABI. Native HCI Read Local Version owns those. */
-    fprintf(stderr, "X9 BlueTool: request=%s errno=%d\n",
-            id && (!strcmp(id, "RunBuiltinScript") || !strcmp(id, "RunCommand")) ? id : "unsupported", error);
+    fprintf(stderr, "X9 BlueTool: request=%s script=%s errno=%d\n",
+            id && (!strcmp(id, "RunBuiltinScript") || !strcmp(id, "RunCommand")) ? id : "unsupported",
+            operation, error);
     xpc_connection_send_message(peer, reply);
     xpc_release(reply);
 }

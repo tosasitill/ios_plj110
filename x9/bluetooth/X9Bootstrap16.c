@@ -6,6 +6,21 @@
 #include <sys/sysctl.h>
 #include <time.h>
 
+enum { POWER_AWAKE = 0, POWER_ASLEEP = 1, POWER_TRANSITION = 2 };
+static int read_power(int *power)
+{
+    size_t size = sizeof(*power);
+    if (sysctlbyname("kern.x9_bt_power", power, &size, NULL, 0)) return errno;
+    if (size != sizeof(*power) || *power < POWER_AWAKE || *power > POWER_TRANSITION)
+        return EPROTO;
+    return 0;
+}
+static int read_boot(int *boot)
+{
+    size_t size = sizeof(*boot);
+    if (sysctlbyname("kern.x9_bt_boot", boot, &size, NULL, 0)) return errno;
+    return size == sizeof(*boot) ? 0 : EPROTO;
+}
 static int connect_status(io_connect_t *connection)
 {
     io_service_t service = IOServiceGetMatchingService(MACH_PORT_NULL,
@@ -29,12 +44,31 @@ static int read_status(io_connect_t connection, bool *retry)
         if (retry) *retry = true;
         return EINPROGRESS;
     }
+    /* Sleep preserves the downloaded firmware, but is not radio-ready. The
+     * worker's power state, not a non-READY service-name check, distinguishes
+     * it from an unavailable initializer and from a transition in progress. */
+    int power = POWER_TRANSITION;
+    int error = read_power(&power);
+    if (error) return error;
+    if (power == POWER_ASLEEP) {
+        int boot = ENXIO;
+        error = read_boot(&boot);
+        return error ? error : (boot == EHOSTDOWN ? EHOSTDOWN : EPROTO);
+    }
+    if (power == POWER_TRANSITION) {
+        if (status.error == EBUSY) {
+            if (retry) *retry = true;
+            return EINPROGRESS;
+        }
+        /* A PASSIVE/unavailable board is terminal, not an ownership wait. */
+        return status.error ? (int)status.error : ENXIO;
+    }
     if (status.state != X9_BT_READY) return ENXIO;
     if (status.error || status.firmware_ready != 1 || status.chip_id != 0x6653 ||
         status.baud != 24000000) return EPROTO;
-    int boot = ENXIO; size = sizeof(boot);
-    if (sysctlbyname("kern.x9_bt_boot", &boot, &size, NULL, 0)) return errno;
-    if (size != sizeof(boot)) return EPROTO;
+    int boot = ENXIO;
+    error = read_boot(&boot);
+    if (error) return error;
     /* READY alone must not hide a serial worker fault. Both authoritative
      * surfaces must agree; metadata/IORegistry personality is insufficient. */
     return boot;
@@ -48,6 +82,27 @@ int x9_bootstrap16_status(void)
     IOServiceClose(connection);
     return error;
 }
+
+static int change_power(int target)
+{
+    int power = POWER_TRANSITION;
+    int error = read_power(&power);
+    if (error) return error;
+    /* Kernel admission distinguishes an unavailable initializer from a
+     * competing transition. Preserve its exact error. A timed-out write is
+     * never retried here: ownership may already have changed. */
+    if (sysctlbyname("kern.x9_bt_power", NULL, NULL, &target, sizeof(target)))
+        return errno;
+    error = read_power(&power);
+    if (error) return error;
+    if (power != target) return EPROTO;
+    if (target == POWER_AWAKE) return x9_bootstrap16_status();
+    int boot = ENXIO;
+    error = read_boot(&boot);
+    return error ? error : (boot == EHOSTDOWN ? 0 : EPROTO);
+}
+int x9_bootstrap16_resume(void) { return change_power(POWER_AWAKE); }
+int x9_bootstrap16_sleep(void) { return change_power(POWER_ASLEEP); }
 
 int x9_bootstrap16_wait(uint32_t seconds)
 {
@@ -63,8 +118,9 @@ int x9_bootstrap16_wait(uint32_t seconds)
             if (error && !retry) break;
         }
         if (connection) error = read_status(connection, &retry);
-        /* PASSIVE and FAILED, including errno ENXIO/EINPROGRESS, are terminal.
-         * Keep one read-only user-client during a real initialization wait. */
+        /* PASSIVE and FAILED are terminal. A completed sleep is EHOSTDOWN;
+         * the launcher may then issue a separate, explicit resume request.
+         * Keep one read-only user-client during initialization/ownership. */
         if (!retry) break;
         if (clock_gettime(CLOCK_MONOTONIC, &now)) { error = errno; break; }
         time_t elapsed = now.tv_sec - start.tv_sec;
