@@ -1597,3 +1597,10 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - **新运行阻塞**：收尾时发现主目录`66f7f2a`对`~/320.txt:612–613`核对：共享SCP的GET_REGION_INFO op10返回`ffffff...ea000000`被getter拒为errno45/stage2，尚未发POWER/READY。这同样会阻塞prox3；不能把本候选称物理上电成功，也不应原样重复该已知失败路径。先协调ALS会话限定32位字段zero/sign-extension窄修复，再验证后续真实链。
 - **未验/启动限制**：SCP仅用LK/TFA已加载原固件；ULPOSC/DVFS/DT与工厂校准下发/完整低功耗尚未验，26M/INFRA/DRAM票保留至reboot，不声称停止即物理断电。候选GPU allowlist280，而319实跑283；不是319单变量替换，**不要直接称无需mailbox可上机**。应在当前已stage283的GPU基线合入传感器功能重建，或先解决280插件资产；本轮不stage。
 - **下一步/验收**：先修复320的region-info解析；在正确GPU基线构建后由用户手动临时boot。`rg -n 'X9 SCP FDT|X9 ALS SCP|X9 PROX|open X9Proximity' ~/N.txt`，要求真实READY→LIST type8→iOS DetectionMode→ENABLE ACK→覆盖/移开两方向DATA及mask→mode0 DISABLE ACK。先核实oneshot极性，再单独验iOS原生遮挡熄屏/恢复；电话未闭环，不能预称通话成功。
+
+#### 320 的共享 GET_REGION_INFO 窄修复（距离会话统一实现）
+
+- type8共享控制/FIFO/iOS桥提交`a0df27c`（已push）；已merge`66f7f2a`的原始320证据，保持ALS与proximity共用一份worker，不覆盖其他会话。
+- Android依据：`scp/rv/scp_helper.c:2262–2276`的`uint32_t`数组、`scp_helper.h:180`的32位字段；`include/linux/soc/mediatek/mtk_sip_svc.h:9–13`的SIP错误0/-1/-2/-3/-4。仅`c2000528/op10`新增`als_get_region_word()`，接受高32位为0，或低32位bit31置位且高32位全1的合法符号扩展；非此形状EOVERFLOW，-1/-2/-3/-4分别ENOTSUP/EINVAL/ERANGE/EPERM，不当地址。`status.last_smc`和日志保留原始64位；其它SMC仍用原完整返回判断。
+- 完整8字段读取后的56..72B/4B对齐结构检查，以及loader/firmware/DRAM的DT firmware reserve范围检查原样保留；此修复不伪造READY、不改固件、不发额外reset。320实际`0xffffffffea000000`现在能进入32位地址分支；**尚无修复后的实机结果，不代表后续POWER/READY/LIST/DATA已通过**。
+- 此局部修复刚提交，直接完整编译在后续里程碑记录；没有测试套件、设备操作或新CI。ALS会话负责320/已stage GPU基线整合，距离会话不碰其主目录。本worktree既有proximity2候选是GPU280且不含此修复，不要原样复测320。

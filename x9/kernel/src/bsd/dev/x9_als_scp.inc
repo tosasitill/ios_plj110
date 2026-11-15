@@ -237,6 +237,27 @@ static int als_in_firmware(uint32_t address, uint32_t bytes)
      address-als_layout.firmware_base < als_layout.firmware_size &&
      bytes <= als_layout.firmware_size-(address-als_layout.firmware_base);
 }
+static int als_get_region_word(unsigned index, uint32_t *word)
+{
+ if (!word || index >= 8) return EINVAL;
+ /* Android rv/scp_helper.c scp_region_info_init stores this getter's a0
+  * directly into uint32_t fields. 320 returned ffffffffea000000 for field0:
+  * legal sign extension of the DT firmware address, not an SMC error.
+  * Accept only zero/sign-extended u32 here; other SMCs retain their full
+  * status ABI. The caller still validates all sizes and firmware ranges. */
+ uint64_t value = als_smc(0xc2000528,10,index);
+ uint32_t low = (uint32_t)value, high = (uint32_t)(value>>32);
+ if (high && (high != 0xffffffffu || !(low&0x80000000u))) return EOVERFLOW;
+ /* mtk_sip_svc.h SIP_SVC_E_*: do not truncate an error into an address,
+  * whether firmware supplied a 32-bit or a 64-bit negative return. */
+ switch (low) {
+  case 0xffffffffu: return ENOTSUP;
+  case 0xfffffffeu: return EINVAL;
+  case 0xfffffffdu: return ERANGE;
+  case 0xfffffffcu: return EPERM;
+ }
+ *word = low; return 0;
+}
 static int als_prepare(void)
 {
  als_stage(X9_ALS_LAYOUT);
@@ -245,9 +266,7 @@ static int als_prepare(void)
  als_stage(X9_ALS_REGION);
  uint32_t region[8];
  for (unsigned i = 0; i < 8; i++) {
-  uint64_t v = als_smc(0xc2000528, 10, i);
-  if (v > 0xffffffffULL) return ENOTSUP;
-  region[i] = (uint32_t)v;
+  error = als_get_region_word(i,&region[i]); if (error) return error;
  }
  if (region[7] < 56 || region[7] > 72 || region[7]%4 ||
      !als_in_firmware(region[0],region[1]) || !als_in_firmware(region[2],region[3]) ||
