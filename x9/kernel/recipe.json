@@ -6242,6 +6242,11 @@
    "template": "bsd-c-4"
   },
   {
+   "name": "sweet_x9_proximity.o",
+   "source": "bsd/dev/sweet_x9_proximity.c",
+   "template": "bsd-c-4"
+  },
+  {
    "name": "sweet_x9_als.o",
    "source": "bsd/dev/sweet_x9_als.c",
    "template": "bsd-c-4"

@@ -5,6 +5,7 @@
  * RawSend20/SendAck37, ListMessages31/RawRead22/ModifyTag23 (MT read only).
  * Standard WMS transfer-route TLVs are byte encoded. RawRead preserves tags;
  * ModifyTag pre-reads, marks one MT message read, then verifies by readback.
+ * List31: storage01, RequestedTag10, Message_Mode11 (not tag11/tag12).
  * MTK: GSM send605/606, SMS host-ready601/602, CMD8601/8603 with
  * ORIGINAL txid ACK8602/8604. Independent from the PDP/DPMAIF state.
  * IMSA exposes only proven registration a04/a05 and 4a01 snapshots.
@@ -12,6 +13,7 @@
  * IMS-only send. SIP, non-CS type4/8105 and VoLTE are NOT implemented here.
  * MD maps type4 to C2K; the RIL event consumer is not yet reconciled.
  */
+#include "../../../bsd/dev/x9_sms_storage.h"
 constexpr unsigned X9M_JOBS=32, X9M_INCOMING=16;
 enum { X9M_SEND=1, X9M_ACK, X9M_REG, X9M_SMSC, X9M_LIST, X9M_READ, X9M_TAG };
 struct x9m_client {
@@ -139,7 +141,7 @@ static bool x9m_store_blocked(const x9m_job &j){
 }
 static uint64_t x9m_store_submit(const x9m_job &j){
  x9q_view storage=x9q_tlv(j.req,j.len,1);unsigned flag=5;
- if(j.op==X9M_LIST){x9q_view tag=x9q_tlv(j.req,j.len,0x11);
+ if(j.op==X9M_LIST){x9q_view tag=x9q_tlv(j.req,j.len,0x10);
   const uint8_t flags[4]={2,1,3,4};flag=tag.p?flags[tag.p[0]]:0;}
  x9w_frame f(0x607,1u<<j.sim);f.byte(0x100,3);f.byte(0x101,(uint8_t)flag);
  if(j.op!=X9M_LIST)f.tlv(0x102,storage.p+1,2);
@@ -360,33 +362,21 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   if(!x9m_sims[sim].ready)err=X9Q_NOT_READY;
   else{x9q_packet p(req);x9m_number(p,1,1,1);p.send(local,port);return true;}
  }else if(service==5&&(id==0x31||id==0x22||id==0x23)){
-  bool list=id==0x31,modify=id==0x23;
-  x9q_view storage=x9q_tlv(req,len,1),tag=x9q_tlv(req,len,0x11),mode=x9q_tlv(req,len,list?0x12:0x10);
-  unsigned index=0;
-  if(!storage.p||storage.n!=(list?1u:modify?6u:5u)||storage.p[0]>1)err=X9Q_ARG;
-  if(mode.p&&(mode.n!=1||mode.p[0]!=1))err=X9Q_UNSUPPORTED;
-  for(unsigned at=7;at<len;at+=3+x9q_u16(req+at+1)){
-   unsigned t=req[at];
-   if(t!=1&&t!=(list?0x12u:0x10u)&&(modify||t!=0x11))err=X9Q_UNSUPPORTED;
-  }
-  if(list){
-   /* 607 flags: 0 -> CMGL ALL, 1/2/3/4 -> unread/read/sent/unsent.
-    * Flag5 is CMGR by index, NOT an ALL enumeration. */
-   if(tag.p&&(tag.n!=1||tag.p[0]>3))err=X9Q_ARG;
-  }else{
-   if(!modify&&tag.p&&(tag.n!=1||tag.p[0]))err=X9Q_UNSUPPORTED; // SMS-on-IMS, not a storage tag.
-   if(!err){index=x9q_u32(storage.p+1);if(!index||index>65535)err=X9Q_ARG;}
-   if(!err&&modify&&storage.p[5]!=0)err=X9Q_UNSUPPORTED; // Only MT -> read, not invented MO/tag setters.
-  }
-  if(!err&&(!x9m_sims[sim].ready||!x9_md_mipc_online()))err=X9Q_NOT_READY;
+  struct x9ms_storage_request storage;unsigned decoded=x9ms_storage_decode(req,len,&storage);
+  if(decoded)err=decoded==X9MS_ARG?X9Q_ARG:X9Q_UNSUPPORTED;
+  /* Apple sends List31 during startup before the real host-ready CNF.
+   * Accept validated bounded work into the existing per-SIM queue; poll
+   * still requires THIS SIM's actual ready CNF before any native TX.
+   * Do not synthesize an empty list or enqueue with an offline transport. */
+  if(!err&&(!x9w_control_ready||!x9_md_mipc_online()))err=X9Q_NOT_READY;
   if(x9m_store_order==~0ull)err=X9Q_BUSY;
   if(!err){
-   x9m_job *j=x9m_new(list?X9M_LIST:modify?X9M_TAG:X9M_READ,slot,sim,req,len);
+   x9m_job *j=x9m_new(storage.list?X9M_LIST:storage.modify?X9M_TAG:X9M_READ,slot,sim,req,len);
    if(!j)err=X9Q_BUSY;
    else{
     j->store_order=++x9m_store_order;j->follow=true;
     printf("X9 SMS: SIM%u stored %s queued QMI txn %u; native per-SIM serialization\n",
-     sim+1,list?"list":modify?"mark-read":"read",x9q_u16(req+1));return true;
+     sim+1,storage.list?"list":storage.modify?"mark-read":"read",x9q_u16(req+1));return true;
    }
   }
  }else if(service==5&&id==0x20){
@@ -488,7 +478,7 @@ static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
   if(j.op==X9M_LIST){
    /* Bounded by the native frame, not a guessed SIM capacity. */
    uint8_t values[4+5*(X9_MIPC_FRAME_MAX/264)]={};values[0]=(uint8_t)count;
-   x9q_view tag=x9q_tlv(j.req,j.len,0x11);
+   x9q_view tag=x9q_tlv(j.req,j.len,0x10);
    for(unsigned i=0;i<count;i++){
     const uint8_t *r=records.p+264*i;unsigned at=4+5*i;
     if(tag.p&&(r[3]^1u)!=tag.p[0]){bzero(values,sizeof(values));x9m_error(j,X9Q_INTERNAL);return;}

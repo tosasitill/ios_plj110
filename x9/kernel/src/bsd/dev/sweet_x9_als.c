@@ -1,13 +1,18 @@
-/* X9 ALS phase 1: bounded MTK sensor/2.0 ingress and diagnostic injection.
+/* X9 ALS: MTK sensor/2.0 native SCP transport, ingress and diagnostics.
  * Wire reference: OPPO kernel_device_modules-6.12 sensor/2.0/{core,sensorhub}.
- * No SCP/I2C/MMIO/firmware operations here; no invented physical readings. */
+ * Mode 3 starts the LK-loaded secure firmware; mode 2 is synthetic only.
+ * No AP sensor I2C, partition writes or invented physical readings. */
 #include <sys/systm.h>
 #include <sys/sysctl.h>
 #include <sys/errno.h>
 #include <kern/clock.h>
 #include <kern/locks.h>
+#include <kern/thread.h>
+#include <machine/machine_routines.h>
+#include <pexpert/device_tree.h>
 #include <libkern/libkern.h>
 #include "../../iokit/Kernel/arm/X9ALS.h"
+#include "../../iokit/Kernel/arm/X9Proximity.h"
 
 static LCK_GRP_DECLARE(x9_als_group, "x9_als");
 static LCK_MTX_DECLARE(x9_als_lock, &x9_als_group);
@@ -15,6 +20,34 @@ static struct x9_als_sample latest;
 static uint32_t mtk_gain;
 static uint64_t last_scp_time;
 static int active, test_mode, valid;
+static int physical_mode, transport_started;
+static int ingress_claimed, shared_transport_requested;
+static struct x9_als_status status = { .report_interval_us = 200000 };
+static uint32_t requested_interval_us = 200000;
+
+void x9_als_copy_status(struct x9_als_status *out)
+{
+ if (!out) return;
+ lck_mtx_lock(&x9_als_lock); *out = status; lck_mtx_unlock(&x9_als_lock);
+}
+uint32_t x9_als_get_report_interval_us(void)
+{
+ lck_mtx_lock(&x9_als_lock); uint32_t us = status.report_interval_us;
+ lck_mtx_unlock(&x9_als_lock); return us;
+}
+int x9_als_set_report_interval_us(uint32_t us)
+{
+ if (us < 20000 || us > 1000000) return EINVAL;
+ lck_mtx_lock(&x9_als_lock);
+ int e = !active ? ENXIO : status.error;
+ if (!e) {
+  /* Retain the newest HID request during startup or a batch ACK. Only the
+   * worker sends controls; applied cadence changes at a matching ACK. */
+  requested_interval_us = us;
+  if (!physical_mode) status.report_interval_us = us; /* host cadence only */
+ }
+ lck_mtx_unlock(&x9_als_lock); return e;
+}
 
 static uint32_t
 le32(const uint8_t *p)
@@ -42,7 +75,7 @@ decode_mtk(const void *record, unsigned int length, uint32_t gain,
 	if (p[0] != 5 || p[1] != 0) return ENOTSUP; /* LIGHT / DATA_ACTION */
 	raw = (int32_t)le32(p + 12);
 	time = le64(p + 4);
-	if (raw < 0 || !time || (time >> 63)) return ERANGE;
+ if (raw < 0 || !time || (time >> 63) || p[2] > 3) return ERANGE;
 	level = ((uint64_t)raw + gain / 2u) / gain;
 	if (level > X9_ALS_MAX_LUX) return ERANGE;
 	*lux = (uint32_t)level;
@@ -66,11 +99,18 @@ int
 x9_als_init(int diagnostic)
 {
 	lck_mtx_lock(&x9_als_lock);
-	if (active) {
+ if (active || transport_started) {
+		/* Another HID may have started the shared worker before ALS. */
+		if (!diagnostic && !test_mode && active && physical_mode && !ingress_claimed) {
+			ingress_claimed = 1;
+			lck_mtx_unlock(&x9_als_lock);
+			return 0;
+		}
 		lck_mtx_unlock(&x9_als_lock);
 		return EBUSY;
 	}
 	active = 1;
+	ingress_claimed = 1;
 	test_mode = diagnostic != 0;
 	valid = 0;
 	mtk_gain = 0;
@@ -83,9 +123,18 @@ void
 x9_als_shutdown(void)
 {
 	lck_mtx_lock(&x9_als_lock);
+	ingress_claimed = 0;
+	if (shared_transport_requested) {
+		valid = 0; /* next real sample can be cached; shared owner stays up */
+		lck_mtx_unlock(&x9_als_lock);
+		return;
+	}
 	active = test_mode = valid = 0;
 	mtk_gain = 0;
 	last_scp_time = 0;
+	/* Native worker observes active=0, sends a real DISABLE if it owns a
+	 * confirmed stream, then exits. It retains secure votes/mappings if the
+	 * remote may still run; stop/start is NOT permission to reset SCP. */
 	lck_mtx_unlock(&x9_als_lock);
 }
 
@@ -115,7 +164,7 @@ x9_als_configure_mtk(const void *info, unsigned int length)
 	gain = le32(p + 4);
 	if (!gain) return EINVAL;
 	lck_mtx_lock(&x9_als_lock);
-	error = !active ? ENXIO : (test_mode ? EBUSY : 0);
+ error = !active ? ENXIO : physical_mode ? EPERM : (test_mode ? EBUSY : 0);
 	if (!error) {
 		mtk_gain = gain;
 		last_scp_time = 0;
@@ -133,7 +182,9 @@ x9_als_receive_mtk(const void *record, unsigned int length)
 	uint64_t scp_time;
 	int error;
 	lck_mtx_lock(&x9_als_lock);
-	error = !active ? ENXIO : (test_mode ? EBUSY : (!mtk_gain ? EAGAIN : 0));
+ error = !active ? ENXIO : status.error ? status.error :
+     physical_mode && !status.control_enabled ? EAGAIN :
+     (test_mode ? EBUSY : (!mtk_gain ? EAGAIN : 0));
 	if (!error) error = decode_mtk(record, length, mtk_gain, &lux, &scp_time);
 	if (!error && scp_time <= last_scp_time) error = EALREADY;
 	if (!error) {
@@ -148,7 +199,7 @@ void
 x9_als_invalidate_mtk(void)
 {
 	lck_mtx_lock(&x9_als_lock);
-	if (!test_mode) {
+ if (!test_mode && !physical_mode) {
 		valid = 0;
 		mtk_gain = 0;
 		last_scp_time = 0;
@@ -185,3 +236,5 @@ sysctl_x9_als_test_lux SYSCTL_HANDLER_ARGS
 }
 SYSCTL_PROC(_debug, OID_AUTO, x9_als_test_lux, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     0, 0, sysctl_x9_als_test_lux, "I", "X9 ALS diagnostic lux (-1 invalid), requires x9_als=2");
+
+#include "x9_als_scp.inc"

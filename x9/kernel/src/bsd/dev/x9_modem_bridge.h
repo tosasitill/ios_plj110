@@ -22,7 +22,8 @@ int x9_md_at_online(void);
 uint64_t x9_md_mipc_submit(const uint8_t *frame, uint32_t length);
 /* take: 1 complete frame, 0 pending, -1 unavailable/capacity, -2 an owned
  * oversized SMS0608 has been fully drained. -2 consumes that token once;
- * no partial/synthetic CNF is returned and other MIPC services stay online. */
+ * no partial/synthetic CNF is returned and other MIPC services stay online.
+ * -3 consumes a guarded dial rejected locally before physical TX, not a CNF. */
 int x9_md_mipc_take(uint64_t token, uint8_t *frame, uint32_t capacity, uint32_t *length);
 int x9_md_mipc_event(uint8_t *frame, uint32_t capacity, uint32_t *length);
 int x9_md_mipc_online(void);
@@ -38,6 +39,50 @@ int x9_md_mipc_online(void);
 int x9_md_mipc_message_event(uint8_t *frame, uint32_t capacity, uint32_t *length, uint32_t *token);
 int x9_md_mipc_message_reply(uint32_t token, unsigned success, uint8_t cause);
 int x9_md_mipc_message_reply_take(uint32_t token, int *result);
+/* Staged call transport, separate from SMS/IMS and WDS. No automatic CMD
+ * registration/approval. event returns raw MD masks (NOT AP SIM slots).
+ * CMD8901 token owns its original id/txid/mask through physical RSP8902 TX.
+ * reply requires an explicit, externally verified approval/cause policy;
+ * success is permission to continue incoming handling, NOT ANSWER0907.
+ * event/reply/take return conventions match messaging above. All command
+ * identity tombstones remain until boot, even after success. No retries;
+ * only eight retained commands until Android retirement rules are proven. */
+int x9_md_mipc_call_event(uint8_t *frame, uint32_t capacity, uint32_t *length, uint32_t *token);
+/* Monotonic RX cursor / ordered drain for generation-scoped subscriptions.
+ * CMD reply token remains separate from the sequence for ordinary INDs. */
+int x9_md_mipc_call_cursor(uint32_t *sequence);
+int x9_md_mipc_call_event_ordered(uint8_t *frame, uint32_t capacity, uint32_t *length,
+                               uint32_t *token, uint32_t *sequence);
+/* Native MO observation, copied under the MD lock. No registration, request,
+ * number disclosure or fabricated idle baseline. GET_STATUS count is valid
+ * only after a complete owned090a; ECPI state requires full4901 frames.
+ * Returns1 copied, -1 unavailable; zero-initialized state means UNKNOWN. */
+struct x9cw_outbound_state;
+int x9_md_mipc_call_snapshot(struct x9cw_outbound_state *state);
+/* Independent MT observation: complete incoming CMD identity plus complete
+ * ECPI0/132/6/133. Never used to complete DIAL or to infer single-call count.
+ * This API observes only; no approval/answer/registration is started. */
+struct x9cw_inbound_state;
+int x9_md_mipc_call_incoming_snapshot(struct x9cw_inbound_state *state);
+/* Atomic outbound admission against a previously copied native baseline.
+ * Same unique writer/token allocator, but checks the epoch/revision/count
+ * again under the MD lock and at writer selection. A guarded staging lease
+ * survives CNF/client loss and blocks other CALL mutations except the
+ * guarded end path. Retirement requires END + owned empty + drained slots;
+ * this still does not supply a production DIAL profile or admission caller. */
+uint64_t x9_md_mipc_call_dial_submit(const uint8_t *frame, uint32_t length,
+                                   const struct x9cw_outbound_state *baseline);
+/* Owned complete current snapshot + matching real MO epoch/ID. Only SIM2
+ * mode20 single ordinary call. Returns1 only with a valid target; no query,
+ * approval or mutation is started by the getter. End submit rechecks under
+ * MD lock and before TX. Uncertain sent owners persist across host timeout. */
+struct x9cw_end_target;
+int x9_md_mipc_call_end_snapshot(struct x9cw_end_target *target);
+uint64_t x9_md_mipc_call_end_submit(const uint8_t *frame, uint32_t length,
+                                  const struct x9cw_end_target *target);
+void x9_md_mipc_call_end_abandon(uint64_t token);
+int x9_md_mipc_call_reply(uint32_t token, unsigned approve, unsigned include_cause, uint32_t cause);
+int x9_md_mipc_call_reply_take(uint32_t token, int *result);
 /* x9_dual_sim=1: two fixed physical slots, indexed 0/1. Read-only AT via
  * MIPC 0003/0004 (8100 string); NEVER falls back to ttyC0 for SIM2.
  * Same nonreused wire token space as MIPC. Cancelled sent queries drain CNF. */

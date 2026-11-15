@@ -89,7 +89,7 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
         ('dram-base', u64(phys_base)), ('dram-size', u64(mem_size)),
         ('x9-ram-map', bytes(2064)),
         ('x9-gpu-handoff', bytes(64)),  # populated only after live LK FDT verification
-        ('x9-scp-handoff', bytes(384)),  # layout only; never a firmware READY declaration
+        ('x9-scp-handoff', bytes(512)),  # v2 layout only; never firmware READY
         ('x9-gps-handoff', bytes(64)),  # consys/HIF layout only, not MCU ownership/READY
         ('x9-mic-dma-handoff', bytes(64)),  # ABI retained, zero: audio loader removed
         ('x9-camera-calibration', bytes(32)),  # only this boot's CSI0/3 LK devinfo words
@@ -121,6 +121,12 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
                      node('manifest-properties', [ph(), ('BNCH', bytes(48))])])
     # Flatten hardware clusters into SWEET's one scheduler cluster. Physical
     # MPIDRs come from the captured running device FDT, not the node names.
+    # XNU is built with MAX_CPU_CLUSTERS=1 (no __AMP__), so cluster-id and
+    # cluster-type stay 0. The real Dimensity 9500 split (1+3+4: cpu0-3
+    # C1-Pro, cpu4-6 C1-Premium, cpu7 C1-Ultra = cpufreq-hw domains 0/1/2)
+    # is published as x9-cluster / x9-core and used by the X9 governor.
+    x9_cluster = (0, 0, 0, 0, 1, 1, 1, 2)
+    x9_core = ('C1-Pro', 'C1-Premium', 'C1-Ultra')
     cpu_nodes = []
     for i, mpidr in enumerate((0x000,0x100,0x200,0x300,0x400,0x500,0x600,0x700)):
         cpu_nodes.append(node(f'cpu{i}', [ph(), ('device_type', cstr('cpu')),
@@ -131,6 +137,7 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
             ('state', cstr('running' if i == 0 else 'stopped')),
             ('timebase-frequency', u32(timebase)), ('peripheral-frequency', u32(timebase)),
             ('fixed-frequency', u32(timebase)),
+            ('x9-cluster', u32(x9_cluster[i])), ('x9-core', cstr(x9_core[x9_cluster[i]])),
         ]))
     cpus = node('cpus', [ph(), ('#address-cells', u32(1)), ('#size-cells', u32(0))], cpu_nodes)
     gic = node('gic', [ph(), ('compatible', cstr('arm,gic-v3')),

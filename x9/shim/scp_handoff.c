@@ -98,6 +98,10 @@ static int pins(uintptr_t dt,struct x9_scp_handoff *h)
    seen[direction][channel/32]|=1u<<(channel%32);last=mbox;
    uint32_t slots=(count+1)/2,idx=used[mbox];
    if(slots>32-idx)return 0;
+   if(direction && channel==22) {
+    if(mbox!=0||count!=1||be(p+i+12)||be(p+i+16)||be(p+i+20)||be(p+i+24))return 0;
+    h->ready_pin=(struct x9_scp_pin){channel,idx*8,count*4,idx};
+   }
    for(unsigned j=0;j<4;j++)if(channel==wanted[j] && direction==(j&1)) {
     if(mbox!=1||count!=words[j])return 0;
     /* Sensor pins use callback, no recv_opt/lock/buffer-full/cb context. */
@@ -107,7 +111,7 @@ static int pins(uintptr_t dt,struct x9_scp_handoff *h)
    used[mbox]+=slots;
   }
  }
- return matched==15;
+ return matched==15 && h->ready_pin.channel==22;
 }
 static int qualify(uintptr_t dt,struct x9_scp_handoff *h)
 {
@@ -128,7 +132,24 @@ static int qualify(uintptr_t dt,struct x9_scp_handoff *h)
     !reg(dt,scp,"mbox1_init",&h->mbox_init,&size)||h->mbox_init!=0x1df2a024||size!=4)return 0;
  if(!memory(dt,h)||!pins(dt,h))return 0;
  h->region_info_op=10; /* secure: GET_REGION_INFO via 0xc2000528, NOT SRAM+4 */
- h->version=1;h->flags=X9_SCP_LAYOUT_VERIFIED;return 1;
+ /* All of these are AO/AP-facing registers, not protected SCP SRAM. */
+ if(!reg(dt,scp,"mbox0_base",&h->mbox0_base,&size)||h->mbox0_base!=0x1dfa0000||size!=0x100||
+    !reg(dt,scp,"mbox0_set",&h->mbox0_set,&size)||h->mbox0_set!=0x1dfa0100||size!=4||
+    !reg(dt,scp,"mbox0_clr",&h->mbox0_clear,&size)||h->mbox0_clear!=0x1dfa010c||size!=4||
+    !reg(dt,scp,"mbox0_init",&h->mbox0_init,&size)||h->mbox0_init!=0x1df2a020||size!=4||
+    !reg(dt,scp,"scp_cfgreg_core0",&h->core0_base,&size)||h->core0_base!=0x1df30000||size!=0x1000||
+    !reg(dt,scp,"scp_cfgreg_core1",&h->core1_base,&size)||h->core1_base!=0x1df40000||size!=0x1000)return 0;
+ const char *infra="/soc/syscon@10001000", *vlp="/clock-controller@1c200000";
+ /* These providers have no reg-names; qualify their sole reg directly. */
+ if(!cells(dt,infra,"reg",&p,&n,4)||n!=16||be(p)||be(p+8)||be(p+4)!=0x10001000||be(p+12)!=0x1000)return 0;
+ h->scpsys_base=be(p+4);
+ if(!str(dt,vlp,"compatible","mediatek,mt6993-cksys_vlp")||
+    !cells(dt,vlp,"reg",&p,&n,4)||n!=16||be(p)||be(p+8)||be(p+4)!=0x1c200000||be(p+12)!=0x1000)return 0;
+ h->vlp_base=be(p+4);
+ if(!cells(dt,"/reserved-memory/mblock-44-SCP-reserved","reg",&p,&n,4)||n!=16||
+    be(p)||be(p+8)||be(p+4)!=0xea000000||be(p+12)!=0x15a0000)return 0;
+ h->firmware_base=be(p+4);h->firmware_size=be(p+12);
+ h->version=2;h->flags=X9_SCP_LAYOUT_VERIFIED|X9_SCP_BOOT_VERIFIED;return 1;
 }
 struct walk {uint8_t *p;size_t size,at,found;unsigned nodes,matches;};
 static int node(struct walk *w,unsigned depth)

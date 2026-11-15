@@ -738,6 +738,7 @@ static bool x9q_enqueue(uint32_t local,uint32_t port,const uint8_t *req,unsigned
 #include "X9WDS.inc"
 #include "X9NetworkName.inc"
 #include "X9Messages.inc"
+#include "X9Calls.inc"
 static void x9q_reject(uint32_t,uint32_t,const uint8_t *,unsigned,uint16_t);
 #include "X9DSDS.inc"
 #include "X9GPSPDS.inc"
@@ -762,6 +763,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
  if(x9n_request(local,port,req,len))return;
  if(x9g_send(local,port,req,len))return;
  if(x9m_request(local,port,req,len))return;
+ if(x9c_request(local,port,req,len))return;
  if(service==1&&x9w_request(local,port,req,len))return;
  /* Per-client NAS/DMS/DSD binding, not a default-data mutation.
   * Jobs snapshot their route; changing binding cannot retarget old replies. */
@@ -850,6 +852,7 @@ static void x9q_del(uint32_t local){
  x9n_del(slot);
  x9w_del(slot);
  x9m_del(slot);
+ x9c_del(slot);
  x9ds_del(slot);
  uint64_t generation=x9q_clients[slot].generation+1;bzero(&x9q_clients[slot],sizeof(x9q_clients[slot]));x9q_clients[slot].generation=generation;
  for(unsigned i=0;i<X9Q_JOBS;i++)if(x9q_jobs[i].used&&!x9q_jobs[i].probe&&x9q_jobs[i].local==local){
@@ -862,6 +865,7 @@ static void x9q_poll(){
  x9w_poll();
  x9n_poll();
  x9m_poll();
+ x9c_poll();
  x9ds_poll();
  /* One bounded read-only pass even when D22 never creates a SIM2 client.
   * It does not send QMI responses, change radio policy or manufacture a SIM. */
