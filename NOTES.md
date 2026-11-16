@@ -158,6 +158,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 屏下超声波指纹：只读可行性评估（未 bring-up）
+
+- **范围/提交**：用户要求评估系统发现/注册、解锁和支付的真实难度；单代理隔离 `feat/fingerprint-assessment`，基线 main/origin `39a02fa8`；报告提交 **`2998514a`**、交接 **`da00836e`**，`docs/2026-11-16_reverse-fingerprint-bringup-report.md`。主checkout当时在SMS分支且有未提交交接，未切换或修改它。合并保留同期main **`d738222b`** 的完整SMS/电源交接；main当时由power-policy worktree占用，不操作该工作树。本轮无 ADB/fastboot、模板读取/录入、根盘/分区/共享输入修改、构建、CI或设备启动；CI run ID：无。
+- **观察**：已有实机DT为SPI7 `0x161f0000`、mode0、35MHz上限，GPIO IRQ/reset/CS=5/7/85，dvdd 3.2V；面板 `ofp-fp-type=0x1c0`，与OPPO bit6 ultrasonic定义吻合。Goodix仅通用binding/注释线索，**型号、闭源算法/TA、实际采集与匹配位置未确认**。20H392根盘launch plist为 `biometrickitd.pearl`，限制 `pearl-sep`、匹配 `ApplePearlSEPDriver`；已有330磁盘归档跨多boot，4条backboardd该provider匹配均none，最后命中06:06:12Z，不是本轮新上机。框架同时有TouchID/Mesa名字和Pearl/auth-token leads，未证明可达Mesa后端，不作“D22绝无TouchID代码”断言。
+- **关键门槛/推断**：当前SweetKeyStore固定unlocked(0x4)，lock/unlock/assert为无状态成功，wrap固定可逆混淆；不能把真指纹驱动SpringBoard UI解锁称为密码/keybag/支付安全已完成。分层L0外围→L1真识别→L2原生注册→L3解锁/keybag→L4 LA/ACL/密钥→L5最终支付；普通支付App逐策略实测，ApplePay另有SE/受保护平台/凭据provisioning/服务端约束，本轮不能承诺原生支付。TEE可研究自建可信后端，但Android HAT/MTK TEE不是Apple SEP授权，可改本地契约不等于Apple原生信任链。
+- **产物/下一步**：私有只读 `x9/out/fingerprint-assessment-20261116/`（scope/timeline/workitems/evidence.json/field-journal，原DT/Apple文件hash及限定日志摘要），最终归档回main同名out保持路径可找。推荐先限定只读定位原厂HAL/driver/TA，判断XNU下是否能完成真实新录/匹配/错指拒绝/删除/重启闭环；密码/keybag状态机独立调查。**尚未证明任何真实指纹录入、匹配、系统注册、解锁或支付成功**；用户只要求评估，未启动实现任务。
+
+
+
 #### 2026-11-16 CPU/GPU 原厂参考负载调频与显示空闲（编译候选，待实机）
 
 - **范围/基线**：单代理 `feat/power-policy`，功能树 `.worktrees/power-policy`，实际 main 基线 **39a02fa8**；不改主 checkout `feat/sms-retrieve-route` 的未提交 NOTES，不动其它工作树/设备。overlay 三源文件加 resident include，未改 XNU patches、GPU280 allowlist、设备配置或原厂固件。
