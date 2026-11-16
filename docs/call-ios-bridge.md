@@ -1381,6 +1381,17 @@ function/fixup metadata与窄合同保存在`x9/out/sms-controller-dispatch/`。
 producer及通知关联；GUID→成功record、当前Messages COMMIT/重开/物理ACK/MO验收仍另缺。
 未改生产SMS行为、未测试/编译、未操作设备/mount或读取数据库。
 
+#### parser response → concrete Model/status；SIM不是通知ID（2026-11-16）
+
+续接新原件已闭合同Controller的 `1007f622c → GSMModel/C2KModel → 1007f72bc`
+及最终raw status/当前pair回原callback；未reset分支保同Model，特殊reset分支是raw1/null。
+**details+0 → Model+8/u32是SIM slot**，
+真`subscriber::isValidSimSlot`消费证明，不能当通知messageID；Model+34/u16仍独立。
+Controller+e0及其下游已读，但Controller+9c0的actual supplier/通知uint ID producer
+仍缺。18个新函数30776B/必要RTTI与imports、实际exit和精确边界见
+[parser Model专项报告](2026-11-16_reverse-sms-parser-model-report.md)。
+无生产短信delta、测试/编译/设备动作，不把raw4、callback或scratch发布标签当COMMIT/物理ACK。
+
 ### WMS37物理ACK completion：实际host receipt后退休
 
 原物理token ACK结果已take后，legacy void-send仍可在OOM/queue-full时丢WMS37回复并清owner。
