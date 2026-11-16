@@ -157,6 +157,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 END actual-QMUX owner 到 native allocator/writer（续接生产修复）
+
+- **续接分类/基线**：上一轮生产修复、静态owner归档、完整kernel及main push属于progress。实际main/origin **ef9047f0** clean，上一root功能分支/三子树均已删除，没有待取build/代理worker；本轮单代理 **fix/call-end-native-owner**，不重新采原CALL/SMS字节，不动其它硬件树/共享`.local`/设备或备份。完整通话短信goal继续active。
+- **实际新代码**：修复前post-wait检查之后`end_submit`仍可等MD lock，state1 writer只核native target；该已证production空窗本轮不再只加一次getter。END job捕原actual QMUX `bridge_generation`，强制现有END submit带原local/node/allocation/64-bit deadline，并与native epoch/revision/ID保存到同token。新内部`coachz_baseband_call_guard`在**MD→bb_lock**双锁下核service9/nonrelease/channel/server/exact allocation及原deadline，并持锁同步commit state1 admission或state2 selection。callback仅原slot/frame/native lease mutation，无heap/API重入/physical TX；BB poll的send/DEL原本在解BB锁后，不新增锁反转。submit guard失败不分新token；writer只对未selected state1回原state6/take=-3，已selected/partial原owner仍排空real CNF、不重发/retarget。
+- **源码/compile-only证据**：9个新增host源向量覆盖第三MD lock与BB等待、无QMI poll时writer的owner/deadline拒绝及selected后release旧token；未执行。CALL fixture r1/r2 **exit0**，共享SMS fixture r2 **exit0**，均`/usr/bin/clang++ -std=c++17 -Wall -Wextra -Werror -c`；r2修正源码向量不调用必断言stage2的旧CNF helper，SMS新增CALL guard stub一律拒绝（无SMS production delta）。原源码diff、精确命令、contract与log/exit在主`x9/out/call-end-native-owner-20261116/`，不把编译当并发/设备验收。实际object/kernel build/main push终态随后记录。
+- **尚待/下一边**：这里是actual QMUX allocation与原native END epoch/ID同token guard，**不是personality record版本/逐动作record+Client+UUID接线**。VOICE09保持关闭、20无productioncaller；generic staged905/DIAL能力不升级。SMS **1007f622c**消费者及Model/status→通知ID本轮尚未读，returned BlastDoor GUID→成功record、Messages COMMIT/重开/物理ACK/MO对端、CallList/handover/双向DSP仍缺。无测试/原件采样/CI run/boot pack/上机/构建后二次检查；上一最新有效完整kernel仍 **039f917a / x9/out/x9-call-sms-owner-postwait-20261116/kernel.development.sweet**，本修复不能用旧kernel冒充。不会因这些未完成项标complete/blocked。
+
 #### 2026-11-16 END post-wait owner fence 与 concrete CALL/SMS 下一边（已收束，最新完整kernel通过）
 
 - **基线/分工**：root `feat/sms-controller-owner`基于main/origin **`a8729e20`**；按用户明确要求复用三个代理，`call-action-owner`追真实CallModel强record更新、`sms-controller-dispatch`追supplied concrete Controller的MT/parser边、`call-sms-receipt-review`审现行CALL/WMS37收据。scratch仅各树`x9/out`，不动其它硬件树、共享`.local`、设备或备份。完整通话短信goal仍 **active**。

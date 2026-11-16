@@ -14,6 +14,7 @@ struct x9_mi_slot {
  uint64_t token; unsigned state,len; uint16_t id,txid; uint8_t mask,cancelled;
  uint8_t call_guard;uint64_t call_revision;
  uint64_t call_epoch;uint32_t call_id;
+ struct x9_mipc_call_owner call_owner;
  unsigned sms_guard,sms_owner;uint64_t sms_generation,sms_deadline_ms;
  uint8_t frame[X9_MIPC_FRAME_MAX];
 };
@@ -107,8 +108,29 @@ int x9_md_mipc_online(void){
 }
 struct x9mi_sms_mutation {unsigned owner;uint64_t generation,deadline_ms;};
 static uint64_t x9mi_now_ms(void){uint64_t ns;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000000;}
+struct x9mi_admission {
+ const uint8_t *frame;unsigned len,id;const struct x9cw_outbound_state *baseline;
+ const struct x9cw_end_target *end;const struct x9mi_sms_mutation *sms;
+ const struct x9_mipc_call_owner *owner;uint64_t token;
+};
+/* Trusted commit only: caller holds MD lock, and guarded END also bb_lock.
+ * No allocation, API callback, transport write or QMI state access here. */
+static int x9mi_allocate(void *context){
+ struct x9mi_admission *a=(struct x9mi_admission *)context;
+ if(x9_mi_online&&!x9_mi_poisoned&&x9_mi_next<65534)for(unsigned i=0;i<X9_MI_SLOTS;i++)if(!x9_mi_slots[i].state){
+  struct x9_mi_slot *s=&x9_mi_slots[i];bzero(s,sizeof(*s));
+  a->token=++x9_mi_next;s->token=a->token;s->txid=(uint16_t)a->token;s->id=(uint16_t)a->id;s->mask=a->frame[8];s->len=a->len;
+  if(a->sms){s->sms_guard=1;s->sms_owner=a->sms->owner;s->sms_generation=a->sms->generation;s->sms_deadline_ms=a->sms->deadline_ms;}
+  if(a->baseline){s->call_guard=1;s->call_revision=a->baseline->revision;x9_mc_dial_token=a->token;x9_mc_dial_floor=a->baseline->epoch;}
+  else if(a->end){s->call_guard=2;s->call_revision=a->end->revision;s->call_epoch=a->end->epoch;s->call_id=a->end->native_id;
+   s->call_owner=*a->owner;x9_mc_end_token=a->token;x9_mc_end_epoch=a->end->epoch;}
+  else if(x9mi_call_mutation(a->id)||(a->id==0x909&&a->frame[8]==2))x9cw_outbound_invalidate(&x9_mc_outbound);
+  memcpy(s->frame,a->frame,a->len);s->frame[12]=(uint8_t)a->token;s->frame[13]=(uint8_t)(a->token>>8);s->state=1;return 1;
+ }
+ return 0;
+}
 static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbound_state *baseline,
-                            const struct x9cw_end_target *end,const struct x9mi_sms_mutation *sms){
+ const struct x9cw_end_target *end,const struct x9mi_sms_mutation *sms,const struct x9_mipc_call_owner *owner){
  if(!p||n<16||n>X9_MIPC_FRAME_MAX||x9mi_u16(p+14)!=n-16||
    p[0]!=0x84||p[1]!=0x19||p[2]!=0x54||p[3]!=0x24||
    p[4]||p[5]||p[6]||p[7]||p[9])return 0;
@@ -222,7 +244,8 @@ static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbou
  }
  else if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||
     (id!=0x201&&id!=0x203&&id!=0x205&&id!=0x219&&id!=0x307))return 0;
- uint64_t token=0;lck_mtx_lock(&x9_mi_lock);
+ if((end&&!owner)||(owner&&(!end||baseline||sms||!owner->generation||!owner->deadline_ms)))return 0;
+ lck_mtx_lock(&x9_mi_lock);
  /* A live generic mailbox is not a usable SMS inbox. Recheck under the
   * allocator lock: poison may follow the adapter's readiness snapshot. */
  if(x9_mm_poisoned&&x9mm_inbox_request(p,n,id)){
@@ -250,23 +273,16 @@ static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbou
    lck_mtx_unlock(&x9_mi_lock);return 0;
   }
  }
- if(x9_mi_online&&!x9_mi_poisoned&&x9_mi_next<65534)for(unsigned i=0;i<X9_MI_SLOTS;i++)if(!x9_mi_slots[i].state){
-  struct x9_mi_slot *s=&x9_mi_slots[i];bzero(s,sizeof(*s));
-  token=++x9_mi_next;s->token=token;s->txid=(uint16_t)token;s->id=(uint16_t)id;s->mask=p[8];s->len=n;
-  if(sms){s->sms_guard=1;s->sms_owner=sms->owner;s->sms_generation=sms->generation;s->sms_deadline_ms=sms->deadline_ms;}
-  if(baseline){s->call_guard=1;s->call_revision=baseline->revision;x9_mc_dial_token=token;x9_mc_dial_floor=baseline->epoch;}
-  else if(end){s->call_guard=2;s->call_revision=end->revision;s->call_epoch=end->epoch;s->call_id=end->native_id;
-   x9_mc_end_token=token;x9_mc_end_epoch=end->epoch;}
-  else if(x9mi_call_mutation(id)||(id==0x909&&p[8]==2))x9cw_outbound_invalidate(&x9_mc_outbound);
-  memcpy(s->frame,p,n);s->frame[12]=(uint8_t)token;s->frame[13]=(uint8_t)(token>>8);s->state=1;break;
- }
- lck_mtx_unlock(&x9_mi_lock);return token;
+ struct x9mi_admission admission={p,n,id,baseline,end,sms,owner,0};
+ if(owner)coachz_baseband_call_guard(owner,x9mi_allocate,&admission);
+ else x9mi_allocate(&admission);
+ lck_mtx_unlock(&x9_mi_lock);return admission.token;
 }
-uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){return x9mi_submit(p,n,NULL,NULL,NULL);}
+uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){return x9mi_submit(p,n,NULL,NULL,NULL,NULL);}
 uint64_t x9_md_mipc_message_mark_read_submit(const uint8_t *p,uint32_t n,
  unsigned owner,uint64_t generation,uint64_t deadline_ms){
  const struct x9mi_sms_mutation guard={owner,generation,deadline_ms};
- return x9mi_submit(p,n,NULL,NULL,&guard);
+ return x9mi_submit(p,n,NULL,NULL,&guard,NULL);
 }
 void x9_md_mipc_message_mark_read_abandon(uint64_t token,unsigned owner,uint64_t generation){
  if(!token)return;
@@ -282,12 +298,14 @@ uint64_t x9_md_mipc_call_dial_submit(const uint8_t *p,uint32_t n,
                                    const struct x9cw_outbound_state *baseline){
  if(!baseline||!baseline->count_known||baseline->native_count||baseline->blocked||
     !p||n<16||x9mi_u16(p+10)!=0x901)return 0;
- return x9mi_submit(p,n,baseline,NULL,NULL);
+ return x9mi_submit(p,n,baseline,NULL,NULL,NULL);
 }
 uint64_t x9_md_mipc_call_end_submit(const uint8_t *p,uint32_t n,
-                                   const struct x9cw_end_target *target){
- if(!target||!p||n!=32||x9mi_u16(p+10)!=0x905)return 0;
- return x9mi_submit(p,n,NULL,target,NULL);
+ const struct x9cw_end_target *target,const struct x9_mipc_call_owner *owner){
+ if(!target||!owner||!p||n!=32||x9mi_u16(p+10)!=0x905)return 0;
+ const struct x9cw_end_target native=*target;
+ const struct x9_mipc_call_owner host=*owner;
+ return x9mi_submit(p,n,NULL,&native,NULL,&host);
 }
 /* Before writer selection, abandon only OUR guarded end slot. A selected
  * or partially written action is irrevocable here; keep its real token and
@@ -489,6 +507,16 @@ static void x9mi_rx(const uint8_t *p,unsigned n){
  }
  lck_mtx_unlock(&x9_mi_lock);
 }
+struct x9mi_selection {struct x9_mi_slot *slot;uint8_t *frame;unsigned *len,*id,*tx;};
+/* MD is held through native target check. For guarded END, bb_lock remains
+ * held from actual allocation/deadline validation through state2 selection.
+ * This is not physical TX: a release AFTER selection still drains the token. */
+static int x9mi_select(void *context){
+ struct x9mi_selection *a=(struct x9mi_selection *)context;struct x9_mi_slot *s=a->slot;
+ if(s->id==0x909&&s->mask==2)s->call_revision=x9_mc_outbound.revision;
+ if(x9mi_call_mutation(s->id))x9cw_outbound_invalidate(&x9_mc_outbound);
+ s->state=2;*a->len=s->len;*a->id=s->id;*a->tx=s->txid;memcpy(a->frame,s->frame,s->len);return 1;
+}
 static void x9mi_tick(void){
  if(!x9_md_at_online())return;
  static uint8_t frame[X9_MIPC_FRAME_MAX];unsigned len=0,id=0,tx=0;
@@ -510,19 +538,21 @@ static void x9mi_tick(void){
    /* Only state1 is still pre-TX. Retire it through local -3, never a fake
     * MD CNF; selected/partial SMS and physical ACK results retain owners. */
    if(x9_mm_poisoned&&x9mm_inbox_request(s->frame,s->len,s->id))rejected=1;
-   /* Indexed mark-read alone carries the host guard. Deadline is rechecked
+   /* Indexed mark-read carries its own host deadline. It is rechecked
     * here, even if the QMI owner has not polled since enqueue. Once state2
     * is selected no timeout/deletion can cancel or replay the physical TX. */
    if(s->sms_guard&&x9mi_now_ms()>=s->sms_deadline_ms)rejected=1;
    if(s->call_guard==2&&(x9_mc_poisoned||
       !x9cw_end_target(&x9_mc_outbound,&x9_mc_current,&current)||!x9cw_end_matches(&target,&current)))rejected=1;
+   if(!rejected){
+    struct x9mi_selection selection={s,frame,&len,&id,&tx};
+    if(s->call_guard==2){
+     if(!coachz_baseband_call_guard(&s->call_owner,x9mi_select,&selection))rejected=1;
+    }else x9mi_select(&selection);
+   }
    if(rejected){
     if(s->call_guard==2&&x9_mc_end_token==s->token)x9_mc_end_token=0;
     s->state=6;s->len=0;bzero(s->frame,sizeof(s->frame));
-   }else{
-    if(s->id==0x909&&s->mask==2)s->call_revision=x9_mc_outbound.revision;
-    if(x9mi_call_mutation(s->id))x9cw_outbound_invalidate(&x9_mc_outbound);
-    s->state=2;len=s->len;id=s->id;tx=s->txid;memcpy(frame,s->frame,len);
    }
   }
  }

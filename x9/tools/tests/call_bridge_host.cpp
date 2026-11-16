@@ -11,6 +11,9 @@
 static int lock_depth;
 static void (*during_md_lock)();
 static unsigned md_lock_until_hook;
+static unsigned bb_guard_depth;
+static void (*during_bb_guard)();
+static void (*during_physical_tx)();
 #define LCK_GRP_DECLARE(n, s) int n
 #define LCK_MTX_DECLARE(n, g) int n
 static void lck_mtx_lock(int *){
@@ -32,7 +35,8 @@ static unsigned writes,last_length;
 static int tx_result;
 static uint8_t last_frame[X9_MIPC_FRAME_MAX];
 static int x9md_tx(unsigned a,unsigned b,unsigned c,unsigned d,unsigned e,const uint8_t *p,unsigned n){
- assert(!lock_depth&&a==5&&b==217&&c==0&&d==16+n&&e==0);
+ assert(!lock_depth&&!bb_guard_depth&&a==5&&b==217&&c==0&&d==16+n&&e==0);
+ if(during_physical_tx){auto hook=during_physical_tx;during_physical_tx=nullptr;hook();}
  writes++;last_length=n;memcpy(last_frame,p,n);return tx_result;
 }
 #include "../../kernel/src/bsd/dev/x9_mipc_bridge.inc"
@@ -68,6 +72,17 @@ static uint64_t bb_x9_call_identity(uint32_t local,uint32_t node){
  assert(!lock_depth||lock_depth==1);
  return node==X9BB_NODE&&local>=CBQ_PORT_BASE&&local-CBQ_PORT_BASE<CBQ_MAX_CLIENTS?
   call_bridge_generation[local-CBQ_PORT_BASE]:0;
+}
+/* Stand-in for actual MD -> bb_lock guard; not an IOKit/runtime test. The
+ * hook models owner/clock change while acquiring bb_lock, before validation. */
+extern "C" int coachz_baseband_call_guard(const struct x9_mipc_call_owner *owner,
+                                         x9_mipc_call_owner_cb callback,void *context){
+ assert(lock_depth==1&&!bb_guard_depth);
+ if(during_bb_guard){auto hook=during_bb_guard;during_bb_guard=nullptr;hook();}
+ bb_guard_depth=1;
+ int result=owner&&callback&&owner->generation&&owner->deadline_ms&&fake_ms<owner->deadline_ms&&
+  bb_x9_call_identity(owner->local_port,owner->node)==owner->generation?callback(context):0;
+ bb_guard_depth=0;return result;
 }
 static void *IOMallocData(unsigned n){
  assert(!lock_depth);call_allocs++;
@@ -840,6 +855,47 @@ static void ios_end_take_generation(){ios_end_postwait(1,false);}
 static void ios_end_snapshot_generation(){ios_end_postwait(2,false);}
 static void ios_end_take_deadline(){ios_end_postwait(1,true);}
 static void ios_end_snapshot_deadline(){ios_end_postwait(2,true);}
+static void ios_end_submit_generation(){ios_end_postwait(3,false);}
+static void ios_end_submit_deadline(){ios_end_postwait(3,true);}
+/* Source vectors only, never executed as part of this change. */
+static void ios_end_guard_admission(bool expire){
+ bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();
+ const uint64_t next=x9_mi_next,generation=x9q_clients[0].generation;
+ during_bb_guard=expire?end_expire_during_md_lock:end_release_during_md_lock;
+ uint8_t p[704],out[X9_MIPC_FRAME_MAX];unsigned n=current_frame(p,1);
+ x9cw_put16(p+12,(unsigned)x9c_end_job.token);x9mi_rx(p,n);x9c_end_poll(out);
+ assert(!during_bb_guard&&!x9c_end_job.used&&!x9_mc_end_token&&x9_mi_next==next);
+ assert(x9q_clients[0].generation==generation&&x9c_clients[0].bound&&writes==1);
+ x9c_response_poll();assert(qmi_replies==(expire?1u:0u));
+ if(expire)assert(qmi_error==X9Q_NOT_READY);
+}
+static void ios_end_guard_admission_generation(){ios_end_guard_admission(false);}
+static void ios_end_guard_admission_deadline(){ios_end_guard_admission(true);}
+static void ios_end_guard_selection(bool expire,bool wait){
+ bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();end_query_cnf();
+ assert(x9c_end_job.stage==2&&x9c_end_job.token);
+ const uint64_t token=x9c_end_job.token,epoch=x9c_end_job.epoch;
+ auto hook=expire?end_expire_during_md_lock:end_release_during_md_lock;
+ if(wait)during_bb_guard=hook;else hook(); // no QMI poll/DEL between enqueue and writer
+ x9mi_tick();assert(!during_bb_guard&&writes==1&&!x9_mc_end_token);
+ assert(x9_mc_outbound.epoch==epoch&&x9c_end_job.token==token);
+ x9c_poll();assert(!x9c_end_job.used&&qmi_replies==(expire?1u:0u));
+ if(expire)assert(qmi_error==X9Q_NOT_READY);
+}
+static void ios_end_guard_selection_generation(){ios_end_guard_selection(false,false);}
+static void ios_end_guard_selection_deadline(){ios_end_guard_selection(true,false);}
+static void ios_end_guard_selection_bb_generation(){ios_end_guard_selection(false,true);}
+static void ios_end_guard_selection_bb_deadline(){ios_end_guard_selection(true,true);}
+static void ios_end_guard_selected_release(){
+ bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();end_query_cnf();
+ const uint64_t token=x9c_end_job.token,epoch=x9c_end_job.epoch;
+ during_physical_tx=end_release_during_md_lock;x9mi_tick();assert(!during_physical_tx);
+ x9c_poll();assert(writes==2&&!qmi_replies&&x9c_end_job.stage==2&&x9c_end_job.answered&&x9_mc_end_token==token);
+ assert(x9cw_u16(last_frame+10)==0x905&&x9cw_u16(last_frame+12)==token&&x9_mc_outbound.epoch==epoch);
+ uint8_t p[24];x9cw_header(p,24,0x906,2,(unsigned)token);x9cw_scalar(p+16,0,0,4);
+ x9mi_rx(p,sizeof(p));x9c_poll();
+ assert(!qmi_replies&&writes==2&&x9c_end_job.stage==3&&x9_mc_end_token==token&&x9_mc_outbound.epoch==epoch);
+}
 static void ios_end_duplicate(){
  bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();uint64_t query=x9c_end_job.token;
  end_request();assert(x9c_end_job.token==query&&!qmi_replies&&!writes);
@@ -1110,7 +1166,8 @@ static void handover_rx_fence(){
  uint32_t n;assert(x9_md_mipc_take(token,out,sizeof(out),&n)==1);
  uint8_t p[32];struct x9cw_end_target t;assert(x9_md_mipc_call_end_snapshot(&t)==1);
  uint8_t q[]={0,8,0,0x21,0,4,0,1,1,0,7};
- assert(x9cw_action(q,11,p,32,7,7,1,1)==32);token=x9_md_mipc_call_end_submit(p,32,&t);assert(token);
+ const struct x9_mipc_call_owner owner={CBQ_PORT_BASE,X9BB_NODE,call_bridge_generation[0],25000};
+ assert(x9cw_action(q,11,p,32,7,7,1,1)==32);token=x9_md_mipc_call_end_submit(p,32,&t,&owner);assert(token);
  handover_frame(p,0);x9mi_rx(p,32);x9mi_tick();
  assert(x9_md_mipc_take(token,p,32,&n)==-3); // no queued pre-handover END TX
  assert(x9_mc_outbound.blocked&&!x9_mc_outbound.count_known&&x9_mc_inbound.blocked);
@@ -1279,6 +1336,14 @@ int main(int argc,char **argv){
   {"ios_end_stale_query",ios_end_stale_query},{"ios_end_presend",ios_end_presend},
   {"ios_end_take_generation",ios_end_take_generation},{"ios_end_snapshot_generation",ios_end_snapshot_generation},
   {"ios_end_take_deadline",ios_end_take_deadline},{"ios_end_snapshot_deadline",ios_end_snapshot_deadline},
+  {"ios_end_submit_generation",ios_end_submit_generation},{"ios_end_submit_deadline",ios_end_submit_deadline},
+  {"ios_end_guard_admission_generation",ios_end_guard_admission_generation},
+  {"ios_end_guard_admission_deadline",ios_end_guard_admission_deadline},
+  {"ios_end_guard_selection_generation",ios_end_guard_selection_generation},
+  {"ios_end_guard_selection_deadline",ios_end_guard_selection_deadline},
+  {"ios_end_guard_selection_bb_generation",ios_end_guard_selection_bb_generation},
+  {"ios_end_guard_selection_bb_deadline",ios_end_guard_selection_bb_deadline},
+  {"ios_end_guard_selected_release",ios_end_guard_selected_release},
   {"ios_end_abandon",ios_end_abandon},{"ios_end_late_cnf",ios_end_late_cnf},
   {"ios_end_duplicate",ios_end_duplicate},{"ios_end_changed_duplicate",ios_end_changed_duplicate},
   {"incoming_states",incoming_states},{"incoming_state_invalid",incoming_state_invalid},{"incoming_observer",incoming_observer},

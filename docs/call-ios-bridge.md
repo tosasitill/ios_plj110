@@ -2855,3 +2855,43 @@ CI、设备、mount/数据库或构建后镜像二次检查**。
 Root整合另补action函数表与共用format6 reader的load-command count/size/end、
 duplicate fixup和最小28B header的fail-closed guard；这些最终维护改动仅AST parse及
 静态review，不冒称上述五次r1采样已执行新guard，也没有再次原件采样。
+
+
+## 2026-11-16 VOICE21 原 QMUX owner/deadline 到 native admission 与 writer
+
+上一post-wait修复只检查take/end_snapshot后的owner，`end_submit`仍能等待MD mutex，
+且排队后的writer只核native target。若actual QMUX已release或原25s guard到期，QMI
+线程尚未dispatch DEL/poll，旧路径仍可分配/选择新的905。该空窗是当前production
+END路径的source interleaving，不是实机复现，也不靠clientId/PBI/record getter猜测。
+
+现在END job从现有bound context捕**actual `c.bridge_generation`**，与QMI-local
+`generation`分开。`x9_md_mipc_call_end_submit`必须带原local port/node/allocation与
+absolute64-bit deadline，并own-copy native target和host scalar。成功admission把它们
+保存在同一个native token槽；原native epoch/revision/ID/SIM检查仍在MD锁下。
+
+- 新内部`coachz_baseband_call_guard`只由实际MD allocator/writer使用，按**MD → bb_lock**
+  锁序验证live/non-release/non-private service9、channel、server node、exact actual
+  allocation与当前64-bit单调时钟；持有bb_lock同步运行无heap/API重入的commit callback。
+- admission callback在双锁内保存frame、host/native owner并commit state1，故guard-fail
+  不分新wire token。writer native检查到BB等待期间MD锁持续持有；BB检查通过才在双锁内
+  commit state2及拷到唯一writer frame。不是先读getter解锁再commit的另一post-wait补丁。
+- stale/expired **state1**通过原state6/`take=-3`一次性本地拒绝；清匹配end lease，不伪造
+  CNF、不TX、不重发。submit失败且host已失效/到期由原reply owner决定NOT_READY。
+- **state2已selected/partial**仍不可撤销，释放/超时后的原905继续排空real CNF；只有
+  原native END＋owned empty＋drained slots可退休，不把success CNF强制改成END。
+  物理`x9md_tx`始终在双锁释放后，不在bb_lock内做CCCI或QMI调用。
+
+源码lock-order复核：`coachz_baseband_poll`在解bb_lock后才call bb_send/bb_del_client；
+commit callback不调用任何MD/bridge API或heap allocator。共享allocator/selection只提取
+原已有动作；generic staged mutation/DIAL/SMS的原validation与native lease合同保留。
+这不是给generic905加全部host guard，也不开放VOICE09或无productioncaller的VOICE20。
+
+原输入diff/窄contract及编译日志在`x9/out/call-end-native-owner-20261116/`。
+9个新增host源向量覆盖submit/BB admission等待、无QMI poll时writer拒绝、BB selection
+等待及已selected释放后的旧token排空；只编译，未执行。CALL和共享SMS fixture的最终
+`clang++ -std=c++17 -Wall -Wextra -Werror -c`均exit0；SMS fixture没有CALL allocation，
+新guard stub一律拒绝，不虚构voice owner。实际kernel对象/build结果见NOTES。
+
+该修复只将**actual-QMUX owner与既有native END epoch/ID**联系到同一提交token。
+逐动作强record/Client/CallInfo UUID、record更新退休/native epoch、DIAL typed backend/profile、
+CallList/handover、双向DSP及Messages同token COMMIT/重开/物理ACK/MO验收仍另缺。

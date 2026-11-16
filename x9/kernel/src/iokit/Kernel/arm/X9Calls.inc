@@ -158,7 +158,7 @@ static void x9c_response_poll(){
 struct x9c_end_job {
  bool used,answered;unsigned slot,sim,stage,id;
  uint16_t transaction;
- uint64_t generation,deadline,token,epoch,reply,binding;
+ uint64_t generation,bridge_generation,deadline,token,epoch,reply,binding;
  uint8_t req[11];
 };
 static x9c_end_job x9c_end_job;
@@ -482,7 +482,8 @@ static uint16_t x9c_end_begin(unsigned slot,const uint8_t *req,unsigned len){
  uint64_t reply=x9c_response_reserve(slot,req,deadline);if(!reply)return X9Q_BUSY;
  uint64_t token=x9c_current_submit(c.sim);if(!token){x9c_response_release(reply);return X9Q_BUSY;}
  struct x9c_end_job &j=x9c_end_job;bzero(&j,sizeof(j));j.used=true;j.slot=slot;j.sim=c.sim;
- j.generation=c.generation;j.binding=c.binding;j.epoch=state.epoch;j.id=id;j.stage=1;j.token=token;j.reply=reply;
+ j.generation=c.generation;j.bridge_generation=c.bridge_generation;
+ j.binding=c.binding;j.epoch=state.epoch;j.id=id;j.stage=1;j.token=token;j.reply=reply;
  /* Apple createEndThisCallReq19a00d4: explicit25000ms request guard. */
  j.deadline=deadline;j.transaction=(uint16_t)x9cw_u16(req+1);
  memcpy(j.req,req,sizeof(j.req));return 0;
@@ -510,13 +511,18 @@ static void x9c_end_poll(uint8_t *frame){
    /* take/snapshot may wait for the MD mutex while the actual QMUX client
     * is released, before this thread can dispatch DEL_CLIENT. Revalidate
     * the read-only stage's owner/deadline before enqueueing a new mutation.
-    * This is a post-wait fence, not an atomic BB/MD submission lease. */
+    * Native admission/selection also carries the original actual QMUX
+    * allocation and deadline under MD -> bb_lock, not this local counter. */
    if(j.answered||!valid||!x9c_end_live(j)||x9q_ms()>=j.deadline){
     x9c_end_answer(j,X9Q_NOT_READY);bzero(&j,sizeof(j));return;
    }
    uint8_t action[32];unsigned k=x9cw_action(j.req,sizeof(j.req),action,sizeof(action),j.id,target.native_id,j.sim,1);
-   j.token=k?x9_md_mipc_call_end_submit(action,k,&target):0;bzero(action,sizeof(action));
-   if(!j.token){x9c_end_answer(j,X9Q_BUSY);bzero(&j,sizeof(j));return;}
+   const struct x9_mipc_call_owner owner={CBQ_PORT_BASE+j.slot,X9BB_NODE,j.bridge_generation,j.deadline};
+   j.token=k?x9_md_mipc_call_end_submit(action,k,&target,&owner):0;bzero(action,sizeof(action));
+   if(!j.token){
+    x9c_end_answer(j,!x9c_end_live(j)||x9q_ms()>=j.deadline?X9Q_NOT_READY:X9Q_BUSY);
+    bzero(&j,sizeof(j));return;
+   }
    j.stage=2;return;
   }
   if(j.stage==2){

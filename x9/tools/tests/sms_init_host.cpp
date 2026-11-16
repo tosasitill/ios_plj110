@@ -27,6 +27,13 @@ static int x9md_tx(unsigned a,unsigned b,unsigned c,unsigned d,unsigned e,const 
  assert(!lock_depth&&a==5&&b==217&&c==0&&d==16+n&&e==0);writes++;if(during_write)during_write();return 0;
 }
 #include "../../kernel/src/bsd/dev/x9_mipc_bridge.inc"
+/* This fixture owns no CALL allocation. Keep the shared transport's END
+ * boundary fail-closed; never invoke its commit callback with invented voice
+ * identity. This is compile-only infrastructure, not a SMS behavior change. */
+extern "C" int coachz_baseband_call_guard(const struct x9_mipc_call_owner *,
+                                         x9_mipc_call_owner_cb,void *){
+ assert(lock_depth==1);return 0;
+}
 static const unsigned X9BB_PORT_BASE=0x2000,X9BB_NODE=1,CBQ_PORT_BASE=0x4000,CBQ_MAX_CLIENTS=8,X9Q_REQ=1024,CBQ_HDR=6;
 static const uint16_t X9Q_INTERNAL=3,X9Q_NOT_READY=16,X9Q_ARG=48,X9Q_BUSY=2,X9Q_UNSUPPORTED=94;
 static struct {uint64_t generation;uint8_t sim_slot;} x9q_clients[CBQ_MAX_CLIENTS];

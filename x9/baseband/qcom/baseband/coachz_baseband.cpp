@@ -17,6 +17,9 @@
 #include <libkern/c++/OSData.h>
 #include <kern/thread_call.h>
 #include <kern/clock.h>
+#ifdef COACHZ_NATIVE_DPMAIF
+#include "../../../kernel/src/bsd/dev/x9_modem_bridge.h"
+#endif
 
 #include "coachz_bb_qmux.h"
 #include "coachz_bb_sahara.h"
@@ -1523,6 +1526,26 @@ static uint64_t bb_x9_call_identity(uint32_t dst_port,uint32_t src_node)
     generation=c.generation;
   IOLockUnlock(bb_lock);return generation;
 }
+#ifdef COACHZ_NATIVE_DPMAIF
+// Called only by the MD allocator/writer with x9_mi_lock already held.
+// Keep the actual allocation check AND commit under this lock so a user
+// QMUX release cannot slip between a getter and local END selection.
+extern "C" int coachz_baseband_call_guard(const struct x9_mipc_call_owner *owner,
+                                         x9_mipc_call_owner_cb callback,void *context)
+{
+  if(!owner||!callback||!bb_lock||!owner->generation||!owner->deadline_ms||
+     owner->local_port<CBQ_PORT_BASE||owner->local_port-CBQ_PORT_BASE>=CBQ_MAX_CLIENTS)return 0;
+  int committed=0;IOLockLock(bb_lock);
+  const cbq_client &c=bb_qmux.client[owner->local_port-CBQ_PORT_BASE];
+  const cbq_server *srv=cbq_server_find(&bb_qmux,9);
+  if(c.used&&!c.release_pending&&!c.private_service&&c.service==9&&c.channel<2&&
+     c.generation==owner->generation&&srv&&srv->node==owner->node){
+    uint64_t ticks,ns;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);
+    if(ns/1000000<owner->deadline_ms)committed=callback(context);
+  }
+  IOLockUnlock(bb_lock);return committed;
+}
+#endif
 // Only retained terminal03/20/21 and exact14B Bind44 replies. No MD callback or allocation
 // under this mutex; admission transfers owned, failure transfers nothing.
 static bool bb_x9_call_result(uint32_t dst_port,uint32_t src_node,uint64_t generation,

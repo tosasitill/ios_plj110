@@ -105,8 +105,19 @@ uint64_t x9_md_mipc_call_dial_submit(const uint8_t *frame, uint32_t length,
  * MD lock and before TX. Uncertain sent owners persist across host timeout. */
 struct x9cw_end_target;
 int x9_md_mipc_call_end_snapshot(struct x9cw_end_target *target);
+/* END carries the actual QMUX allocation, not the QMI-local generation or
+ * a personality record revision. Only admission/selection of unsent END is
+ * guarded. Both use MD -> bb_lock; the bridge holds bb_lock while invoking
+ * the trusted, allocation-free callback which commits that local operation.
+ * Callback must not call any MD/bridge API. Selected/partial TX stays owned. */
+struct x9_mipc_call_owner {
+ uint32_t local_port, node; uint64_t generation, deadline_ms;
+};
+typedef int (*x9_mipc_call_owner_cb)(void *context);
+int coachz_baseband_call_guard(const struct x9_mipc_call_owner *owner,
+ x9_mipc_call_owner_cb callback, void *context);
 uint64_t x9_md_mipc_call_end_submit(const uint8_t *frame, uint32_t length,
-                                  const struct x9cw_end_target *target);
+ const struct x9cw_end_target *target, const struct x9_mipc_call_owner *owner);
 void x9_md_mipc_call_end_abandon(uint64_t token);
 int x9_md_mipc_call_reply(uint32_t token, unsigned approve, unsigned include_cause, uint32_t cause);
 int x9_md_mipc_call_reply_take(uint32_t token, int *result);
