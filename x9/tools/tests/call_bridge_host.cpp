@@ -732,9 +732,10 @@ static void voice_bind_codec(){
 }
 static void bind_voice(){
  uint8_t q[]={0,77,0,0x44,0,4,0,1,1,0,1};
- assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q))&&!qmi_replies);
+ const unsigned before=qmi_replies;
+ assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q))&&qmi_replies==before);
  assert(!x9c_clients[0].bound&&x9c_bind_pending(0,true));
- x9c_response_poll();assert(qmi_replies==1&&!qmi_error&&!x9c_bind_pending(0));
+ x9c_response_poll();assert(qmi_replies==before+1&&!qmi_error&&!x9c_bind_pending(0));
  assert(x9c_clients[0].bound&&x9c_clients[0].sim==1&&!x9q_clients[0].sim_slot&&!writes);
  qmi_replies=0;call_allocs=call_frees=0;
 }
