@@ -36,7 +36,10 @@ FB_W, FB_H, FB_STRIDE = 1256, 2760, 5120
 # and its planes (418.67) disagreed, so every 123 switch reloaded the keyboard.
 # 109.txt/USER: the 36 px top/bottom bars were ugly; the keyboard bug was the width
 # (414 pt layout vs 418.67 pt screen), so keep 414 pt and use the full panel height
-# (414x920 pt). 7 px stay black left/right.
+# (414x920 pt). Legacy output uses nominal 7px side bars (16B-aligned offset
+# -8 actually gives left8/right6). x9_fill=1 fills them ONLY at the final
+# compositor output, with inverse HID mapping; canvas and MG dimensions stay
+# unchanged. Keep these equal to X9DisplayGeometry.h and its host regression.
 CANVAS_W, CANVAS_H = 1242, 2760
 TIMEBASE = 1000000000  # captured arm,armv8-timer clock-frequency; override if needed
 

@@ -182,6 +182,46 @@ scaled(uint8_t *dst, uint32_t dst_stride, uint32_t panel_w, uint32_t panel_h,
 	}
 }
 
+/* Fullscreen candidate's logical compositor. Validate the complete source
+ * rectangle before pointer arithmetic; clip signed destination coordinates
+ * without moving a partly off-screen layer to the origin. Legacy callers of
+ * row/scaled and the direct-scanout validator remain unchanged. */
+inline bool
+draw_canvas(uint8_t *dst, uint32_t stride, uint32_t width, uint32_t height,
+    const Surface &s, int32_t sx, int32_t sy, int32_t sw, int32_t sh,
+    int32_t dx, int32_t dy, int32_t dw, int32_t dh, Format fmt, bool blend)
+{
+	if (!dst || !s.kernel_address || fmt == FormatUnsupported ||
+	    s.bytes_per_element != 4 || s.element_width != 1 || s.element_height != 1 ||
+	    !width || !height || width > 0x7fffffffu || height > 0x7fffffffu ||
+	    s.width > 0x7fffffffu || s.height > 0x7fffffffu ||
+	    (uint64_t)stride < (uint64_t)width * 4 ||
+	    (uint64_t)s.bytes_per_row < (uint64_t)s.width * 4 ||
+	    sx < 0 || sy < 0 || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0 ||
+	    (int64_t)sx + sw > s.width || (int64_t)sy + sh > s.height ||
+	    (int64_t)dx + dw > 0x7fffffff || (int64_t)dy + dh > 0x7fffffff)
+		return false;
+	uint64_t needed = (uint64_t)(sy + sh - 1) * s.bytes_per_row + (uint64_t)(sx + sw) * 4;
+	if (s.offset > s.memory_length || needed > s.memory_length - s.offset ||
+	    s.offset > (uintptr_t)-1 - s.kernel_address ||
+	    needed > (uintptr_t)-1 - s.kernel_address - s.offset)
+		return false;
+	int32_t x0 = dx < 0 ? 0 : dx, y0 = dy < 0 ? 0 : dy;
+	int32_t x1 = (int64_t)dx + dw > width ? (int32_t)width : dx + dw;
+	int32_t y1 = (int64_t)dy + dh > height ? (int32_t)height : dy + dh;
+	if (x0 >= x1 || y0 >= y1) return false;
+	const uint8_t *src = (const uint8_t *)(s.kernel_address + s.offset);
+	if (sw == dw && sh == dh) {
+		rows(dst + (uint64_t)y0 * stride + (uint64_t)x0 * 4, stride,
+		    src + (uint64_t)((int64_t)sy + y0 - dy) * s.bytes_per_row + (uint64_t)((int64_t)sx + x0 - dx) * 4,
+		    s.bytes_per_row, (uint32_t)(x1 - x0), (uint32_t)(y1 - y0), fmt, blend);
+	} else {
+		scaled(dst, stride, width, height, src, s.bytes_per_row, sx, sy, sw, sh,
+		    dx, dy, dw, dh, fmt, blend);
+	}
+	return true;
+}
+
 /*
  * Validate one full-panel scanout candidate and compute the panel window.
  * Conditions are exactly the ones directPresent() checked before it asked for

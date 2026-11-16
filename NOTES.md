@@ -158,6 +158,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 显示铺满 / 兼容逻辑尺寸（进行中）
+
+- 单代理 `feat/display-fill`，功能树 `.worktrees/display-fill`，继承已推送 UI 候选 `5af3d156`；root 的 SMS 未提交 NOTES 原样保留。scratch `x9/out/display-fill-20261116/`。未上机、未写设备、无 CI run。
+- **运行时观察**：330.txt 的 AppleCLCD=1256x2760/stride5120、申报1242x2760；HID=同尺寸、offset=-8,0；真实 CA 层=1242x2760，a/b均0,0,1242,2760。123键盘历史不一致有107.txt记录，不能重新扩大 UIKit 为418.67pt。笔记“各7px”是名义居中；当前16B对齐offset=-8意味着实际左8px/右6px，用户称7pt仍需实测，不能冒称已核对截图。
+- **方案**：保留414x920pt@3x；默认关闭的`x9_fill=1`在独立逻辑shadow合成后仅横向1242→1256，HID按同一像素中心逆变换。独立shadow不读回/重复拉伸已铺满的物理帧；原有GPU fence、retained holds、双缓冲与TE提交顺序保留。默认RAM surface亦逻辑尺寸，禁走direct/staged绕过，allocation failure拒绝显示启动而非display/input不一致。灵动岛仍为独立`x9_ui=1`候选、上轮缓存/dylib安装未获上机确认。
+- **离线里程碑**：3项fill测试、4项原UI测试均exit0；exhaustive1256/2760映射、全帧/14重复像素/无反馈/padding/裁剪/bounds/offset/alpha/模拟键盘-overlay/20px通过。LLVM22+显式Xcode14 SDK的ASan/UBSan likewise exit0（仅host，不是手机）。两真实单文件编译r1均exit0；随后只改诊断日志，将在整包再编。初r0错猜Xcode路径失败、Apple15 ASan在Darwin27初始化崩溃、LLVM自动SDK27与旧linker不匹配失败均保留；显式SDK14解决。第一FB编译因ushort?:4→int narrowing失败，4u修复后通过，不隐藏失败。
+- 下一：完整候选构建/打包header和ADT验证；硬件键盘/边缘手势/旋转/岛避让/状态栏20px和性能待用户临时boot验证，未满足不能称保证。
+
 #### 2026-11-16 状态栏 / 原生灵动岛（候选实现，未上机）
 
 - 单代理 `feat/statusbar-island`，隔离树 `.worktrees/statusbar-island`，基线 **39a02fa8**；不碰 root checkout 的 SMS 未提交交接。scratch `x9/out/statusbar-island-20261116/`。用户要求：识别/启用路径、参考 GitHub 强开灵动岛、状态栏整个下移20像素。
