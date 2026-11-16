@@ -390,9 +390,11 @@ static errno_t exec_handle_spawnattr_policy(proc_t p, thread_t thread, int psa_a
 static void exec_port_actions_destroy(struct exec_port_actions *port_actions);
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 static int x9_torch_exec_env(struct image_params *, int);
+static int x9_motion_exec_env(struct image_params *, int);
 static int x9_camera_exec_env(struct image_params *, int);
 #include "x9_appsync_exec.inc"
 static int x9_appsync_exec_env(struct image_params *, int);
+static int x9_ui_exec_env(struct image_params *, int);
 #endif
 
 /*
@@ -5839,7 +5841,11 @@ exec_extract_strings(struct image_params *imgp)
 	if (error) goto bad;
 	error = x9_camera_exec_env(imgp, new_ptr_size);
 	if (error) goto bad;
+	error = x9_motion_exec_env(imgp, new_ptr_size);
+	if (error) goto bad;
 	error = x9_appsync_exec_env(imgp, new_ptr_size);
+	if (error) goto bad;
+	error = x9_ui_exec_env(imgp, new_ptr_size);
 	if (error) goto bad;
 #endif
 	if (imgp->ip_argspace < new_ptr_size) {
@@ -6982,8 +6988,10 @@ sweet_x9_prepare_wallpaper_collections(proc_t p,user_addr_t scratch,user_addr_t 
 #include "x9_baseband_firmware.inc"
 #include "x9_carrier_cbn_install.inc"
 #include "x9_torch_install.inc"
+#include "x9_motion_install.inc"
 #include "x9_camera_install.inc"
 #include "x9_appsync_env.inc"
+#include "x9_ui_install.inc"
 #include "x9_microphone_install.inc"
 #include "x9_haptic_install.inc"
 #include "x9_speaker_install.inc"
@@ -8619,9 +8627,13 @@ sweet_x9_wipe_gestalt_cache(proc_t p, user_addr_t scratch, user_addr_t end)
 	 * Epoch 2026-11-16 (log 328): /arm-io/aop/iop-aop-nub/als for MG
 	 * ambient-light-sensor; the flash/haptics answers rebuild with it. */
 	static const char epoch_dir[] = "/private/var/x9/mg";
+	const bool island = sweet_x9_arg("x9_ui", 0) == 1;
 	static const char als_epoch_path[] = "/private/var/x9/mg/refresh-als-20261116";
 	static const uint8_t als_epoch_data[] =
 	    "x9 MobileGestalt cache rebuilt for ADT AOP ambient light sensor\n";
+	static const char ui_epoch_path[] = "/private/var/x9/mg/refresh-ui2556-20261116";
+	static const uint8_t ui_epoch_data[] =
+	    "x9 MobileGestalt cache rebuilt for ADT artwork subtype 2556 and AOP ALS\n";
 	/* Explicit x9_mgwipe=3, native mode2 only: the new metadata-only ISP
 	 * node supplies camera-rear/front. Do not reuse the ALS marker: a prior
 	 * successful ALS refresh would preserve the old no-still-camera answer.
@@ -8633,18 +8645,33 @@ sweet_x9_wipe_gestalt_cache(proc_t p, user_addr_t scratch, user_addr_t end)
 	const uint8_t *epoch_data;
 	size_t epoch_bytes;
 	uint8_t epoch_sha[32];
-	int mode = sweet_x9_arg("x9_mgwipe", 0);
+	/* Enabled UI (X9 board default or x9_ui=1) regenerates artwork once.
+	 * Explicit x9_mgwipe=0 still suppresses ALL cache writes for diagnostics. */
+	int mode = sweet_x9_arg("x9_mgwipe", island ? 2 : 0);
 	if (mode != 1 && mode != 2 && mode != 3) {
 		return 0;
 	}
 	if (mode == 3 && sweet_x9_arg("x9_camera", 0) != 2) {
 		return EINVAL;
 	}
-	epoch_path = mode == 3 ? camera_epoch_path : als_epoch_path;
-	epoch_data = mode == 3 ? camera_epoch_data : als_epoch_data;
-	epoch_bytes = mode == 3 ? sizeof(camera_epoch_data) - 1 : sizeof(als_epoch_data) - 1;
+	epoch_path = mode == 3 ? camera_epoch_path : island ? ui_epoch_path : als_epoch_path;
+	epoch_data = mode == 3 ? camera_epoch_data : island ? ui_epoch_data : als_epoch_data;
+	epoch_bytes = mode == 3 ? sizeof(camera_epoch_data) - 1 :
+	    island ? sizeof(ui_epoch_data) - 1 : sizeof(als_epoch_data) - 1;
 	if (!sweet_x9_ufs_root_writable()) {
 		return EROFS;
+	}
+	/* Explicit one-shot rollback (x9_ui=0 x9_mgwipe=1) invalidates the
+	 * old enabled epoch too. Otherwise re-enabling after rollback would keep
+	 * the newly regenerated 2436 cache because a stale 2556 marker survives.
+	 */
+	if (mode == 1 && !island) {
+		if (!proc_is64bit(p) || scratch > end || sizeof(ui_epoch_path) > end - scratch) return E2BIG;
+		error = copyout(ui_epoch_path, scratch, sizeof(ui_epoch_path));
+		if (error) return error;
+		error = unlink(p, &u, &rv);
+		printf("X9 MGWIPE: rollback UI epoch errno=%d\n", error);
+		if (error && error != ENOENT) return error;
 	}
 	if (mode == 2 || mode == 3) {
 		SHA256_CTX epoch_hash;
@@ -8924,6 +8951,8 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 if(cbn_error)printf("X9 CBN: carrier bundle unavailable errno=%d; continuing boot\n",cbn_error);
 	 int torch_error=x9_torch_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(torch_error)printf("X9 TORCH: bridge unavailable errno=%d; continuing boot\n",torch_error);
+	 int motion_error=x9_motion_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+	 if(motion_error)printf("X9 MOTION: bridge unavailable errno=%d; continuing boot\n",motion_error);
 	 int camera_error=x9_camera_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(camera_error)printf("X9 CAMERA: bridge unavailable errno=%d; continuing boot\n",camera_error);
 	 int mic_error=x9_microphone_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
@@ -8934,6 +8963,8 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 if(speaker_error)printf("X9 SPEAKER HAL: unavailable errno=%d; continuing boot without output publication\n",speaker_error);
 	 int bt_root_error=x9_bluetooth_root(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(bt_root_error)printf("X9 BT ROOT: not applied errno=%d; continuing boot\n",bt_root_error);
+	 int ui_error=x9_ui_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+	 if(ui_error)printf("X9 UI: bridge unavailable errno=%d; continuing boot\n",ui_error);
 	}
 	sweet_x9_init_stage="objc-trampolines";
 	error=sweet_x9_prepare_objc_trampolines(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);

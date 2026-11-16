@@ -37,6 +37,7 @@
 #include "SweetSurface.h"
 #include "SweetBoard.h"
 #include "X9Desktop.h"
+#include "X9DisplayGeometry.h"
 static uint64_t x9_fb_present_seq;
 
 /*
@@ -290,6 +291,11 @@ class AppleCLCD : public IOMobileFramebuffer {
 	void x9GpuWaitSetup(void);
 public:
 	void x9GpuTimerArm(void) { if (fX9GpuTimer != NULL) fX9GpuTimer->setTimeoutUS(1); }
+	/* RequestPowerChange caller holds fLock; keep timer internals private. */
+	void x9PowerTimerArm(void) {
+		if (!fPowerOff) fTickDeadline = mach_absolute_time();
+		if (fVsync != NULL) fVsync->setTimeoutUS(1);
+	}
 private:
 
 public:
@@ -368,6 +374,10 @@ public:
 	 * so the write-combined panel mapping is never read back per pixel. */
 	IOBufferMemoryDescriptor *fX9Compose;
 	bool          fX9ComposeValid;  /* shadow holds what the panel shows */
+	bool          fX9Fill;        /* x9_fill=1: logical composition, physical output stretch */
+	IOBufferMemoryDescriptor *fX9FillCanvas; /* never contains expanded physical pixels */
+	uint16_t      fX9FillColumns[X9_PANEL_W];
+	void          presentFill(const uint8_t *rec);
 	void          fadeStep(const uint8_t *src, uint32_t srcStride, uint32_t step);
 
 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
@@ -626,22 +636,35 @@ AppleCLCD::start(IOService *provider)
 	}
 	int native = 0;
 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+	fX9Fill = false;
 	fLogicalW = fWidth;
 	fLogicalH = fHeight;
 	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
 		fLogicalW = SWEET_FB_LOGICAL_W;
 		fLogicalH = SWEET_FB_LOGICAL_H;
 	}
-	/* X9: present a real iPhone size (414x896 pt @3x) centred on the 1256x2760
+	/* X9: present a logical iPhone size (414x920 pt @3x) on the 1256x2760
 	 * panel; must equal the ADT disp0 canvas (x9/tools/mkadt.py CANVAS_*) and
 	 * SweetHID's mapping. 107.txt: at 1256 px (418.67 pt) the keyboard frame was
 	 * 414 pt but its planes 418.67 pt, so switching to the number plane looked
 	 * like a resize and UIKit reloaded the keyboard back to letters. Offsets
-	 * are negative here (logical smaller than the panel): the border strips are
-	 * blanked every frame in present(). */
+	 * are negative in legacy mode (logical smaller than the panel): the border
+	 * strips are blanked in present(). Default fill stretches only scanout. */
 	if (sweet_board_x9()) {
-		fLogicalW = 1242;   /* 414 pt: the keyboard layout width (the 123 fix) */
-		fLogicalH = 2760;   /* full panel height (414x920 pt); no top/bottom bars */
+		fLogicalW = X9_CANVAS_W;   /* 414 pt: the keyboard layout width (the 123 fix) */
+		fLogicalH = X9_CANVAS_H;   /* full panel height (414x920 pt) */
+		fX9Fill = sweet_x9_arg("x9_fill", 0) == 1;
+		if (fX9Fill) {
+			fX9FillCanvas = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+			    kIODirectionInOut, (vm_size_t)fRowBytes * fLogicalH, page_size);
+			if (fX9FillCanvas == NULL || fX9FillCanvas->getBytesNoCopy() == NULL) {
+				IOLog("X9 DISPLAY FILL: logical canvas allocation failed;startup refused (no mismatched HID fallback)\n");
+				OSSafeReleaseNULL(fX9FillCanvas);
+				return false;
+			}
+			bzero(fX9FillCanvas->getBytesNoCopy(), (size_t)fRowBytes * fLogicalH);
+			x9_fill_columns(fX9FillColumns);
+		}
 	}
 	/* x rounded down to 4 pixels: the panel window must start 16-byte aligned (MDP fetch) */
 	fOffX = ((int32_t)(fLogicalW - fWidth) / 2) & ~3;
@@ -651,11 +674,13 @@ AppleCLCD::start(IOService *provider)
 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
 	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
 	int x9_render = 0;
-	if (sweet_board_x9() && (x9_render = sweet_x9_arg("x9_metal_render", 1)) == 1 && fSurface != NULL && fPixels != 0) {
-		SweetSurface *target = sweet_surface_create_buffer(fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+	if (sweet_board_x9() && ((x9_render = sweet_x9_arg("x9_metal_render", 1)) == 1 || fX9Fill) && fSurface != NULL && fPixels != 0) {
+		SweetSurface *target = sweet_surface_create_buffer(fX9Fill ? fLogicalW : fWidth,
+		    fX9Fill ? fLogicalH : fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
 		uintptr_t targetPixels = target != NULL ? target->kernelAddress() : 0;
 		if (targetPixels != 0) {
-			memcpy((void *)targetPixels, (const void *)fPixels, (size_t)fRowBytes * fHeight);
+			if (fX9Fill) bzero((void *)targetPixels, (size_t)fRowBytes * fLogicalH);
+			else memcpy((void *)targetPixels, (const void *)fPixels, (size_t)fRowBytes * fHeight);
 			/* The published physical surface remains retained by the ID table,
 			 * keeping the panel CPU mapping alive; fPixels remains scanout. */
 			fSurface->release(); fSurface = target;
@@ -1084,6 +1109,7 @@ AppleCLCD::start(IOService *provider)
 	registerService();
 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
+	if (fX9Fill) IOLog("X9 DISPLAY FILL: logical 1242x2760 -> physical 1256x2760;CPU pixel-centre stretch, separate retained canvas;direct/staged bypass disabled\n");
 	return true;
 }
 
@@ -1091,6 +1117,17 @@ void
 AppleCLCD::scheduleVsync(IOTimerEventSource *sender)
 {
 	if (!sweet_board_x9()) { sender->setTimeoutUS(SWEET_FB_VSYNC_US); return; }
+	IOLockLock(fLock);
+	if (fPowerOff) {
+		/* Finish/cancel an already armed transfer, then stop software VSync.
+		 * RequestPowerChange(on) re-arms under this same lock, so a racing
+		 * off callback cannot cancel the new wakeup. */
+		if (!fX9SubmitPending && x9_lk_gui_busy() == 0) sender->cancelTimeout();
+		else sender->setTimeoutUS(1000);
+		IOLockUnlock(fLock);
+		return;
+	}
+	IOLockUnlock(fLock);
 	uint64_t now = mach_absolute_time(), elapsedNs = 0;
 	fTickDeadline += fTickPeriod;
 	if (now >= fTickDeadline) {
@@ -1452,6 +1489,9 @@ x9_fb_render_done(uint64_t completed)
 bool
 AppleCLCD::x9RecDoubleOK(const uint8_t *rec)
 {
+	/* Fill always composes to a separate cached canvas, even for the default
+	 * RAM surface or blend=0. Keep the existing pending/shown-slot exclusion. */
+	if (fX9Fill) return fX9FillCanvas != NULL && fX9Slot2 != NULL && !fPowerOff && fConsolePaused;
 	/* Only frames present() composes entirely in the cached shadow: at least
 	 * one layer, none of them the panel's own default surface (userspace
 	 * drawing in place), blending on (the shadow path exists only then). */
@@ -1509,6 +1549,19 @@ void
 AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 {
 	AppleCLCD *fb = (AppleCLCD *)owner;
+	if (sweet_board_x9()) {
+		IOLockLock(fb->fLock);
+		bool off = fb->fPowerOff;
+		if (off) {
+			fb->fX9ComposeValid = false;
+			if (fb->fX9SubmitPending && x9_lk_gui_cancel()) {
+				fb->fX9SubmitPending = false;
+				fb->fX9PresentTimer->cancelTimeout();
+			}
+		}
+		IOLockUnlock(fb->fLock);
+		if (off) { fb->scheduleVsync(sender); return; }
+	}
 	uint64_t now = mach_absolute_time();
 	if (sweet_board_x9()) {
 		fb->fCadenceTicks++;
@@ -1939,7 +1992,17 @@ AppleCLCD::blWork(thread_call_param_t p0, __unused thread_call_param_t p1)
 		uint32_t level = fb->fBlLevel, fadeMs = fb->fX9BlFadeMs, gen = fb->fX9BlGen;
 		bool off = fb->fPowerOff;
 		IOLockUnlock(fb->fLock);
-		if (off || level == fb->fBlSent) {
+		if (off) {
+			/* X9 has no Qualcomm fDsi. Blank through the already proven
+			 * LK DBV path; bypass the lit-screen minimum clamp of 2.
+			 * Do not send unqualified panel SLEEP_IN or cut shared rails. */
+			if (fb->fX9Bl && fb->fBlSent != 0) {
+				fb->setPanelLevel(0);
+				fb->fBlSent = 0;
+			}
+			return;
+		}
+		if (level == fb->fBlSent) {
 			return;
 		}
 		uint32_t from = fb->fBlSent == ~0u ? level : fb->fBlSent;
@@ -2261,11 +2324,81 @@ x9_layer_scaled(uint8_t *dst, uint32_t dstStride, uint32_t panelW, uint32_t pane
 	    dx, dy, dw, dh, (x9_display::Format)format, blend);
 }
 
+/* Only x9_fill=1 enters this path. The rest of the presenter stays byte-for-
+ * byte on its old policy. Holds, GPU completion fences and the shown/pending
+ * slot exclusion have already been applied by x9TryPresentLocked(). */
+void
+AppleCLCD::presentFill(const uint8_t *rec)
+{
+	if (!fConsolePaused) {
+		fConsolePaused = true;
+		int force_console = 0;
+		PE_parse_boot_argn("sweetfb_console", &force_console, sizeof(force_console));
+		if (!force_console) sweet_console_muted = 1;
+		IOLog("X9 DISPLAY FILL: GUI takeover;logical canvas retained independently of panel/fade\n");
+	}
+	uint8_t *canvas = (uint8_t *)fX9FillCanvas->getBytesNoCopy();
+	uint32_t mask = get32(rec, 0x104);
+	/* Exactly the legacy removal rule; mask is a changed-layer mask, not an
+	 * enable mask. Other retained layers are still drawn from the swap record. */
+	if ((mask & 1u) && get32(rec, 0x54) == 0)
+		bzero(canvas, (size_t)fRowBytes * fLogicalH);
+	bool first = true;
+	unsigned drawn = 0, refused = 0;
+	const bool blend_enabled = x9_blend_enabled();
+	for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
+		uint32_t id = get32(rec, 0x54 + 4 * layer);
+		if (!id) continue;
+		SweetSurface *s = sweet_surface_copy(id);
+		if (s == NULL) { refused++; continue; }
+		uintptr_t src = s->kernelAddress();
+		sweet_surface_cpu_acquire(s);
+		const uint8_t *a = rec + 0x64 + 16 * layer, *b = rec + 0xc4 + 16 * layer;
+		int32_t dw = (int32_t)get32(b, 8), dh = (int32_t)get32(b, 12);
+		if (dw <= 0 || dh <= 0) { dw = (int32_t)s->width; dh = (int32_t)s->height; }
+		int32_t sw = (int32_t)get32(a, 8), sh = (int32_t)get32(a, 12);
+		if (sw <= 0 || sh <= 0) { sw = dw; sh = dh; }
+		x9_display::Surface surface = {
+			.scanout_phys = 0, .offset = s->offset,
+			.memory_length = s->memory ? s->memory->getLength() : 0,
+			.kernel_address = src, .pixel_format = s->pixelFormat,
+			.bytes_per_element = s->bytesPerElement ? s->bytesPerElement : 4u,
+			.element_width = s->elementWidth, .element_height = s->elementHeight,
+			.width = s->width, .height = s->height, .bytes_per_row = s->bytesPerRow,
+		};
+		x9_display::Format fmt = blend_enabled ? x9_display::format(s->pixelFormat) : x9_display::FormatBGRA;
+		bool ok = x9_display::draw_canvas(canvas, fRowBytes, fLogicalW, fLogicalH, surface,
+		    (int32_t)get32(a, 0), (int32_t)get32(a, 4), sw, sh,
+		    (int32_t)get32(b, 0), (int32_t)get32(b, 4), dw, dh, fmt, !first && blend_enabled);
+		if (ok) { first = false; drawn++; } else refused++;
+		s->release();
+	}
+	const bool dbl = fX9DoubleFrame && fX9Double;
+	const unsigned shown = x9_lk_gui_shown();
+	const unsigned slot = !dbl ? 0 : fX9SubmitPending ? fX9PendSlot : (shown == 2 ? 0 : 2);
+	uint8_t *panel = slot == 2 ? fX9Slot2 : (uint8_t *)fPixels;
+	x9_fill_expand(panel, fRowBytes, canvas, fRowBytes, fX9FillColumns);
+	/* WC stores must finish before the existing LK fresh-TE submit. */
+	__asm__ volatile("dsb sy" ::: "memory");
+	x9QueuePresent(slot);
+	if (x9_fb_present_seq <= 8 || x9_fb_present_seq % (fTickHz * 2) == 0) {
+		IOLog("X9 FILL frame: seq=%llu drawn=%u refused=%u slot=%u logical=1242x2760 physical=1256x2760\n",
+		    x9_fb_present_seq, drawn, refused, slot);
+		if (x9_diag_logging()) {
+			struct x9_fb_sample z = x9_fb_sample_grid(canvas, fLogicalW, fLogicalH, fRowBytes, 64);
+			IOLog("X9 FILL canvas: sample=%u nonblack=%u checksum=%08x\n", z.samples, z.nonblack, z.checksum);
+		}
+	}
+}
+
 
 void
 AppleCLCD::present(const uint8_t *rec)
 {
-	if (sweet_board_x9()) {static unsigned entered; if (entered++ < 2) IOLog("X9 DISPLAY: pan168 present entered;CPU first-frame,staged GPU output opt-in\n");}
+	if (sweet_board_x9()) {static unsigned entered; if (entered++ < 2) {
+		if (fX9Fill) IOLog("X9 DISPLAY: fill present entered;CPU logical composition, no staged bypass\n");
+		else IOLog("X9 DISPLAY: pan168 present entered;CPU first-frame,staged GPU output opt-in\n");
+	}}
 	uint32_t mask = get32(rec, 0x104);
 	bool x9_probe = false;
 	if (sweet_board_x9()) {
@@ -2284,6 +2417,10 @@ AppleCLCD::present(const uint8_t *rec)
 		return;
 	}
 	fConsShown = false;
+	if (fX9Fill) {
+		presentFill(rec);
+		return;
+	}
 	if (directPresent(rec)) {
 		if (!fConsolePaused) {
 			fConsolePaused = true;
@@ -2821,7 +2958,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 			 * while there are no buttons or touch to wake the panel again.
 			 */
 			int stayon = 0;
-			if (off && (stayon = sweet_x9_arg("sweetfb_stayon", 1)) != 0) {
+			if (off && (stayon = sweet_x9_arg("sweetfb_stayon", sweet_board_x9() ? 0 : 1)) != 0) {
 				IOLog("SWEET FB: display off ignored (sweetfb_stayon)\n");
 				break;
 			}
@@ -2831,6 +2968,15 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 				fFB->fPowerOff = off;
 				fFB->fFadeStep = 0;
 				fFB->fDirty = true;     /* on: redraw the latest frame */
+				if (sweet_board_x9()) {
+					/* on: fresh cadence, no catch-up burst for time asleep.
+					 * off: one callback drains GUI and parks this timer. */
+					fFB->x9PowerTimerArm();
+				}
+				if (fFB->fX9Bl && fFB->fBlCall != NULL) {
+					fFB->fX9BlGen++; /* interrupt an old brightness fade */
+					thread_call_enter(fFB->fBlCall); /* DBV0 on off; restore latest level on on */
+				}
 			}
 			uint32_t level = fFB->fBlLevel;
 			IOLockUnlock(fFB->fLock);

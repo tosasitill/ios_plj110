@@ -29,9 +29,11 @@
 #include "IOHIDKeys.h"
 #include "IOHIDPrivateKeys.h"
 #include "IOHIDUsageTables.h"
+#include "../X9DisplayGeometry.h"
 
 extern "C" uint64_t mach_absolute_time(void);
 extern "C" int sweet_early_is_x9(void);
+extern "C" int sweet_x9_arg(const char *name, int def);
 
 /* One open client: the user client and its event callback. */
 class IOHIDEventServiceClient : public OSObject {
@@ -408,6 +410,7 @@ private:
 	IOLock *fLock;
 	int fLogicalW, fLogicalH, fOffX, fOffY;
  int fPanelW,fPanelH;
+	bool fX9Fill;
 	bool fDown[SWEET_TOUCH_FINGERS];
 	bool fEdge[SWEET_TOUCH_FINGERS];
 	IOFixed fX[SWEET_TOUCH_FINGERS];
@@ -474,17 +477,20 @@ SweetHIDTouch::start(IOService *provider)
 	}
 	int native = 0;
 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+	fX9Fill = false;
 	fLogicalW = native ? 1080 : 1125;
 	fLogicalH = native ? 2400 : 2436;
 	fOffX = ((fLogicalW - 1080) / 2) & ~3;           /* as SweetFramebuffer.cpp */
 	fOffY = (fLogicalH - 2400) / 2;
  fPanelW=1080;fPanelH=2400;
  if(sweet_early_is_x9()) {
-  /* Panel 1256x2760 -> presented 1242x2688 centred, as SweetFramebuffer.cpp:
-   * offsets ((1242-1256)/2)&~3 = -8 and (2688-2760)/2 = -36. */
-  fPanelW=1256;fPanelH=2760;fLogicalW=1242;fLogicalH=2760;
+  /* Same geometry and board default as AppleCLCD; x9_fill=0 disables both. */
+  fPanelW=X9_PANEL_W;fPanelH=X9_PANEL_H;fLogicalW=X9_CANVAS_W;fLogicalH=X9_CANVAS_H;
+  fX9Fill=sweet_x9_arg("x9_fill",0)==1;
   fOffX=((fLogicalW-fPanelW)/2)&~3;fOffY=(fLogicalH-fPanelH)/2;
+  if(fX9Fill)fOffX=fOffY=0;
   IOLog("X9 HID: panel 1256x2760 -> display %dx%d offset %d,%d\n",fLogicalW,fLogicalH,fOffX,fOffY);
+  if(fX9Fill)IOLog("X9 HID FILL: pixel-centre inverse 1256x2760 -> 1242x2760;normalized, no border offset\n");
  }
 	/* The digitizer covers the main display (backboardd maps it 1:1). */
 	setProperty("DisplayIntegrated", kOSBooleanTrue);
@@ -512,8 +518,8 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
 	IOLockLock(fLock);
 	bool was = fDown[finger];
 	/* Panel pixels -> the presented 1125x2436 display (SweetFramebuffer.cpp). */
-	IOFixed nx = (IOFixed)(((int64_t)(x + fOffX) << 16) / fLogicalW);
-	IOFixed ny = (IOFixed)(((int64_t)(y + fOffY) << 16) / fLogicalH);
+	IOFixed nx = fX9Fill ? x9_fill_normalized(x, fPanelW) : (IOFixed)(((int64_t)(x + fOffX) * 65536) / fLogicalW);
+	IOFixed ny = fX9Fill ? x9_fill_normalized(y, fPanelH) : (IOFixed)(((int64_t)(y + fOffY) * 65536) / fLogicalH);
 	/* X9: panel border outside the presented display maps to its edge. */
 	if (nx < 0) nx = 0; else if (nx > 0xffff) nx = 0xffff;
 	if (ny < 0) ny = 0; else if (ny > 0xffff) ny = 0xffff;
@@ -615,3 +621,4 @@ sweet_hid_touch(int finger, int down, int x, int y)
 #include "X9Barometer.inc"
 
 #include "X9Proximity.inc"
+#include "X9Accelerometer.inc"
