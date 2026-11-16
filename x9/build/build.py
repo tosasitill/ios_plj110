@@ -370,6 +370,9 @@ class Builder:
         self.run_or_exit([sys.executable, '-I', str(X9 / 'haptic/build.py'),
                           '--developer-dir', self.cfg['developer_dir'],
                           '--out', str(self.out / 'haptic')], ROOT, label='haptic/build.py')
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'display/build.py'),
+                          '--developer-dir', self.cfg['developer_dir'],
+                          '--out', str(self.out / 'display')], ROOT, label='display/build.py')
         # MTU3 USB iOS SDK/diagnostic client; standalone artifact, no root edits.
         self.run_or_exit([sys.executable, '-I', str(X9 / 'usb/build.py'),
                           '--developer-dir', self.cfg['developer_dir'],

@@ -158,6 +158,38 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 display-fill：用户批准合 main / 删除分支（源码收尾，未实机）
+
+- **范围/基线**：仅整合 `feat/display-fill`（head **`51fbd533`**，包含UI **`5af3d156`**）并清理该树/本地及远端分支；原UI与其它活跃分支不动。独立 `.worktrees/display-fill-main` 使用main，先ff到真实origin/main **`7ca335c5`**；NOTES合并actual exit1，保留完整最新main Apple服务/SMS交接后插入原fill/UI段，无生产代码冲突，相对feature生产delta为空。主checkout仍在SMS分支，未切换、未改其未提交NOTES。
+- **产物保全**：功能树 **1034项ignored文件/链接**（除共享`.local` symlink）无覆盖APFS复制并逐文件SHA-256一致；清单/原两方NOTES/确切命令测试及退出码在主checkout `x9/out/display-fill-retirement-20261116/`，完整副本 `archive/`。`.local` target和所有备份保留。已交付四份v2镜像仍在主checkout原路径；镜像绑定 **`4cc05e25`** 源码，不冒称重编了新main。
+- **验证/边界**：本轮复跑4项UI host测试、3项fill测试（LLVM22 ASan/UBSan）均actual exit0；四份主目录v2 boot SHA-256复核一致；无新kernel构建/CI run/设备启动/ADB/fastboot/mailbox/根盘写入。`x9_fill`、`x9_ui` 默认off；全局应用状态栏未覆盖，原生岛、键盘/触摸/边缘和性能仍待实机。用户批准的是git整合/清理，不是MG缓存/dylib持久写入许可。合并/push/删除实际结果完成后追加，不提前冒称成功。
+
+#### 2026-11-16 显示铺满 / 兼容逻辑尺寸（v2候选已打包，待实机）
+
+- 单代理 `feat/display-fill`，功能树 `.worktrees/display-fill`，继承已推送 UI 候选 `5af3d156`；root 的 SMS 未提交 NOTES 原样保留。scratch `x9/out/display-fill-20261116/`。未上机、未写设备、无 CI run。
+- **运行时观察**：330.txt 的 AppleCLCD=1256x2760/stride5120、申报1242x2760；HID=同尺寸、offset=-8,0；真实 CA 层=1242x2760，a/b均0,0,1242,2760。123键盘历史不一致有107.txt记录，不能重新扩大 UIKit 为418.67pt。笔记“各7px”是名义居中；当前16B对齐offset=-8意味着实际左8px/右6px，用户称7pt仍需实测，不能冒称已核对截图。
+- **方案**：保留414x920pt@3x；默认关闭的`x9_fill=1`在独立逻辑shadow合成后仅横向1242→1256，HID按同一像素中心逆变换。独立shadow不读回/重复拉伸已铺满的物理帧；原有GPU fence、retained holds、双缓冲与TE提交顺序保留。默认RAM surface亦逻辑尺寸，禁走direct/staged绕过，allocation failure拒绝显示启动而非display/input不一致。灵动岛仍为独立`x9_ui=1`候选、上轮缓存/dylib安装未获上机确认。
+- **离线里程碑**：3项fill测试、4项原UI测试均exit0；exhaustive1256/2760映射、全帧/14重复像素/无反馈/padding/裁剪/bounds/offset/alpha/模拟键盘-overlay/20px通过。LLVM22+显式Xcode14 SDK的ASan/UBSan likewise exit0（仅host，不是手机）。两真实单文件编译r1均exit0；随后只改诊断日志，将在整包再编。初r0错猜Xcode路径失败、Apple15 ASan在Darwin27初始化崩溃、LLVM自动SDK27与旧linker不匹配失败均保留；显式SDK14解决。第一FB编译因ushort?:4→int narrowing失败，4u修复后通过，不隐藏失败。
+- **同期main吸收**：第一次e8c5d2ec整包与四镜像构建/实际boot解压/ADT验证均exit0，保留原件；随后真实fetch发现main已到ff9e900f，含CPU/GPU/显示休眠的生产更新，不能交付会回退这些更新的旧基线。merge自动合FB，NOTES发生冲突；仅在完整incoming main NOTES顶部插入原有fill/UI交接，保留其它记录。将重编唯一v2镜像再交付，原镜像是中间产物，不推荐。
+- **最终v2交付**：源`e8c5d2ec`、验证工具`484d0517`、吸收main `ff9e900f`的merge **`4cc05e25`**（含新CPU/GPU/显示休眠，不回退）；v2完整构建103/103 overlay（3 prebuilt）exit0。v2 ASan/UBSan的3项fill＋4项UI测试、prepare-local检查均exit0；v2四镜像同kernel打包/从实际boot解压到Image再核payload/ADT/真实参数/sha均exit0。boot **14938112B**，Image **31907840B**。初版最初独立留在feature树，仅v2四整目录无覆盖APFS复制到主checkout，逐boot SHA复核通过；收尾前全部ignored产物另行归档（见上条）。
+- **主目录产物**：`x9/out/x9-fill-v2-20261116/boot.img`（fill1/UI0，603B args，SHA **561fe368f4646f79c0cc65fc08d20d13624687486e93f9f9982b9a4abe4b60db**）；`x9-fill-island20-v2-20261116`（fill1/UI1，598B，SHA **fd48b4612b6a6754d7de355e4422f66c02fb3d6652f89b179d1b42a140d6c504**）；`x9-fill-baseline-v2-20261116`（0/0，593B）；`x9-fill-rollback-v2-20261116`（0/0+单次mgwipe，600B）。只fill相对330参数仅多fill；联合/rollback为607B限额去掉本kernel未嵌BT-root payload的no-op参数，不是rootboot13BT整包，不删除已安装BT文件。GPU280 allowlist不变，无plugin-package/CI run/设备操作。
+- **交接与边界**：报告`docs/2026-11-16_display-fill-report.md`，实际构建/失败/验证/复制证据`x9/out/display-fill-20261116/`；文档/交接提交 **04f0702**，`git push -u origin feat/display-fill` 实际exit0；首次发布该远端分支成功，确切最终head/remote结果记finalization。默认关闭；先临时boot只fill进行实际白底玻璃屏/边缘点按/123/emoji/中文/横竖屏/息屏/性能对照，再用户确认UI缓存和dylib持久动作后试联合。原UI仍仅SpringBoard状态栏hook，不是全app的20px位移，真岛/Jindo/safe-area/裁剪待测。未上机，未证明用户要求的全部兼容；用户本轮明确批准将默认关闭候选合main并删除display-fill树/分支；仍不将候选冒称硬件完成。
+- 下一：用户临时boot v2实际验收；硬件键盘/边缘手势/旋转/岛避让/状态栏20px和性能待用户临时boot验证，未满足不能称保证。
+
+#### 2026-11-16 状态栏 / 原生灵动岛（候选实现，未上机）
+
+- 单代理 `feat/statusbar-island`，隔离树 `.worktrees/statusbar-island`，基线 **39a02fa8**；不碰 root checkout 的 SMS 未提交交接。scratch `x9/out/statusbar-island-20261116/`。用户要求：识别/启用路径、参考 GitHub 强开灵动岛、状态栏整个下移20像素。
+- **观察**：最新 `330.txt` 同时有 `X9 STATUSBAR: ... DynamicSplitMedium ... errno=0` 和 SpringBoard `WARNING: Using overridden ...`；已是岛式两侧状态栏，但不证明原生岛。当前 ADT artwork-device-subtype=2436，兼容身份D22/iPhone10,3。20H392 `SBUIIsSystemApertureEnabled` **1a345a39c** 在SpringBoard检查有效subtype2556/2796；`SBSIsSystemApertureAvailable` **191555160** 的once body **1915551a0** 还检查FeatureFlags `SpringBoard/Jindo`，随后读MG `oPeik/9e8lQWMszEjbPzng.ArtworkDeviceSubType` 并比较2556/2796。root克隆的原件SpringBoard.plist里Jindo=FeatureComplete，非运行时flag返回证明。
+- **参考/候选**：DynamicCowTS@372fed4738b576a190a78325203d8e48fe16fa03只改相同cache字段（2556 Pro/2796 Pro Max），不照搬其MDC/TrollStore利用或分辨率修改。增加默认关闭 `x9_ui=1`：ADT只改subtype2556，不改ProductType/board/画布；独立UI epoch一次重建MG缓存（显式x9_mgwipe=0可禁止）；hash-addressed自有statusbar dylib仅注入SpringBoard，AppSync/任何既有DYLD链优先、不覆盖。不写Apple二进制或GPT。
+- **偏移路径**：20H392 UIKitCore UUID 1242978a-2c2c-3781-8d6c-9777edce2804，`-[UIStatusBar_Modern layoutSubviews]` **189244f3c** 每次把内层_UIStatusBar.frame重置为wrapper.bounds；hook原函数之后整体加 **20/nativeScale = 6.666667pt @3x**。布局不累加、不逐图标修改，不动桌面/触摸映射/画布。仅竖屏主屏；原生SystemAperture窗口不随该状态栏hook挪动；App内自绘bar尚未扩大注入，必须先证明桌面/锁屏剪裁、手势与计时器/音乐的原生岛。
+- **验证里程碑**：iOS arm64 dylib编译/签名实际exit0（86112B）；kern_exec.c真实overlay单文件实际exit0（148条既有风格warnings，无error）。4项离线tests在匹配Xcode15/MacOS SDK下实际exit0（第一次用了CLT MacOSX27 SDK与旧linker，失败保留，不算通过）；prepare-local --check exit0。此初步验证之后完整构建/打包已完成，见下条；无CI run ID、无fastboot/设备写入。
+
+
+- **完整打包里程碑**：源码 **00478b31**；`build.py all --boot-config x9/out/statusbar-island-20261116/baseline-330.json --boot-arg x9_ui=1 --name x9-ui-island20-20261116` 实际exit0，**103/103 overlay（3 prebuilt）**；Image **31887360 B**、boot **14929920 B**。同一kernel再打包baseline/rollback均exit0；从**实际payload header/ADT**复核candidate2556、baseline/rollback2436，启用与baseline的原始cmdline仅多一个`x9_ui=1`（593→601 B），Image内payload字节/sha及boot sha均匹配。候选boot SHA **7c9ac834fcceb221cc03bb18e840fc9eda22aad1fa64a667007f27048644ce7c**。
+- **恢复/边界**：rollback用`x9_ui=0 x9_mgwipe=1`单次恢复ADT/cache并只移除自有UI epoch，随后普通镜像；600 B参数，因本main/UI kernel**没有嵌入BT root payload**，删去实际no-op的`x9_bt_root=1`以容纳mgwipe，不恢复/删除已经安装的BT root文件。本轮不是rootboot13 Bluetooth整包；不能拿此UI编译结果证明Bluetooth/XNU IRQ或其它硬件回归通过。首次rollback包装因证据脚本将adt.parse tuple当Node而未产生config，实际exit1，修正后exit0，失败日志保留。
+- **交付/下一步**：三个整目录已无覆盖APFS复制至主checkout `x9/out/x9-ui-island20-20261116/`、`x9-ui-baseline20-20261116/`、`x9-ui-rollback20-20261116/`，均有boot.img；证据继续留feature scratch。报告 `docs/2026-11-16_reverse-statusbar-island-report.md`。原UI分支已提交并push；本轮由继承它的display-fill合main，原UI分支/树不在清理范围；候选默认off，不改root SMS未提交内容。首次启用会重建MG cache和安装自有dylib/epoch，需明确确认；无mailbox/plugin变化（GPU280）。未证明原生岛或实际20px效果，下一用户确认后测计时器/音乐+桌面/锁屏截图/剪裁与手势；通过才扩大到应用进程。
+
+
 #### 2026-11-16 NFC / iMessage / App Store：只读验证门槛评估（未实现）
 
 - **发布/复核**：GitHub **PR #2** 于 `2026-11-16T11:53:33Z` 合入main，merge **`1ba69325`**；报告 **`aff607fe`**、初版交接 **`1a9f0521`** 均为published main祖先。复核为限定DT/launch库存、旧日志脱敏摘要和源码分支，非新账户/射频测试。停止前归档私有scratch至主checkout同名out，删除自有feature工作树/ref；不切换或覆盖主checkout及其它活跃分支。
