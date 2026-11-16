@@ -6247,6 +6247,11 @@
    "template": "bsd-c-4"
   },
   {
+   "name": "sweet_x9_motion.o",
+   "source": "bsd/dev/sweet_x9_motion.c",
+   "template": "bsd-c-4"
+  },
+  {
    "name": "sweet_x9_als.o",
    "source": "bsd/dev/sweet_x9_als.c",
    "template": "bsd-c-4"

@@ -351,6 +351,9 @@ class Builder:
         self.run_or_exit([sys.executable, '-I', str(X9 / 'torch/build.py'),
                           '--developer-dir', self.cfg['developer_dir'],
                           '--out', str(self.out / 'torch')], ROOT, label='torch/build.py')
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'motion/build.py'),
+                          '--developer-dir', self.cfg['developer_dir'],
+                          '--out', str(self.out / 'motion')], ROOT, label='motion/build.py')
         camera = [sys.executable, '-I', str(X9 / 'camera/build.py'),
                   '--developer-dir', self.cfg['developer_dir'],
                   '--out', str(self.out / 'camera')]

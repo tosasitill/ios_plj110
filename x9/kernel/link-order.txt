@@ -371,6 +371,7 @@ x9:sweet_x9_gps.o
 x9:sweet_x9_barometer.o
 x9:sweet_x9_als.o
 x9:sweet_x9_proximity.o
+x9:sweet_x9_motion.o
 xnu:bsd/DEVELOPMENT/sweet_i2c1.o
 xnu:bsd/DEVELOPMENT/sweet_cpufreq.o
 xnu:bsd/DEVELOPMENT/sweet_rpmh.o
