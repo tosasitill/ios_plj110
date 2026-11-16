@@ -574,8 +574,27 @@ static int property_parse(const struct x9_heif_document *d,
     case T('a','u','x','C'):
         bit = 8; e = full(&c,&version,&flags);
         if (!e && (version || flags)) e = ENOTSUP;
-        if (!e && (c.at == c.end || !d->data[c.at] ||
-            !memchr(d->data+c.at,0,(size_t)(c.end-c.at)))) e = EBADMSG;
+        if (!e) {
+            const uint8_t *zero = c.at == c.end ? NULL :
+                memchr(d->data+c.at,0,(size_t)(c.end-c.at));
+            if (!zero || zero == d->data+c.at) e = EBADMSG;
+            else {
+                struct x9_heif_auxiliary_info *aux = &out->auxiliary;
+                aux->present = 1;
+                aux->urn.offset = c.at; aux->urn.bytes = (uint64_t)(zero-(d->data+c.at));
+                aux->subtype.offset = (uint64_t)(zero-d->data)+1;
+                aux->subtype.bytes = c.end-aux->subtype.offset;
+                /* Exact, case-sensitive URNs observed in the CMPhoto alpha
+                 * consumer. AVC/depth/custom URNs are retained, not guessed
+                 * to share the HEVC alpha carrier/subtype interpretation. */
+                static const char hevc[] = "urn:mpeg:hevc:2015:auxid:1";
+                static const char miaf[] = "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha";
+                if (aux->urn.bytes == sizeof(hevc)-1 && !memcmp(d->data+c.at,hevc,sizeof(hevc)-1))
+                    aux->type = X9_HEIF_AUXILIARY_HEVC_ALPHA;
+                else if (aux->urn.bytes == sizeof(miaf)-1 && !memcmp(d->data+c.at,miaf,sizeof(miaf)-1))
+                    aux->type = X9_HEIF_AUXILIARY_MIAF_ALPHA;
+            }
+        }
         break;
     case T('p','a','s','p'):
         /* Descriptive ordinary Box: two unsigned32 sample spacings. Never
@@ -657,6 +676,7 @@ int x9_heif_get_image(const struct x9_heif_document *d, uint32_t id, struct x9_h
     for (unsigned n = 0; n < d->reference_count && !e; n++) {
         const struct reference *r = &d->references[n];
         if (r->from != id) continue;
+        if (r->type == T('a','u','x','l') && !out->auxiliary.present) { e = EBADMSG; break; }
         if (r->type == T('p','r','e','m')) out->premultiplied_reference_count++;
         if (r->type != T('d','i','m','g')) continue;
         if (out->derived_count == X9_HEIF_MAX_ITEMS) e = ENOSPC;
@@ -727,4 +747,59 @@ int x9_heif_auxiliary(const struct x9_heif_document *d, uint32_t master,
         if (matches && at++ == index) { *id = source; return 0; }
     }
     return ENOENT;
+}
+int x9_heif_auxiliary_reference(const struct x9_heif_document *d, uint32_t source,
+    uint32_t index, uint32_t *id)
+{
+    if (!id) return EINVAL;
+    *id = 0;
+    if (!d || !item_find(d,source)) return EINVAL;
+    uint32_t at = 0;
+    for (unsigned n = 0; n < d->reference_count; n++) {
+        const struct reference *r = &d->references[n];
+        if (r->type == T('a','u','x','l') && r->from == source && at++ == index) {
+            *id = r->to; return 0;
+        }
+    }
+    return ENOENT;
+}
+int x9_heif_resolve_alpha_association(const struct x9_heif_document *d, uint32_t master,
+    struct x9_heif_alpha_association *out)
+{
+    if (!out) return EINVAL;
+    memset(out,0,sizeof(*out));
+    if (!d || !item_find(d,master)) return EINVAL;
+    struct x9_heif_alpha_association result = { .master_id = master };
+    struct x9_heif_image *image = calloc(1,sizeof(*image));
+    if (!image) return ENOMEM;
+    int e = 0;
+    for (unsigned n = 0; n < X9_HEIF_MAX_ITEMS && !e; n++) {
+        uint32_t source = 0;
+        e = x9_heif_auxiliary(d,master,n,&source);
+        if (e == ENOENT) { e = 0; break; }
+        if (!e && source == master) e = ELOOP;
+        if (!e) e = x9_heif_get_image(d,source,image);
+        if (!e && !image->auxiliary.present) e = EBADMSG;
+        unsigned matches = 0;
+        for (unsigned k = 0; k < d->reference_count && !e; k++) {
+            const struct reference *r = &d->references[k];
+            if (r->type == T('a','u','x','l') && r->from == source && r->to == master) matches++;
+        }
+        if (!e && matches != 1) e = ENOTSUP; /* inverse enumeration does fold duplicates */
+        if (!e && image->auxiliary.type != X9_HEIF_AUXILIARY_UNKNOWN) {
+            if (result.alpha_id) e = ENOTSUP;
+            else { result.alpha_id = source; result.auxiliary = image->auxiliary; }
+        }
+    }
+    unsigned prem_count = 0;
+    for (unsigned n = 0; n < d->reference_count && !e; n++) {
+        const struct reference *r = &d->references[n];
+        if (r->type != T('p','r','e','m') || r->from != master) continue;
+        if (!result.alpha_id || r->to != result.alpha_id) e = EBADMSG;
+        else if (++prem_count != 1) e = ENOTSUP;
+        else result.premultiplied = 1;
+    }
+    free(image);
+    if (!e) *out = result;
+    return e;
 }

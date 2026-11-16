@@ -45,6 +45,24 @@ struct x9_heif_property {
     uint32_t type, essential;
     struct x9_heif_span payload; /* excludes box header, includes full-box prefix */
 };
+enum x9_heif_auxiliary_type {
+    X9_HEIF_AUXILIARY_UNKNOWN = 0,
+    X9_HEIF_AUXILIARY_HEVC_ALPHA,
+    X9_HEIF_AUXILIARY_MIAF_ALPHA
+};
+struct x9_heif_auxiliary_info {
+    uint32_t present;
+    enum x9_heif_auxiliary_type type;
+    struct x9_heif_span urn; /* exact aux_type bytes, excludes terminating NUL */
+    struct x9_heif_span subtype; /* ALL bytes after NUL, not an AU or decoded SEI */
+};
+/* One selected master->alpha relationship, not pitm or an HEVC VPS/layer
+ * association. An alpha source may have other masters; those are NOT silently
+ * made the associated PRIMARY picture for alpha_channel_info bit-depth rules. */
+struct x9_heif_alpha_association {
+    uint32_t master_id, alpha_id, premultiplied;
+    struct x9_heif_auxiliary_info auxiliary;
+};
 struct x9_heif_image {
     uint32_t id, type, width, height, hidden;
     uint32_t location_present, construction_method;
@@ -55,6 +73,7 @@ struct x9_heif_image {
     uint16_t canvas_fill_rgba[4]; /* iovl: unmodified unsigned16 RGB+alpha */
     int32_t overlay_x[X9_HEIF_MAX_ITEMS], overlay_y[X9_HEIF_MAX_ITEMS];
     uint32_t premultiplied_reference_count; /* prem is never silently ignored */
+    struct x9_heif_auxiliary_info auxiliary;
     uint32_t property_count;
     struct x9_heif_property properties[X9_HEIF_MAX_ASSOCIATIONS];
     struct x9_heif_span hvcc; /* coded image only; unchanged hvcC payload */
@@ -108,4 +127,19 @@ int x9_heif_premultiplied_reference(const struct x9_heif_document *, uint32_t it
  * own ordered properties. ENOENT is end-of-enumeration. */
 int x9_heif_auxiliary(const struct x9_heif_document *, uint32_t master,
     uint32_t index, uint32_t *id);
+/* Raw ordered auxl destinations of the selected source, including repetitions.
+ * Unlike the inverse enumeration above, this never deduplicates edges. */
+int x9_heif_auxiliary_reference(const struct x9_heif_document *, uint32_t source,
+    uint32_t index, uint32_t *master_id);
+/* Resolve a bounded single-alpha compositor association BEFORE source/decode
+ * callbacks: every inverse auxl source must carry auxC; at most one recognized
+ * alpha and one prem edge are supported. prem is master->that same alpha, auxl
+ * is alpha->master. Duplicate edges/multiple alpha sources return ENOTSUP as
+ * an explicit implementation boundary, not a claim of normative invalidity.
+ * Unrecognized auxiliary types stay in the graph and in raw metadata. Wrong
+ * prem targets or absent auxC fail; no fallback/drop. Failure clears output.
+ * Success proves container topology only, NOT subtype framing/SEI semantics,
+ * PRIMARY bit depth, monochrome syntax, pixel alignment or hardware support. */
+int x9_heif_resolve_alpha_association(const struct x9_heif_document *, uint32_t master,
+    struct x9_heif_alpha_association *);
 #endif

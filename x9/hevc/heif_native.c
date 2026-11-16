@@ -211,7 +211,11 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
     struct x9_heif_geometry geometry;
     int e = x9_heif_get_image(c->document,id,image);
     if (!e) e = x9_heif_plan_geometry(c->plan,id,&geometry);
-    if (!e && (geometry.auxiliary_count || image->premultiplied_reference_count)) e = ENOTSUP;
+    /* The plan already bound prem to its exact auxl alpha source. Neither a
+     * valid container association nor selecting that source by ID grants a
+     * hardware grayscale carrier or a color-domain unassociation contract. */
+    if (!e && (geometry.auxiliary_count || image->premultiplied_reference_count ||
+        image->auxiliary.present)) e = ENOTSUP;
     for (unsigned n = 0; n < image->property_count && !e; n++) {
         uint64_t bytes = image->properties[n].payload.bytes;
         if (bytes > GRAPH_METADATA_LIMIT-c->metadata_bytes) e = EMSGSIZE;

@@ -19,6 +19,7 @@ struct x9_heif_geometry {
     uint32_t id, width, height; /* after this item's ordered transforms */
     uint32_t coded_width, coded_height; /* ispe, before item transforms */
     uint32_t derived_count, auxiliary_count;
+    struct x9_heif_alpha_association alpha; /* container edge, not HEVC PRIMARY/layer */
     struct x9_heif_sample_aspect source_aspect; /* pre-item-transform, separate provenance;
         * explicit canvas pasp, or absent-pasp identity's unique child OUTPUT */
     uint32_t source_aspect_item_id; /* immediate dimg child for absent-pasp identity,
@@ -27,7 +28,8 @@ struct x9_heif_geometry {
         * absent resolved source remains0, never an inferred square default */
 };
 /* The document and its borrowed immutable bytes must outlive the plan. The
- * plan validates ALL reachable dimg/auxl nodes, active-stack cycles, tile
+ * plan validates ALL reachable dimg/auxl nodes, auxC presence and single-alpha
+ * prem source/target pairing, active-stack cycles, tile
  * coverage and ordered geometry before a raster callback can run. item_id0
  * selects primary. Dimensions/memory/depth limits are implementation bounds.
  * This original entrypoint uses EXACT_SAMPLES: fractional clean-aperture

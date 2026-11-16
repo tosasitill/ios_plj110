@@ -154,13 +154,23 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
     if (!e && !id) e = x9_heif_primary(document,&id);
     if (!e) e = x9_heif_get_image(document,id,image);
     if (!e && image->type != X9_HEIF_HVC1) e = ENOTSUP;
-    if (!e) e = x9_hevc_config_parse(data+image->hvcc.offset,(size_t)image->hvcc.bytes,&config);
+    /* Inspect this item's OWN coded syntax before the hardware admission.
+     * A monochrome alpha source is one channel, not three fake YUV channels;
+     * neither auxl nor pitm supplies its coded depth. Inspection does not
+     * grant a grayscale output format or an HEVC associated PRIMARY layer. */
+    if (!e) e = x9_hevc_config_inspect(data+image->hvcc.offset,(size_t)image->hvcc.bytes,&config);
     if (!e && (image->width != config.width || image->height != config.height)) e = EBADMSG;
     if (!e && image->channels) {
-        if (image->channels != 3) e = ENOTSUP;
+        if (image->channels != (config.chroma_format_idc ? 3u : 1u)) e = EBADMSG;
         for (unsigned n = 0; n < image->channels && !e; n++)
-            if (image->bit_depth[n] != config.bit_depth) e = EBADMSG;
+            if (image->bit_depth[n] != 8u+(n ? config.bit_depth_chroma_minus8 : config.bit_depth_luma_minus8))
+                e = EBADMSG;
     }
+    /* Ordinary Main/Main10 native admission remains authoritative. Valid
+     * monochrome/RExt inspection MUST NOT become a synthetic hardware sample.
+     * Selecting a tagged aux item directly also cannot bypass alpha gates. */
+    if (!e) e = x9_hevc_config_parse(data+image->hvcc.offset,(size_t)image->hvcc.bytes,&config);
+    if (!e && image->auxiliary.present) e = ENOTSUP;
     if (!e) e = x9_heif_read_item(document,id,NULL,0,&bytes);
     if (!e) { au = malloc(bytes); if (!au) e = ENOMEM; }
     if (!e) e = x9_heif_read_item(document,id,au,bytes,&bytes);

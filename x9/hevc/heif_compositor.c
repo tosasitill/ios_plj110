@@ -13,7 +13,7 @@ struct transform {
 struct node {
     struct x9_heif_geometry geometry;
     uint32_t type, rows, columns, state, subtree_height, transform_count;
-    uint32_t premultiplied;
+    uint32_t premultiplied, auxiliary_source;
     uint32_t derived[X9_HEIF_MAX_ITEMS], auxiliary[X9_HEIF_MAX_ITEMS];
     int32_t overlay_x[X9_HEIF_MAX_ITEMS], overlay_y[X9_HEIF_MAX_ITEMS];
     struct transform transforms[X9_HEIF_MAX_ASSOCIATIONS];
@@ -183,9 +183,13 @@ static int visit(struct x9_heif_plan *p, uint32_t id, unsigned depth, uint32_t *
     if (!image) return ENOMEM;
     int e = x9_heif_get_image(p->document,id,image);
     if (!e && (image->width > X9_HEIF_MAX_DIMENSION || image->height > X9_HEIF_MAX_DIMENSION)) e = EMSGSIZE;
+    /* Resolve actual container edges before even a metadata source callback.
+     * pitm is not the associated HEVC PRIMARY; each master owns its pairing. */
+    if (!e) e = x9_heif_resolve_alpha_association(p->document,id,&node->geometry.alpha);
     if (!e) {
         node->type = image->type; node->rows = image->rows; node->columns = image->columns;
         node->premultiplied = image->premultiplied_reference_count;
+        node->auxiliary_source = image->auxiliary.present;
         if (node->type == X9_HEIF_IOVL) {
             p->overlays = 1;
             memcpy(node->overlay_x,image->overlay_x,sizeof(node->overlay_x));
@@ -539,7 +543,8 @@ static int compose(const struct x9_heif_plan *plan, enum x9_heif_raster_format f
     if (!plan || !source || !pixel_bytes(format) || !budget || budget > SIZE_MAX) return EINVAL;
     if ((plan->resampling || plan->overlays) && !linear) return ENOTSUP;
     for (unsigned n = 0; n < plan->count; n++)
-        if (plan->nodes[n].geometry.auxiliary_count || plan->nodes[n].premultiplied) return ENOTSUP;
+        if (plan->nodes[n].geometry.auxiliary_count || plan->nodes[n].premultiplied ||
+            plan->nodes[n].auxiliary_source) return ENOTSUP;
     struct composition *c = calloc(1,sizeof(*c));
     if (!c) return ENOMEM;
     c->plan = plan; c->format = format; c->pixel_bytes = pixel_bytes(format); c->linear = linear;

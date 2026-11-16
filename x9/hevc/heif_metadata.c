@@ -129,6 +129,30 @@ static int hdr_extension(const struct x9_heif_document *document, const struct x
     if (extensions) CFDictionarySetValue(extensions,key,value);
     CFRelease(value); *seen |= flag; return 0;
 }
+static int auxiliary_info(const struct x9_heif_document *document,
+    const struct x9_heif_auxiliary_info *aux, CFMutableDictionaryRef info)
+{
+    if (!aux->present) return 0;
+    const uint8_t *urn = NULL, *subtype = NULL;
+    int e = x9_heif_span_data(document,aux->urn,&urn);
+    if (!e && aux->subtype.bytes) e = x9_heif_span_data(document,aux->subtype,&subtype);
+    if (e) return e;
+    /* Raw bytes are intentional: an unknown URN is not assumed UTF-8 and
+     * this metadata key does not grant CoreMedia AuxiliaryTypeInfo semantics.
+     * In particular the opaque tail is not passed to the AU165 parser. */
+    CFDataRef type = CFDataCreate(NULL,urn,(CFIndex)aux->urn.bytes);
+    CFDataRef data = CFDataCreate(NULL,subtype,(CFIndex)aux->subtype.bytes);
+    if (!type || !data) e = ENOMEM;
+    if (!e) {
+        CFDictionarySetValue(info,CFSTR("AuxiliaryTypeURNBytes"),type);
+        CFDictionarySetValue(info,CFSTR("AuxiliarySubTypeBytes"),data);
+        CFDictionarySetValue(info,CFSTR("AuxiliaryTypeOrigin"),CFSTR("auxC-fullbox0-type-NUL-opaque-tail"));
+        e = put_number(info,CFSTR("AuxiliaryTypeClassification"),aux->type);
+    }
+    if (type) CFRelease(type);
+    if (data) CFRelease(data);
+    return e;
+}
 int x9_heif_copy_item_info(const struct x9_heif_document *document,
     const struct x9_heif_image *image, CFDictionaryRef *out, CFMutableDictionaryRef extensions)
 {
@@ -141,13 +165,15 @@ int x9_heif_copy_item_info(const struct x9_heif_document *document,
     CFMutableArrayRef derived = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
     CFMutableArrayRef item_offsets = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
     CFMutableArrayRef prem = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
+    CFMutableArrayRef masters = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
     uint32_t color_seen = 0, hdr_seen = 0, aspect_seen = 0;
-    int e = !info || !properties || !aux || !derived || !item_offsets || !prem ? ENOMEM : 0;
+    int e = !info || !properties || !aux || !derived || !item_offsets || !prem || !masters ? ENOMEM : 0;
     if (!e) e = put_number(info,CFSTR("ItemID"),image->id);
     if (!e) e = put_number(info,CFSTR("Width"),image->width);
     if (!e) e = put_number(info,CFSTR("Height"),image->height);
     if (!e) e = put_number(info,CFSTR("ConstructionMethod"),image->construction_method);
     if (!e) e = put_number(info,CFSTR("PremultipliedReferenceCount"),image->premultiplied_reference_count);
+    if (!e) e = auxiliary_info(document,&image->auxiliary,info);
     if (!e && image->type == X9_HEIF_IOVL) {
         CFMutableArrayRef fill = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
         CFMutableArrayRef offsets = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
@@ -229,12 +255,23 @@ int x9_heif_copy_item_info(const struct x9_heif_document *document,
             if (!value) e = ENOMEM; else { CFArrayAppendValue(prem,value); CFRelease(value); }
         }
     }
+    for (unsigned n = 0; n < X9_HEIF_MAX_REFERENCES && !e; n++) {
+        uint32_t id = 0;
+        e = x9_heif_auxiliary_reference(document,image->id,n,&id);
+        if (e == ENOENT) { e = 0; break; }
+        if (!e) {
+            CFNumberRef value = number(id);
+            if (!value) e = ENOMEM;
+            else { CFArrayAppendValue(masters,value); CFRelease(value); }
+        }
+    }
     if (!e) {
         CFDictionarySetValue(info,CFSTR("DerivedIDs"),derived);
         CFDictionarySetValue(info,CFSTR("Properties"),properties);
         CFDictionarySetValue(info,CFSTR("AuxiliaryIDs"),aux);
         CFDictionarySetValue(info,CFSTR("ItemOffsetIDs"),item_offsets);
         CFDictionarySetValue(info,CFSTR("PremultipliedReferenceIDs"),prem);
+        CFDictionarySetValue(info,CFSTR("AuxiliaryMasterIDs"),masters);
         *out = info; info = NULL;
     }
     if (info) CFRelease(info);
@@ -243,6 +280,7 @@ int x9_heif_copy_item_info(const struct x9_heif_document *document,
     if (derived) CFRelease(derived);
     if (item_offsets) CFRelease(item_offsets);
     if (prem) CFRelease(prem);
+    if (masters) CFRelease(masters);
     return e;
 }
 int x9_heif_resolve_hdr_extensions(CFMutableDictionaryRef extensions,
