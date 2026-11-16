@@ -54,6 +54,12 @@ static bool call_batch_accept=true,call_alloc_fail,call_alloc_poison,call_alloc_
 static bool call_bb_expire;
 static unsigned call_allocs,call_frees,call_batches,call_batch_count;
 static unsigned call_alloc_fail_at;
+static uint64_t call_bridge_generation[CBQ_MAX_CLIENTS]={11,12,13,14,15,16,17,18};
+static uint64_t bb_x9_call_identity(uint32_t local,uint32_t node){
+ assert(!lock_depth||lock_depth==1);
+ return node==X9BB_NODE&&local>=CBQ_PORT_BASE&&local-CBQ_PORT_BASE<CBQ_MAX_CLIENTS?
+  call_bridge_generation[local-CBQ_PORT_BASE]:0;
+}
 static void *IOMallocData(unsigned n){
  assert(!lock_depth);call_allocs++;
  if(call_alloc_poison)x9_mc_poisoned=1;
@@ -61,10 +67,19 @@ static void *IOMallocData(unsigned n){
  return call_alloc_fail||(call_alloc_fail_at&&call_allocs==call_alloc_fail_at)?nullptr:malloc(n);
 }
 static void IOFreeData(void *p,unsigned){assert(!lock_depth);call_frees++;free(p);}
-static bool bb_x9_call_registration(uint32_t local,uint32_t node,bb_x9_call_frame *f,uint32_t count,uint64_t deadline){
+static bool bb_x9_call_result(uint32_t local,uint32_t node,uint64_t generation,const uint8_t *sdu,
+                              unsigned size,uint8_t *owned,unsigned room,uint64_t deadline){
+ assert(!lock_depth&&owned&&room==CBQ_HDR+size&&(size==14||size==18));
+ if(call_bb_expire)fake_ms=deadline;
+ if(!call_batch_accept||generation!=bb_x9_call_identity(local,node)||
+    (!x9cw_u16(sdu+10)&&fake_ms>=deadline))return false;
+ qmi_error=x9cw_u16(sdu+12);coachz_baseband_qrtr(local,node,X9BB_PORT_BASE+9,sdu,size);
+ free(owned);return true; // stand-in for later host read; not MD completion
+}
+static bool bb_x9_call_registration(uint32_t local,uint32_t node,uint64_t generation,bb_x9_call_frame *f,uint32_t count,uint64_t deadline){
  assert(lock_depth==1&&count&&count<=9);call_batches++;call_batch_count=count;
  if(call_bb_expire)fake_ms=deadline;
- if(!call_batch_accept||fake_ms>=deadline)return false;
+ if(!call_batch_accept||fake_ms>=deadline||generation!=bb_x9_call_identity(local,node))return false;
  for(unsigned i=0;i<count;i++){
   assert(f[i].owned&&f[i].size==(i?11u:14u));
   if(!i){assert(f[i].sdu[0]==2&&x9cw_u16(f[i].sdu+3)==3&&!x9cw_u32(f[i].sdu+10));qmi_error=0;}
@@ -73,9 +88,9 @@ static bool bb_x9_call_registration(uint32_t local,uint32_t node,bb_x9_call_fram
  }
  return true;
 }
-static bool bb_x9_call_handover(uint32_t local,uint32_t node,bb_x9_call_frame *f,uint32_t count){
+static bool bb_x9_call_handover(uint32_t local,uint32_t node,uint64_t generation,bb_x9_call_frame *f,uint32_t count){
  assert(lock_depth==1&&count&&count<=8);call_batches++;call_batch_count=count;
- if(!call_batch_accept)return false;
+ if(!call_batch_accept||generation!=bb_x9_call_identity(local,node))return false;
  for(unsigned i=0;i<count;i++){
   assert(f[i].owned&&f[i].size==11&&f[i].sdu[0]==4&&x9cw_u16(f[i].sdu+3)==0x54);
   assert(!x9cw_u16(f[i].sdu+1)&&x9cw_u16(f[i].sdu+5)==4&&f[i].sdu[7]==1&&x9cw_u16(f[i].sdu+8)==1);
@@ -86,6 +101,13 @@ static bool bb_x9_call_handover(uint32_t local,uint32_t node,bb_x9_call_frame *f
  return true;
 }
 #include "../../kernel/src/iokit/Kernel/arm/X9Calls.inc"
+// Explicit synthetic bound/registered VOICE owner for staging-only cases;
+// NAS's sim_slot is no longer used as the independently bound CALL context.
+static void dial_owner_fixture(){
+ struct x9c_client &c=x9c_clients[0];c.bound=c.registered=true;c.sim=1;
+ c.generation=x9q_clients[0].generation;c.bridge_generation=call_bridge_generation[0];
+ c.binding=++x9c_binding_next;
+}
 
 static unsigned incoming(uint8_t *p,unsigned mask=0x22,unsigned tx=0x2345){
  x9cw_header(p,64,0x8901,mask,tx);
@@ -653,6 +675,7 @@ static void dial_join_order(){
 }
 static void ios_join(){
  empty_baseline();uint8_t q[64],p[24];unsigned n=dial_qmi(q);x9q_clients[0].sim_slot=1;
+ dial_owner_fixture();
  assert(x9c_dial_submit(0,q,n,measured_route));uint64_t t=x9c_dial_job.token;x9mi_tick();
  assert(!x9_md_mipc_submit(last_frame,last_length)); // staging lease blocks a second mutation
  x9cw_header(p,24,0x902,2,(unsigned)t);x9cw_scalar(p+16,0,0,4);x9mi_rx(p,24);x9c_poll();
@@ -662,6 +685,7 @@ static void ios_join(){
 }
 static void ios_timeout(){
  empty_baseline();uint8_t q[64],p[24];unsigned n=dial_qmi(q);x9q_clients[0].sim_slot=1;
+ dial_owner_fixture();
  assert(x9c_dial_submit(0,q,n,measured_route));uint64_t t=x9c_dial_job.token;x9mi_tick();
  fake_ms=60001;x9c_poll();assert(qmi_replies==1&&qmi_error==X9Q_NOT_READY&&x9c_dial_job.token==t);
  x9cw_header(p,24,0x902,2,(unsigned)t);x9cw_scalar(p+16,0,0,4);x9mi_rx(p,24);
@@ -669,12 +693,14 @@ static void ios_timeout(){
 }
 static void ios_deleted(){
  empty_baseline();uint8_t q[64],p[24];unsigned n=dial_qmi(q);x9q_clients[0].sim_slot=1;
+ dial_owner_fixture();
  assert(x9c_dial_submit(0,q,n,measured_route));uint64_t t=x9c_dial_job.token;x9mi_tick();
  x9c_del(0);x9q_clients[0].generation++;x9cw_header(p,24,0x902,2,(unsigned)t);x9cw_scalar(p+16,0,0,4);
  x9mi_rx(p,24);rx_progress(130,7,0);x9c_poll();assert(!qmi_replies&&!x9c_dial_job.token&&x9c_dial_job.used);
 }
 static void dial_presend_fence(){
  empty_baseline();uint8_t q[64],out[24];unsigned n=dial_qmi(q);x9q_clients[0].sim_slot=1;
+ dial_owner_fixture();
  assert(x9c_dial_submit(0,q,n,measured_route));uint64_t t=x9c_dial_job.token;unsigned before=writes;
  rx_progress(130,7,0);x9mi_tick();assert(writes==before);uint32_t k;
  assert(x9_md_mipc_take(t,out,sizeof(out),&k)==-3&&!k);

@@ -157,6 +157,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 CALL terminal reply 所有权续修（本轮生产代码，完整目标未完成）
+
+- **基线/范围**：main `e4f33dae`，`feat/call-terminal-receipt` / `.worktrees/call-terminal-receipt`。本轮单代理，不操作设备、分区、mailbox或其它硬件树。读取既有CallList原件契约后确认第七byte/Call_Type仍未闭合，不猜字段、不再重跑已排除producer路径。转而修复实际源码的独立缺口：END21终态、staging DIAL20汇合与注册03失败回复原来通过void/port-recognition发送后擦除owner，无法确认主机队列真正接收。
+- **实际生产修改**：新增32个无号码terminal response owner，在接受03/21及staging20、MD操作之前预留；保存原txn/msg/result、独立VOICE SIM与本地generation、真实QMUX generation和不回绕binding lease。job决定结果与host queue receipt分离，cleanup不擦掉待投递结果；queue/OOM只重试本地投递，不重发MD。已决定的错误不改写，尚未投递成功跨原25s/60s guard转NOT_READY，bridge mutex内再核原deadline与真实QMUX generation。原成功注册Result03＋54仍全有或全无，新增实际QMUX generation guard；54批次也复核真实allocation。删client/换binding丢旧host结果但保物理token/epoch，SIM切换再切回不能复活旧owner。staging dial不再借NAS sim_slot作VOICE路由；仍无生产DIAL调用者。
+- **编译里程碑**：主checkout固定布局`prepare-local.py --check`实际exit0；worktree的check因共享maintained-source链接仍指main而exit2，未改共享链接。首次recipe中修改的`X9Baseband.cpp.o`成功，未修改的C dependencies单编因本树缺gitignored `x9_mdota.inc`失败，不掩盖。宿主fixture只更新API签名/独立VOICE owner输入并`xcrun --sdk macosx clang++ -std=c++17 -c`编译，最终exit0/无输出；没有执行人工向量或测试套件。重构dial poll时编译发现pointer `sizeof`警告，已改回显式4096B take/erase后重新编译通过。日志/recipe在本树`x9/out/call-terminal-receipt-compile/`，正式完整kernel构建结果随后记录，不把单对象成功当整包成功。
+- **完成边界/下一项**：这些是回复所有权和真实allocation fencing的生产修复，不是CallList publisher、typed caller/backend/profile接入、handover后ID/CS动作或通话双向媒体完成。VOICE09仍关闭，Bind44/BUSY/unsupported等即时拒绝仍为旧best-effort，未宣称全VOICE响应可靠。SMS现有生产链未见新的matching契约矛盾，本轮不制造ready/ACK，当前镜像Messages同token COMMIT/重开/物理ACK及MO对端验收仍缺。完整goal保持active；先完成本次真实源码的正常kernel编译，再沿未完成caller/profile/CallList/media与当前SMS验收继续，不能交付“通话短信已修好”的最终镜像。
+
 #### 2026-11-16 提取与三路新证据收尾（已归档/push；仍无最终修复镜像）
 
 - **实际完成**：18个同版原件仍在 `x9/out/android-call-inputs-20261116-092442/`；追加五份当前日志/状态快照已无覆盖rename至主 `x9/out/call-owned-runtime/`。三个原代理因服务stream资源错误停写，复用其原功能树由三个短收尾代理消费既有产物，不重跑ASC/提取/反汇编/hash/设备。三组scratch均已无覆盖归档主 `x9/out/{dial-java-producer,voice-dsp-payload,init-sms-java}/`，原日志/源码head/失真摘录保留，原件与衍生不混写。

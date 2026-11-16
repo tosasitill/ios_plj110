@@ -1511,17 +1511,65 @@ static bool bb_x9_sms_ack_result(uint32_t dst_port,uint32_t src_node,uint64_t ge
   }
   IOLockUnlock(bb_lock);return admitted;
 }
+// CALL replies/events use the actual QMUX allocation, not the separately
+// based QMI-owner generation. Check it again under bb_lock at transfer.
+static uint64_t bb_x9_call_identity(uint32_t dst_port,uint32_t src_node)
+{
+  const uint32_t slot=dst_port-CBQ_PORT_BASE;
+  if(!bb_lock||dst_port<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return 0;
+  uint64_t generation=0;IOLockLock(bb_lock);
+  const cbq_client &c=bb_qmux.client[slot];const cbq_server *srv=cbq_server_find(&bb_qmux,9);
+  if(c.used&&!c.release_pending&&!c.private_service&&c.service==9&&c.channel<2&&srv&&srv->node==src_node)
+    generation=c.generation;
+  IOLockUnlock(bb_lock);return generation;
+}
+// Only retained terminal03/20/21 replies. No MD callback or allocation
+// under this mutex; admission transfers owned, failure transfers nothing.
+static bool bb_x9_call_result(uint32_t dst_port,uint32_t src_node,uint64_t generation,
+                             const uint8_t *sdu,uint32_t size,uint8_t *owned,uint32_t room,
+                             uint64_t deadline_ms)
+{
+  const uint32_t slot=dst_port-CBQ_PORT_BASE;
+  if(!bb_lock||!generation||!sdu||!owned||dst_port<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS||
+     (size!=14&&size!=18)||room!=CBQ_HDR+size||sdu[0]!=CBQ_QMI_RESPONSE||
+     cbq_rd16(sdu+5)!=size-7||sdu[7]!=2||cbq_rd16(sdu+8)!=4||cbq_rd16(sdu+10)>1||
+     (!!cbq_rd16(sdu+10))!=(!!cbq_rd16(sdu+12)))return false;
+  const unsigned id=cbq_rd16(sdu+3);
+  if(id!=3&&id!=0x20&&id!=0x21)return false;
+  if(size==18&&(id!=0x20||cbq_rd16(sdu+10)||sdu[14]!=0x10||cbq_rd16(sdu+15)!=1||!sdu[17]))return false;
+  if(size==14&&id==0x20&&!cbq_rd16(sdu+10))return false; // success requires the real call ID
+  bool admitted=false;IOLockLock(bb_lock);
+  const cbq_client &c=bb_qmux.client[slot];const cbq_server *srv=cbq_server_find(&bb_qmux,9);
+  if(c.used&&!c.release_pending&&!c.private_service&&c.service==9&&c.channel<2&&
+     c.generation==generation&&srv&&srv->node==src_node){
+    bb_channel *ch=&bb_ch[c.channel==0?CBH_QMUX1:CBH_QMUX2];
+    if(ch->count<BB_QUEUE){
+      uint64_t ticks,ns;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);
+      // A success must not cross the original host request guard while
+      // sleeping on bb_lock. Terminal errors retain their first result.
+      if(!cbq_rd16(sdu+10)&&(!deadline_ms||ns/1000000>=deadline_ms)){
+        IOLockUnlock(bb_lock);return false;
+      }
+      cbq_frame_header(owned,size,c.service,c.cid);memcpy(owned+CBQ_HDR,sdu,size);
+      ch->frames[(ch->head+ch->count++)%BB_QUEUE]={room,owned};ch->frames_out++;ch->bytes_out+=room;
+      IOLockWakeup(bb_lock,ch,false);
+      if(ch->reads_waiting&&bb_complete_call)thread_call_enter(bb_complete_call);
+      admitted=true;
+    }else ch->frames_dropped++;
+  }
+  IOLockUnlock(bb_lock);return admitted;
+}
 // CALL bootstrap publishes Result03 followed by up to eight retained54;
 // a live subscription publishes up to eight ordered54. Both are one batch.
 // Port recognition is NOT a queue receipt. Buffers are
 // allocated by the single QMI owner before acquiring MD->bb mutexes; failure
 // transfers none of them and cannot grant a subscription or emit half a batch.
 struct bb_x9_call_frame { const uint8_t *sdu; uint32_t size; uint8_t *owned; };
-static bool bb_x9_call_publication(uint32_t dst_port,uint32_t src_node,
+static bool bb_x9_call_publication(uint32_t dst_port,uint32_t src_node,uint64_t generation,
                                    bb_x9_call_frame *frames,uint32_t count,bool registration,uint64_t deadline_ms)
 {
   const uint32_t slot=dst_port-CBQ_PORT_BASE;
-  if(!bb_lock||!frames||!count||count>(registration?9u:8u)||(registration&&!deadline_ms)||
+  if(!bb_lock||!generation||!frames||!count||count>(registration?9u:8u)||(registration&&!deadline_ms)||
      dst_port<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return false;
   for(uint32_t i=0;i<count;i++){
     const bb_x9_call_frame &f=frames[i];
@@ -1540,7 +1588,8 @@ static bool bb_x9_call_publication(uint32_t dst_port,uint32_t src_node,
   // not bb_now_ms's diagnostic 32-bit clock or an earlier getter.
   uint64_t ticks,ns;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);
   const cbq_client &c=bb_qmux.client[slot];bool admitted=false;
-  if((!registration||ns/1000000<deadline_ms)&&c.used&&!c.release_pending&&!c.private_service&&c.service==9&&c.channel<2){
+  if((!registration||ns/1000000<deadline_ms)&&c.used&&!c.release_pending&&!c.private_service&&
+     c.service==9&&c.channel<2&&c.generation==generation){
     bb_channel *ch=&bb_ch[c.channel==0?CBH_QMUX1:CBH_QMUX2];
     if(count<=BB_QUEUE-ch->count){
       const cbq_server *srv=cbq_server_find(&bb_qmux,c.service);
@@ -1561,14 +1610,14 @@ static bool bb_x9_call_publication(uint32_t dst_port,uint32_t src_node,
   }
   IOLockUnlock(bb_lock);return admitted;
 }
-static bool bb_x9_call_registration(uint32_t dst_port,uint32_t src_node,
+static bool bb_x9_call_registration(uint32_t dst_port,uint32_t src_node,uint64_t generation,
                                     bb_x9_call_frame *frames,uint32_t count,uint64_t deadline_ms){
-  return bb_x9_call_publication(dst_port,src_node,frames,count,true,deadline_ms);
+  return bb_x9_call_publication(dst_port,src_node,generation,frames,count,true,deadline_ms);
 }
-static bool bb_x9_call_handover(uint32_t dst_port,uint32_t src_node,bb_x9_call_frame *frames,uint32_t count){
+static bool bb_x9_call_handover(uint32_t dst_port,uint32_t src_node,uint64_t generation,bb_x9_call_frame *frames,uint32_t count){
   // An event has no invented host request timeout. Readiness, generation,
   // subscription and native poison are fenced by the trusted MD callback.
-  return bb_x9_call_publication(dst_port,src_node,frames,count,false,0);
+  return bb_x9_call_publication(dst_port,src_node,generation,frames,count,false,0);
 }
 // Unlike coachz_baseband_qrtr's "port recognized" result, this is an actual
 // host-queue admission receipt. An X9 SMS must keep its PDU on queue/OOM loss;
