@@ -9,6 +9,7 @@
 struct x9_haptic_converter {
     uint32_t phase, step, conversion, intensity, sharpness, decimator;
     int32_t dc, envelope, lowpass, sum, hold;
+    int32_t in_peak, active, kick, brake, brake_amp, last_amp;
 };
 /* Q15 sine approximation on a full unsigned 32-bit turn. Bhaskara's
  * approximation, bounded 64-bit intermediates, exact zero at half turns. */
@@ -34,6 +35,7 @@ static inline int x9_haptic_convert_sample(struct x9_haptic_converter *c,int16_t
     c->dc+=dc_delta/512;
     if(!pcm && c->dc && c->dc<512 && c->dc> -512)c->dc+=c->dc>0?-1:1;
     int32_t input=(int32_t)pcm-c->dc;
+    {int32_t a=pcm<0?-(int32_t)pcm:pcm;if(a>c->in_peak)c->in_peak=a;}
     int32_t magnitude=input<0?-input:input;
     /* Peak hold over one D22 carrier half period (6 ms covers >=84 Hz),
      * then ~2 ms release: a smooth envelope instead of a rectified ripple
@@ -58,8 +60,26 @@ static inline int x9_haptic_convert_sample(struct x9_haptic_converter *c,int16_t
          * x6 puts a ~5500 tap at OPPO's full level, 1000 at 18%.
          * Pure f0 sine: an LRA turns a 3rd harmonic into buzz. */
         int64_t scaled=(int64_t)c->envelope*6;
-        int32_t amp=scaled>32767?32767:(int32_t)scaled;
-        value=(int32_t)((int64_t)amp*x9_haptic_sine(c->phase)/32768);
+        int32_t target=scaled>32767?32767:(int32_t)scaled,amp,sign=1;
+        /* LRA transient as OPPO's own effects shape it: a resonant motor
+         * barely builds up within iOS's 10..70 ms taps (log 329: "light,
+         * loose") and rings on after them. Overdrive the first two cycles
+         * at twice the event's own level, then follow it linearly; when it
+         * ends, drive one reverse-phase cycle ramping down from the last
+         * level (active brake). Both scale with the event: still linear. */
+        uint32_t period=c->step?(uint32_t)((1ULL<<32)/c->step):70;
+        if(target) {
+            if(!c->active){c->active=1;c->kick=(int32_t)(2*period);}
+            c->brake=0;
+            amp=target;
+            if(c->kick){c->kick--;int64_t k=(int64_t)target*2;amp=k>32767?32767:(int32_t)k;}
+            c->last_amp=amp;
+        } else {
+            if(c->active){c->active=0;c->kick=0;c->brake=(int32_t)period;c->brake_amp=c->last_amp;}
+            if(c->brake){amp=(int32_t)((int64_t)c->brake_amp*c->brake/(int32_t)period);c->brake--;sign=-1;}
+            else amp=0;
+        }
+        value=sign*(int32_t)((int64_t)amp*x9_haptic_sine(c->phase)/32768);
         c->phase+=c->step;
         value=(int32_t)((int64_t)value*c->intensity/1000);
         value=value*127/32768;

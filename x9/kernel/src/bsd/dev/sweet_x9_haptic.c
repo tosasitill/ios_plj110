@@ -53,11 +53,11 @@ static uint64_t st_accepted,st_submitted;static unsigned st_peak,st_gos,st_logs;
 static uint8_t st_state_or;
 static void stream_summary(void)
 {
-    if(!(hs.flags&X9_HAPTIC_RUNNING) || st_logs>=16)return;
+    if(!(hs.flags&X9_HAPTIC_RUNNING) || st_logs>=48)return;
     st_logs++;
-    printf("X9 HAPTIC: stream gen=%llu accepted=%llu submitted=%llu peak=%u go=%u state_or=%02x sysst=%02x underruns=%llu\n",
+    printf("X9 HAPTIC: stream gen=%llu accepted=%llu submitted=%llu in_peak=%d peak=%u go=%u state_or=%02x sysst=%02x underruns=%llu\n",
         hs.generation,hs.accepted_frames-st_accepted,hs.submitted_frames-st_submitted,
-        st_peak,st_gos,st_state_or,hs.hw_fault,hs.underruns);
+        converter.in_peak,st_peak,st_gos,st_state_or,hs.hw_fault,hs.underruns);
 }
 static void stream_reset(void)
 {st_accepted=hs.accepted_frames;st_submitted=hs.submitted_frames;st_peak=st_gos=0;st_state_or=0;}
@@ -244,10 +244,9 @@ static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
                     head=count=0;quiet_stop=true;
                 }
                 if(!hb.active) {
-                    /* 30 ms prefill: log 327 started at 10 ms and the FIFO ran dry
-                     * between mediaserverd writes (go=28 for one pattern),
-                     * so each pulse braked and restarted. */
-                    if(count>=360 || (draining && count)) {
+                    /* 20 ms prefill: 10 ms (log 327) ran the FIFO dry between
+                     * mediaserverd writes; 30 ms (log 329) was felt as delay. */
+                    if(count>=240 || (draining && count)) {
                         e=hgo();st_state_or|=(uint8_t)hs.hw_state;
                         if(!e){on_at=now_ns();quiet_stop=false;++st_gos;}
                     }

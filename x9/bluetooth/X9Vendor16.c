@@ -297,6 +297,13 @@ static void jump_words(uint32_t *out, uintptr_t target)
 /* Copy only the independently verified, PC-independent four-instruction
  * prologue. Its original LR is still on the copied frame; jump (not call)
  * to native +16, so native epilogue returns to the wrapper's caller. */
+/* Log 329: the constructor stopped silently after vm_allocate'd memory was
+ * to become executable, and the old RWX|COPY text request is refused under
+ * this kernel's W^X rules. Trampolines now live in this signed dylib's own
+ * __TEXT page, and every page (ours and bluetoothd's) is changed the way a
+ * debugger plants a breakpoint: R|W|COPY, write, then back to R|X. */
+__attribute__((used, aligned(16384), section("__TEXT,__x9tramp")))
+static const uint32_t x9_tramp_area[4096] = {0};
 static uintptr_t trampoline(vm_address_t base, const struct edit *e)
 {
     uint32_t words[8];
@@ -475,7 +482,11 @@ int x9_vendor16_install(intptr_t slide)
         {0x10011857c, {0xd10343ff,0xa9095ff8,0xa90a57f6,0xa90b4ff4}, {0}, 4},
     };
     unsigned count = 31;
-    if (x9_cap16_hook_count > sizeof(edits)/sizeof(edits[0]) - count) return -1;
+    if (x9_cap16_hook_count > sizeof(edits)/sizeof(edits[0]) - count) {
+        x9_bt_note("X9 vendor: %zu capability hooks exceed edit table; no text changed\n",
+                   x9_cap16_hook_count);
+        return -1;
+    }
     for (size_t k = 0; k < x9_cap16_hook_count; k++) {
         const struct x9_cap16_hook *h = &x9_cap16_hooks[k];
         edits[count].va = h->va; edits[count].words = 4;
@@ -490,10 +501,19 @@ int x9_vendor16_install(intptr_t slide)
             return -1;
         }
     }
-    vm_address_t tramp = 0;
     vm_size_t page = (vm_size_t)vm_page_size;
-    kern_return_t kr = vm_allocate(mach_task_self(), &tramp, page, VM_FLAGS_ANYWHERE);
-    if (kr) return -1;
+    vm_address_t tramp = (vm_address_t)(uintptr_t)x9_tramp_area;
+    if (page > sizeof(x9_tramp_area) || (tramp & (page-1))) {
+        x9_bt_note("X9 vendor: trampoline area %#lx not page-aligned for page %#lx\n",
+                   (unsigned long)tramp, (unsigned long)page);
+        return -1;
+    }
+    kern_return_t kr = vm_protect(mach_task_self(), tramp, page, FALSE,
+                                  VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY);
+    if (kr) {
+        x9_bt_note("X9 vendor: trampoline page COW failed (%d); no text changed\n", kr);
+        return -1;
+    }
     original_init = (init_fn)trampoline(tramp, &edits[3]);
     original_callbacks = (callback_fn)trampoline(tramp+32, &edits[4]);
     x9_cap16_configure(slide,
@@ -522,7 +542,10 @@ int x9_vendor16_install(intptr_t slide)
     memcpy((void *)(uintptr_t)(tramp+192), bridge, sizeof(bridge));
     sys_icache_invalidate((void *)(uintptr_t)tramp, 512);
     kr = vm_protect(mach_task_self(), tramp, page, FALSE, VM_PROT_READ|VM_PROT_EXECUTE);
-    if (kr) { vm_deallocate(mach_task_self(), tramp, page); return -1; }
+    if (kr) {
+        x9_bt_note("X9 vendor: trampoline page R|X failed (%d); no bluetoothd text changed\n", kr);
+        return -1;
+    }
     jump_words(edits[3].after, (uintptr_t)vendor_init);
     jump_words(edits[4].after, (uintptr_t)register_callbacks);
     jump_words(edits[5].after, (uintptr_t)x9_cap16_supported);
@@ -555,12 +578,11 @@ int x9_vendor16_install(intptr_t slide)
         for (j = 0; j < page_count && pages[j] != p; j++) {}
         if (j != page_count) continue;
         kr = vm_protect(mach_task_self(), p, page, FALSE,
-                              VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE|VM_PROT_COPY);
+                              VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY);
         if (kr) {
             for (j = 0; j < page_count; j++)
                 if (vm_protect(mach_task_self(), pages[j], page, FALSE,
                                     VM_PROT_READ|VM_PROT_EXECUTE)) abort();
-            vm_deallocate(mach_task_self(), tramp, page);
             x9_bt_note("X9 vendor: COW text protection failed (%d); no text changed\n", kr);
             return -1;
         }
@@ -570,9 +592,14 @@ int x9_vendor16_install(intptr_t slide)
         memcpy((void *)addr(edits[k].va), edits[k].after, edits[k].words*4);
         sys_icache_invalidate((void *)addr(edits[k].va), edits[k].words*4);
     }
-    for (unsigned j = 0; j < page_count; j++)
-        if (vm_protect(mach_task_self(), pages[j], page, FALSE,
-                            VM_PROT_READ|VM_PROT_EXECUTE)) abort();
+    for (unsigned j = 0; j < page_count; j++) {
+        kr = vm_protect(mach_task_self(), pages[j], page, FALSE, VM_PROT_READ|VM_PROT_EXECUTE);
+        if (kr) {
+            x9_bt_note("X9 vendor: patched text page %#lx R|X failed (%d)\n",
+                       (unsigned long)pages[j], kr);
+            abort();
+        }
+    }
     x9_bt_note("X9 vendor: native type0 routing and HCI capability publisher; unsupported vendor ops stay null\n");
     return 1;
 }
