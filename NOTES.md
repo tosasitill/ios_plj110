@@ -158,6 +158,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 相机图标缺失：补 metadata-only ISP 发现与独立一次性 MG 刷新
+
+- **用户现象/范围**：用户报告桌面没有相机。仍没有新增数字日志（最新330，mode1）；本地根盘工作克隆只读检查 `/Applications/Camera.app/Info.plist` 发现 app 存在、bundle 为 com.apple.camera、UIRequiredDeviceCapabilities 只有 arm64、SBAppTags 为 still-camera；旧克隆 IconState 中没有 camera。这些是克隆观察，不冒充当前设备 App/LS/限制状态。
+- **确定源码缺口/参考**：此前 r2 的 mkadt 没有 `/arm-io/isp`。固定 `.local/references/hackios-xnu-kernel/xnuloader/loader.c:3226–3233` 在 camera_requested 时放无 compatible/device_type/reg 的 isp/camera-rear，专供 MG still/rear-camera 与 SpringBoard Camera.app 发现。当前20H392原 libMobileGestalt 在 `19c56341c/19c56c59c` 走真 ISP path 与 camera-rear hashed key；`_MobileGestalt_get_cameraCapability` 的原CFString等于 `MD5(MGCopyAnswer+still-camera)` base64（nv4RoLkNoPT0/rsO8Yaiew），rear/front/video exported key同样对应资格。原 helper 19c557414 取实际 IORegistry property，19c559e74 实际执行 MGCopyAnswer+property 哈希匹配。原cfstring tagged pointer保留raw，仅mapped-low36字符串读取，不将其称live/authenticated pointer；answer-table候选查找未命中，不补称已闭原native callback表。
+- **实际修复**：只有 `x9_camera=2` 打包才加 metadata-only `/arm-io/isp` 的 camera-rear/front=1，并独立于 torch 放 `/product/camera` 节点。没有 Apple ISP compatible/device_type/reg，不修改 Apple Camera.app、LaunchServices/桌面布局或 physical READY/实际RAW守卫。新 opt-in **x9_mgwipe=3** 仅 native mode2，在 PID1 用独立 `/private/var/x9/mg/refresh-camera-20261116` 标记复用两份 MG 缓存重建；先前 ALS epoch不能使它跳过，两次 unlink 成功后才写标记。1/2旧语义保留，默认仍0；构建不执行此操作，须用户确认后才手动启动刷新候选。
+- **当前编译/记录**：正常 Builder `compile_one(kern_exec.o)` **True/exit0、145 warnings**，session54272已终态；没有测试脚本/套件或设备写入。原始 app tags、MG符号/反汇编/headers、选中raw/string/hash映射、失败原件/未命中候选、source-input与exec-compile log/exit/result 保留本树 gitignored `x9/out/camera-icon-20261116/`。即便发现节点修复成立，也不声称这是设备图标唯一原因或已拍摄成功；下一正常构建 r3（无额外MG刷新）与同kernel可选r3-mg（显式3），实际终态随后记。
+
 #### 2026-11-16 相机恢复工作：NS GIC 阻断已修，正常 mode2 r2 已构建
 
 - **范围/基线**：单代理进入现有 `.worktrees/camera-integration` / `feat/camera-integration`，起点 `4d6e4c5b`；合入当前 main `2c34c540`，只 NOTES 尾部并行追加冲突，保留完整双方交接；相机 native/source/repeat/AE/cancel 与 bounded shim handoff 全部保留，其他工作树和共享输入不改。合入带回已落地 board-default 音频/麦克风与蓝牙/AKS/振动修复。

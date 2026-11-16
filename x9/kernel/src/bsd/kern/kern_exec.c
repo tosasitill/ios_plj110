@@ -8619,23 +8619,39 @@ sweet_x9_wipe_gestalt_cache(proc_t p, user_addr_t scratch, user_addr_t end)
 	 * Epoch 2026-11-16 (log 328): /arm-io/aop/iop-aop-nub/als for MG
 	 * ambient-light-sensor; the flash/haptics answers rebuild with it. */
 	static const char epoch_dir[] = "/private/var/x9/mg";
-	static const char epoch_path[] = "/private/var/x9/mg/refresh-als-20261116";
-	static const uint8_t epoch_data[] =
+	static const char als_epoch_path[] = "/private/var/x9/mg/refresh-als-20261116";
+	static const uint8_t als_epoch_data[] =
 	    "x9 MobileGestalt cache rebuilt for ADT AOP ambient light sensor\n";
+	/* Explicit x9_mgwipe=3, native mode2 only: the new metadata-only ISP
+	 * node supplies camera-rear/front. Do not reuse the ALS marker: a prior
+	 * successful ALS refresh would preserve the old no-still-camera answer.
+	 * Leave LaunchServices and SpringBoard's icon layout/preferences intact. */
+	static const char camera_epoch_path[] = "/private/var/x9/mg/refresh-camera-20261116";
+	static const uint8_t camera_epoch_data[] =
+	    "x9 MobileGestalt cache rebuilt for native dual-camera discovery\n";
+	const char *epoch_path;
+	const uint8_t *epoch_data;
+	size_t epoch_bytes;
 	uint8_t epoch_sha[32];
 	int mode = sweet_x9_arg("x9_mgwipe", 0);
-	if (mode != 1 && mode != 2) {
+	if (mode != 1 && mode != 2 && mode != 3) {
 		return 0;
 	}
+	if (mode == 3 && sweet_x9_arg("x9_camera", 0) != 2) {
+		return EINVAL;
+	}
+	epoch_path = mode == 3 ? camera_epoch_path : als_epoch_path;
+	epoch_data = mode == 3 ? camera_epoch_data : als_epoch_data;
+	epoch_bytes = mode == 3 ? sizeof(camera_epoch_data) - 1 : sizeof(als_epoch_data) - 1;
 	if (!sweet_x9_ufs_root_writable()) {
 		return EROFS;
 	}
-	if (mode == 2) {
+	if (mode == 2 || mode == 3) {
 		SHA256_CTX epoch_hash;
 		SHA256_Init(&epoch_hash);
-		SHA256_Update(&epoch_hash, epoch_data, sizeof(epoch_data) - 1);
+		SHA256_Update(&epoch_hash, epoch_data, epoch_bytes);
 		SHA256_Final(epoch_sha, &epoch_hash);
-		error = x9_bbfw_equal(epoch_path, epoch_sha, sizeof(epoch_data) - 1);
+		error = x9_bbfw_equal(epoch_path, epoch_sha, epoch_bytes);
 		if (!error) {
 			printf("X9 MGWIPE: epoch already rebuilt; cache kept\n");
 			return 0;
@@ -8674,12 +8690,12 @@ sweet_x9_wipe_gestalt_cache(proc_t p, user_addr_t scratch, user_addr_t end)
 	if (error != 0 && error != ENOENT) {
 		return error;
 	}
-	if (mode == 2) {
+	if (mode == 2 || mode == 3) {
 		int created = 0;
 		error = x9_bbfw_directory(p, scratch, end, epoch_dir);
 		if (!error) {
 			error = x9_bbfw_write(p, scratch, end, epoch_path, epoch_data,
-			    sizeof(epoch_data) - 1, epoch_sha, &created);
+			    epoch_bytes, epoch_sha, &created);
 		}
 		printf("X9 MGWIPE: epoch marker created=%d errno=%d\n", created, error);
 	}
