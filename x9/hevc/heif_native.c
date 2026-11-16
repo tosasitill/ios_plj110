@@ -276,6 +276,8 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
             if (!e) e = x9_hevc_copy_pixel_aspect(geometry.source_aspect.horizontal,
                 geometry.source_aspect.vertical,&input_aspect);
             if (!e) e = put_number(record,CFSTR("SourcePixelAspectOrigin"),geometry.source_aspect.origin);
+            if (!e && geometry.source_aspect_item_id)
+                e = put_number(record,CFSTR("SourcePixelAspectItemID"),geometry.source_aspect_item_id);
             if (!e && input_aspect) CFDictionarySetValue(record,CFSTR("SourcePixelAspectRatio"),input_aspect);
             if (input_aspect) CFRelease(input_aspect);
             if (!e) e = x9_hevc_copy_pixel_aspect(geometry.pixel_aspect_h,geometry.pixel_aspect_v,&transformed_aspect);
@@ -285,6 +287,7 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
             if (!e) {
                 CFDictionarySetValue(record,CFSTR("RasterPlacementPolicy"),
                     image->type == X9_HEIF_HVC1 ? CFSTR("resolved-coded-source-to-ordered-output") :
+                    geometry.source_aspect_item_id ? CFSTR("identity-unique-child-ordered-output-to-input-then-own-transforms") :
                     image->type == X9_HEIF_GRID || image->type == X9_HEIF_IDEN ?
                         (geometry.source_aspect.horizontal ?
                             CFSTR("declared-canvas-check-every-child-output-absent-only-square-no-inheritance") :
@@ -703,6 +706,8 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
         if (!e) e = put_number(info,CFSTR("GraphColorPolicy"),(uint32_t)graph_color);
         if (!e) e = put_number(info,CFSTR("CleanAperturePolicy"),(uint32_t)clap_policy);
         if (!e) e = put_number(info,CFSTR("SourcePixelAspectOrigin"),(uint32_t)geometry.source_aspect.origin);
+        if (!e && geometry.source_aspect_item_id)
+            e = put_number(info,CFSTR("SourcePixelAspectItemID"),geometry.source_aspect_item_id);
         if (!e) {
             int64_t size = (int64_t)c->raster_budget;
             CFNumberRef number = CFNumberCreate(NULL,kCFNumberSInt64Type,&size);
@@ -716,7 +721,7 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
             if (aspect) CFDictionarySetValue(info,kCMFormatDescriptionExtension_PixelAspectRatio,aspect);
             if (source_aspect) CFDictionarySetValue(info,CFSTR("SourcePixelAspectRatio"),source_aspect);
             CFDictionarySetValue(info,CFSTR("PixelAspectInterpretation"),
-                CFSTR("separate pasp/selected-SPS/observed-CM source provenance; grid/iden check each child output against canvas input, absent only square; ordered raster metric; linear-ceil exact aperture/sample counts; absent remains absent, never inherited"));
+                CFSTR("separate pasp/selected-SPS/observed-CM/identity-output source provenance; absent-pasp iden preserves unique exact-size child ordered output before own transforms; explicit canvas and every grid edge still agree; no grid inheritance or square default; linear-ceil exact aperture/sample counts"));
             CFDictionarySetValue(info,CFSTR("GraphColorInterpretation"),
                 graph_color == X9_HEIF_GRAPH_COLOR_PER_ITEM ?
                     CFSTR("explicit per-item sources; common ICC composition; iovl colr interprets fill only") :

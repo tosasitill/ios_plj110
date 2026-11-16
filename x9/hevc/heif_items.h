@@ -26,12 +26,15 @@
 #define X9_HEIF_IDEN X9_HEIF_TYPE('i','d','e','n')
 #define X9_HEIF_IOVL X9_HEIF_TYPE('i','o','v','l')
 struct x9_heif_document;
-/* Resolved coded-source metadata, separate from the raw container image.
+/* Resolved sample metric, separate from the raw container image.
  * COREMEDIA means an actually returned format value, not container/SPS
- * provenance or a locally inferred 1:1 default. Zero pair means absent. */
+ * provenance or a locally inferred 1:1 default. IDENTITY_OUTPUT is only
+ * assigned by the compositor to an absent-pasp identity's copied child
+ * OUTPUT metric; it is not a coded-source resolver result. Zero pair means absent. */
 enum x9_heif_aspect_origin {
     X9_HEIF_ASPECT_ABSENT = 0, X9_HEIF_ASPECT_PASP,
-    X9_HEIF_ASPECT_SELECTED_SPS, X9_HEIF_ASPECT_COREMEDIA
+    X9_HEIF_ASPECT_SELECTED_SPS, X9_HEIF_ASPECT_COREMEDIA,
+    X9_HEIF_ASPECT_IDENTITY_OUTPUT
 };
 struct x9_heif_sample_aspect {
     uint64_t horizontal, vertical; /* positive signed64 if present */

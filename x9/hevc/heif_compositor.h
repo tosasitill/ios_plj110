@@ -20,7 +20,9 @@ struct x9_heif_geometry {
     uint32_t coded_width, coded_height; /* ispe, before item transforms */
     uint32_t derived_count, auxiliary_count;
     struct x9_heif_sample_aspect source_aspect; /* pre-item-transform, separate provenance;
-        * derived canvas uses only its own pasp, never a guessed child inheritance */
+        * explicit canvas pasp, or absent-pasp identity's unique child OUTPUT */
+    uint32_t source_aspect_item_id; /* immediate dimg child for absent-pasp identity,
+        * including an absent child metric; 0 for own/coded source provenance */
     uint64_t pixel_aspect_h, pixel_aspect_v; /* output ratio, 1..INT64_MAX;
         * absent resolved source remains0, never an inferred square default */
 };
@@ -38,14 +40,18 @@ struct x9_heif_geometry {
  * output ratio must fit positive signed64 CFNumbers, else E2BIG, never rounded.
  * This is not square-pixel conversion or a HEIF mandated resampling policy.
  * grid/iden compare EVERY child's ordered OUTPUT ratio with the canvas's
- * pre-transform declared pasp before callbacks and again on cached rasters
+ * pre-transform input metric before callbacks and again on cached rasters
  * at the actual sample-copy path. Agreeing non-square lattices can be copied
  * without resizing; canvas crop/rotation then determines its output metric.
- * Present mismatches or a non-square edge with an absent ratio reject. No
- * absent ratio inherits or becomes1:1; legacy absent/square paths retain their
- * metadata. Non-square iovl/auxiliary placement, mixed-lattice resampling and
+ * An identity without its own pasp copies its unique child's ordered OUTPUT
+ * metric after exact input-size agreement, then applies its own transforms.
+ * Its present source origin is IDENTITY_OUTPUT, with the immediate child ID;
+ * absent child remains absent. This does not rewrite raw container metadata.
+ * Explicit mismatches or other non-square edges with an absent ratio reject.
+ * Grid has no absent-metric inheritance, and no missing ratio becomes1:1.
+ * Non-square iovl/auxiliary placement, mixed-lattice resampling and
  * full normative derived metric/inheritance are not implemented. These
- * container-only entrypoints preserve absent pasp; the native preflight
+ * container-only entrypoints resolve no coded metric beyond pasp; the native preflight
  * variant below resolves actual coded-source SPS/CM sample aspect. */
 int x9_heif_plan_create(
     const struct x9_heif_document *, uint32_t item_id, struct x9_heif_plan **);

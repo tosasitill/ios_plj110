@@ -35,12 +35,16 @@ enum x9_heif_graph_color_policy {
  * retains no AU buffers. Color preflight and the actual decoded source
  * recheck the immutable plan's ratio/presence read-only. Raw pasp provenance
  * remains separate from SourcePixelAspectRatio/Origin (absent0, pasp1,
- * selected-SPS2, observed-CM3).
- * grid/iden require each child's transformed output ratio to agree with the
+ * selected-SPS2, observed-CM3, identity-output4). An absent-pasp identity
+ * preserves its unique exact-size child's ordered OUTPUT metric as input,
+ * with SourcePixelAspectItemID naming that immediate child, then applies its
+ * own transforms. Absent child stays0/0 with origin0; no raw pasp is invented.
+ * Explicit grid/iden require each child's transformed output ratio to agree with the
  * canvas's explicit pre-transform pasp BEFORE hardware. The actual sample-copy
  * path rechecks completed cached raster ratios; agreeing non-square samples
- * preserve that lattice, followed by the canvas's ordered transforms. Absent
- * canvas/child ratio cannot admit a non-square placement and never inherits.
+ * preserve that lattice, followed by the canvas's ordered transforms. Grid
+ * canvas/child absence cannot admit a non-square placement and never inherits;
+ * identity preservation also rechecks presence on the actual cached raster.
  * Non-square overlay/auxiliary placement, mixed-lattice resampling and full
  * normative derived metric/inheritance remain unimplemented. Explicit LINEAR_CEIL
  * uses exact aperture/output-sample counts, not double-derived ratios.

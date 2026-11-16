@@ -138,6 +138,8 @@ static int transforms(struct x9_heif_plan *plan, const struct x9_heif_image *ima
 }
 static int source_aspect(const struct x9_heif_image *image, const struct x9_heif_sample_aspect *aspect)
 {
+    /* Validate only own/coded-source resolution. IDENTITY_OUTPUT is assigned
+     * later from a completed child, never trusted from the source callback. */
     uint64_t h = aspect->horizontal, v = aspect->vertical;
     if ((!h != !v) || h > INT64_MAX || v > INT64_MAX ||
         aspect->origin < X9_HEIF_ASPECT_ABSENT || aspect->origin > X9_HEIF_ASPECT_COREMEDIA ||
@@ -151,13 +153,15 @@ static int source_aspect(const struct x9_heif_image *image, const struct x9_heif
 /* grid/iden place child OUTPUT samples in the canvas INPUT lattice, before
  * the canvas's own transforms. Explicit present ratios must agree on EVERY
  * dimg edge, not just tile0, raw pasp, shared config or the root declaration.
- * This exact-copy subset does not infer inherited spacings or reinterpret a
- * mismatched lattice. Preserve the legacy absent/square path without filling
- * in1:1; missing evidence never admits a non-square placement. */
+ * Absent-pasp identity preserves its unique child's completed output metric,
+ * including presence. Grid still does not infer an absent canvas metric or
+ * reinterpret a mismatched lattice. Preserve its legacy absent/square path
+ * without filling in1:1; missing evidence never admits a non-square placement. */
 static int placement_metric(const struct x9_heif_geometry *canvas, uint64_t h, uint64_t v)
 {
     uint64_t ch = canvas->source_aspect.horizontal, cv = canvas->source_aspect.vertical;
     if ((!h != !v) || h > INT64_MAX || v > INT64_MAX) return EBADMSG;
+    if (canvas->source_aspect_item_id && (!!ch != !!h)) return EBADMSG;
     if (ch && h) return (__uint128_t)ch*v == (__uint128_t)cv*h ? 0 : ENOTSUP;
     return ch != cv || h != v ? ENOTSUP : 0;
 }
@@ -196,10 +200,7 @@ static int visit(struct x9_heif_plan *p, uint32_t id, unsigned depth, uint32_t *
             e = p->aspect_source(p->aspect_context,image,&aspect);
         }
         if (!e) e = source_aspect(image,&aspect);
-        if (!e) {
-            node->geometry.source_aspect = aspect;
-            e = transforms(p,image,node);
-        }
+        if (!e) node->geometry.source_aspect = aspect;
     }
     for (unsigned n = 0; n < image->derived_count && !e; n++) {
         e = visit(p,image->derived[n],depth+1,&node->derived[n]);
@@ -209,6 +210,18 @@ static int visit(struct x9_heif_plan *p, uint32_t id, unsigned depth, uint32_t *
     if (!e && node->type == X9_HEIF_IDEN) {
         const struct x9_heif_geometry *g = &p->nodes[node->derived[0]].geometry;
         if (g->width != image->width || g->height != image->height) e = EBADMSG;
+        else if (!image->pixel_aspect_h) {
+            /* Identity copies EXACTLY the unique child's already-transformed
+             * raster. Resolve this input before appending our own operations,
+             * never use raw child pasp or mutate container/coded provenance.
+             * The coded-source callback still cannot return this origin.
+             * An absent child metric stays0/0, not an inferred square default. */
+            node->geometry.source_aspect.horizontal = g->pixel_aspect_h;
+            node->geometry.source_aspect.vertical = g->pixel_aspect_v;
+            node->geometry.source_aspect.origin = g->pixel_aspect_h ?
+                X9_HEIF_ASPECT_IDENTITY_OUTPUT : X9_HEIF_ASPECT_ABSENT;
+            node->geometry.source_aspect_item_id = g->id;
+        }
     }
     if (!e && node->type == X9_HEIF_GRID) {
         const struct x9_heif_geometry *tile = &p->nodes[node->derived[0]].geometry;
@@ -221,6 +234,10 @@ static int visit(struct x9_heif_plan *p, uint32_t id, unsigned depth, uint32_t *
             if (tile->width != other->width || tile->height != other->height) e = EBADMSG;
         }
     }
+    /* Each node's transforms are calculated once, after child OUTPUT geometry
+     * and any identity input metric are final. Cached DAG nodes retain that
+     * immutable result; no replay/duplicate append or stale resampling flags. */
+    if (!e) e = transforms(p,image,node);
     for (unsigned n = 0; n < X9_HEIF_MAX_ITEMS && !e; n++) {
         uint32_t auxiliary = 0;
         e = x9_heif_auxiliary(p->document,id,n,&auxiliary);
@@ -251,7 +268,8 @@ static int plan_create(const struct x9_heif_document *document, uint32_t id,
     /* Validate the WHOLE reachable graph before any raster callback. Each
      * grid/iden edge consumes transformed child samples in the declared
      * pre-transform canvas metric. DAG reuse never skips a new parent edge.
-     * No absent inheritance, mixed-lattice resampling or square default.
+     * Only absent-pasp identity preserves a unique exact-size child's output;
+     * no grid inheritance, mixed-lattice resampling or square default.
      * Non-square overlay/auxiliary placement remains unsupported. */
     for (unsigned n = 0; n < p->count && !e; n++) {
         const struct node *node = &p->nodes[n];
