@@ -1973,3 +1973,43 @@ DAPM/mixer选择、独立USIP_PHONECALL及iOS BasebandVoice双向I/O；不写猜
 `x9/out/voice-dsp-payload/{final-dsp-contract.json,final-evidence-index.md}`；
 只重读已有证据即可复核，不接触设备或旧备份。本轮仅docs，无production delta、
 测试、编译、CI、boot pack或上机；VOICE09不因静态收束开放。
+
+## 2026-11-16 同版 Android17 SMS owner：raw 接收 ACK 不等于 Messages commit
+
+本次已抓 matching `telephony-common.jar`（Android17 `CP2A.260605.016/B.46c413f-20895a6-20bdbdd`），
+仅收束既有 ASC Java、selected DEX 和原 offset JSON，不重跑提取、hash、测试或设备命令。
+以下 `code_item` 均是原 `classes.dex` 文件偏移；`+offset` 仅指 ASC rebuilt-ref 渲染的相对指令位置。
+**长构造器标签纠正：** extractor 按 method name 索引，两个 `<init>` 覆盖了 selected 标题；
+原 JSON 的 SmsDispatchersController 长 ctor 是 **`0x175c0c/512B`**，短 ctor 才是 `0x175e1c/26B`。
+保留原件不改写，不将该错标题当原长方法地址，也不把 rebuilt 相对位置直接算成已核对的原绝对地址。
+
+长 ctor 的 selected `+0100` 创建 GsmInboundSmsHandler；Gsm ctor `0x1f2c14/+0026`
+将 `Phone.mCi.setOnNewGsmSms(handler,1,null)` 绑定事件1，factory `0x1f2a0c/+0014` 调 `start()`。
+这是静态 owner/start 链，不证明当前进程实际 override、StartupState 推进或 baseband ready。
+DeliveringState `0x1138e8/+01ac` 在事件1内调用 `handleNewSms`；事件2另在 `+015c` 调
+`processMessagePart`。`handleNewSms 0x1170fc/+003e` 调 dispatchMessage；其 receive-disabled、
+polling、satellite 等 gate 本次只有 retained ASC Java，不声称这些 gate 的原指令已逐项闭合。
+
+**条件化的普通 CS GSM 接收分支：** radio-specific `0x1f2a38/+0162` → normal
+`0x116084/+0198` → raw helper。`addTrackerToRawTable 0x115dc8/+0098` 调 provider insert，
+随后 parse row id、设 tracker 删除条件并返回1；duplicate 返回5。`sRawUri` 在 retained Java
+构造器指向 `Telephony.Sms.CONTENT_URI/raw`，不是最终 SMS app inbox 或 iOS Messages 数据库。
+helper `0x115f50/+001a` 在 result1 时**先排事件2，再返回1**；duplicate5 则直接转1、不排新事件2。
+`handleNewSms/+008c` 对 -1 跳过 ACK，result1 置 success=true 后 `+0098` 同步调用
+notify/ACK；这条分支不等待事件2广播完成、最终短信 app 保存或重开显示。
+
+Gsm ACK `0x1f2ccc` → `resultToCause 0x1f2bb4`：`-1/1→0`、`3→0xd3`、其它 `→0xff`；
+其中 -1 的 cause 映射**不代表 handleNewSms 已发 ACK**。RIL `0x14941c` 先 canMakeRequest，
+再申请 decimal request37，经 serial/lambda → RadioMessagingProxy `0x158cd4`，非 empty 时
+调用真实 `IRadioMessaging` AIDL 或 `V1_4/IRadio` HIDL。Android request37 与 QMI WMS37
+是不同命名空间；调用存在不等于 modem ACK、completion，也未证本次实际 AIDL/HIDL 分支。
+
+selected 未保存完整 try/exception-handler 表，ASC Java 有类型/控制流失真；raw helper Java
+还漏掉 selected 中 URI-error 分支。因此不补猜完整异常条件、provider transaction COMMIT 或 IMS 契约。
+fresh 日志现位于主 `x9/out/call-owned-runtime/`；既有窄筛初始化/SMS ACK为0 hits，窗口09:15后，
+不能据此判未初始化/失败；旧 Java/IMS owner 活动也不能拼成本次短信接收成功。
+既有 kernel memory-full D3 映射与此静态分支吻合，无新独立 codec/dispatch 矛盾，不造 ready/ACK。
+**Android raw 接收 ACK 不能替代 iOS 验收：** 仍需当前 image/source 对齐的同 token Messages
+COMMIT、重开持久化、相关物理 ACK/WMS完成，以及 MO 对端收到；本次没有 production delta 或镜像。
+原偏移、标签边界与逐条只读 `cat/sed` 入口在 gitignored
+`x9/out/init-sms-java/matching-sms-final-contract.json`；root 统一归档/交接，无编译、CI 或上机结果。
