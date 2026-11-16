@@ -163,7 +163,8 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **范围/基线**：单代理进入现有 `.worktrees/camera-integration` / `feat/camera-integration`，起点 `4d6e4c5b`；合入当前 main `2c34c540`，只 NOTES 尾部并行追加冲突，保留完整双方交接；相机 native/source/repeat/AE/cancel 与 bounded shim handoff 全部保留，其他工作树和共享输入不改。合入带回已落地 board-default 音频/麦克风与蓝牙/AKS/振动修复。
 - **最新观察**：`~/330.txt:481` 相机仍 `mode=1 / platform=0`，`:3006` boot args 为 `x9_camera=1`，不是 r1 mode2 镜像验收；目前没有当次 physical ID/RAW/PixelBufferHandler/屏幕预览证据。`~/324.txt:629` 相同 GICD 实读 `ctlr=12 / typer=a07f051e / group=0`；对应 pe_fiq 当前 NS 两安全态配置，与已实跑 BT IRQ 修复相符。
 - **确定源码阻断/下一动作**：native source→`cam_irq_prepare_locked`→`cam_irq_controller_impl` 仍要求 `(ctl&0x11)==0x11` 和可见 IGROUPR bit；0x12 必然 EBUSY。按 NS view 修为 ARE_NS+EnableGrp1A(0x12)，不把读为0的不可见 group 当拒绝依据；保留实际 topology/line count/level trigger/RWP、route/priority/enable/pending/active、真实 IAR/EOI 与 DMA/退休守卫，不改 GIC 全局或安全组寄存器。随后单对象交编及正常完整 mode2 功能候选，不跑测试套件/构建后二次检查，不自行 boot/ADB/mailbox/写分区。完整相机目标未完成，后续以新 mode2 日志和真实预览/拍摄效果验收。
-- **原始记录**：本树 gitignored `x9/out/camera-resume-20261116/` 保留基线、merge 原日志和日志摘录；没有新 CI run/build/设备结果，终态随后更新。
+- **合入/单对象终态**：merge 为 `430fcfbc`；原 merge diff-check 因 main 原有 `0006-x9-bt-uart-irq.patch` 的 unified-diff context 空格+tab 报警（未改该继承补丁），本轮 camera diff-check exit0。上述 NS 守卫与 thread-only prepare 拒绝快照已实现；正常 Builder `compile_one(sweet_x9_camera.o)` **True/exit0、153 warnings**（与 r1 最后联合编译数量相同），原 session99090 已终态。没有执行测试套件/额外产物检查。`prepare-local.py --check` exit0，gh 当前相机分支 run list `[]/exit0`，没有 CI run ID。
+- **原始记录/下一步**：本树 gitignored `x9/out/camera-resume-20261116/` 保留基线、merge 原日志、日志摘录、single-compile.log/exit/result 与输入校验/gh 输出。下一以已提交代码正常 `build.py all` 构建 mode2 r2；boot-device 其他 token 不变，不启用额外 BT root 安装/MG 清缓存。尚无 r2 boot/实际 RAW/handler/屏幕结果，不能称相机完成。
 
 #### 2026-11-16 SMS fanout / 同 Model factory 分流（静态收束；retrieve/retirement仍缺）
 

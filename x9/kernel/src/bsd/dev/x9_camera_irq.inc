@@ -102,11 +102,18 @@ static int cam_irq_controller_impl(bool pending_ok)
 {
     uint32_t ctl=cam_irq_rd(cam_irq.gic,0);
     uint32_t lines;
-    if((ctl&0x11)!=0x11||(!pending_ok&&(ctl&(1u<<31))))return EBUSY;
+    /* This is the same non-secure, two-security-state GICD view as pe_fiq
+     * and the native BT IRQ owner: ARE_NS (bit4) + EnableGrp1A (bit1).
+     * CTLR bit0 is RES0 here (actual log 324 reads 0x12), and IGROUPR
+     * reads zero even for delivered NS interrupts. Neither is a usable
+     * admission predicate. Do not write CTLR/IGROUPR/ICFGR: the exact
+     * boot topology, level configuration, route/priority/enable readbacks
+     * and actual IAR/EOI remain mandatory for our three bound lines. */
+    if((ctl&0x12)!=0x12||(!pending_ok&&(ctl&(1u<<31))))return EBUSY;
     lines=((cam_irq_rd(cam_irq.gic,4)&31)+1)*32;
     for(unsigned i=0;i<3;i++) {
-        unsigned id=cam_irq.layout.intid[i];uint32_t bit=cam_irq_bit(i);
-        if(lines<=id||!(cam_irq_rd(cam_irq.gic,cam_irq_bank(i,0x80))&bit)||
+        unsigned id=cam_irq.layout.intid[i];
+        if(lines<=id||
            (cam_irq_rd(cam_irq.gic,0xc00+4*(id/16))&(3u<<((id%16)*2))))return EBUSY;
     }
     return 0;
@@ -500,7 +507,24 @@ static int cam_irq_prepare_locked(uint64_t epoch)
     cam_irq.sv_cg=cam_mm.sv_cg;cam_irq.top=cam_mm.top;
     cam_irq.fence=cam_mm.desc[X9_CAM_MM_CAM_MUX].effect_mask|
         cam_mm.desc[X9_CAM_MM_CAMTM_MUX].effect_mask|cam_mm.desc[X9_CAM_MM_SENINF_MUX].effect_mask;
-    e=cam_irq_topology();if(!e)e=cam_irq_controller();if(!e)e=cam_irq_idle();
+    e=cam_irq_topology();
+    if(!e) {
+        e=cam_irq_controller();if(!e)e=cam_irq_idle();
+        /* Thread-only cold prepare evidence; never print from the IAR
+         * filter or sample powered CAMSV banks on a failed GIC admission. */
+        if(e) {
+            printf("X9 CAMERA IRQ: prepare refused epoch=%llu errno=%d ctlr=%x typer=%x (NS view)\n",
+                epoch,e,cam_irq_rd(cam_irq.gic,0),cam_irq_rd(cam_irq.gic,4));
+            for(unsigned i=0;i<3;i++) {
+                unsigned id=cam_irq.layout.intid[i];uint32_t bit=cam_irq_bit(i);
+                printf("X9 CAMERA IRQ: role=%u intid=%u config=%x enable=%x pending=%x active=%x\n",
+                    i,id,cam_irq_rd(cam_irq.gic,0xc00+4*(id/16)),
+                    cam_irq_rd(cam_irq.gic,cam_irq_bank(i,0x100))&bit,
+                    cam_irq_rd(cam_irq.gic,cam_irq_bank(i,0x200))&bit,
+                    cam_irq_rd(cam_irq.gic,cam_irq_bank(i,0x300))&bit);
+            }
+        }
+    }
     if(!e&&!cam_irq.thread_started) {
         thread_t thread;
         if(kernel_thread_start(cam_irq_worker,NULL,&thread)!=KERN_SUCCESS)e=ENOMEM;
