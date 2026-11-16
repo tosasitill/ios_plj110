@@ -239,6 +239,10 @@ static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
     struct x9_hevc_poc_picture picture_poc;
     int gate = x9_hevc_sample_metadata(&s->config,CFDataGetBytePtr(s->hvcc),
         (size_t)CFDataGetLength(s->hvcc),input,bytes,&metadata);
+    /* F.14.3.8 alpha persistence/cancel is in OUTPUT order, not this SUBMIT
+     * sequence. Until real AUX_ALPHA/primary association and its output
+     * consumer exist, refuse resolved alpha before token/native mutation. */
+    if (!gate && metadata.alpha.present) gate = ENOTSUP;
     if (!gate) gate = x9_hevc_hdr_sequence_next(&s->hdr_sequence,&metadata,&prospective);
     if (!gate) gate = x9_hevc_poc_sequence_next(&s->poc_sequence,&metadata,&prospective_poc,&picture_poc);
     if (!gate && picture_poc.clvs != prospective.clvs) gate = EINVAL;

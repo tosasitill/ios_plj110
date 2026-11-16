@@ -4,6 +4,7 @@
 #include "hevc_bitstream.h"
 #include "vt_image_metadata.h"
 #include <VideoToolbox/VideoToolbox.h>
+#include <errno.h>
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -67,8 +68,11 @@ OSStatus X9HEVCCopyHardwarePicture(CMSampleBufferRef sample, CVPixelBufferRef *o
     struct x9_hevc_hdr hdr = {0};
     if (!e && x9_hevc_irap_annexb(&config,CFDataGetBytePtr(hvcc),au,bytes,NULL,0,&needed,NULL))
         e = kVTVideoDecoderUnsupportedDataFormatErr;
-    if (!e && x9_hevc_sample_hdr(&config,CFDataGetBytePtr(hvcc),
-        (size_t)CFDataGetLength(hvcc),au,bytes,&hdr)) e = kVTVideoDecoderBadDataErr;
+    if (!e) {
+        int gate = x9_hevc_sample_hdr(&config,CFDataGetBytePtr(hvcc),
+            (size_t)CFDataGetLength(hvcc),au,bytes,&hdr);
+        if (gate) e = gate == ENOTSUP ? kVTVideoDecoderUnsupportedDataFormatErr : kVTVideoDecoderBadDataErr;
+    }
     free(au);
     if (e) return e;
     e = X9HEVCRegisterDecoder();

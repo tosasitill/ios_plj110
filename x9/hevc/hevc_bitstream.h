@@ -133,8 +133,26 @@ struct x9_hevc_hdr {
  * exact CM/container snapshots. Does not invent absent fields or mastering
  * chromaticities, rescale values, or validate complete colour conformance. */
 int x9_hevc_hdr_validate(const struct x9_hevc_hdr *);
+/* HDR-only still/HEIF preflight also validates SEI165 and returns ENOTSUP
+ * for resolved base alpha (including cancel), rather than dropping it. */
 int x9_hevc_sample_hdr(const struct x9_hevc_config *, const uint8_t *hvcc,
     size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes, struct x9_hevc_hdr *);
+/* F.14.2.8/F.14.3.8: exact resolved base-layer prefix SEI165 syntax in THIS AU.
+ * Sources use the same direct/scalable scope bits as HDR, not a carrier claim.
+ * Scalar fields are meaningful only when present && !cancel. Endpoint widths
+ * are bit_depth_minus8+9 (9..16 bits); equal and descending endpoints are legal.
+ * use_idc retains all 3 bits, including reserved3..7, without mapping to an
+ * alpha convention. Absent use_idc's normative inference2 is not a message.
+ * These facts do NOT establish AUX_ALPHA/associated primary/bit-depth equality
+ * or perform clip/increment/normalization. Persistence/cancel applies in OUTPUT
+ * order and must not be committed with SUBMIT/HDR input state. Until a genuine
+ * carrier/association/output consumer exists, decoding consumers reject any
+ * resolved base alpha message (including cancel); non-base messages are not
+ * promoted. Unknown payload extension bits are ignored as D.3.1 requires. */
+struct x9_hevc_alpha {
+    uint32_t present, sources, cancel, use_idc, bit_depth_minus8;
+    uint32_t transparent, opaque, incr, clip, clip_type;
+};
 /* Complete AU/catalog/SEI validation before publishing any facts. EOS/EOB are
  * observed NAL units, not inferred from DRAIN or no_output_of_prior_pics_flag.
  * The metadata gate is bounded, not a complete validator of unknown SEI
@@ -148,6 +166,7 @@ struct x9_hevc_au_metadata {
      * These are header facts, not full POC, display or DMA completion. */
     uint32_t log2_max_poc_lsb, poc_lsb, pic_output_flag, first_slice_type;
     struct x9_hevc_hdr hdr;
+    struct x9_hevc_alpha alpha;
 };
 int x9_hevc_sample_metadata(const struct x9_hevc_config *, const uint8_t *hvcc,
     size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes,

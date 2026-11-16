@@ -781,6 +781,8 @@ struct sei_context {
     const uint8_t *hvcc;
     const struct x9_hevc_hdr *before;
     struct x9_hevc_hdr *hdr;
+    const struct x9_hevc_alpha *alpha_before;
+    struct x9_hevc_alpha *alpha;
     unsigned *counts;
     unsigned pps_id, temporal, nal_temporal, prefix, after_vcl;
 };
@@ -819,7 +821,8 @@ static unsigned sei_vcl_associated(uint32_t type)
         (type >= 200 && type <= 202) || type == 205) return 1;
     switch (type) {
     case 2: case 3: case 6: case 9: case 15: case 16: case 17: case 19:
-    case 22: case 23: case 45: case 47: case 56: case 128: case 131: case 132: return 1;
+    case 22: case 23: case 45: case 47: case 56: case 128: case 131: case 132:
+    case 165: return 1; /* Annex F F.14.3.1, including scalable-nested alpha */
     default: return 0;
     }
 }
@@ -861,10 +864,63 @@ static int sei_vps_base_scope(const struct sei_context *s, const uint32_t select
         }
     return b.error ? EINVAL : 0;
 }
+static int alpha_equal(const struct x9_hevc_alpha *a, const struct x9_hevc_alpha *b)
+{
+    /* Scope provenance may differ for agreeing direct/nested repetitions. */
+    return a->present == b->present && a->cancel == b->cancel && a->use_idc == b->use_idc &&
+        a->bit_depth_minus8 == b->bit_depth_minus8 && a->transparent == b->transparent &&
+        a->opaque == b->opaque && a->incr == b->incr && a->clip == b->clip && a->clip_type == b->clip_type;
+}
+static int sei_alpha(struct sei_reader *r, uint64_t end, const struct sei_context *s,
+    unsigned nested, unsigned apply, unsigned source)
+{
+    struct x9_hevc_alpha alpha = { .present = 1, .sources = source };
+    alpha.cancel = sei_get(r,1,end);
+    if (!alpha.cancel) {
+        alpha.use_idc = sei_get(r,3,end); /* 3..7 reserved; do not invent a convention */
+        alpha.bit_depth_minus8 = sei_get(r,3,end);
+        unsigned width = alpha.bit_depth_minus8+9;
+        alpha.transparent = sei_get(r,width,end);
+        alpha.opaque = sei_get(r,width,end);
+        alpha.incr = sei_get(r,1,end);
+        alpha.clip = sei_get(r,1,end);
+        if (alpha.clip) alpha.clip_type = sei_get(r,1,end);
+        uint32_t range = alpha.opaque >= alpha.transparent ? alpha.opaque-alpha.transparent :
+            alpha.transparent-alpha.opaque;
+        /* F.14.3.8: incr requires a nonzero power-of-two endpoint distance.
+         * No max=(1<<bit_depth)-1 test: the wire scalars have ONE extra bit.
+         * Equal endpoints and reversed endpoints remain legal raw syntax. */
+        if (alpha.incr && (!range || (range & (range-1)))) return EINVAL;
+    }
+    if (r->b.error) return EINVAL;
+    /* D.2.1/D.3.1: a partial-byte payload needs its one/zero tail. Reserved
+     * extension data, including extra bytes, must be ignored by decoders.
+     * The last one bit of the final payload byte is the delimiter; at most
+     * seven trailing zero bits follow it. Never borrow the next SEI header
+     * or NAL rbsp_trailing_bits to complete a truncated scalar or payload. */
+    if (r->used < end) {
+        unsigned last = 0;
+        while (r->used < end && !r->b.error) {
+            unsigned n = end-r->used < 8 ? (unsigned)(end-r->used) : 8;
+            last = ((last << n) | sei_get(r,n,end)) & 255u;
+        }
+        if (!last) return EINVAL;
+    }
+    if (r->b.error || r->used != end) return EINVAL;
+    if (!apply) return 0; /* validate non-base syntax, never promote its facts */
+    if (++s->counts[4] > 8 || (!nested && s->nal_temporal != s->temporal) ||
+        (s->after_vcl && !s->alpha_before->present) ||
+        (s->alpha->present && !alpha_equal(s->alpha,&alpha))) return EINVAL;
+    unsigned sources = s->alpha->sources | source;
+    *s->alpha = alpha; s->alpha->sources = sources;
+    return 0;
+}
 static int sei_payload(struct sei_reader *r, uint32_t type, uint32_t bytes, uint64_t end,
     const struct sei_context *s, unsigned nested, unsigned apply, unsigned source)
 {
     if (nested && (type == 129 || type == 132 || type == 133)) return EINVAL;
+    /* Suffix165 is reserved_sei_message(), NOT alpha_channel_info(). */
+    if (s->prefix && type == 165) return sei_alpha(r,end,s,nested,apply,source);
     /* D.2.1 suffix137/144/147/148 are reserved payloads, not these messages. */
     unsigned mastering = s->prefix && type == 137, light = s->prefix && type == 144;
     unsigned ambient = s->prefix && type == 148, preferred = s->prefix && type == 147;
@@ -970,11 +1026,13 @@ static int sei_scalable(struct sei_reader *r, uint64_t end, const struct sei_con
 }
 static int sei_hdr(const uint8_t *p, size_t n, const struct x9_hevc_config *config,
     const uint8_t *hvcc, unsigned pps_id, unsigned temporal, unsigned after_vcl,
-    const struct x9_hevc_hdr *before, struct x9_hevc_hdr *hdr, unsigned counts[4])
+    const struct x9_hevc_hdr *before, struct x9_hevc_hdr *hdr,
+    const struct x9_hevc_alpha *alpha_before, struct x9_hevc_alpha *alpha, unsigned counts[5])
 {
     struct sei_reader r = { .b = { .p = p+2, .n = n-2 } };
     const struct sei_context s = { .config = config, .hvcc = hvcc, .pps_id = pps_id,
-        .before = before, .hdr = hdr, .counts = counts, .temporal = temporal,
+        .before = before, .hdr = hdr, .alpha_before = alpha_before, .alpha = alpha,
+        .counts = counts, .temporal = temporal,
         .nal_temporal = (p[1]&7)-1u, .prefix = ((p[0]>>1)&63) == 39, .after_vcl = after_vcl };
     uint64_t limit = (uint64_t)(n-2)*8; /* EBSP upper bound, not a payload bound */
     unsigned last = 0, direct_timing = 0, nested_timing = 0, other = 0, active = 0;
@@ -1017,8 +1075,9 @@ int x9_hevc_sample_metadata(const struct x9_hevc_config *c, const uint8_t *hvcc,
     if (e) return e;
     struct x9_hevc_hdr hdr = {0};
     struct x9_hevc_hdr before = {0};
+    struct x9_hevc_alpha alpha = {0}, alpha_before = {0};
     unsigned vcl_seen = 0;
-    unsigned counts[4] = {0};
+    unsigned counts[5] = {0};
     size_t at = 0;
     while (at < sample_bytes) {
         uint32_t bytes = 0;
@@ -1027,13 +1086,14 @@ int x9_hevc_sample_metadata(const struct x9_hevc_config *c, const uint8_t *hvcc,
         if (type < 32) vcl_seen = 1;
         if (type == 39 || type == 40) {
             e = sei_hdr(sample+at,bytes,c,hvcc,metadata.pps_id,
-                metadata.temporal_id,vcl_seen,&before,&hdr,counts);
+                metadata.temporal_id,vcl_seen,&before,&hdr,&alpha_before,&alpha,counts);
             if (e) return e;
-            if (!vcl_seen) before = hdr;
+            if (!vcl_seen) { before = hdr; alpha_before = alpha; }
         }
         at += bytes;
     }
     metadata.hdr = hdr;
+    metadata.alpha = alpha;
     *out = metadata; return 0;
 }
 int x9_hevc_sample_hdr(const struct x9_hevc_config *c, const uint8_t *hvcc,
@@ -1043,6 +1103,10 @@ int x9_hevc_sample_hdr(const struct x9_hevc_config *c, const uint8_t *hvcc,
     memset(out,0,sizeof(*out));
     struct x9_hevc_au_metadata metadata;
     int e = x9_hevc_sample_metadata(c,hvcc,hvcc_bytes,sample,sample_bytes,&metadata);
+    /* Still-picture/HEIF callers consume only HDR and have no associated
+     * alpha carrier or output-order state. Do not silently drop SEI165 or
+     * infer opaque pixels/cancel success from its presence or raw use_idc. */
+    if (!e && metadata.alpha.present) e = ENOTSUP;
     if (!e) *out = metadata.hdr;
     return e;
 }
