@@ -4327,6 +4327,105 @@ def pkvm_smmu_owner_evidence(elf):
     return result
 
 
+def pkvm_smmu_finalise_evidence(elf):
+    """Exact driver/finalise edges, not a successful native DMA authority.
+
+    The stock ops.init is a literal zero leaf. Finalise invokes an external
+    module-ops snapshot callback, whose implementation is not in this ELF.
+    File-bound callbacks and guest return registers cannot certify that the
+    snapshot walked the live S2 or that each void idmap callback mapped DMA.
+    """
+    result = dict(profile_match=False, identity_scope='selected ranges and relocations only',
+        whole_module_identity_proven=False, loaded_module_pairing_proven=False,
+        runtime_driver_registered_proven=False, runtime_snapshot_success_proven=False,
+        runtime_stage2_dma_mapping_proven=False, runtime_ns_authority_proven=False,
+        native_cold_provider_implemented=False)
+    anchors = (
+        ('kvm_smmu_v3_ops', '.data', 1, 0, 0x78,
+         '6edd9f6f9cc92cded36e6c4a580933f9c9f1b90562b46903b806f21902a1a54f'),
+        ('__kvm_nvhe_smmu_finalise', '.hyp.text', 2, 0x5cd8, 0x58,
+         'eb86758d731306ead08eeb3ffcb5599fd3c9c791e5e43e8d933fb12029bd2707'),
+        ('__kvm_nvhe_mtk_smmu_init', '.hyp.text', 2, 0x5d34, 8,
+         '2b59db05426e0f313d72b30f3398c65721de2562a59dc46ceeba224f98d0b876'),
+        ('__kvm_nvhe_mtk_smmu_host_stage2_idmap', '.hyp.text', 2, 0x5d6c, 0xf4,
+         '30e4d495d5ce999d284441f92849055dfc8b393178c044a7c0716779769a4377'),
+        ('__kvm_nvhe_mtk_smmu_host_stage2_idmap_complete', '.hyp.text', 2, 0x5e64, 0x20,
+         '19458e308e9027267cfe9635a9b002f663ee049c09b522dc8a24d3586d50036e'),
+    )
+    functions = {}
+    for name, section, typ, start, size, digest in anchors:
+        sections = [(i, s) for i, s in enumerate(elf.sections) if s['name'] == section]
+        if len(sections) != 1 or sections[0][1]['type'] != 1:
+            return result
+        index, sec = sections[0]
+        matches = [s for s in elf.symbols if s['name'] == name and
+            (s['section'], s['type'], s['value'], s['bytes']) == (index, typ, start, size)]
+        if len(matches) != 1:
+            return result
+        raw = span(elf.data(sec), start, size)
+        if hashlib.sha256(raw).hexdigest() != digest:
+            return result
+        functions[name] = dict(section=section, offset=start, bytes=size,
+            symbol_type=typ, file_offset=sec['offset'] + start,
+            selected_sha256=digest, raw_hex=raw.hex())
+    init = [s for s in elf.sections if s['name'] == '.init.text' and s['type'] == 1]
+    if len(init) != 1:
+        return result
+    registration = span(elf.data(init[0]), 0x24c, 12)
+    if registration.hex() != '000000900000009100000094':
+        return result
+    relocations = [
+        captured_rela(elf, '.data', 0, (257, '', '.text', 3, 0, 0x1ed4)),
+        captured_rela(elf, '.hyp.data', 0, (257, '', '.hyp.text', 3, 0, 0x5d34)),
+        captured_rela(elf, '.hyp.data', 0x58, (257, '', '.hyp.text', 3, 0, 0x5d6c)),
+        captured_rela(elf, '.hyp.data', 0x60, (257, '', '.hyp.text', 3, 0, 0x5e64)),
+        captured_rela(elf, '.init.text', 0x24c, (275, 'kvm_smmu_v3_ops', '.data', 1, 0, 0)),
+        captured_rela(elf, '.init.text', 0x250, (277, 'kvm_smmu_v3_ops', '.data', 1, 0, 0)),
+        captured_rela(elf, '.init.text', 0x254, (283, 'kvm_iommu_register_driver', None, 0, 0, 0)),
+        captured_rela(elf, '.hyp.text', 0x5ce8,
+            (275, '__kvm_nvhe_pkvm_smmu_ops', '.hyp.bss', 1, 0x40, 0)),
+        captured_rela(elf, '.hyp.text', 0x5cf4,
+            (286, '__kvm_nvhe_pkvm_smmu_ops', '.hyp.bss', 1, 0x40, 0)),
+    ]
+    for offset, name, target in (
+        (0x5d90, '__kvm_nvhe_get_vm', 0x66bc),
+        (0x5da0, '__kvm_nvhe_address_vm_range_check', 0x72f4),
+        (0x5dac, '__kvm_nvhe_get_vm', 0x66bc),
+        (0x5dbc, '__kvm_nvhe_address_vm_range_check', 0x72f4),
+        (0x5e00, '__kvm_nvhe_smmu_lazy_free', 0x7c30),
+        (0x5e20, '__kvm_nvhe_smmu_vm_map', 0x6e88),
+        (0x5e34, '__kvm_nvhe_smmu_vm_unmap', 0x6f04),
+        (0x5e74, '__kvm_nvhe_mtk_smmu_sync', 0x2dc0)):
+        relocations.append(captured_rela(elf, '.hyp.text', offset,
+            (283, name, '.hyp.text', 2, target, 0)))
+    result.update(profile_match=True, profile='captured MT6993 EL2 SMMU finalise ABI 1',
+        selected_anchors=functions, relocation_evidence=relocations,
+        registration=dict(section='.init.text', start=0x24c, end_exclusive=0x258,
+            file_offset=init[0]['offset'] + 0x24c, raw_hex=registration.hex(),
+            driver_init_slot=0, driver_init_target=0x1ed4,
+            external_register_driver_body_not_captured=True),
+        init=dict(ops_slot=0, target=0x5d34, returns_literal_zero=True,
+            initializes_hardware=False, zero_is_not_readiness_or_delegation=True),
+        finalise=dict(snapshot_indirect_ops_slot=0x1c0, snapshot_domain_argument=0,
+            callback_call_offset=0x5d14, guest_result_store_offset=0x5d1c,
+            guest_result_is_signed32_callback_return=True,
+            external_snapshot_body_not_captured=True,
+            no_snapshot_done_store_in_captured_function=True),
+        idmap=dict(ops_slot=0x58, both_vm_range_checks_required=[0, 1],
+            domain_argument_ignored=True, target_vm=0, input_end_minus_start_low32=True,
+            zero_prot_calls_unmap=True, nonzero_prot_map_predicate_mask=6,
+            map_permission_argument=7, mapping_results_not_checked=True,
+            callback_has_no_per_range_error_return=True,
+            lock_is_ticket_lr_sc_not_ns_authority=True),
+        complete=dict(ops_slot=0x60, map_true_returns_without_sync=True,
+            map_false_calls_sync_at=0x5e74,
+            sync_result_not_returned_as_per_buffer_dma_receipt=True),
+        limitations=dict(indirect_snapshot_name_and_permission_labels_are_source_correlated=True,
+            external_kvm_iommu_init_hyp_body_not_captured=True,
+            snapshot_is_host_s2_to_el2_iommu_not_xnu_sid_a0_b0_lease=True))
+    return result
+
+
 def smmu_power_sync_evidence(elf, shutdown):
     """Power hook conventions and MM's timeout suppression; never MMIO."""
     result = dict(profile_match=False, runtime_power_ownership_proven=False,
@@ -4787,6 +4886,7 @@ def module(blob):
         result['iommu_util_rpm_evidence'] = iommu_util_rpm_evidence(elf, result['build_id'])
     if result['modinfo'].get('name') == ['pkvm_smmu']:
         result['pkvm_smmu_owner_evidence'] = pkvm_smmu_owner_evidence(elf)
+        result['pkvm_smmu_finalise_evidence'] = pkvm_smmu_finalise_evidence(elf)
     return result
 
 
