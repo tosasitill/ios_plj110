@@ -1,4 +1,5 @@
 #include "X9Bootstrap16.h"
+#include <os/log.h>
 #include "../kernel/src/bsd/dev/x9_bluetooth.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
@@ -16,6 +17,9 @@ void x9_bt_note(const char *format, ...)
     fputs(text, stderr);
     size_t n = strlen(text); while (n && text[n-1] == '\n') text[--n] = 0;
     (void)sysctlbyname("kern.x9_bt_note", NULL, NULL, text, n + 1);
+    /* Also in the unified log: log 330's console lost every note after the
+     * first, the persisted logd store (read from Android) did not. */
+    os_log_error(OS_LOG_DEFAULT, "X9BT %{public}s", text);
 }
 
 enum { POWER_AWAKE = 0, POWER_ASLEEP = 1, POWER_TRANSITION = 2 };
