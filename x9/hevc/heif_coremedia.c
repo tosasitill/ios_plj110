@@ -72,11 +72,11 @@ static int format_aspect(CMVideoFormatDescriptionRef format, CFDictionaryRef req
 {
     CFTypeRef aspect = CFDictionaryGetValue(requested,kCMFormatDescriptionExtension_PixelAspectRatio);
     if (!aspect) return 0; /* Do not invent container provenance for CM/SPS defaults. */
-    uint32_t eh, ev, ah, av;
+    uint64_t eh, ev, ah, av;
     int e = x9_hevc_read_pixel_aspect(aspect,&eh,&ev);
     if (!e) e = x9_hevc_read_pixel_aspect(CMFormatDescriptionGetExtension(format,
         kCMFormatDescriptionExtension_PixelAspectRatio),&ah,&av);
-    if (!e && (!ah || (uint64_t)eh*av != (uint64_t)ah*ev)) e = EBADMSG;
+    if (!e && (!ah || (__uint128_t)eh*av != (__uint128_t)ah*ev)) e = EBADMSG;
     return e;
 }
 OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,

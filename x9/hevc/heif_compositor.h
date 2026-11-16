@@ -19,7 +19,8 @@ struct x9_heif_geometry {
     uint32_t id, width, height; /* after this item's ordered transforms */
     uint32_t coded_width, coded_height; /* ispe, before item transforms */
     uint32_t derived_count, auxiliary_count;
-    uint32_t pixel_aspect_h, pixel_aspect_v; /* admitted output pasp; absent0 */
+    uint64_t pixel_aspect_h, pixel_aspect_v; /* output ratio, 1..INT64_MAX;
+        * absent source pasp remains0, never an inferred square default */
 };
 /* The document and its borrowed immutable bytes must outlive the plan. The
  * plan validates ALL reachable dimg/auxl nodes, active-stack cycles, tile
@@ -28,11 +29,15 @@ struct x9_heif_geometry {
  * This original entrypoint uses EXACT_SAMPLES: fractional clean-aperture
  * sizes/origins return ENOTSUP, never unannounced rounding/resampling. The
  * with_policy entrypoint can explicitly plan LINEAR_CEIL rasterization.
- * Arbitrary aux types remain in the graph. Non-square pasp is supported for
- * an untransformed coded root, retained as OUTPUT sample spacings, not a
- * square-pixel conversion. Its use in transformed/derived graphs rejects
- * before callbacks: aspect-aware metric propagation is not yet implemented.
- * Square pasp (any equal positive spacings) needs no correction. */
+ * Arbitrary aux types remain in the graph. Present pasp on a coded root has
+ * an exact ordered OUTPUT metric: odd quarter turns exchange axes, mirror
+ * and integer crops preserve spacing, explicit LINEAR_CEIL aperture extents
+ * adjust spacing by exact extent/output sample counts. Cross-cancelled
+ * output ratio must fit positive signed64 CFNumbers, else E2BIG, never rounded.
+ * This is not square-pixel conversion or a HEIF mandated resampling policy.
+ * Derived/child non-square SOURCE OR OUTPUT ratios still reject before any
+ * callbacks; full derived metric/inheritance is not implemented. Absent pasp
+ * remains absent; selected-SPS sample-aspect propagation is separate work. */
 int x9_heif_plan_create(
     const struct x9_heif_document *, uint32_t item_id, struct x9_heif_plan **);
 int x9_heif_plan_create_with_policy(const struct x9_heif_document *, uint32_t item_id,
@@ -54,7 +59,7 @@ struct x9_heif_raster {
     uint32_t width, height, format;
     size_t stride, bytes;
     uint8_t *data; /* compositor-owned malloc; release with raster_close */
-    uint32_t pixel_aspect_h, pixel_aspect_v; /* output sample spacings, absent0;
+    uint64_t pixel_aspect_h, pixel_aspect_v; /* output ratio, positive signed64, absent0;
         * a consumer must not silently assume square when these differ */
 };
 /* Callback fills ONE untransformed coded item's visible raster, or an iovl

@@ -165,7 +165,7 @@ struct image_attachment {
     CFStringRef source, destination;
     CFTypeID type;
 };
-int x9_hevc_read_pixel_aspect(CFDictionaryRef aspect, uint32_t *horizontal, uint32_t *vertical)
+int x9_hevc_read_pixel_aspect(CFDictionaryRef aspect, uint64_t *horizontal, uint64_t *vertical)
 {
     if (!horizontal || !vertical || horizontal == vertical) return EINVAL;
     *horizontal = *vertical = 0;
@@ -176,8 +176,8 @@ int x9_hevc_read_pixel_aspect(CFDictionaryRef aspect, uint32_t *horizontal, uint
     int64_t x = 0, y = 0;
     if (!h || !v || CFGetTypeID(h) != CFNumberGetTypeID() || CFGetTypeID(v) != CFNumberGetTypeID() ||
         !CFNumberGetValue(h,kCFNumberSInt64Type,&x) || !CFNumberGetValue(v,kCFNumberSInt64Type,&y) ||
-        x <= 0 || y <= 0 || x > UINT32_MAX || y > UINT32_MAX) return EBADMSG;
-    *horizontal = (uint32_t)x; *vertical = (uint32_t)y;
+        x <= 0 || y <= 0) return EBADMSG;
+    *horizontal = (uint64_t)x; *vertical = (uint64_t)y;
     return 0;
 }
 
@@ -237,7 +237,7 @@ OSStatus x9_hevc_attach_image_metadata(CMVideoFormatDescriptionRef format,
             return kVTVideoDecoderBadDataErr;
         if (CFEqual(entries[i].source,
                     kCMFormatDescriptionExtension_PixelAspectRatio)) {
-            uint32_t h, v;
+            uint64_t h, v;
             if (x9_hevc_read_pixel_aspect(values[i],&h,&v))
                 return kVTVideoDecoderBadDataErr;
         }
@@ -277,13 +277,13 @@ OSStatus x9_hevc_validate_hdr_metadata(CMVideoFormatDescriptionRef format, CVPix
     if (hdr_error) return hdr_error;
     CFTypeRef aspect = CMFormatDescriptionGetExtension(format,kCMFormatDescriptionExtension_PixelAspectRatio);
     if (aspect) {
-        uint32_t eh, ev, ah, av;
+        uint64_t eh, ev, ah, av;
         CFTypeRef actual = CVBufferCopyAttachment(pixel,kCVImageBufferPixelAspectRatioKey,NULL);
         int e = x9_hevc_read_pixel_aspect(aspect,&eh,&ev);
         if (!e) e = x9_hevc_read_pixel_aspect(actual,&ah,&av);
-        /* Cross products fit uint64 even at UINT32_MAX. Equivalent reduced
+        /* Positive signed64 cross products fit unsigned128. Equivalent reduced
          * spacing pairs are legal; a missing CV ratio cannot match. */
-        if (!e && (!ah || (uint64_t)eh*av != (uint64_t)ah*ev)) e = EBADMSG;
+        if (!e && (!ah || (__uint128_t)eh*av != (__uint128_t)ah*ev)) e = EBADMSG;
         if (actual) CFRelease(actual);
         if (e) return kVTVideoDecoderBadDataErr;
     }

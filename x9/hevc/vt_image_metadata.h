@@ -16,11 +16,12 @@ int x9_hevc_merge_preferred_transfer(CFMutableDictionaryRef, const struct x9_hev
  * CICP4/5 carry exact gamma2.2/2.8. No inferred raw code from CFString aliases. */
 int x9_hevc_copy_transfer_extensions(CFDictionaryRef, CFDictionaryRef *);
 
-/* Typed CM/CV sample spacings: both exactly integral CFNumbers in 1..UINT32_MAX,
- * matching pasp's unsigned32 domain. NULL means absent, returns two zeros.
+/* Typed CM/CV sample spacings: both exactly integral CFNumbers in 1..INT64_MAX.
+ * Raw pasp remains unsigned32; transformed raster ratios can exceed that
+ * domain without narrowing. NULL means absent, returns two zeros.
  * No float-to-integer truncation, signed32 narrowing or inferred defaults.
  * errno result; outputs are cleared on failure and must be disjoint. */
-int x9_hevc_read_pixel_aspect(CFDictionaryRef, uint32_t *horizontal, uint32_t *vertical);
+int x9_hevc_read_pixel_aspect(CFDictionaryRef, uint64_t *horizontal, uint64_t *vertical);
 
 /* Exact original CM/container bytes, before any SEI enrichment. Optional HDR
  * absent remains absent; all three CFData fields and optional raw preferred

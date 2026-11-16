@@ -13,7 +13,7 @@ struct transform {
 struct node {
     struct x9_heif_geometry geometry;
     uint32_t type, rows, columns, state, subtree_height, transform_count;
-    uint32_t premultiplied;
+    uint32_t premultiplied, non_square_source;
     uint32_t derived[X9_HEIF_MAX_ITEMS], auxiliary[X9_HEIF_MAX_ITEMS];
     int32_t overlay_x[X9_HEIF_MAX_ITEMS], overlay_y[X9_HEIF_MAX_ITEMS];
     struct transform transforms[X9_HEIF_MAX_ASSOCIATIONS];
@@ -52,10 +52,35 @@ static int aperture_axis(uint32_t image, uint32_t size_n, uint32_t size_d,
     *resample |= fractional;
     return 0;
 }
+/* The pasp pair describes the pre-item-transform source lattice. Retain raw
+ * spacings for exact crops/mirrors and exchange axes on odd quarter turns.
+ * LINEAR_CEIL centers span the exact aperture, so a crop multiplies h/v by
+ * (width_n * height_d * out_height)/(width_d * out_width * height_n).
+ * Carry factors through ALL ordered transforms before cross-cancelling and
+ * multiplying: an intermediate large ratio may be reduced by a later crop.
+ * This is the explicit rasterization policy's metric, not derived inheritance
+ * or a claim that HEIF mandates ceil. No double participates in this ratio. */
+#define METRIC_FACTORS (1u + 3u * X9_HEIF_MAX_ASSOCIATIONS)
+static uint64_t gcd(uint64_t a, uint64_t b)
+{ while (b) { uint64_t r = a % b; a = b; b = r; } return a; }
+static int metric_product(const uint64_t *factors, unsigned count, uint64_t *out)
+{
+    uint64_t product = 1;
+    for (unsigned n = 0; n < count; n++) {
+        if (!factors[n]) return EBADMSG;
+        if (product > (uint64_t)INT64_MAX/factors[n]) return E2BIG;
+        product *= factors[n];
+    }
+    *out = product; return 0;
+}
 static int transforms(struct x9_heif_plan *plan, const struct x9_heif_image *image,
     struct node *node)
 {
     uint32_t width = image->width, height = image->height;
+    uint64_t horizontal[METRIC_FACTORS] = {image->pixel_aspect_h};
+    uint64_t vertical[METRIC_FACTORS] = {image->pixel_aspect_v};
+    uint64_t *h = horizontal, *v = vertical;
+    unsigned count = 1;
     for (unsigned n = 0; n < image->property_count; n++) {
         const struct x9_heif_property *p = &image->properties[n];
         const uint8_t *raw = NULL;
@@ -77,10 +102,34 @@ static int transforms(struct x9_heif_plan *plan, const struct x9_heif_image *ima
         }
         if (e) return e;
         if (op.kind) {
+            if (h[0] && op.kind == CROP &&
+                ((uint64_t)be32(raw) != (uint64_t)be32(raw+4)*op.width ||
+                 (uint64_t)be32(raw+8) != (uint64_t)be32(raw+12)*op.height)) {
+                /* Origin-only interpolation changes placement, not spacing.
+                 * Both axes use exact, already-validated positive factors. */
+                if (count > METRIC_FACTORS-3) return E2BIG;
+                h[count] = be32(raw); h[count+1] = be32(raw+12); h[count+2] = op.height;
+                v[count] = be32(raw+4); v[count+1] = op.width; v[count+2] = be32(raw+8);
+                count += 3;
+            } else if (op.kind == ROTATE && (op.argument & 1u)) {
+                uint64_t *temporary = h; h = v; v = temporary;
+            }
             node->transforms[node->transform_count++] = op;
             plan->resampling |= op.resample;
             width = op.width; height = op.height;
         }
+    }
+    if (h[0]) {
+        /* Preserve the raw pair when no sampling metric changed. Otherwise
+         * only the equivalent rational pair is significant. All factors are
+         * positive, and at most three are appended per property association. */
+        if (count > 1) for (unsigned i = 0; i < count; i++)
+            for (unsigned j = 0; j < count; j++) {
+                uint64_t common = gcd(h[i],v[j]); h[i] /= common; v[j] /= common;
+            }
+        int e = metric_product(h,count,&node->geometry.pixel_aspect_h);
+        if (!e) e = metric_product(v,count,&node->geometry.pixel_aspect_v);
+        if (e) return e;
     }
     node->geometry.width = width; node->geometry.height = height;
     return 0;
@@ -115,6 +164,7 @@ static int visit(struct x9_heif_plan *p, uint32_t id, unsigned depth, uint32_t *
         node->geometry.derived_count = image->derived_count;
         node->geometry.pixel_aspect_h = image->pixel_aspect_h;
         node->geometry.pixel_aspect_v = image->pixel_aspect_v;
+        node->non_square_source = image->pixel_aspect_h != image->pixel_aspect_v;
         e = transforms(p,image,node);
     }
     for (unsigned n = 0; n < image->derived_count && !e; n++) {
@@ -162,15 +212,16 @@ int x9_heif_plan_create_with_policy(const struct x9_heif_document *document, uin
     p->document = document; p->clap_policy = policy;
     int e = id ? 0 : x9_heif_primary(document,&id);
     if (!e) e = visit(p,id,0,&p->root);
-    /* Validate the WHOLE reachable graph before any raster callback. Only an
-     * untransformed coded root has unambiguous retained non-square sample
-     * spacings here. Never ignore a child's pasp, swap axes speculatively or
-     * call Normal transfer a square-pixel conversion. Equal raw spacings need
-     * no correction. Full transform/derived physical metrics remain missing. */
+    /* Validate the WHOLE reachable graph before any raster callback. The
+     * coded root has a known source lattice and ordered output metric. No
+     * derived/child inheritance or mixed placement metric is inferred. Check
+     * BOTH raw source and output ratios: square input may become non-square
+     * under anisotropic LINEAR_CEIL, and non-square may become square. */
     for (unsigned n = 0; n < p->count && !e; n++) {
         const struct node *node = &p->nodes[n];
-        if (node->geometry.pixel_aspect_h != node->geometry.pixel_aspect_v &&
-            (n != p->root || node->type != X9_HEIF_HVC1 || node->transform_count)) e = ENOTSUP;
+        if ((node->non_square_source ||
+            node->geometry.pixel_aspect_h != node->geometry.pixel_aspect_v) &&
+            (n != p->root || node->type != X9_HEIF_HVC1)) e = ENOTSUP;
     }
     if (e) free(p); else *out = p;
     return e;

@@ -174,6 +174,8 @@ static int print_heif_item(const struct x9_heif_document *d, uint32_t id,
         image->rows,image->columns,image->derived_count);
     printf("  ordered geometry=%ux%u; pixels/color/auxiliary merge not executed\n",
         geometry.width,geometry.height);
+    if (geometry.pixel_aspect_h) printf("  ordered pixel aspect=%llu:%llu (source pasp, not square-pixel conversion)\n",
+        (unsigned long long)geometry.pixel_aspect_h,(unsigned long long)geometry.pixel_aspect_v);
     printf("  location=%u construction_method=%u (item data, not decoded image references)\n",
         image->location_present,image->construction_method);
     printf("  prem references=%u (source unpremultiplication not executed)\n",image->premultiplied_reference_count);

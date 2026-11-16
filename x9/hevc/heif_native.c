@@ -33,14 +33,15 @@ static OSStatus parser_error(int e)
     return !e ? noErr : e == ENOMEM ? kVTAllocationFailedErr :
         e == ENOTSUP ? kVTVideoDecoderUnsupportedDataFormatErr : kVTVideoDecoderBadDataErr;
 }
-static int put_number(CFMutableDictionaryRef d, CFStringRef key, uint32_t n)
+static int put_number(CFMutableDictionaryRef d, CFStringRef key, uint64_t n)
 {
-    int64_t value = n;
+    if (n > INT64_MAX) return E2BIG;
+    int64_t value = (int64_t)n;
     CFNumberRef number = CFNumberCreate(NULL,kCFNumberSInt64Type,&value);
     if (!number) return ENOMEM;
     CFDictionarySetValue(d,key,number); CFRelease(number); return 0;
 }
-static int copy_aspect(uint32_t h, uint32_t v, CFDictionaryRef *out)
+static int copy_aspect(uint64_t h, uint64_t v, CFDictionaryRef *out)
 {
     *out = NULL;
     if (!h && !v) return 0;
@@ -56,11 +57,11 @@ static int copy_aspect(uint32_t h, uint32_t v, CFDictionaryRef *out)
 static OSStatus check_aspect(CVPixelBufferRef pixel, CFDictionaryRef expected)
 {
     if (!expected) return noErr;
-    uint32_t eh, ev, ah, av;
+    uint64_t eh, ev, ah, av;
     CFTypeRef actual = CVBufferCopyAttachment(pixel,kCVImageBufferPixelAspectRatioKey,NULL);
     int e = x9_hevc_read_pixel_aspect(expected,&eh,&ev);
     if (!e) e = x9_hevc_read_pixel_aspect(actual,&ah,&av);
-    if (!e && (!ah || (uint64_t)eh*av != (uint64_t)ah*ev)) e = EBADMSG;
+    if (!e && (!ah || (__uint128_t)eh*av != (__uint128_t)ah*ev)) e = EBADMSG;
     if (actual) CFRelease(actual);
     return parser_error(e); /* read-only; never repair a lost transfer attachment */
 }
@@ -253,6 +254,11 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
         else {
             e = put_number(record,CFSTR("TransformedWidth"),geometry.width);
             if (!e) e = put_number(record,CFSTR("TransformedHeight"),geometry.height);
+            CFDictionaryRef transformed_aspect = NULL;
+            if (!e) e = copy_aspect(geometry.pixel_aspect_h,geometry.pixel_aspect_v,&transformed_aspect);
+            if (!e && transformed_aspect)
+                CFDictionarySetValue(record,CFSTR("TransformedPixelAspectRatio"),transformed_aspect);
+            if (transformed_aspect) CFRelease(transformed_aspect);
             if (!e) {
                 CFDictionarySetValue(record,CFSTR("EffectiveColr"),color);
                 CFDictionarySetValue(record,CFSTR("ColorInterpretation"),
@@ -608,9 +614,9 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
     if (!e) e = x9_heif_open(CFDataGetBytePtr(c->file),(size_t)CFDataGetLength(c->file),&c->document);
     if (!e) e = x9_heif_plan_create_with_policy(c->document,id,clap_policy,&c->plan);
     if (!e) e = x9_heif_plan_geometry(c->plan,id,&geometry);
-    /* Qualify/allocate output spacings before any hardware frame. The plan
-     * only admits non-square for an untransformed coded root; it does not
-     * guess how a transform or child placement changes a physical metric. */
+    /* Qualify/allocate the exact coded-root output ratio before any hardware
+     * frame. Source CM aspect remains pre-item-transform; export receives the
+     * metric of the actual ordered raster. No derived inheritance is guessed. */
     if (!e) e = copy_aspect(geometry.pixel_aspect_h,geometry.pixel_aspect_v,&aspect);
     if (!e) {
         c->resampling = x9_heif_plan_requires_resampling(c->plan);
@@ -662,6 +668,8 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
             CFDictionarySetValue(info,CFSTR("Items"),c->items);
             CFDictionarySetValue(info,CFSTR("WorkingRGBICCProfile"),c->working);
             if (aspect) CFDictionarySetValue(info,kCMFormatDescriptionExtension_PixelAspectRatio,aspect);
+            CFDictionarySetValue(info,CFSTR("PixelAspectInterpretation"),
+                CFSTR("present source pasp; ordered raster metric; linear-ceil exact aperture/sample counts; absent remains absent"));
             CFDictionarySetValue(info,CFSTR("GraphColorInterpretation"),
                 graph_color == X9_HEIF_GRAPH_COLOR_PER_ITEM ?
                     CFSTR("explicit per-item sources; common ICC composition; iovl colr interprets fill only") :
