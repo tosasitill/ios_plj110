@@ -2947,3 +2947,26 @@ CallList/handover、双向DSP及Messages同token COMMIT/重开/物理ACK/MO验�
 - 失败保留：误猜100a38cec的库存guard实际exit1、未读原text；后续control RTTI tagged name
   guard亦exit1。前两Controller RTTI仅从保存byte/chain离线恢复exit0，原reader仍exit1，不掩tag。
   本轮无生产delta/编译/测试/CI/设备动作，完整通话短信目标仍active。
+
+### 2026-11-16：SMS acknowledge 的同 ID map 退休，不是物理 ACK
+
+详见[同 ID 退休报告](2026-11-16_reverse-sms-id-retirement-report.md)，证据位于
+`x9/out/sms-ack-owner-20261116/`。原ACK第二key为kSmsMessageIsMobileOriginated、
+reply为kSmsMessageWasAcknowledged；bool/queue imports复用旧精确proof。
+同Model AP101528d10+e0真slot101528df0→1000c05b0，capture原u32 ID与同owner。
+
+- queued core1000c7878按同ID查同Model+60 map，match后更新begin、Model+68 size减1，
+  实际detach/release pair/delete node，返回1；miss返回0。旧retrieve只lookup/retain，
+  与这里的erase不同。原incoming-count+d8 core1000c6b40读的正是同Model+68。
+- map owner释放不等于Operation立即析构；control+8原count0的last-strong分支才调
+  control+10。旧admitted SmsOperation controlAP101529378+10→1000c6784，实际
+  Operation+8→10042d120仅见owned strings/Registry pair释放；Registry最后owner副作用
+  另未穷尽，不据此称modem ACK或Messages COMMIT。
+- 当前kernel WMS37核native command token、原QMI/actual QMUX owner，提交8602/8604并
+  等physical TX/host admission；不是Operation通知ID。没有真实caller支持把app ACK接
+  到该kernel API，本轮不新增adapter/生产delta，不造ID映射。
+
+13新完整原FS2128B/1新exact import均实际exit0，函数只promote保留原库存，无原text/
+chain页重采，无测试/人工向量/构建/CI/设备动作。server Registry/current concrete选择
+仍条件化。下一沿旧parser helper1007f7720的ACK function virtual+30追真实callback
+类型/安装及原token→WMS37，不重采本轮body；完整保存/物理ACK/MO与CALL媒体仍缺。
