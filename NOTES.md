@@ -162,7 +162,9 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 - **范围/基线**：仅整合 `feat/display-fill`（head **`51fbd533`**，包含UI **`5af3d156`**）并清理该树/本地及远端分支；原UI与其它活跃分支不动。独立 `.worktrees/display-fill-main` 使用main，先ff到真实origin/main **`7ca335c5`**；NOTES合并actual exit1，保留完整最新main Apple服务/SMS交接后插入原fill/UI段，无生产代码冲突，相对feature生产delta为空。主checkout仍在SMS分支，未切换、未改其未提交NOTES。
 - **产物保全**：功能树 **1034项ignored文件/链接**（除共享`.local` symlink）无覆盖APFS复制并逐文件SHA-256一致；清单/原两方NOTES/确切命令测试及退出码在主checkout `x9/out/display-fill-retirement-20261116/`，完整副本 `archive/`。`.local` target和所有备份保留。已交付四份v2镜像仍在主checkout原路径；镜像绑定 **`4cc05e25`** 源码，不冒称重编了新main。
-- **验证/边界**：本轮复跑4项UI host测试、3项fill测试（LLVM22 ASan/UBSan）均actual exit0；四份主目录v2 boot SHA-256复核一致；无新kernel构建/CI run/设备启动/ADB/fastboot/mailbox/根盘写入。`x9_fill`、`x9_ui` 默认off；全局应用状态栏未覆盖，原生岛、键盘/触摸/边缘和性能仍待实机。用户批准的是git整合/清理，不是MG缓存/dylib持久写入许可。合并/push/删除实际结果完成后追加，不提前冒称成功。
+- **验证/边界**：本轮复跑4项UI host测试、3项fill测试（LLVM22 ASan/UBSan）均actual exit0；四份主目录v2 boot SHA-256复核一致；无新kernel构建/CI run/设备启动/ADB/fastboot/mailbox/根盘写入。`x9_fill`、`x9_ui` 默认off；全局应用状态栏未覆盖，原生岛、键盘/触摸/边缘和性能仍待实机。用户批准的是git整合/清理，不是MG缓存/dylib持久写入许可。实际git收尾见下条；测试通过不是实机验收。
+
+- **合并/清理实际完成**：merge **`84e1aad5`**，`git push origin main` actual exit0（`7ca335c5..84e1aad5`）；published main包含原feature **`51fbd533`**。归档后正常 `git worktree remove .worktrees/display-fill` exit0；最初从root SMS HEAD执行 `branch -d`被安全拒绝exit1，转到merged main工作树后正常 `branch -d feat/display-fill` exit0，没有 `-D`。以原head精确lease删除远端feature exit0；`ls-remote`复核该ref不存在。本地feature/工作树均不存在，root SMS HEAD、未提交NOTES SHA与起始状态一致；原UI和其它活跃树保留。此次收尾仅文档更新，无生产delta/重编/新CI/设备结果。最终交接提交与远端main确切SHA写 `x9/out/display-fill-retirement-20261116/finalization.json`，随后正常删除临时main工作树；不是手机功能完成。
 
 #### 2026-11-16 显示铺满 / 兼容逻辑尺寸（v2候选已打包，待实机）
 

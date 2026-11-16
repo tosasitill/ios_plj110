@@ -105,6 +105,7 @@ baseline → enabled 的 cmdline 精确只增加 `x9_ui=1`。
 
 无 GitHub Actions run（本轮使用本机 Xcode/LLVM 编译），无设备启动结果。
 2026-11-16 用户批准通过继承此实现的 `feat/display-fill` 合入 main 并清理该分支。
+merge `84e1aad5` 已推送，display-fill 本地/远端分支及工作树已删除。
 这是默认关闭候选的源码整合，不是原生岛已开启或已实机验收；原 `feat/statusbar-island`
 分支/工作树不在此次清理范围。新电源策略已纳入 v2 联合镜像，见 display-fill 报告；
 以上三份初版 UI 镜像保留作历史证据，不冒称最新 main 整包。

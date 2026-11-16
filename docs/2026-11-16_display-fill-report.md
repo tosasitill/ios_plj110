@@ -8,10 +8,13 @@
 
 **没有手机启动/触摸/键盘/灵动岛实测，没有设备操作，没有 CI run ID。**
 编译和 host 测试通过不代表原生 SystemAperture、应用 safe-area 或所有应用状态栏已通过。
-2026-11-16 用户批准将候选合入 main 并删除 `feat/display-fill`；此次为源码收尾，
+2026-11-16 用户批准将候选合入 main 并删除 `feat/display-fill`；merge `84e1aad5` 已推送，
+该功能工作树与本地/远端分支已删除，产物保留。此次为源码收尾，
 不代表已获实机验收或批准设备写入。主 checkout 的 SMS 分支/未提交 NOTES 未修改。
 合并时保留最新 main `7ca335c5` 的 Apple 服务交接；相对候选 `51fbd533` 无生产代码变化，
 既有 v2 镜像仍对应 `4cc05e25` 的已构建源码，不冒称重新构建了最新 main。
+收尾复跑4项UI测试与3项fill测试（LLVM22 ASan/UBSan）均exit0；归档和git结果在
+`x9/out/display-fill-retirement-20261116/`。
 
 ## 1. 黑边来自哪里（运行时优先）
 
@@ -118,7 +121,7 @@ v2吸收main时NOTES冲突亦记录，保留完整incoming后仅插入fill/UI交
 ### 复跑
 
 ```sh
-# 在仓库根执行；原 display-fill 工作树将在收尾后删除。
+# 在仓库根执行；原 display-fill 工作树已删除。
 cd /Users/tosasitill/ios_plj110
 DEVELOPER_DIR=$(python3 -c 'import json; print(json.load(open("x9/build/local.json"))["developer_dir"])')
 export DEVELOPER_DIR
