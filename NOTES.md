@@ -158,6 +158,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 一天无新提交分支清理（实际删除完成）
+
+- **用户范围/快照**：单代理 `feat/stale-branch-cleanup-20261116`，初始main/origin **e0e7815c**；后续ff吸收同期SMS的已推送 **2c34c540**，保留其全部报告/交接。按筛选时刻 **2026-11-16 18:47:04 +0800** 的固定24小时窗口（截止11-15 18:47:04）检查本地/真实远端同名分支的所有head，使用全部可达commit的最新committer时间，避免merge/非单调时间误选。只有 **feat/audio-dsp-boot**（最新11-13 18:04:09，1a76d62c）、**feat/audio-ipi**（11-14 23:18:18，6717e8af）符合。两者均为published main祖先、未合提交0，两次ff merge均Already up to date、tree未变，main push为Everything up-to-date；无需重新制造生产merge。
+- **实际归档/删除**：音频树tracked clean；16项整个x9/out目录/日志无覆盖迁至主checkout同名路径，29项额外ignored文件（生成输入/配置/pycache）存 `x9/out/stale-branch-archive-20261116/audio-dsp-boot/`，共保存1165个ignored文件；仅unlink该树`.local` symlink，不改target。tree清空ignored且tracked clean后正常remove及branch -d，原始hash均保留在published main。随后 **atomic push + 每ref旧hash force-with-lease** 实际exit0，远端两音频分支均删除；fetch --prune及真实ls-remote复核通过。所有原镜像/日志/私有输入/备份保持可找，不编译/上机。
+- **同期变化/库存**：本轮仅删除上述两音频ref。另有三条HEIF辅助local ref同期消失、HEVC/SMS新增提交及root checkout变化，均非本轮动作；不恢复/覆盖其它工作。初版退役wrapper在已成功删除后因“其它ref必须不变”的保守断言exit1；库存r1又因同期未push数量变化exit1，均保留失败，不重复删除。修正r2仅记录实际库存，实际exit0：当时本地 **7（排除临时树、含main）**、远端 **26（含main）**、名称去重 **29**，独立未push **45**（camera-ios-preview33/camera-source12）。这是当时快照，不是对其它活动任务未来库存的保证；最终库存/sha以同out的finalization记录为准。
+- **交付/边界**：报告 `docs/2026-11-16_branch-retirement-report.md`，原始库存、rename/argv/stdout/stderr/exit在 `x9/out/stale-branch-cleanup-20261116/`。仅提交本交接/报告、ff/push main，归档并清理本轮临时树/分支；root原SMS未提交内容从未由本轮切换/写入/恢复，后续已推送SMS内容直接ff吸收。相机/HEVC和其它不足24小时分支不在删除名单，不随执行耗时滚动扩大范围。没有生产代码delta、kernel/boot/CI run ID或设备操作；最终收尾的确切commit/命令/状态保留finalization.json。
+
 #### 2026-11-16 SMS fanout / 同 Model factory 分流（静态收束；retrieve/retirement仍缺）
 
 - **开始状态/范围**：上一轮owner/Operation ID证据属progress，当前main/origin **9e25175b** clean；本轮单代理 `feat/sms-retrieve-retirement`，scratch `x9/out/sms-retrieve-retirement-20261116/`。复用上轮18函数/9imports；仅沿fanout wrapper100b7366c下游与同ID取件/退休新边，不重采成功范围、重编END kernel或新增代理/设备动作。完整通话短信goal保持active，不以静态payload/内存pair替通知送达、Messages COMMIT或物理ACK。
