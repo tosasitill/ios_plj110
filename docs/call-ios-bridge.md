@@ -1392,6 +1392,23 @@ Controller+e0及其下游已读，但Controller+9c0的actual supplier/通知uint
 [parser Model专项报告](2026-11-16_reverse-sms-parser-model-report.md)。
 无生产短信delta、测试/编译/设备动作，不把raw4、callback或scratch发布标签当COMMIT/物理ACK。
 
+#### Controller+9c0 owner → Operation通知ID（2026-11-16）
+
+[本轮完整静态报告](2026-11-16_reverse-sms-notification-consumer-report.md) 已补上一条
+缺边：保留factory installer＋新MessageCenterModel创建flow，将同Model强pair经factory+10
+（100369f88）传旧creator并retain到Controller+9c0/+9c8；实际Model+40经weaklock、内容
+own-copy及强队列context，构造独立 **SmsOperation**。当前Operation ID=-1时，同Model的
+MessageIdManager+8/u32分配计数值，写 **Operation+0xc/u32**，同ID→同强pair进入内存树；
+随后SIM1通知payload把该ID写真 **kCTMessageIdKey**、typeKey=1/code0x1d。**这不是原
+sms::Model+34/u16、SIM/Model+8，也不是GUID/SQL RowID/MD transaction或nativeepoch。**
+
+原件最终18新函数11552B/9exact imports，合同
+`x9/out/sms-notification-consumer-20261116/notification-consumer-contract-r2.json`。
+旧installer只复用已有LLVM原指令字，不冒充新采样/live运行；name库存r1的越界记录和
+cache命中guard exit1均保留纠偏，最终RTTI/keys独立资格。没有生产delta或测试/构建/设备
+动作。通知深层fanout/subscriber receipt、同ID retrieve server与map退休、Messages
+GUID→成功record/COMMIT/重开、物理ACK/MO仍缺；前段静态通路不是完整短信验收。
+
 ### WMS37物理ACK completion：实际host receipt后退休
 
 原物理token ACK结果已take后，legacy void-send仍可在OOM/queue-full时丢WMS37回复并清owner。
