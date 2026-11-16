@@ -9,9 +9,21 @@
 #include <strings.h>
 #include "../../kernel/src/bsd/dev/x9_modem_bridge.h"
 static int lock_depth;
+static void (*during_md_lock)();
+static unsigned md_lock_until_hook;
+static unsigned bb_guard_depth;
+static void (*during_bb_guard)();
+static void (*during_physical_tx)();
 #define LCK_GRP_DECLARE(n, s) int n
 #define LCK_MTX_DECLARE(n, g) int n
-static void lck_mtx_lock(int *){assert(!lock_depth);lock_depth=1;}
+static void lck_mtx_lock(int *){
+ assert(!lock_depth);
+ if(during_md_lock){
+  assert(md_lock_until_hook);
+  if(!--md_lock_until_hook){auto hook=during_md_lock;during_md_lock=nullptr;hook();}
+ }
+ lock_depth=1;
+}
 static void lck_mtx_unlock(int *){assert(lock_depth);lock_depth=0;}
 static int x9_at_enabled(){return 1;}
 static int sweet_x9_arg(const char *,int){return 1;}
@@ -23,7 +35,8 @@ static unsigned writes,last_length;
 static int tx_result;
 static uint8_t last_frame[X9_MIPC_FRAME_MAX];
 static int x9md_tx(unsigned a,unsigned b,unsigned c,unsigned d,unsigned e,const uint8_t *p,unsigned n){
- assert(!lock_depth&&a==5&&b==217&&c==0&&d==16+n&&e==0);
+ assert(!lock_depth&&!bb_guard_depth&&a==5&&b==217&&c==0&&d==16+n&&e==0);
+ if(during_physical_tx){auto hook=during_physical_tx;during_physical_tx=nullptr;hook();}
  writes++;last_length=n;memcpy(last_frame,p,n);return tx_result;
 }
 #include "../../kernel/src/bsd/dev/x9_mipc_bridge.inc"
@@ -54,6 +67,23 @@ static bool call_batch_accept=true,call_alloc_fail,call_alloc_poison,call_alloc_
 static bool call_bb_expire;
 static unsigned call_allocs,call_frees,call_batches,call_batch_count;
 static unsigned call_alloc_fail_at;
+static uint64_t call_bridge_generation[CBQ_MAX_CLIENTS]={11,12,13,14,15,16,17,18};
+static uint64_t bb_x9_call_identity(uint32_t local,uint32_t node){
+ assert(!lock_depth||lock_depth==1);
+ return node==X9BB_NODE&&local>=CBQ_PORT_BASE&&local-CBQ_PORT_BASE<CBQ_MAX_CLIENTS?
+  call_bridge_generation[local-CBQ_PORT_BASE]:0;
+}
+/* Stand-in for actual MD -> bb_lock guard; not an IOKit/runtime test. The
+ * hook models owner/clock change while acquiring bb_lock, before validation. */
+extern "C" int coachz_baseband_call_guard(const struct x9_mipc_call_owner *owner,
+                                         x9_mipc_call_owner_cb callback,void *context){
+ assert(lock_depth==1&&!bb_guard_depth);
+ if(during_bb_guard){auto hook=during_bb_guard;during_bb_guard=nullptr;hook();}
+ bb_guard_depth=1;
+ int result=owner&&callback&&owner->generation&&owner->deadline_ms&&fake_ms<owner->deadline_ms&&
+  bb_x9_call_identity(owner->local_port,owner->node)==owner->generation?callback(context):0;
+ bb_guard_depth=0;return result;
+}
 static void *IOMallocData(unsigned n){
  assert(!lock_depth);call_allocs++;
  if(call_alloc_poison)x9_mc_poisoned=1;
@@ -61,10 +91,22 @@ static void *IOMallocData(unsigned n){
  return call_alloc_fail||(call_alloc_fail_at&&call_allocs==call_alloc_fail_at)?nullptr:malloc(n);
 }
 static void IOFreeData(void *p,unsigned){assert(!lock_depth);call_frees++;free(p);}
-static bool bb_x9_call_registration(uint32_t local,uint32_t node,bb_x9_call_frame *f,uint32_t count,uint64_t deadline){
+static bool bb_x9_call_result(uint32_t local,uint32_t node,uint64_t generation,const uint8_t *sdu,
+                              unsigned size,uint8_t *owned,unsigned room,uint64_t deadline){
+ assert(!lock_depth&&owned&&room==CBQ_HDR+size&&(size==14||size==18));
+ const unsigned id=x9cw_u16(sdu+3);
+ assert(id==3||id==0x20||id==0x21||id==0x44);
+ assert(size!=18||id==0x20);
+ if(call_bb_expire)fake_ms=deadline;
+ if(!call_batch_accept||generation!=bb_x9_call_identity(local,node)||
+    (!x9cw_u16(sdu+10)&&fake_ms>=deadline))return false;
+ qmi_error=x9cw_u16(sdu+12);coachz_baseband_qrtr(local,node,X9BB_PORT_BASE+9,sdu,size);
+ free(owned);return true; // stand-in for later host read; not MD completion
+}
+static bool bb_x9_call_registration(uint32_t local,uint32_t node,uint64_t generation,bb_x9_call_frame *f,uint32_t count,uint64_t deadline){
  assert(lock_depth==1&&count&&count<=9);call_batches++;call_batch_count=count;
  if(call_bb_expire)fake_ms=deadline;
- if(!call_batch_accept||fake_ms>=deadline)return false;
+ if(!call_batch_accept||fake_ms>=deadline||generation!=bb_x9_call_identity(local,node))return false;
  for(unsigned i=0;i<count;i++){
   assert(f[i].owned&&f[i].size==(i?11u:14u));
   if(!i){assert(f[i].sdu[0]==2&&x9cw_u16(f[i].sdu+3)==3&&!x9cw_u32(f[i].sdu+10));qmi_error=0;}
@@ -73,9 +115,9 @@ static bool bb_x9_call_registration(uint32_t local,uint32_t node,bb_x9_call_fram
  }
  return true;
 }
-static bool bb_x9_call_handover(uint32_t local,uint32_t node,bb_x9_call_frame *f,uint32_t count){
+static bool bb_x9_call_handover(uint32_t local,uint32_t node,uint64_t generation,bb_x9_call_frame *f,uint32_t count){
  assert(lock_depth==1&&count&&count<=8);call_batches++;call_batch_count=count;
- if(!call_batch_accept)return false;
+ if(!call_batch_accept||generation!=bb_x9_call_identity(local,node))return false;
  for(unsigned i=0;i<count;i++){
   assert(f[i].owned&&f[i].size==11&&f[i].sdu[0]==4&&x9cw_u16(f[i].sdu+3)==0x54);
   assert(!x9cw_u16(f[i].sdu+1)&&x9cw_u16(f[i].sdu+5)==4&&f[i].sdu[7]==1&&x9cw_u16(f[i].sdu+8)==1);
@@ -86,6 +128,13 @@ static bool bb_x9_call_handover(uint32_t local,uint32_t node,bb_x9_call_frame *f
  return true;
 }
 #include "../../kernel/src/iokit/Kernel/arm/X9Calls.inc"
+// Explicit synthetic bound/registered VOICE owner for staging-only cases;
+// NAS's sim_slot is no longer used as the independently bound CALL context.
+static void dial_owner_fixture(){
+ struct x9c_client &c=x9c_clients[0];c.bound=c.registered=true;c.sim=1;
+ c.generation=x9q_clients[0].generation;c.bridge_generation=call_bridge_generation[0];
+ c.binding=++x9c_binding_next;
+}
 
 static unsigned incoming(uint8_t *p,unsigned mask=0x22,unsigned tx=0x2345){
  x9cw_header(p,64,0x8901,mask,tx);
@@ -197,6 +246,18 @@ static void dial_golden(){
  struct x9cw_dial_profile wrong=measured_route;wrong.domain=5;
  assert(!x9cw_dial(q,n,p,sizeof(p),&wrong,0));
  wrong=measured_route;wrong.sim=0;assert(!x9cw_dial(q,n,p,sizeof(p),&wrong,0));
+ /* Preserve already-owned explicit Android CLIR, without interpreting an
+  * Apple privacy byte or choosing a vendor/network default. Only108 changes. */
+ for(unsigned clir=1;clir<=2;clir++){
+  struct x9cw_dial_profile explicit_route=measured_route;explicit_route.clir=clir;
+  assert(x9cw_dial(q,n,p,sizeof(p),&explicit_route,0)==72&&p[36]==clir);
+  assert(!memcmp(p,golden,36)&&!memcmp(p+37,golden+37,72-37));
+  assert(x9cw_native_dial(p,72,2)&&x9cw_request(p,72,0x901,2));
+ }
+ wrong=measured_route;wrong.clir=3;
+ assert(!x9cw_dial(q,n,p,sizeof(p),&wrong,0));
+ wrong.clir=0x100;assert(!x9cw_dial(q,n,p,sizeof(p),&wrong,0));
+ p[36]=3;assert(!x9cw_native_dial(p,72,2));
  /* QMI's string has no NUL; MIPC adds one. Optional type can be omitted. */
  n=dial_qmi(q,5,false);assert(x9cw_dial(q,n,p,sizeof(p),&measured_route,0)==72);
  n=dial_qmi(q,40);assert(x9cw_dial(q,n,p,sizeof(p),&measured_route,0)==104);
@@ -653,6 +714,7 @@ static void dial_join_order(){
 }
 static void ios_join(){
  empty_baseline();uint8_t q[64],p[24];unsigned n=dial_qmi(q);x9q_clients[0].sim_slot=1;
+ dial_owner_fixture();
  assert(x9c_dial_submit(0,q,n,measured_route));uint64_t t=x9c_dial_job.token;x9mi_tick();
  assert(!x9_md_mipc_submit(last_frame,last_length)); // staging lease blocks a second mutation
  x9cw_header(p,24,0x902,2,(unsigned)t);x9cw_scalar(p+16,0,0,4);x9mi_rx(p,24);x9c_poll();
@@ -662,6 +724,7 @@ static void ios_join(){
 }
 static void ios_timeout(){
  empty_baseline();uint8_t q[64],p[24];unsigned n=dial_qmi(q);x9q_clients[0].sim_slot=1;
+ dial_owner_fixture();
  assert(x9c_dial_submit(0,q,n,measured_route));uint64_t t=x9c_dial_job.token;x9mi_tick();
  fake_ms=60001;x9c_poll();assert(qmi_replies==1&&qmi_error==X9Q_NOT_READY&&x9c_dial_job.token==t);
  x9cw_header(p,24,0x902,2,(unsigned)t);x9cw_scalar(p+16,0,0,4);x9mi_rx(p,24);
@@ -669,12 +732,14 @@ static void ios_timeout(){
 }
 static void ios_deleted(){
  empty_baseline();uint8_t q[64],p[24];unsigned n=dial_qmi(q);x9q_clients[0].sim_slot=1;
+ dial_owner_fixture();
  assert(x9c_dial_submit(0,q,n,measured_route));uint64_t t=x9c_dial_job.token;x9mi_tick();
  x9c_del(0);x9q_clients[0].generation++;x9cw_header(p,24,0x902,2,(unsigned)t);x9cw_scalar(p+16,0,0,4);
  x9mi_rx(p,24);rx_progress(130,7,0);x9c_poll();assert(!qmi_replies&&!x9c_dial_job.token&&x9c_dial_job.used);
 }
 static void dial_presend_fence(){
  empty_baseline();uint8_t q[64],out[24];unsigned n=dial_qmi(q);x9q_clients[0].sim_slot=1;
+ dial_owner_fixture();
  assert(x9c_dial_submit(0,q,n,measured_route));uint64_t t=x9c_dial_job.token;unsigned before=writes;
  rx_progress(130,7,0);x9mi_tick();assert(writes==before);uint32_t k;
  assert(x9_md_mipc_take(t,out,sizeof(out),&k)==-3&&!k);
@@ -691,9 +756,12 @@ static void voice_bind_codec(){
 }
 static void bind_voice(){
  uint8_t q[]={0,77,0,0x44,0,4,0,1,1,0,1};
- assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q))&&qmi_error==0);
+ const unsigned before=qmi_replies;
+ assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q))&&qmi_replies==before);
+ assert(!x9c_clients[0].bound&&x9c_bind_pending(0,true));
+ x9c_response_poll();assert(qmi_replies==before+1&&!qmi_error&&!x9c_bind_pending(0));
  assert(x9c_clients[0].bound&&x9c_clients[0].sim==1&&!x9q_clients[0].sim_slot&&!writes);
- qmi_replies=0;
+ qmi_replies=0;call_allocs=call_frees=0;
 }
 static void end_request(){
  uint8_t q[]={0,78,0,0x21,0,4,0,1,1,0,7};
@@ -764,6 +832,71 @@ static void ios_end_presend(){
  rx_progress(6);x9mi_tick();x9c_poll();assert(writes==1&&!x9c_end_job.used&&!x9_mc_end_token&&
   qmi_replies==1&&qmi_error==X9Q_NOT_READY);
 }
+static void end_release_during_md_lock(){call_bridge_generation[0]=0;}
+static void end_expire_during_md_lock(){fake_ms=x9c_end_job.deadline;}
+/* Compile-only source vectors: model loss while acquiring take (first),
+ * end_snapshot (second), or end_submit (third MD lock), without DEL dispatch.
+ * Separate vectors below cover the native admission/selection BB guard;
+ * none of these source assertions has been executed in this change. */
+static void ios_end_postwait(unsigned wait,bool expire){
+ bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();
+ uint8_t p[704],out[X9_MIPC_FRAME_MAX];unsigned n=current_frame(p,1);
+ x9cw_put16(p+12,(unsigned)x9c_end_job.token);x9mi_rx(p,n);
+ const uint64_t generation=x9q_clients[0].generation,next=x9_mi_next;
+ const uint64_t binding=x9c_clients[0].binding;
+ md_lock_until_hook=wait;during_md_lock=expire?end_expire_during_md_lock:end_release_during_md_lock;
+ x9c_end_poll(out);assert(!during_md_lock&&!md_lock_until_hook);
+ assert(!x9c_end_job.used&&!x9_mc_end_token&&x9_mi_next==next);
+ assert(x9q_clients[0].generation==generation&&x9c_clients[0].bound&&x9c_clients[0].binding==binding);
+ x9c_response_poll();assert(qmi_replies==(expire?1u:0u));
+ if(expire)assert(qmi_error==X9Q_NOT_READY);
+ x9mi_tick();assert(writes==1&&x9cw_u16(last_frame+10)==0x909);
+}
+static void ios_end_take_generation(){ios_end_postwait(1,false);}
+static void ios_end_snapshot_generation(){ios_end_postwait(2,false);}
+static void ios_end_take_deadline(){ios_end_postwait(1,true);}
+static void ios_end_snapshot_deadline(){ios_end_postwait(2,true);}
+static void ios_end_submit_generation(){ios_end_postwait(3,false);}
+static void ios_end_submit_deadline(){ios_end_postwait(3,true);}
+/* Source vectors only, never executed as part of this change. */
+static void ios_end_guard_admission(bool expire){
+ bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();
+ const uint64_t next=x9_mi_next,generation=x9q_clients[0].generation;
+ during_bb_guard=expire?end_expire_during_md_lock:end_release_during_md_lock;
+ uint8_t p[704],out[X9_MIPC_FRAME_MAX];unsigned n=current_frame(p,1);
+ x9cw_put16(p+12,(unsigned)x9c_end_job.token);x9mi_rx(p,n);x9c_end_poll(out);
+ assert(!during_bb_guard&&!x9c_end_job.used&&!x9_mc_end_token&&x9_mi_next==next);
+ assert(x9q_clients[0].generation==generation&&x9c_clients[0].bound&&writes==1);
+ x9c_response_poll();assert(qmi_replies==(expire?1u:0u));
+ if(expire)assert(qmi_error==X9Q_NOT_READY);
+}
+static void ios_end_guard_admission_generation(){ios_end_guard_admission(false);}
+static void ios_end_guard_admission_deadline(){ios_end_guard_admission(true);}
+static void ios_end_guard_selection(bool expire,bool wait){
+ bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();end_query_cnf();
+ assert(x9c_end_job.stage==2&&x9c_end_job.token);
+ const uint64_t token=x9c_end_job.token,epoch=x9c_end_job.epoch;
+ auto hook=expire?end_expire_during_md_lock:end_release_during_md_lock;
+ if(wait)during_bb_guard=hook;else hook(); // no QMI poll/DEL between enqueue and writer
+ x9mi_tick();assert(!during_bb_guard&&writes==1&&!x9_mc_end_token);
+ assert(x9_mc_outbound.epoch==epoch&&x9c_end_job.token==token);
+ x9c_poll();assert(!x9c_end_job.used&&qmi_replies==(expire?1u:0u));
+ if(expire)assert(qmi_error==X9Q_NOT_READY);
+}
+static void ios_end_guard_selection_generation(){ios_end_guard_selection(false,false);}
+static void ios_end_guard_selection_deadline(){ios_end_guard_selection(true,false);}
+static void ios_end_guard_selection_bb_generation(){ios_end_guard_selection(false,true);}
+static void ios_end_guard_selection_bb_deadline(){ios_end_guard_selection(true,true);}
+static void ios_end_guard_selected_release(){
+ bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();end_query_cnf();
+ const uint64_t token=x9c_end_job.token,epoch=x9c_end_job.epoch;
+ during_physical_tx=end_release_during_md_lock;x9mi_tick();assert(!during_physical_tx);
+ x9c_poll();assert(writes==2&&!qmi_replies&&x9c_end_job.stage==2&&x9c_end_job.answered&&x9_mc_end_token==token);
+ assert(x9cw_u16(last_frame+10)==0x905&&x9cw_u16(last_frame+12)==token&&x9_mc_outbound.epoch==epoch);
+ uint8_t p[24];x9cw_header(p,24,0x906,2,(unsigned)token);x9cw_scalar(p+16,0,0,4);
+ x9mi_rx(p,sizeof(p));x9c_poll();
+ assert(!qmi_replies&&writes==2&&x9c_end_job.stage==3&&x9_mc_end_token==token&&x9_mc_outbound.epoch==epoch);
+}
 static void ios_end_duplicate(){
  bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();uint64_t query=x9c_end_job.token;
  end_request();assert(x9c_end_job.token==query&&!qmi_replies&&!writes);
@@ -775,6 +908,22 @@ static void ios_end_duplicate(){
  x9mi_rx(p,24);x9c_poll();assert(qmi_replies==1&&!qmi_error&&x9c_end_job.used&&!x9c_end_job.token);
  x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
  assert(qmi_replies==1&&writes==2); // no BUSY + late-success pair or second mutation
+}
+static void ios_end_changed_duplicate(){
+ bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();
+ const uint64_t query=x9c_end_job.token,epoch=x9c_end_job.epoch;
+ uint8_t q[]={0,78,0,0x21,0,4,0,1,1,0,8}; // same txn, different valid target
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
+ assert(!qmi_replies&&!writes&&x9c_end_job.token==query&&x9c_end_job.id==7&&x9c_end_job.epoch==epoch);
+ x9mi_tick();end_query_cnf();const uint64_t token=x9c_end_job.token;
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
+ assert(!qmi_replies&&x9c_end_job.token==token&&x9c_end_job.id==7);x9mi_tick();
+ assert(writes==2&&x9cw_u16(last_frame+10)==0x905&&x9cw_u32(last_frame+28)==7);
+ uint8_t p[24];x9cw_header(p,24,0x906,2,(unsigned)token);x9cw_scalar(p+16,0,0,4);
+ x9mi_rx(p,sizeof(p));x9c_poll();
+ assert(qmi_replies==1&&!qmi_error&&x9c_end_job.used&&x9c_end_job.answered&&x9_mc_end_token==token);
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
+ assert(qmi_replies==1&&writes==2&&x9c_end_job.id==7&&x9c_end_job.epoch==epoch);
 }
 static void ios_end_abandon(){
  bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();end_query_cnf();
@@ -998,6 +1147,18 @@ static void handover_request_identity(){
  assert(x9c_reg_wait[0][0].answered&&!x9c_clients[0].handover);
  x9c_poll();x9mi_tick();assert(!writes&&!x9c_cmd_init.token);
 }
+static void handover_completed_changed(){
+ bind_voice();x9w_control_ready=true;x9c_cmd_init.confirmed=true;
+ x9c_init[1].stage=X9_CI_DONE;x9c_init[1].registered=1;
+ handover_begin();x9c_poll();
+ assert(qmi_replies==1&&!qmi_error&&x9c_reg_wait[0][0].answered&&x9c_clients[0].handover);
+ const uint64_t binding=x9c_clients[0].binding;
+ handover_begin(0,0,91); // changed value under the already-terminal transaction
+ assert(qmi_replies==1&&!qmi_error&&x9c_clients[0].handover&&x9c_clients[0].binding==binding);
+ x9c_poll();x9mi_tick();assert(qmi_replies==1&&!writes&&call_batches==1);
+ handover_begin(0,0,92);x9c_poll(); // a fresh transaction still owns its disable
+ assert(qmi_replies==2&&!qmi_error&&!x9c_clients[0].handover&&call_batches==2&&!writes);
+}
 static void handover_rx_fence(){
  rx_progress(130,7,0);rx_progress(2);rx_progress(132);
  uint8_t current[704],out[704];x9cw_header(current,16,0x909,2,0);
@@ -1006,7 +1167,8 @@ static void handover_rx_fence(){
  uint32_t n;assert(x9_md_mipc_take(token,out,sizeof(out),&n)==1);
  uint8_t p[32];struct x9cw_end_target t;assert(x9_md_mipc_call_end_snapshot(&t)==1);
  uint8_t q[]={0,8,0,0x21,0,4,0,1,1,0,7};
- assert(x9cw_action(q,11,p,32,7,7,1,1)==32);token=x9_md_mipc_call_end_submit(p,32,&t);assert(token);
+ const struct x9_mipc_call_owner owner={CBQ_PORT_BASE,X9BB_NODE,call_bridge_generation[0],25000};
+ assert(x9cw_action(q,11,p,32,7,7,1,1)==32);token=x9_md_mipc_call_end_submit(p,32,&t,&owner);assert(token);
  handover_frame(p,0);x9mi_rx(p,32);x9mi_tick();
  assert(x9_md_mipc_take(token,p,32,&n)==-3); // no queued pre-handover END TX
  assert(x9_mc_outbound.blocked&&!x9_mc_outbound.count_known&&x9_mc_inbound.blocked);
@@ -1110,7 +1272,7 @@ static void handover_live_alloc_poison(){
 static void handover_live_generation_sim(){
  handover_live_setup();uint8_t p[32];call_batch_accept=false;
  handover_frame(p,0);x9mi_rx(p,32);x9c_poll();assert(x9c_clients[0].pending.count==1);
- x9c_del(0);x9q_clients[0].generation++;bind_voice();call_batch_accept=true;
+ x9c_del(0);x9q_clients[0].generation++;call_batch_accept=true;bind_voice();
  handover_begin(0,1,92);x9c_poll();assert(!qmi_indications&&!x9c_clients[0].pending.count);
  handover_frame(p,1,1);x9mi_rx(p,32);x9c_poll();assert(!qmi_indications); // other SIM
  handover_frame(p,1);x9mi_rx(p,32);x9c_poll();assert(qmi_indications==1&&qmi_indication_states[0]==3);
@@ -1118,8 +1280,10 @@ static void handover_live_generation_sim(){
  call_batch_accept=false;handover_frame(p,0);x9mi_rx(p,32);x9c_poll();
  uint8_t bind[]={0,93,0,0x44,0,4,0,1,1,0,0};
  x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,bind,sizeof(bind));
- assert(x9c_clients[0].sim==0&&!x9c_clients[0].pending.count&&!x9c_clients[0].handover);
- call_batch_accept=true;x9c_poll();assert(qmi_indications==1&&!writes);
+ assert(x9c_clients[0].sim==1&&x9c_clients[0].pending.count==1&&x9c_clients[0].handover&&x9c_bind_pending(0,true));
+ call_batch_accept=true;x9c_poll();
+ assert(x9c_clients[0].sim==0&&!x9c_clients[0].pending.count&&!x9c_clients[0].handover&&!x9c_bind_pending(0));
+ assert(qmi_indications==2&&!writes); // old-route event flushed before44 receipt
 }
 static void handover_live_overflow_disable(){
  handover_live_setup();uint8_t p[32];call_batch_accept=false;
@@ -1171,15 +1335,25 @@ int main(int argc,char **argv){
   {"progress_identity_provenance",progress_identity_provenance},
   {"end_reason_provenance",end_reason_provenance},{"outbound_end_reason",outbound_end_reason},{"incoming_end_reason",incoming_end_reason},
   {"ios_end_stale_query",ios_end_stale_query},{"ios_end_presend",ios_end_presend},
+  {"ios_end_take_generation",ios_end_take_generation},{"ios_end_snapshot_generation",ios_end_snapshot_generation},
+  {"ios_end_take_deadline",ios_end_take_deadline},{"ios_end_snapshot_deadline",ios_end_snapshot_deadline},
+  {"ios_end_submit_generation",ios_end_submit_generation},{"ios_end_submit_deadline",ios_end_submit_deadline},
+  {"ios_end_guard_admission_generation",ios_end_guard_admission_generation},
+  {"ios_end_guard_admission_deadline",ios_end_guard_admission_deadline},
+  {"ios_end_guard_selection_generation",ios_end_guard_selection_generation},
+  {"ios_end_guard_selection_deadline",ios_end_guard_selection_deadline},
+  {"ios_end_guard_selection_bb_generation",ios_end_guard_selection_bb_generation},
+  {"ios_end_guard_selection_bb_deadline",ios_end_guard_selection_bb_deadline},
+  {"ios_end_guard_selected_release",ios_end_guard_selected_release},
   {"ios_end_abandon",ios_end_abandon},{"ios_end_late_cnf",ios_end_late_cnf},
-  {"ios_end_duplicate",ios_end_duplicate},
+  {"ios_end_duplicate",ios_end_duplicate},{"ios_end_changed_duplicate",ios_end_changed_duplicate},
   {"incoming_states",incoming_states},{"incoming_state_invalid",incoming_state_invalid},{"incoming_observer",incoming_observer},
   {"register_codec",register_codec},{"register_transition",register_transition},{"register_sequence",register_sequence},
   {"register_timeout",register_timeout},{"register_deleted",register_deleted},{"register_unsupported",register_unsupported},
   {"handover_codec",handover_codec},{"handover_concurrent_bootstrap",handover_concurrent_bootstrap},
   {"handover_subscription_fence",handover_subscription_fence},{"handover_pending_timeout",handover_pending_timeout},
   {"handover_pending_overflow",handover_pending_overflow},{"handover_transport_loss",handover_transport_loss},
-  {"handover_request_identity",handover_request_identity},
+  {"handover_request_identity",handover_request_identity},{"handover_completed_changed",handover_completed_changed},
   {"handover_rx_fence",handover_rx_fence},
   {"registration_queue_wait",registration_queue_wait},{"registration_queue_timeout",registration_queue_timeout},
   {"registration_alloc_oom",registration_alloc_oom},{"registration_alloc_poison",registration_alloc_poison},

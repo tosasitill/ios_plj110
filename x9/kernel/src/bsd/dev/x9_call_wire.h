@@ -125,17 +125,26 @@ static inline int x9cw_qmi_dial(const uint8_t *p,unsigned n,struct x9cw_dial_num
  if(!(seen&1))return 0;
  *out=d;return 1;
 }
-/* A captured route/profile is supplied EXPLICITLY by the caller, not chosen
- * from QMI CallType or a modem default. Only PLJ110 SIM2's measured profile
- * is implemented. Non-emergency getDomain returns0 on the IMS request branch;
+/* Route/profile is supplied EXPLICITLY by the caller, not chosen from QMI
+ * CallType or a modem default. Only PLJ110 SIM2's measured non-emergency IMS
+ * route is implemented. CLIR0 is the captured value; explicit Android CLIR1/2
+ * also survive the matching Rtm/Rmm ordinary decimal path unchanged into108.
+ * Matching Java temporary SC31 supplies those explicit values independently
+ * of the still-unqualified vendor default. The matching MD normal-number
+ * consumer, after its special-case gate, uses raw1 for "#31#" and raw2 for
+ * "*31#"; raw0 can consult existing CLIR and is not an explicit show request.
+ * This is NOT an Apple-enum cast,
+ * prefix parser, default selector or permission to discard typed privacy.
+ * Non-emergency getDomain returns0 on the IMS request branch;
  * getEccPreferredDomain still reads runtime state. No production provider yet
  * establishes the complete IMS/profile context in iOS. */
 struct x9cw_dial_profile {
- unsigned sim;uint32_t address_type,call_type,domain,ecc_domain;unsigned clir;
+ unsigned sim;uint32_t address_type,call_type,domain,ecc_domain;
+ unsigned clir; /* already-owned Android raw value, not Apple CLIR/CT enum */
 };
 static inline int x9cw_dial_profile_valid(const struct x9cw_dial_profile *p){
  return p&&p->sim==1&&p->address_type==2&&p->call_type==1&&p->domain==0&&
-        p->ecc_domain==0&&p->clir==0;
+        p->ecc_domain==0&&p->clir<=2;
 }
 /* Pure encoder, never submits/announces/approves. Reject a second dial while
  * any native call is known. Copy digits before output writes, permitting
@@ -143,7 +152,11 @@ static inline int x9cw_dial_profile_valid(const struct x9cw_dial_profile *p){
 static inline unsigned x9cw_dial(const uint8_t *qmi,unsigned n,uint8_t *out,unsigned room,
                                 const struct x9cw_dial_profile *profile,unsigned native_count){
  struct x9cw_dial_number d;uint8_t number[40];
- if(!out||native_count||!x9cw_dial_profile_valid(profile)||!x9cw_qmi_dial(qmi,n,&d))return 0;
+ if(!out||!profile||native_count||!x9cw_qmi_dial(qmi,n,&d))return 0;
+ /* Validate the exact owned scalars that will be encoded, not a prior read
+  * of caller storage. Neither profile nor digits are reread after output. */
+ const struct x9cw_dial_profile route=*profile;
+ if(!x9cw_dial_profile_valid(&route))return 0;
  unsigned string_size=(d.length+12)&~7u,size=16+string_size+40;
  if(room<size)return 0;
  for(unsigned i=0;i<d.length;i++)number[i]=d.digits[i];
@@ -153,9 +166,11 @@ static inline unsigned x9cw_dial(const uint8_t *qmi,unsigned n,uint8_t *out,unsi
  x9cw_zero(number,sizeof(number));
  unsigned at=16+string_size;
  /* Exactly the observed serialized order, including CLIR108/u8. */
- x9cw_scalar(out+at,0x108,0,1);x9cw_scalar(out+at+8,0x101,2,4);
- x9cw_scalar(out+at+16,0x102,1,4);x9cw_scalar(out+at+24,0x103,0,4);
- x9cw_scalar(out+at+32,0x104,0,4);return size;
+ x9cw_scalar(out+at,0x108,route.clir,1);
+ x9cw_scalar(out+at+8,0x101,route.address_type,4);
+ x9cw_scalar(out+at+16,0x102,route.call_type,4);
+ x9cw_scalar(out+at+24,0x103,route.domain,4);
+ x9cw_scalar(out+at+32,0x104,route.ecc_domain,4);return size;
 }
 static inline int x9cw_native_dial(const uint8_t *p,unsigned n,unsigned sim_count){
  if(!x9cw_frame(p,n,0x901)||sim_count!=2||p[8]!=2||n<64||
@@ -169,8 +184,11 @@ static inline int x9cw_native_dial(const uint8_t *p,unsigned n,unsigned sim_coun
  const unsigned tags[]={0x108,0x101,0x102,0x103,0x104},values[]={0,2,1,0,0};
  for(unsigned i=0;i<5;i++,at+=8){
   unsigned bytes=i?4:1;
-  if(x9cw_u16(p+at)!=tags[i]||x9cw_u16(p+at+2)!=bytes||
-     (bytes==4?x9cw_u32(p+at+4):p[at+4])!=values[i])return 0;
+  if(x9cw_u16(p+at)!=tags[i]||x9cw_u16(p+at+2)!=bytes)return 0;
+  unsigned value=bytes==4?x9cw_u32(p+at+4):p[at+4];
+  /* Raw CLIR1/2 are original explicit requests, not a missing108 default.
+   * Keep the exact tag/order/width and all other measured profile fields. */
+  if(i?value!=values[i]:value>2)return 0;
   for(unsigned j=4+bytes;j<8;j++)if(p[at+j])return 0;
  }
  return 1;

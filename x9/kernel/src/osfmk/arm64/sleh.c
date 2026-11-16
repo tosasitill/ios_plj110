@@ -40,6 +40,7 @@
 #if defined(SWEET)
 extern bool x9_adsp_audio_irq_filter(uint32_t);
 extern bool x9_camera_irq_filter(uint32_t);
+extern bool x9_bluetooth_irq_filter(uint32_t);
 #endif
 #include <arm64/machine_machdep.h>
 #include <arm64/monotonic.h>
@@ -2073,7 +2074,8 @@ sleh_irq(arm_saved_state_t *state)
 	} else {
 		sweet_irq_other++;
 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
-		if (!x9_adsp_audio_irq_filter(intid) &&
+		if (!x9_bluetooth_irq_filter(intid) &&
+		    !x9_adsp_audio_irq_filter(intid) &&
 		    !x9_camera_irq_filter(intid) && cdp->interrupt_handler) {
 			cdp->interrupt_handler(cdp->interrupt_target,
 			    cdp->interrupt_refCon,

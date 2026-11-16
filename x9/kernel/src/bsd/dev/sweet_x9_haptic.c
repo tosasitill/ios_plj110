@@ -47,8 +47,23 @@ static bool allowed(struct proc *p)
     char name[32]={0};proc_name(proc_pid(p),name,sizeof(name));
     return uid==501 && !strcmp(name,"mediaserverd");
 }
+/* Per-stream aggregate (first 16): proves whether non-zero RTP samples
+ * reached the FIFO in RTP_GO, without per-sample serial lines. */
+static uint64_t st_accepted,st_submitted;static unsigned st_peak,st_gos,st_logs;
+static uint8_t st_state_or;
+static void stream_summary(void)
+{
+    if(!(hs.flags&X9_HAPTIC_RUNNING) || st_logs>=48)return;
+    st_logs++;
+    printf("X9 HAPTIC: stream gen=%llu accepted=%llu submitted=%llu in_peak=%d peak=%u go=%u state_or=%02x sysst=%02x underruns=%llu\n",
+        hs.generation,hs.accepted_frames-st_accepted,hs.submitted_frames-st_submitted,
+        converter.in_peak,st_peak,st_gos,st_state_or,hs.hw_fault,hs.underruns);
+}
+static void stream_reset(void)
+{st_accepted=hs.accepted_frames;st_submitted=hs.submitted_frames;st_peak=st_gos=0;st_state_or=0;}
 static int stop_locked(void)
 {
+    stream_summary();
     hs.flags&=~X9_HAPTIC_RUNNING;draining=scene_active=quiet_stop=false;
     ++hs.generation;head=count=0;sequence=0;
     int e=hoff();on_at=last_signal_ns=0;hs.last_stop_ns=now_ns();
@@ -67,7 +82,7 @@ static int start_locked(struct x9_haptic_start *s)
     if(hs.mode!=2 || !(hs.flags&X9_HAPTIC_READY))return ENXIO;
     if(now_ns()<cool_until)return EAGAIN;
     if((hs.flags&X9_HAPTIC_RUNNING) || hb.active)return EBUSY;
-    hs.flags&=~X9_HAPTIC_THROTTLED;hs.flags|=X9_HAPTIC_RUNNING;
+    hs.flags&=~X9_HAPTIC_THROTTLED;hs.flags|=X9_HAPTIC_RUNNING;stream_reset();
     ++hs.generation;head=count=0;sequence=0;draining=scene_active=false;
     x9_haptic_converter_init(&converter,hs.f0_millihz,s->conversion,s->intensity,s->sharpness);
     hs.last_write_ns=now_ns();s->generation=hs.generation;return 0;
@@ -77,7 +92,11 @@ static int haptic_open(dev_t d,int f,__unused int t,struct proc *p)
     if(minor(d)==0)return f&FWRITE?EACCES:0;
     if(minor(d)!=1 || !(f&FWRITE) || !allowed(p))return EPERM;
     lck_mtx_lock(&haptic_lock);int e=hs.mode!=2?EPERM:writer?EBUSY:0;
-    if(!e)writer=true;lck_mtx_unlock(&haptic_lock);return e;
+    if(!e)writer=true;
+    static unsigned opens;
+    if(++opens<=8 || e){char name[32]={0};proc_name(proc_pid(p),name,sizeof(name));
+        printf("X9 HAPTIC: writer open #%u by %s errno=%d\n",opens,name,e);}
+    lck_mtx_unlock(&haptic_lock);return e;
 }
 static int haptic_close(dev_t d,__unused int f,__unused int t,__unused struct proc *p)
 {
@@ -144,7 +163,11 @@ static int haptic_ioctl(dev_t d,u_long cmd,caddr_t data,__unused int f,struct pr
     lck_mtx_lock(&haptic_write_lock);lck_mtx_lock(&haptic_lock);int e=0;
     if(cmd==X9_HAPTIC_GET_STATUS){hs.queued_frames=count;memcpy(data,&hs,sizeof(hs));}
     else if(!writer)e=EPERM;
-    else if(cmd==X9_HAPTIC_START)e=start_locked((void *)data);
+    else if(cmd==X9_HAPTIC_START) {
+        e=start_locked((void *)data);
+        static unsigned starts;
+        if(++starts<=8 || e)printf("X9 HAPTIC: START #%u errno=%d flags=%x\n",starts,e,hs.flags);
+    }
     else if(cmd==X9_HAPTIC_STOP)e=stop_locked();
     else if(cmd==X9_HAPTIC_DRAIN) {
         if(!(hs.flags&X9_HAPTIC_RUNNING))e=EPIPE;
@@ -182,7 +205,9 @@ static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
         if(hs.flags&X9_HAPTIC_RUNNING) {
             /* An explicit client must not hold the chip running forever.
              * Changes of amplitude/sequence do not renew continuous-on time. */
-            if(on_at && now-on_at>=1000000000ULL) {
+            /* Scenes only: OPPO plays RTP streams (ringtones) without a cap, and
+             * log 327 patterns were cut into restarts by this 1 s limit. */
+            if(scene_active && on_at && now-on_at>=1000000000ULL) {
                 hs.flags|=X9_HAPTIC_THROTTLED;cool_until=now+1000000000ULL;
                 hs.throttled_rtp_frames+=count;head=count=0;
                 int e=hoff();on_at=0;quiet_stop=true;
@@ -214,13 +239,20 @@ static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
                  * their time relative to subsequent transients. */
                 bool signal=false;
                 for(unsigned i=0;i<count;i++)if(ring[(head+i)%X9_HAPTIC_RING]){signal=true;break;}
+                /* While running, keep streaming silence for 200 ms after the
+                 * last signal (OPPO streams continuously): parking 20 ms
+                 * after each tap made every keystroke pay GO + boost
+                 * startup again (log 329/330 "delayed"). */
                 if(!scene_active && !draining && !signal &&
-                   (!hb.active || (last_signal_ns && now-last_signal_ns>=20000000))) {
+                   (!hb.active || (last_signal_ns && now-last_signal_ns>=200000000))) {
                     head=count=0;quiet_stop=true;
                 }
                 if(!hb.active) {
-                    if(count>=120 || (draining && count)) {
-                        e=hgo();if(!e){on_at=now_ns();quiet_stop=false;}
+                    /* 20 ms prefill: 10 ms (log 327) ran the FIFO dry between
+                     * mediaserverd writes; 30 ms (log 329) was felt as delay. */
+                    if(count>=240 || (draining && count)) {
+                        e=hgo();st_state_or|=(uint8_t)hs.hw_state;
+                        if(!e){on_at=now_ns();quiet_stop=false;++st_gos;}
                     }
                 }
                 if(!e && hb.active) {
@@ -229,12 +261,14 @@ static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
                         unsigned n=MIN(count,MIN(15u,MIN(budget,X9_HAPTIC_RING-head)));
                         e=hfeed(ring+head,n);
                         if(e==EAGAIN){e=0;break;}if(e)break;
+                        for(unsigned i=0;i<n;i++){int a=ring[head+i]<0?-ring[head+i]:ring[head+i];
+                            if((unsigned)a>st_peak)st_peak=(unsigned)a;}
                         for(unsigned i=0;i<n;i++)if(ring[head+i]){last_signal_ns=now_ns();break;}
                         head=(head+n)%X9_HAPTIC_RING;count-=n;budget-=n;hs.submitted_frames+=n;
                     }
                     if(!e && !count) {
                         uint8_t fifo;e=hget(4,&fifo);if(!e)e=hstate();
-                        if(!e && (fifo&1) && !hs.hw_state) {
+                        if(!e && (fifo&1) && !(hs.hw_state&15)) { /* rtp_play: STATE_MASK */
                             /* Real FIFO empty + native standby, not elapsed
                              * wall time, proves this hardware run ended. */
                             hb.active=false;on_at=0;

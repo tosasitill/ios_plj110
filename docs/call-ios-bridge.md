@@ -10,8 +10,9 @@
 | Android 请求形状 | 新增本机卡2实测 `0901` 的六个 TLV；接听 `0907 {}`；挂断 `0905 {MODE100/u32=0, ID101/u32}` |
 | 拨出状态生产者 | 完整 `4901` 的真实 ID / ECPI reducer；已实现、单对象可编译；未有完整真机 wire 重放或 iOS 运行验收 |
 | 空快照与异步确认 | 完整 owned `090a` 数组解析、号码与原始presentation有界owner；`0902 + 新 MO epoch` 汇合生成 VOICE20/tag10/u8；DIAL 仍无生产 profile/admission 调用者 |
-| 单通话挂断 / SIM 绑定 | VOICE44/tag01/u8 独立绑定；显式 VOICE21 → owned current query → 同 MO epoch/真实 ID/完整单通话 snapshot → guarded0905 → 同token0906 → 原iOS txn 的 result；已接请求分发，未设备验收 |
+| 单通话挂断 / SIM 绑定 | VOICE44/tag01/u8 独立绑定，实际host queue receipt后提交路由；显式 VOICE21 → owned current query → 同 MO epoch/真实 ID/完整单通话 snapshot → guarded0905 → 同token0906 → 原iOS txn 的 result；未设备验收 |
 | 初始化 / 事件注册 | 明确绑定后的 VOICE03：13=0 与14=0/1 可独立并发 → 全局 CMD8901 → 逐 SIM IND4901/4902 → owned0909/090a；逐token确认，13=1仍拒绝；仅编译、未运行 |
+| NAS 本地订阅注册 | NAS03保存原txn/localgen/QMUXgen，真实host queue receipt后才原子提交tag13/18/19订阅patch；FIFO、重复结果缓存及旧background IND gate；不是网络注册/IMS-ready |
 | handover 通知 | 严格 MD4902/EVENT3 → Android SRVCC → Apple54/tag1/u8；订阅cursor/generation/SIM隔离、注册与live事件均整批queue receipt后释放，queue/OOM保序等待；未设备验收，未迁移handover后的ID/RAT/profile |
 | 来电 CMD / 状态 | `8901` 的字段、长度和唯一 tag 验证；独立 pending ID → 完整 ECPI0/132/6/133 的 MT reducer / iOS observer；未发布 CallList |
 | END 原因 metadata | 成功完整解析、被当前 MO/MT 身份接受的 `133/mode20/10a=16` → 内部 Apple reason145；无cause/其它cause未知，不从无ID0910补归属；只编译，未发布 END |
@@ -26,7 +27,206 @@
 `x9cw_dial()` 同样仅编码：必须显式提供已验证的卡2 profile、无现存通话；当前没有 profile provider。
 原 transport 已允许这一严格 DIAL 子集；上一版宿主测试闭合发送/CNF。新增异步 join / 空快照 / 发送前 guard 目前只有编译结果，没有执行验证，也没有 iOS 自动拨号调用者。
 
+### VOICE44 的 owned receipt 与换绑边界（2026-11-16）
+
+旧44成功路径先清client/registration waiters、轮转binding并写SIM，再用void/best-effort
+`x9q_packet::send`回复。queue-full/OOM可使host未收到结果却已换路由；旧注册waiter已answered、
+但其terminal03尚在response pool时，换绑还可能使旧response-live失效而静默丢失结果。
+这是源码确认的窗口，不是本轮设备复现。
+
+现在exact11B44/tag01/u8在共享32项terminal pool中先保存原请求/txn、原本地generation、
+真实QMUX allocation generation、**旧binding完整身份snapshot（允许initial unbound）**，
+以及预留的nonwrapping新lease。预留消耗全局allocator但不激活route；跨client不共用lease，
+queue/OOM仅重试本地结果，不重新分配lease、不发送或取消MD请求。
+`bb_x9_call_result`只新增exact14B44 Result，仍在bb锁内核实际allocation、service9、node、
+non-release_pending、完整queue容量及deadline；成功转交buffer才算receipt。
+仅此receipt之后，唯一QMI线程同步commit新binding；不设会产生“已发success却不commit”的
+post-receipt fallible gate。same-SIM/同allocation是no-op，不清registration/handover或轮转lease。
+
+changing-bind admission拒绝本slot/local-generation尚在drain的end/dial mutation owner、
+未answered注册waiter及任何live非bind response（包括已决定尚未receipt的错误）。
+pending changing-success再挡新03/21和future staging20 admission，旧owner继续持原scope。
+DEL清44 pool/cache，不取消或改写物理token/epoch；binding identity失效自动退休本地pending，
+没有脱离pool的悬挂busy handle。
+
+首次44使用明确的**local25s admission policy**；保留原件不足以闭合44的SendProxy timer，
+不称原Apple44 timeout。新success跨guard转NOT_READY且不commit，已决定error保持首结果。
+每client仅缓存最后一项实际receipt的44；成功缓存pin **commit后的lease**，live exact repeat
+仅重发原Result，不再commit。只有这种completed replay以`UINT64_MAX`传递已有结果，
+不因原guard到期改写已commit的success；新44及03/20/21没有此bypass。
+changed txn复用保留first owner/result，不为changed输入造第二结果；新44成功admission退休旧cache，
+不宣称跨后续binding事务永久去重。非法新请求、容量/BUSY等未admit拒绝仍best-effort。
+
+这只闭logical binding/receipt前置，不给44添加record/revision/native epoch语义；
+typed caller/profile/CallList/media及当前SMS最终验收仍未完成，VOICE09仍关闭、20无生产caller。
+三路静态review和只编译记录见NOTES及`x9/out/call-bind-{receipt,review,contract,lifecycle}/`。
+
 ## 原件证据（2026-11-15）
+
+### 用户态传输、加载及 Android profile：生产接入边界
+
+现有用户态→内核传输已经存在，不能把“没有自定义call API/生产caller”写成“没有传输”。
+`libATCommandStudioDynamic.dylib` 原export trie明确导出
+`qmi::Client::createWithQueue19ecd6b20/19ece432c`、`Client::send19ecd2294`及
+`ClientRouter::addClient19ecea700/get19ecd5340`。前者使用原
+`com.apple.commcenter.atcs.xpc` broker，真实State强owner及队列，而非额外raw QMUX reader。
+`Client::send→State::send19ecd2c7c`序列化真实QMIServiceMsg，以原`send_qmi_message`/
+`send_timeout_ms`字段进入现有异步路径；共享QMux校验service/cid后保存owned SerializedMessage。
+Router的实际属性名为`sim`，same-key分支**替换**强pair并释放旧owner，缺key的get抛
+`out_of_range`，不能隐式取默认SIM。VOICE SendProxy借Client对象地址，须保证借用期间地址稳定；
+内部另有State/capture所有权，不把该要求扩大成所有callback都继续借Client对象。
+
+原ABP type0 selectors2/write、3/read是已有内核入口：复制输入→`bb_host_write`（bb锁内）→
+`cbq_from_host`→`bb_to_modem/bb_queue_tx`→现有bridge poll→`x9bb_modem_send`→
+`x9q_send`→`x9c_request`。channel open对第二owner返回`kIOReturnExclusiveAccess`，
+新provider应复用原broker/逻辑client，不能与原读者竞争。319已有qmux1/2打开、异步selector2及
+WMS4c两个client的运行证据，但镜像SHA未对齐，**不是新typed通话flow已执行**；本轮未逐条闭合
+ATCS至libIOABP的所有virtual边，也没有新增用户态callable API。09仍未公告，20无生产准入。
+12处当前root原cache小切片及窄export读取在`x9/out/call-native-ingress/`；独立peer确认21条
+所选export及5处owner/key原字节，不代表整个库只有21个export。
+
+当前CommCenter launchd cache/plist没有call注入环境。原dyld真实链是AMFI op5a→Security flags→
+`DYLD_INSERT_LIBRARIES` owner→getLoader→initializer list→imageBase+offset→constructor BLR。
+现`sweet_amfi`已按真实5a ABI返回ff，无依据再放宽`CS_RESTRICT`；16处当前root原字节相符。
+原CommandDriversFactory仅按vendor选固定M/K库并初始化真实command-driver owner，
+不是通用插件发现、也不是单独IMS CallFactory插入口。**完整功能provider具备后**才接正常
+builder、签名后manifest、PID1原子发布与精确CommCenter exec注入；不先添加空loader。
+原loading及独立ATCS review在`x9/out/call-runtime-loading/`，实际已在主checkout，无需重搬。
+
+Android原`RFX_MSG_REQUEST_IMS_DIAL/cf33`→`requestDial381410`明确
+emergency=false/video=false/IMS=true，六TLV为`8100/string、108/u8、101/102/103/104/u32`。
+number producer可证明101=2、ordinary voice branch证明102=1、normal IMS证明103=0；
+**108和104不能由“普通Apple Call”默认归零**。108来自原owned Dial+8，Rtm非ECC且CLIR0时
+可用slot key124策略改写；Rmm key125精确对比字符串`true`，不是运营商标识。Rtm构造的临时
+copied request并非实际send对象，requestToMcl仍接原引用，其owned CLIR已被策略改写。
+104每次依赖MCL72 preferredRat/31 voice RAT，ordinary cf33不执行已发现的ECC reset caller。
+完整配置/两privacy byte/RTT/relay语义尚未映射，不能静默丢弃、造ready或借实包充当生产profile。
+当前encoder在该窄链无已证错误；字段来源、原日志及精确owned copy在
+`x9/out/call-md-profile-owner/`。本节没有生产行为修改、编译、测试、设备操作或最终镜像。
+
+### 真实 per-personality 路由与强 owner getter（2026-11-16）
+
+这是新的原件 ABI 前置，不是已接线 provider。当前根盘 Cryptex cache 的九个
+选定 text 范围及九个选定 export 已读取，text与对应 extracted dylib相符：
+`x9/out/call-personality-context/{original-context-proof.json,original-context-proof-v2.json}`。
+不重复 CallList第七byte的旧排除，也不凭这些 helper公告09或指定默认SIM。
+
+- 真导出 `PersonalityIDToSimSlot1f0323a38` 接 `x0` 强 Registry pair 的借用地址、
+  `x1` 实际 PersonalityID；要求 initialized Registry，经其 map取强 PersonalityShop，
+  shop virtual+0按该ID返回强 PersonalityInfo。缺shop/record返回0。
+  record `+31/u8!=1` 时读真实 `+34/u32`；`+31==1` 时还取Registry配置强owner，
+  配置 `+111/u8`为false则**返回slot1**，为true才读record+34。
+  因此 helper返回1不单独证明物理卡1，不能无条件把它用于native CALL route。
+- `sd::isSimPersonality1f03390cc` 对同一种shop查询，只接受非空record且
+  `+31==0`；缺对象返回false。两个独立查询不构成同一record/revision的原子快照。
+- `PersonalitySpecificImpl::personalityInfo1f032651c` 使用 `x8` sret，
+  复制真实 `this+8/+10` shared pair，并递增非空control的强引用。
+  **这是可复用的强owner producer，不是返回裸指针或借用pair。**
+  对同一qualified具体对象，`simSlot1f031f1fc`读取该owned record+34，
+  不执行前述Registry单slot策略fallback。仍须真实对象adjustment、原调用队列与
+  rebind/revocation fence，不能只从临时Call+28的clientId派生身份。
+- 完整构造 **C1 `1f0392bbc`** 的shared pair形参在x1；base构造
+  **C2 `1f0392b84`** 的x1是construction-table/VTT输入，shared pair在x2。
+  两者都强own pair；不能因demangled名称相同就按C1的两参数ABI调用C2。
+  `personalityId1f0392cbc`使用x8 sret、把record+18交原helper；本轮未重新实名该helper，
+  更不将personalityId等同call UUID/clientId。
+- `subscriber::simSlotAsSubType1f1ab81f4` 原值转换为
+  `uint32_t(slot-1)<3 ? slot : 0`；`simSlotAsInstance1f0322cc8` 则
+  slot1→0、slot2→1、其余→-1。先前原VOICE44 subscription2→wire1是第三层转换。
+  native桥仍只支持已限定的sim0/1，不接SIM3或无效/缺失fallback。
+
+下一接线应取**实际per-personality强owner**并证明其具体caller、queue及身份变更fence，
+而不是固定personality枚举、Call指针/clientId或盲用helper返回值。原broker的State/QMUX
+generation仍是独立层；上述源码资格不提供native epoch、MD receipt或media readiness。
+此项未改生产源码、未编译/测试/操作设备，selected CLIR jar及最终短信/通话验收仍待输入。
+
+### 原 broker SendProxy、消息与回调的真实所有权（2026-11-16）
+
+本轮修正旧 `call-native-ingress/native-ingress-contract.json` 的
+`callback fields@+18/+20` 描述：VOICE wrapper `1f1a2482c` 持有的
+**0x28-byte inner qmi SendProxy 的 +18 不是 callback**。
+原 `Client::send19ecd2294` 只取真实State并进入 `State::send19ecd2c7c`：
+
+| inner offset | 原 ABI / 生存期 |
+| --- | --- |
+| +0 | 借用稳定地址的 `qmi::Client*`；wrapper同步dispatch期间不能失效 |
+| +8 | owned `QMIServiceMsg*`；不是裸7-byte QMI SDU |
+| +10 | u32 timeout；已核VOICE03/20/21的25000ms，不能外推为44原件timer |
+| +18 | 可空的借用 `uint16_t*` transaction输出地址；`19ecd2ed4/2ed8`同步写入u16 |
+| +20 | response block；`19ecd2db8/2dc0`读取并调用真实 `_Block_copy` |
+
+`19ecd2f84..f94` 构造40B async send capture：State、owned XPC dict、retained
+message、copied block，以及**u16 transaction值**。外围SharedSynchronizable wrapper
+保State强owner；消费者 `19ecd3998` 再调用 `send_sync19eccfd8c`，不继续借用原
+Client地址或transaction输出地址。同步txn输出只是本地分配值，不是MD接受或终态。
+不能将+18当block，也不能因原临时wrapper销毁就退休
+本native epoch。传输仍复用既有 `com.apple.commcenter.atcs.xpc` / QMUX / ABP，
+没有新增raw reader或callable backend。
+
+原export trie另证 `QMIServiceMsg::create(const void*,unsigned short)19ecff70c`
+与 `createRequest(const void*,unsigned short)19ecff82c`：两者将借用输入交给
+`QMIServiceMsg19ecce120`，读取**u16 message-id + u16 TLV字节数的4B header**，
+再为每个tag/u8、length/u16、value独立分配/深复制。输入不是带flags/transaction的7B
+QMI SDU，更不是QMUX frame。原constructor断言总长度并在bool=true时另解析Result；
+`createRequest`的bool=false不解析response Result。构造与回调有真实intrusive message
+owner，不能用raw结构memcpy替代它，也不能把callback的 `const QMIServiceMsg&`
+裸引用保留到异步工作以后。
+
+`postResponseToClient_sync19ecd219c` 在State+78 callback queue上安排40B capture：
+retained response、copied block、State+100/+108的weak handle pair和
+**State+81 configured-handle flag快照**。消费者 `19ecd3b58` 中，flag非零时必须
+weak-control `lock()`成功且weak identity非空才invoke；flag为零仍可invoke，不能
+泛称“没有weak handle就无回调”。`setClientHandle19ece28e8` 只更新State中的pair/flag，
+不会改已入队capture；`stop19ece29c8` 是State+10配置队列上的async请求，其实际消费者
+`19ece5514` 清的是State+80 started bit，不是旧capture的flag。+10/+78是不同配置槽，
+不足以证明运行时queue身份必不同，也未证明这里存在顺序barrier。**stop/release或weak-lock
+本身都不是callback queue fence**；晚回调仍需由真实context/generation/UUID/epoch owner拒绝。
+
+`handleResponse_sync19ecd15c0` 按该State pending vector里的transaction匹配并移除owner，
+原raw响应再交constructor、local error走原错误消息，最终发布copied block。这个匹配不
+赋予UUID/native epoch归属，也不替代派生backend的expected message-id/route核对或真实
+typed terminal delegate。这里仅闭合可复用的原传输ABI，不造新的成功回执/ACTIVE。
+
+证据 `x9/out/call-context-backend/`：`broker-owned-contract.json`、六组原件汇编、
+`qualify-broker-original.py` / `broker-current-cache-qualification.json`，22处本轮原件
+范围均匹配当前root Cryptex cache；`read-owner-islands.py` 将四个原cache支岛实际解至
+`_Block_copy/_Block_release/__shared_weak_count::lock/__release_weak`，不凭nearest-symbol
+注释定名。这不是产物复检、provider执行、编译或通话验收；VOICE09仍关闭，生产DIAL
+caller/profile、完整typed backend及双向专用媒体仍缺。
+
+### NAS03本地初始化订阅：真实host queue receipt
+
+本项与VOICE03/IMSA的网络注册不同。Apple `registerEvents_sync1f1ab620c` 以
+tag19/u8请求SigInfoEvents，ConfigSigInfo2/message6c是独立threshold配置。生产NAS03
+仍保留既有tag13/18/19宽度1、bool0/1校验；unknown tag按原accepted-but-unserved
+语义处理，不合成对应indication。以前直接改flags后用void-send，队列满/OOM时可能
+没有注册响应却已开始后台查询；新有界owner将这两者以实际queue receipt连接。
+
+每个原请求保存slot、local generation、真实QMUX generation、SIM、txn、validated bytes
+和首结果；最多32个pending，同client按单调order FIFO。只有实际BB队列接受原response
+才将mask/values应用到CURRENT flags、重启采样cycle；未触及字段不被入队时旧snapshot覆盖。
+last-completed cache独立于pending池，exact重复只回复原结果，不再apply/next；changed或
+malformed同txn由原owner保留首结果，不给第二BAD/ARG或发MD。合法新txn成功admission
+才清cache；ARG/BUSY和order达到UINT64_MAX不抹cache。OOM/full只保留host回复重试，
+没有物理命令、额外网络ready赋值或猜测timeout。
+
+DEL/localgen或真实QMUXgen变化退休旧host owner；pending时不同SIM绑定BUSY，同SIM不阻，
+成功换SIM清cache。关闭订阅的receipt以后，已在途background NAS24/4d/4f自己的IND
+以当前localgen/SIM/对应flag再gate，物理查询仍drain；foreground和其它合法subscriber的
+共享signal样本fanout不受这条self gate影响。原pool-full BUSY/ARG仍是普通非receipt
+错误边界，不将此次修复泛称所有QMI回复可靠。独立peer发现的相邻6c旧隐式signal-enable
+已删除；6c保留原ACK，但不写signal/next，不改变NAS03订阅、也不重启采样周期。
+实际Apple `setThresholds_sync1f1ab589c` 在 `58d0` 构造6c，`58dc/58e8` 调
+prepareThresholds/populateThresholds，`58f4` 另设tag a0 LinkQualityIndicator；
+NAS03 `6200/620c/6210` 构造03并写独立tag19，`6238` 是IndicationRegister SendProxy。
+因此6c是threshold/delta/LQI配置而不是订阅。本桥仍ACK但未应用这些配置，日志明确该限制；
+不会把删除隐式enable说成完整阈值实现。具体生产提交/固定构建结果见NOTES。
+
+`coachz_baseband_poll`在原唯一线程中运行send/del后再进入`x9q_poll→x9r_poll`；
+BB通知只完成host read/Mach通知，host后续write和release只排队到下一owner poll，
+不会在receipt与flags commit之间直接重入同owner。这是实际callsite串行证据，非
+设备时序测试。严格host及真实recipe对象只编译，人工向量未执行；不代表iOS已经
+学到真实网络注册，更不代表typed IMS、VOICE09、CallList或声音已可用。
 
 ### VOICE03 与 Android 注册 owner
 
@@ -152,6 +352,46 @@ RIL `RtmCallController::handleSrvcc26a2a0..`完成时清IMS列表，证明不能
 ril-srvcc-notify,ril-srvcc-controller,ril-urc-route,ios-handover,ios-ho-dispatch}.asm`和
 `android16-radio-types.hal`；真实10086材料没有SRVCC完成，不能算handover验收。
 新增8项人工向量只编译，未运行；旧overflow向量改用合法MD RING事件6，以免畸形4901在首帧就隔离而掩盖FIFO容量。
+
+#### handover 标记与真实 Call ID 迁移：独立 typed 消费者（静态闭合）
+
+本轮从当前根盘 CommCenter 和正确的 `libCommCenterMCommandDrivers.dylib` 恢复两条独立链，
+不再将它们当作七byte CallList 的 offset6。后者仍未闭合，不因此生成 CallList。
+
+- `handleVoiceAllCallStatusIndication1f1ac3644` 的 `3f80` 明确取 **tag1f**，
+  `3fac→192ab2c/192aaa0` 解析 `IsHandoverCallList`：count/u8，每项两个u8。
+  `4014..4030` 以 `ldrh >= 0x100` 筛选，即 **item[1]非零**，不是bit0；以item[0]为键
+  保存bool，并在`4500..453c/493c..4954`按真实CallList ID查回该标记。
+- 相邻 **tag20** 是 `ParentCallInfo`，不是上述标记表。`4124→192abfc` 解析，
+  `41e0/4234/4290..4294` 证明item[1]作旧ID键、item[0]作新ID值、步长3B；
+  第三个字节语义未恢复，不猜。`42a8..42bc` 调用delegate virtual+148，
+  `1f1b2098c` 转至内层virtual+1e8；root表 `10158ac10→1006965c4`。
+  后者 `100ff3dc8` 按真实 **Call+140==SimSlot** 选择强Call owners（bool0绕过额外+a0过滤），
+  `6966d0`仅以 **ldrb Call+c4** 查旧ID，命中后`6967a4→101049ad4`，
+  `101049ae8`实际 **str w1,[Call+c4]** 写新u32 ID，再走原通知链；缺键保留原ID。
+  这是原件的身份迁移消费者，不是当前MTK桥已经产生了有资格的ParentCallInfo。
+- SRVCC CallInfo由`1f1ac48c8`真copy构造并strong-own driver后异步发布；
+  `1f1ad98a0`调用driver+78的delegate virtual+a0，真实wrapper addresspoint
+  `20dd487a8` 的+a0=`1f1b20704`，转内层virtual+d8；
+  root表`10158ab00→1006949ec`是`handleHandoverCallInfo`。
+  `MCommandDriversFactory::createCallCommandDriver1f1b1eba8`保存输入强delegate pair至wrapper+8/+10，
+  `EurekaCallCommandDriver` ctor`1f1abd468..478`安装wrapper强pair至driver+78/+80。
+  这是QMI自己的wrapper，**不是此前追到ID更新槽的IMS三层adapter**。
+- root `1006949ec`按CallInfo+d8选driver并比较controller+b8；有既有Calls的对应分支
+  调`10068d734`先查真实UUID owner，driver virtual+128或无UUID owner触发整数ID fallback。
+  `10100db28`遍历controller+78的强Call列表，准确入选谓词为
+  **Call+c4==CallInfo+5c && w2!=0 && Call+2f0!=1**；本调用w2=1。
+  2f0语义未解，不命名为RAT/结束/IMS标志；w2=0跳过全部，不是取消附加过滤。
+  随后的`10100a698(controller,&sharedCall,0)`处理原typed Call，**不是拿CallInfo更新ID**。
+  无owner/no-calls/wrong-driver有清理或拒绝分支，不凭handover通知创建假Call。
+  VoiceHandoverEvent走QMI wrapper+98=`1f1b206ec`→root+d0=`1006945b8`，与CallInfo分开。
+
+root当前Cryptex cache的14处有界原代码/表读取均与提取原件逐字一致；仅资格原件，
+不是新运行流量或构建产物检查。独立peer复读上述分支、四处8B表和实际ID setter。
+材料在`x9/out/call-handover-typed-owner/{handover-contract,current-cache-qualification}.json`；
+peer在`x9/out/call-md-voice-owner/handover-peer-contract.json`。
+仍缺MD交接后的同epoch身份producer、第三字节资格和真实CS/profile/action/media迁移，
+不能直接把MD4902翻成该ID表；VOICE09继续关闭，没有handover功能验收。
 
 ### CallList 七byte原件核对（进行中，不生成默认字段）
 
@@ -382,10 +622,66 @@ state/END或handover**。不新增hook/ready常量。
 
 CallInfo原`toString`证明`+40=PhoneNumberType`、`+44=PhoneCallSubType`、
 `+57=Is Listed As Emergency`，最后bool不是video；`100dd7560`是CallConfig copy ctor，
-不是配置生成入口。桥需保留上游真实opaque配置，未知`+d8` string不猜用途。
-typed delegate按clientId/name保持强shared_ptr，再保存queue/weak_ptr；ACTIVE派送先weak-lock，
-在driver原queue调用真实delegate+20(uuid)。删除按同client/name退休，不能异步缓存裸指针
-或用跨subscriber全局UUID表。
+不是配置生成入口。桥需保留上游真实opaque配置，未知`+d8` optional string不猜用途。
+typed delegate按clientId/name保持强shared_ptr，再保存queue/weak_ptr；这里的name是**登记key，
+不是call UUID**。`100dcbf14`以C++ string `operator+`生成`ims.call.`+输入clientName，
+manager登记为`ims.manager.`+name；emergency另用`ims.call.e911`/`ims.manager.e911`。
+`IMSWrapperDelegate::handleActiveEvent1b7c7b640`与disconnect `1b7c7aacc`均迭代该client
+record的全部call delegate records，**不是在wrapper map里按event UUID查找**。各record保存queue
+及weak_ptr，异步block另深拷贝event UUID，dequeue先weak-lock，再在登记queue（空时MainQueue）
+调用真实delegate+20(uuid)。删除按同client/name退休，不能异步缓存裸指针或用跨subscriber全局UUID表。
+
+UUID过滤发生在CommCenter：ACTIVE `1007c4d3c`先调`1007c4490`，将UUID string转为CFUUID，
+调用model+80 command delegate的+e0查原CallInfo；lookup失败走`1007c4f28→1007c51a4`，
+不执行`1007c503c`的+100同步及`1007c5054`的+40 ACTIVE通知。model+80/+88是强owned
+`IMSCallModelCommandDriverDelegate<IMSCallModelCommandDriverDelegateBase>`，不是typed `ims::Call`；
+其RTTI `101533100`/名称`1010c3f9b`及`10019ef10/ef68`的shared allocation有原件证据。
+真实CallHandle是model::dial的x1 shared pair，由driver同一factory结果传入。
+
+#### typed dial实际输入与异步所有权（2026-11-15，原件静态）
+
+`ims::Call::dial1b7c41468`实参为`(this, calledAddress string const&, CallConfig const&,
+additional string const&, bool)`。driver `100dceb44`向model传递原CallInfo、同factory CallHandle、
+deep-copied CallConfig及calledAddress；normal model在`1007cb970`保留前两项，additional传空string，
+bool传原CallInfo+57。`Call`对象只保存owned UUID/clientId、两CLIR byte、text mode和relay；
+**不保存calledAddress/CallConfig，也不包含callback owner**。
+
+`IMSCallOptions`大小`0x13a0`，ordinary typed dial的明确拷贝如下，偏移均为十六进制；
+未知字段不据数值猜成video、voice或默认profile：
+
+| 输入 | IMSCallOptions | 拷贝形式 |
+| --- | --- | --- |
+| CallConfig+0/+20 | +1/+b0 | 各1 byte |
+| CallConfig+8 | +148 | owned string |
+| CallConfig+40..6f | +b8..e7 | 48 bytes |
+| CallConfig+70/+88/+a0/+b8 | +e8/+100/+118/+130 | 各owned string |
+| CallConfig+d8 | +168 | optional owned string |
+| additional string | +30 | owned string |
+| Call+9/+8 | +28/+29 | 两个真实CLIR byte |
+| Call+40==2 / Call+44 | +79/+7a | text-mode条件 / relay byte |
+| bool实参 | +160 | 原CallInfo+57，不是video |
+| Call+10 UUID / Call+28 clientId | +10/+1388 | ImsUuid representation / owned string |
+
+`100dd7560`深拷贝CallConfig时还保留+28 string和+d0 u32；即便本普通dial未读取它们，
+桥也不能截断配置或对含string的结构裸`memcpy`。`setCallIdBlocking1b7c42d84`将w2/w1写Call+8/+9，
+driver `100dca8bc..940`从真实上游设置选择`(1,1)`、`(0,0)`或`(1,0)`，不能固定CLIR0。
+
+MainQueue block `1b7c41878` capture+20是owned calledAddress，capture+38为独立options copy；
+调用后再次stack-copy options，经真实IPTelephonyManager+90直入
+`initializeNonEmergencyCall1b7b32708`，**不capture Call/shared delegate，亦不重新走Client虚拟dial**。
+该函数以options+1388查`BambiClient::sipStack(clientId)1b7db11e0`；null stack只日志后返回，
+stack+98!=2才发disconnect，不能由void dial返回或无callback证明已成功准入。normal分支还需
+`makeOutgoingUri1b7cc6ec0`成功、无existing unconfirmed calls，才分配0x280 IMSCallInfo并startCall。
+这里的IMSCallInfo+18/+20/+80分别是manager/BambiClient/BambiCall，不是CommCenter CallInfo或typed Call。
+
+当前root原cache export trie确认Call C1/dial、ClientHandle addDefaultCallDelegate/addCallManagerDelegate、
+IMSClientManager updateCallDelegate/delegateForStack为真实导出；导出存在不代表MTK transport可直接实现。
+`sendCallDisconnectionNotification1b7b33400`经clientId→delegateForStack，向wrapper virtual+10传
+owned UUID string、reason和DisconnectInfo；需要上述真实client record、登记owner及原UUID lookup链。
+本轮尚无证据支持完整生产provider替换：最早缺口是按原Personality初始化且具真实有效SipStack/注册状态的
+owned client，随后才是完整配置语义→Android请求及UUID↔epoch/native-ID适配，不能以空factory或直接ACTIVE绕过。
+只读切片、登记key解码、完整dial/owner JSON及原cache export读取脚本在
+`x9/out/call-typed-dial-context/`（收尾归档主checkout；原件及转储不入git）。
 
 typed hangup沿`CallHandle+20→1b7c434b4→MainQueue→endCall(uuid,reason)1b7b39be0`
 找真实IMSCallInfo，再经Info+80的BambiCall调用`endWithReason1b7bc4500`；最终模型mutation
@@ -396,22 +692,383 @@ MediaSession→+280 interface→virtual+98非零，才发布真实UUID事件。�
 ACTIVE会绕过真实owner/media门，不是已实现通话。最早provider缺口仍是完整client/personality
 初始化及网络注册语义/lifecycle，随后才是UUID↔MD ID、状态/END和双向媒体。
 
+#### caller privacy 与 TLV104 策略来源（2026-11-16，原件静态）
+
+**两privacy byte已追到真实SIP消费者，但还不是生产dial profile准入。**
+`Call+9/+8→IMSCallOptions+28/+29`是`BambiCallOptions`子对象的`+0/+1`。
+`initializeNonEmergencyCall1b7b327ac..7b8`将options+28交给copy ctor
+`1b7b42aa4`，其`2ac4/2ac8`以u16保留两byte；
+`SipSession::initializeWithOptions1b7b90d24/28`再原值保存到Session+2a0/+2a1。
+以下偏移限定于这条owned **SipSession** 链，不把其它对象的同偏移RTT字段当privacy。
+
+`SipSession::fillCommonRequestHeaders1b7ba85a0`的决定门如下：
+
+| Call+9 / Call+8 | 原件实际效果 |
+| --- | --- |
+| 1 / 1 | Session+2a1真：Privacy header使用当前stack的owned配置string；空string回退`id`，并调用`SipUri::makeAnonymous1b7ba8758`设置anonymous From |
+| 1 / 0 | Session+2a1假、+2a0真：Privacy header明确设置`none`，不走上述anonymous分支 |
+| 0 / 0 | 不做per-call override；当前stack的AlwaysAddPrivacyHeader仍可独立要求`Privacy: none`，不能解释为显式允许显示号码 |
+
+`kPrivacyId1e26ef2d0`/`kPrivacyNone1e26ef2e8`由真实initializer
+`1b7d882a8..88308`从literal`1b7e589e2="id"`/`1b7e785d3="none"`构造；
+不能把磁盘上的零初始化C++ string误当运行时空值。stack owner也已闭合：
+Session+c8→SipDialog（`90e24`）、Dialog+a8→SipDialogManager（`d07f14`）、
+Manager+60→SipUserAgent（`b49968`）、Agent+8→SipStack（`b4f590`）。
+SipStack ctor`cff9ac/b4`把SipStackConfig建于+a0；initialize`d014e0/e8`
+真实copy入该配置，其首部是SipUserAgentConfig。后者assignment`ae6e9c..ebc`
+保留+248..273及owned+278 string。因此consumer的Stack+2fd/+318严格对应
+UAConfig+25d/+278；`initializeFromPrefs b4de70..dea4`写AlwaysAddPrivacyHeader，
+`b4e44c..e480`写PrivacyHeaderValue。**它们不是Android key124的已证替代来源。**
+
+真实上游`CallCommandDriver::computeClirValue_sync1f40dfba8..dfc9c`读取CallInfo+4c的
+CLIRRequestState：3直接返回CT值2；4查询driver+60的per-SIM `rest::ClirInfo` map，
+key来自CallInfo+d8，缺记录返回2；其它state仅2返回1，其余返回0。
+state4有记录时：record+4==3→2；record+0==3或+8==0→record+4；
++8==2→2；其余→record+0。真实字符串表确认这是**两套不同枚举**：
+CLIRRequestState的1/2/3/4为Suppression/Invocation/Default/Invalid；
+CTCallingLineIdRestrictionValue的0/1/2/3为Disabled/Enabled/NetworkControlled/Unknown。
+CommCenter`100dca8a4..940`将CT1→setter(1,1)、CT0→(1,0)、CT2/3→(0,0)，
+与上表SIP效果一致；不能把Default3直接当Android raw CLIR0或2。
+
+Android已证的可用窄子集是：**non-ECC、普通十进制号码、原owned CLIR明确为1或2**，
+Rtm`265500`不会读取key124来改写它；Rmm`387fb0`虽读取key125并精确比较`"true"`，
+但只有CLIR1且号码以`*82`开头，或ECC且key171为`"1"`才改写0，所以该子集1/2均原值下送108。
+`getClirPrefix387450`的实际literal为1→`#31#`、2→`*31#`、其它→空string。
+本小节不以常识替代尚未闭合的Android输入意图producer；记录这两个原值的策略稳定性及
+Apple已证显式blocking/non-blocking效果，**不据此开放默认profile或增补生产白名单**。
+
+104不是“当前NAS/IMSA显示有网”的派生默认值。`getEccPreferredDomain387a30`先读MCL72，
+再两次独立读`isVoiceGsmRat`：首次真且pref==3→1；否则第二次真→0；否则再读owned MCL31
+的voiceRadioTech，以`C={4,5,6,7,8,12,13}`分类，pref==3→!C，C真→0，其余pref==4→2、否则0。
+不把多次status读取冒作一个原子snapshot。**pref72确为0时，所有分支均返回104=0**，
+但仅凭本地空vector、普通拨号或10086实包不能授予真实pref72来源：
+`setEccPreferredRat2794c0`写AP key72，经StatusManager同步到MCL；普通cf33不走pre-local-ECC。
+`handleGetCurrentCallsResponse26c1d8..c218`确在原owned response data.size unsigned<=7时
+reset AP72=0；需保留这条真实response/同步生命周期，不能用零初始化对象模拟reset。
+
+`isVoiceGsmRat387810`还读取MCL1：`(key1&0xc)!=0 && voiceRegState!=5 && voiceRadioTech==20`
+时强制false，否则调用`isGsmRat387c50`；后者`387cf0..d10`的CCMP决定实际bool，接受
+RIL RAT集合`{1,2,3,9,10,11,14,15,16,17,19,20}`，前段mask只选择日志路径。
+key31不是任意radio整数：`requestVoiceRegistrationState30f8f0`的042f response
+要求8100/10B，value+1/u16LE进入slot CS cache+10；`updateServiceStateValue30e370`
+经`convertCSNetworkType2fd710`构造RfxNwServiceState的voice RAT并set MCL31。
+其中0x8000→RIL20；CS不in-service且isAlwaysReportRatAndCellIdentityInfo假时voice RAT为0。
+当前kernel `X9QMIAT.inc`的CREG/CEREG/C5GREG及COPS AcT生成serving/data NAS快照；
+`X9Messages.inc`的0a05/100(type)/101(state)只生成IMS-registration快照。
+**NAS radio12、COPS AcT11、IMSA registered均不是上述owned MCL31.voiceRadioTech20，
+也不提供MCL1/MCL72生命周期。** 本轮不新增query、探针、provider假ready或encoder字段。
+
+私有证据为`x9/out/call-privacy-policy/`的`privacy-policy-original-proof.json`、
+`read-original-privacy-policy.py`、`privacy-*.numbered.asm`及`ril-voice-gsm-rat.asm`/
+`ril-is-gsm-rat.asm`；30个固定code切片直接读取当前root原cache、root CommCenter及匹配RIL，
+cache text与提取镜像对应切片全部一致。只是原件静态qualification；未运行设备、测试或编译，
+未改生产准入；完整caller-default/runtime profile仍未闭合。
+
+#### typed事件 → FSM → 权威CallState（静态闭合，未hook）
+
+三层model command wrapper真实地址点为 `101532fc0→1015fb090→101532ab0`，
+最后进入 `CallCommandDriverDelegate10158aa28`。factory `10019b654` 建wrapper并传入
+`100dc8b1c`，ctor将真实owner move到driver+88/+90；UUID lookup经
+`+e0→+110→+1a0→100693d28` weak-lock CallController+78 vector、CFEqual后owned-copy
+CallInfo。不是裸指针或把native整数ID当UUID。
+
+ACTIVE实际 `+40→10068f0ec→1010488f0→Call+338→10104eccc→10104f4b8`，
+END经真实 `+50→10068f610→1010494a8→Call+338→10105837c→101058b38`。
+`4Call` ctor `10104730c` 分配0x68 FSM、保存强shared_ptr status delegate至FSM+8/+10，
+Call+338拥有FSM。事件名来自原日志 `10104f530 CallActive` / `101058bb0 CallEnded`；
+transition table由原ctor `10105e0c4` / `10105e568` 填BSS，磁盘零指针不等于无handler。
+
+这里有两套不同状态，不能互抄：FSM+18的表 `10162f248` 为
+Idle0/Ringing1/WaitingToDial2/InitializingMedia3/Dialing4/DialingCallEnded5/
+Alerting6/Active7/Waiting8/UserAnswered9/Held10/WaitingToDisconnect11/Disconnected12。
+CallActive从合法Ringing/Dialing/Alerting/UserAnswered/Held分支写FSM state7；CallEnded保留
+Disconnected12和DialingCallEnded5的不同分支，不直接删Call。此前 `100696b2c` 写
+Call+a4的是SRVCC状态，不是ACTIVE CallState。
+
+最终status delegate `10158af20+28/1006984b8→10158b148+28/100699dd0→101018528`
+先weak-lock nested delegate+20/+28 owner，按真实UUID `101005398` 取Call shared_ptr，
+再于 `101018718` 写 **Call+a0**。ACTIVE传入0，不是FSM的7。匹配
+`libCommCenterBase callStateToString1f03908e0` 原表 `20dad4e78` 是
+Active0/Held1/WaitingToDial2/InitializingMedia3/Dialing4/Ringing5/Disconnected6/
+Alerting7/Waiting8/Idle9。END走status+50 `100698710→10069a00c→101018e18`，
+`101018f54` 直接写Call+a0=6，后于 `101019424` 再调用原state维护入口(...,6)。
+正常state mutation保留 `101018ad8` 等维护，再经 `100ff81c4→owner+170 notify virtual+10`
+传owned CallInfo；Call+2d4非零可在权威写入后提前分支，不能假设每次通知必到。
+notification sender具体type/后续UI publish仍未闭合。
+
+本项闭合的是已有typed事件到真实模型mutation，不提供MTK producer、UUID↔native
+epoch映射或运行dial admission，也不绕过Bambi owner/MediaSession门直接调用ACTIVE。
+它不解决CallList46 producer/offset6，不能将FSM/CallState/ECPI或wire CallEventStatus
+编号混用。原件/枚举/窄asm与复读脚本在 `x9/out/calllist-handler-closure-analysis/typed-model/`；
+无生产hook、设备操作、测试或新镜像。复查可在该typed-model目录运行
+`python3 root-query.py f:0x100693d28 f:0x101018528 f:0x101018e18`，仅读原件；
+旧文件 underlying-active-end-lookup.asm / underlying-real-uuid-lookup.asm 曾误将
+100694eac/100696fcc称UUID consumer，不再采用。旧10068f434不是最终END consumer，
+旧END CTState8已撤销；准确值为Call+a0=6，而非FSM12/5或SRVCC+a4。
+
+#### 2026-11-16 typed拨出状态发布：TRYING不发布，RINGING实际是CallAlerting
+
+原 `IMSCallModel` 的 CallEventDelegate address point `10159c718` 中，
+`+30→1007c55f0` 是 TRYING，`+38→1007c57d0` 是 RINGING。
+TRYING 按真实 UUID 经 `1007c4490` 查找后仅记日志；原 literal `1013ff6c3`
+明确为 `IMS Incoming Indication: TRYING ... Ignoring.`，没有模型 state sync 或通知。
+不能把 MD ECPI130 送 TRYING 后便称拨号状态已发布。
+
+RINGING 的真实执行链是 `1007c57d0→UUID lookup→command+30/10019f148`
+`→100dda270→10019ce40→10068e548→10068d734→10104879c`，
+最后取真实 `Call+338` 的 FSM，进入 `10104e2c8→10104e890→10104eab4`。
+该事件的原日志 literal `10127ac81` 是 **CallAlerting**，不是凭 callback 名称
+解释为呼入 Ringing。`10104e348` 的临时 payload byte5 不当作最终 CallState。
+
+dispatcher 读取 `FSM+18`，以 `(state+1)*8` 索引 BSS 表 `101673178`；
+原初始化函数 `10105e078` 为表 `101673180` 的13个 state entries 填入 handler。
+只有 Dialing4 的 entry（`1016731a0`）是 `10104ec28`，其他 entries 是
+返回0的 `10104ec20`。合法 handler 先复核前态4，再经 `FSM+8` 的强 status
+delegate virtual+28 发送 **CallState Alerting7**，随后提交 FSM Alerting6。
+因此前态、FSM状态、CT CallState、QMI wire event 编号是不同契约，不能互抄。
+
+status delegate `1006984b8→100699dd0→101018528` 保留原 owned 参数、
+weak owner 与真实 UUID lookup `101005398`，在 `101018718` 写入 `Call+a0=7`；
+其后的维护与 `100ff81c4` 通知仍须保留，`Call+2d4` 可在写入后提前分支。
+InProgress 的 command+38 另经 `10068e834→10068e6ec`，不是上述 RINGING 链。
+
+这是原件静态闭合，不是已经安装 MD producer 或用户态 provider。仍须真实
+`(clientId, UUID, epoch, native ID)` 映射、可达 admission、完整生命周期和媒体准入；
+不直接广播 ACTIVE，不构造未知的七byte CallList46，不把 void callback 当最终UI验收。
+新原件切片/派生契约在 gitignored `x9/out/calllist-production/`，
+`typed-publication-contract.json` 保存精确地址/字节；表来源复用
+`x9/out/calllist-handler-closure-analysis/typed-model/stateengine-tables-init-range.asm`。
+无测试、设备操作或新镜像。
+
+#### typed初始化 / 注册 / 注销的原件契约
+
+`createIMSClient_sync1f2e6803c→factory+38/100315998→CreateNewClient1b7c43a00`
+创建真实Client并保存controller+d8；StackDelegate绑定controller+40 alias、真实shared_ptr及
+controller+18 queue。正常`initializeImsClient_sync1f2e6e6d0`从model+268取得真实704B
+StackConfig、model+38取得personality string，调用Client+f0/`initialize1b7c3d768`；
+其四个MainQueue block进入两个真实`initializeFromSIM` overload，保留真实CFDictionary/
+clientId/personality。controller+f8=1及initialized回调置2只是初始化阶段；后续真实
+NetworkServices来自model→Client+130/`updateNetworkServices1b7c3f368`，不能绕过配置。
+
+网络枚举单独来自`handleRegistrationStateChanged1b7abc4a4→wrapper1b7c83344→queue/
+weaklock→controller1f2e6b420→model+60`：0 Deregistered、1 Registering、2 Registered、
+3 Deregistering。真实64B RegistrationActiveInfo由`1b7abc5a4`填service mask、注册URI、
+stackId、expiry差值；URI尚未最终实名为IMPU，expiry截u32未见clamp，不用号码/固定秒代替。
+consumer `1f2e6b660`按真实DataMode/LastAttempted策略归一服务mask；optimized cache stub
+`1f2fb1828→1f038d49c`为`(ipMask&1)|((ipMask>>1)&2)`，不是registered bool→全能力。
+随后`saveImsRegistrationState1f2e6da78→updateCurrentImsState1f2e78df4`在model锁内保存
+DataMode/registered/u64 mask，再经真实service+78/`1007ab37c`写root per-personality节点
+`+38 bool/+40 mask/+48 flag/+50 DataMode`，observer+30通知真实map。静态model mutation
+已闭合，但observer后续CT/UI发布与实际MD-backed输入未闭合，不称设备已注册。
+
+真实20B RegistrationInfo含i32 retrySeconds、SIPcode、termination callerBool、willRetry、
+reserved0与RegFailureReason；error producer仅匹配ImsResult domain取SIPcode，否则0，
+termination默认200来自原件常量。retrySeconds对-1/0保留，其他max(absolute-time(NULL),0)。
+失败consumer `1f2e6bbdc`先提交false/mask0再处理真实retry/PDN/policy，不能只删map。
+原enum6 DisabledCountry、7 Authentication Failed即使SD日志显示Unknown也不能抹除。
+
+正常deinitialize `1f2e6f40c→Client+100/1b7c3e578→MainQueue→IPManager1b7cbe71c`
+进入真实Bambi/SipStack注销；只有uninitialized回调`1f2e6b264`才将阶段置0。
+factory shared_ptr deleter`100315b00`仅ret，release不等于delete；cleanup里的Client+c0
+是removeStackDelegate，不是removeDefaultCallDelegate或全销毁（更正此前槽标签）。
+显式Client析构→removeClient→record/maps销毁有据，但普通controller的cleanup并不
+等于同步注销完成、队列排空或Client析构。`callOnMainQueue`
+实际导入dispatch_async，原removeClient block捕获clientId裸指针；不模仿此未闭合时序，
+不声称原件UAF。最窄替换边界是per-personality真实typed Client+StackDelegate owner/queue，
+仍需真实MD服务mask、URI、expiry/retry、PDN/DataMode、failure/注销确认及call/media生命周期。
+精确原件与复读脚本保存在`x9/out/ims-call-provider-contract/`，本项没有production hook。
+
+#### 实际typed Client接口与拨号的非virtual边界
+
+同版原件的`ims::Client` address point是 **`1d90b86d8`**，不是legacy
+`IMSCallClientInterface`的`101531058/20dada348`。实际Client有44个槽（`+0..158`）：
+`+30 setCapability`、`+90 addMessageDelegate`、`+98 addStackDelegate`、`+a0 addCallManagerDelegate`、
+`+a8 addDefaultCallDelegate`、`+b0 addXcapDelegate`、`+c0 removeStackDelegate`、`+d0 removeDefaultCallDelegate`、
+`+f0 initialize(personality,StackConfig)`、`+100 deinitialize`、`+108 sendSMS`、
+`+130 updateNetworkServices`。**这张表没有dial槽**；不能把legacy `+28`解释成typed拨号。
+构造函数`1b7c3eb68`先设置ClientHandle address point`1d90b8860`，再写上述Client
+address point，ClientHandle+10是原clientId string，不是独立可替换transport指针。
+
+关键直接依赖在正常Call工厂之外：`ims::Call` ctor **`1b7c412a8`**在
+`412e8..41314`直接复制ClientHandle+10的string到Call+28；它没有在该构造链中保存
+ClientHandle指针或shared_ptr。因此为factory+38返回自造vtable对象，既会遇到这个
+非virtual布局读取，也不会使已有Call的dial改走新Client vtable。不能凭这个局部事实
+宣称全系统没有client owner；manager/record与SD controller另有真实owner。
+
+`Call::dial1b7c41468`复制真实UUID/clientId与CallConfig到IMSCallOptions，
+`41790`派送MainQueue block **`1b7c41878`**。block于`418a8..418ac`从
+IPTelephonyManager+90取真实IMSCallManager，在`418cc` **直接BL**
+`initializeNonEmergencyCall1b7b32708`，不是Client virtual调用。它继续使用既有
+AP SIP/Bambi owner链，不会因Client初始化回调换成MD-backed就自动转成MTK DIAL。
+
+据此修正上一节的“最窄替换边界”：per-personality Client/StackDelegate只是
+**初始化与注册子边界**。完整生产桥至少还要同时闭合正常CallFactory+40所创建的
+真实typed Call/UUID、dial/action实际入口、client/epoch/native-ID owner以及真实state/media
+消费者；不以只替Client或CC legacy factory、复制常量registered、直接ACTIVE回调代替。
+当前`X9Calls.inc::x9c_dial_submit`仍无生产admission caller，service09亦未公告。
+现有AppSync exec注入不覆盖CommCenter，日常构建没有call用户态provider，未添加空注入stub。
+这是实际调用链与当前构建源码的静态结论，不是设备已经选中或执行该路径。
+
+原件切片与44槽注释保存在`x9/out/call-provider-integration/`：
+`typed-call-dial-direct-manager.asm`、`typed-client-slot-map.txt`；ctor及dial上游原件在
+`x9/out/ims-call-provider-contract/`。复读只反汇编固定原件：
+`/opt/homebrew/opt/llvm@22/bin/llvm-objdump -d --demangle --start-address=0x1b7c41878 --stop-address=0x1b7c41904 .local/apple/dsc-20H392/System/Library/PrivateFrameworks/IPTelephony.framework/Support/libIPTelephony.dylib`。
+本项没有生产改码、编译、设备操作、测试或镜像。
+
+#### 普通cleanup、异步注销与late callback的真实边界
+
+本轮直接读取真实Cryptex cache：Client ctor76B、vtable352B、SD cleanup槽调用44B，
+与固定提取原件一致；上一轮`+b0 removeStack / +c0 removeDefault`为手工减基址错误，
+**不是版本/提取ABI差异**。正确槽为`+98 addStack / +c0 removeStack / +d0 removeDefault`。
+实际`cleanup_sync1f2e4233c`的`42420..42430`调用Client+c0，因此**普通cleanup已接
+removeStackDelegate**，此前“cleanup仅removeDefault、未连接removeStack”的结论撤回。
+真实cache完整Call block140B同时确认`418cc`的直接BL，不依赖提取文件的单独槽猜测。
+
+但这不等于Client退休：普通deinit写controller+f8=3，uninitialized置0并保留
+controller+d8/e0；controller dtor释放shared control block时，root factory custom deleter
+100315b00仍仅ret。CreateNewClient实际返回独立64B Client，manager的48B record是另一对象。
+已审普通deinit/cleanup/release没有证明Client真析构已发生，不能据此free或重用旧identity。
+
+`removeStackDelegate1b7aaaa40→updateStackDelegate1b7aab668`只发MainQueue
+dispatch_async，不是完成fence。block1b7c34e30的nullptr分支在34ff0调用
+IMSWrapperDelegate::removeStackDelegate1b7aaba1c，擦wrapper+40的weak/queue登记，
+然后直接跳35160，**绕过SharedHolder+0的stack强owner map**。
+nonnull分支是emplace：3500c的现存非空entry保留首strong owner，35014..35068才插空位；
+不能机械复制它来实现任意same-key owner替换。
+
+uninitialized producer1b7c84274已经复制出去的weak pointer与reason不会被擦登记撤回。
+dequeue consumer1b7c844c0仅weak.lock成功后以临时strong调用delegate+40，失败drop；
+该consumer未检查source-client-ID、init epoch或当前phase。真实cache支岛
+1bc65ff8c→194712078为libc++ weak.lock，1bc65ff80→194712048为release_weak，
+不是uniform-delta猜测。因此“remove已返回→late callback已取消”不成立，不将局部时序
+形状称为原件实测UAF。
+
+真Client dtor1b7c3ec00才同步removeClient1b7c33900，销毁record的wrapper weak maps、
+SharedHolder strong maps、strings/queue并擦manager record，随后异步339e0→
+BambiClient::invalidateStack1b7da7e0c。末步仍不是completion fence，且block捕获borrowed
+client-ID pointer；新provider须own-copy身份并建立真实终态/队列退休条件，而不是仿照
+异步裸指针或把uninitialized当全对象销毁。
+
+精确原cache切片、修订后的自动槽表与复读脚本在`x9/out/ims-client-lifecycle/`：
+`actual-cache-client-vtable.txt`、`actual-cache-sd-cleanup-slot.txt`、
+`actual-cache-typed-call-dial-block140.txt`、`lifecycle-decoded.json`、`static.py`。
+可从主目录用`python3 x9/out/ims-client-lifecycle/static.py ip dis 0x1b7c34e30 reread-update-stack.asm`
+只读原件。固定UniXNU/hackios-xnu-kernel/QcomBaseband及其tracked patches的窄typed-provider
+名称查询未找到直接可复用实现；QcomBaseband已核入口是QRTR/QMI wire/board transport，
+不把限定零命中升级成全系统不存在。无生产改码、构建、测试或设备动作。
+
+#### 真正 CallFactory / RTTI / action owner 与可导入构造入口
+
+正常factory的vptr是`101532938`（RTTI=`11CallFactory`），createCall为+40→`10019c234`。
+物理ABI：x0 factory，x1指向UUID owning首字段（driver实际传CallInfo地址），
+x2临时`shared_ptr<ims::ClientHandle>`，w3真实`isEmergencyCall(CallInfo const&)`，
+x8为`shared_ptr<ims::CallHandle>` sret；stripped正式x1声明仍不猜。
+正常分配0x60=control0x18+真实Call0x48，control release真调用Call virtual destructor，
+不是Client的ret-deleter。UUID经CFRetain和CFUUIDCreateString，不能生成默认UUID。
+
+`100b93568→10019b3d0`创建40B factory；`100fe1b54/1dd8`将强pair安装至controller+48/+50；
+Registry按`CallControllerInterface` RTTI插入controller，不是独立factory item。
+factory锁自身weak后`10019b4c4→10019b654→100dc8b1c`，driver ctor`100dc8dd0/dd8`
+保存同一强factory pair至+328/+330。factory自身weak为+8/+10，Registry weak为+18/+20。
+正常action还通过`1007cb918 __dynamic_cast(ims::CallHandle→ims::Call)`，
+成功才virtual+80；不拿任意假vtable/裸对象代替typed拥有与RTTI。
+
+当前根盘原cache **export trie**确认Call C1真实导出`1b7c41390`（单B到C2`1b7c412a8`），
+Call RTTI`1d90b81d0`和vtable symbol`1d90b7db8`也导出；Call D0/D1/D2仅本地、没有相应export，
+导出的是CallHandle D2`1b7c41344`。提取dylib的export command为0/0不代表原cache无导出。
+不能声明不可导入的Call destructor，或仅构造原Call就声称拨号已转MD：原dial仍直入IMSCallManager。
+
+已恢复18槽Call、13槽CallHandle、25槽event wrapper与6槽manager delegate；manager delegate+10
+外部目标仍未解。Call字段+10 UUID/+28 clientId、+8/+9 CLIR、+40 TextMediaSessionMode/+44 relay有据；
+answer/end调用manager+20/+28，end reason先经原enum→string，不直猜MD cause；mute+60的ret不证明媒体静音。
+本HEAD无call用户态provider builder/CommCenter loader，exec allowlist不含CommCenter；
+`x9c_dial_submit`无生产caller，`x9c_request`没有VOICE20 admission，现有内核C ABI未证明用户态callable面。
+因此本轮不加仅loading/空handler，尚须owned factory替换、profile/UUID/epoch/native-ID、内核入口及真实媒体生命周期。
+原表/汇编/导出复读脚本与准确decision在`x9/out/call-typed-actions/`。
+
+#### provider-install：真实 factory 返回面、临时 action handle 与 AP 漏路（静态闭合，未安装）
+
+最窄的真实消费者是`100dcf174`：`100dcf198`取driver+328的强owned factory，
+`100dcf1a8`读其vptr+40、`100dcf1c0` plain `BLR`；正常factory addresspoint
+`101532938`的该槽地址是`101532978`，原实现`10019c234`。
+因此可实现方案应保留真实factory/controller/driver与原+40构造，只在真实返回面接管action；
+不是替换完整MCommandDriversFactory，也不是查找不存在的独立Registry factory item。
+本轮尚未实现对该loaded槽或真实factory实例的可写保护、安装时序、原指针保存/原子切换和撤销，
+不能把一个地址或loader receipt写成已安装。运行时必须校验上述原件image UUID/ABI和dyld已fixup指针，
+不能使用磁盘chained-fixup编码值；当前arm64 plain `BLR`不授权猜测arm64e签名规则。
+
+**Call是临时action handle，不是MD生命周期owner。**正常dial的factory pair在sp+600/+608；
+config helper的copy sp+5d8/+5e0在`100dce798..7cc`释放，model正常路径仅保有local cast pair，
+调用Call+80后释放；driver `100dcec04..c70`又释放剩余sp+5d0与sp+608。
+另一个真实动作`100dd484c→100dd4888`重新调用同一helper创建Call，调用+30后在
+`100dd48e8..491c`释放。这已否定“仅首次dial对象安装，然后靠其析构退役MD”的方案。
+每次factory返回均须关联既有logical client/UUID/native epoch，context寿命独立于这些临时对象。
+
+真Call addresspoint为`1d90b7dc8`，不是导出vtable symbol`1d90b7db8`。
+D1/D2 `1b7c43ac8→1b7c41344`仅销owned UUID/clientId；D0 `1b7c43acc`随后delete，
+**两者均不发hangup、END或deinit**。shared control `10019ed40`将this调整至embedded Call+18，
+调用其vptr+0 **nondeleting** destructor，control D0再释放整个分配，不能对embedded Call执行+8删除。
+若以后使用共享action adapter，应保原RTTI[-2/-1]、原D1/D0及typed布局，表至少与引用它的所有对象同寿；
+native退休只在真实终态/准入失败/逻辑client注销与callback fence闭合后执行，不以Call析构代替。
+
+**只改dial/hangup仍会漏到AP。**CLIR+38 `1b7c42d84`仅写w2→+8、w1→+9，可保原setter；
+text+28 `1b7c432fc`除写+40还派block `1b7c433d4→1b7b3ad4c setTextMediaSessionMode`；
+relay+30 `1b7c43898`除写+44还派block `1b7c43970→1b7b3acac setRelayMode`。
+后两者在config阶段已可调用，MD-owned对象必须保字段mutation但隔离AP发送，不能原函数passthrough。
+其余会发AP的ring/answer/end/DTMF/refresh/hold/resume/pull/branded-image动作同样必须有明确准入，
+未实现不能回落AP；原mute仅ret不证明媒体静音。当前缺native user provider context/admission，
+仅内核内部dial入口、VOICE20仍拒绝，故本轮不写unused installer或空factory，亦无生产编译/上机结论。
+
+精确汇编、原件UUID和facts/design分层见`x9/out/call-provider-install/provider-install-contract.json`；
+`factory40-actual-callsite.asm`、`call-helper-other-action-and-config.asm`、`driver-normal-pair-release.asm`、
+`call-original-d0-d1.asm`及`text-config-ap-leak.asm/relay-config-ap-leak.asm`可原件复读。
+原typed callback最终消费者由`x9/out/calllist-production/`独立追踪；返回真Call不等于state发布，
+不要用TRYING忽略通知、未知状态数值映射或fake ACTIVE冒充通话流程。
+
 ### 通话专用voice音频契约（仅原件静态，不冒充媒体speaker）
 
-同机HAL `ScpSpeechOn2474a0`先registerAdspFeature14，`247544`以scene0、UL/DL各65536B
+同机HAL `ScpSpeechOn2474a0`先registerAdspFeature14，`247544`以scene0、AP↔DSP各65536B region
 和真实`processDmaMsg246660`/this注册callback；GOT44d3b8由原库relocation确认。
 `AudioMessengerIPI1dceb0→audio_ipi_dma_cbk_register42f790`保存callback/this，
-`42fa5c..6c`发ioctl40046915，20B payload含magic/~magic、scene/reg、UL/DL尺寸。
+`42fa5c..6c`发ioctl40046915，20B payload含magic/~magic、scene/reg、a2d/d2a尺寸。
 Android参考REG_DMA→alloc_region(scene0)按实际task/dsp/controller发双向region的
-offset/size/read_idx/write_idx，再以ADD1 NEED_ACK UPDATE_REGION发布，不能沿用SmartPA布局。
+offset/size/read_idx/write_idx，再以ADD1 NEED_ACK UPDATE_REGION发布；公共descriptor ABI可共用，
+但不能复用SmartPA的coreA/scene/单环尺寸与owner。
 `247688..6bc`实际scene0/layer2/type0/ack1/AD20，param1是实际时间/on打包值，param2是modem index，
 `42efc0→42f548..55c`落ioctl40046900。没有把本机抓到的单次值当运行默认值。
 
 **更正**：OpenDSP this+158是SpeechDriverNormal；`sendIpcCmd24c720→1b2ac0`最终只有返回0，
 不是MD↔DSP3D00 transport。scene0 callback只分DA00/DA10/DA11/DA12；3D00是另一MD→DSP方向，
 其完整producer/consumer、MD voice DMA、voice AFE与Aurisys参数生命周期仍缺。
-当前native IPI_DMA只拥有coreA/task14或32，板级transport实际只注册core0；Android双核scene0
+当前native IPI_DMA只拥有coreA/task14或32，板级transport实际只注册core0；固定参考中双核scene0
 路由HiFi3_B，但实际physical routing来自task-info，不把Aurisys core_type1猜为物理core1。
+
+实际HAL `audio_messenger_ipi_init42e2d0`在`42e5f8..42e60c`以
+**ioctl40046914**取kernel task-info到BSS4675d4；每项8B，`audio_get_dsp_id4302a0`
+读取首u32，`get_audio_controller_task430310`读该项+7。Android固定参考按
+`core_total>1`选择scene0→HIFI3_B(enum3)，`ipi_dsp_id_to_adsp_cid`减2→physical core1，
+再走`adsp_send_message`。已抓DT明确core-num2、core1 mailbox2/3与独立IPI_DMA_B
+0x100000；这仍不是本次runtime task-info[0]的8B回读，更不是DSP consumer证据。
+HAL静态`get_audio_controller_task_by_id430370`常量002f2b2a2e2e明确id2→42/id3→43，
+也不能拿它替代动态scene→dsp-id选择。
+
+REG_DMA参考布局现在已闭合：header128B，scene0的AP_TO_DSP / DSP_TO_AP两个entry
+分别在+128/+512，每entry384B；offset+0、size+4、read_idx+128、write_idx+256。
+ADD0 DIRECT发`{u64 base_phy,u64 pool_size}`，只有发送成功才置inited；ADD1 NEED_ACK
+以param1=scene0发布region。**这两条65536B region没有被证明是MD voice PCM的UL/DL环**，
+不能用AP↔DSP控制/数据region的已知布局补造MD3D00的payload、PCM地址或节拍。
+窄MD speech/SPC原件区间90636ce8..90659400与907ff500..90808600未见3D00/D300
+immediate，仅限定这两个范围；`spcIO_sendMsgViaCCCI90652c34`直接走CCCI4/ccci_write9065281a；
+另一SPC stream producer907ff728在907ff8e0调用AFxx mapper907ff500、907ff972调用
+ccci_write。两条legacy链均不是已证MD→DSP3D00，不把不同caller混成同一wrapper调用链。
+
+当前`X9Calls.inc`没有native audio/DSP/REG_DMA生产调用，原core0/IPIA/scene14或32
+owner也未拥有scene0通话。生产接入仍需独立call epoch/SIM/modem-index生命周期，
+以实际task-info确认core/pool选择（若core1则B）的双region及同generation强pin、真实AD20与完整DSP reply，
+然后闭合MD3D00 producer/payload、同版DSP consumer/ACK、MD PCM地址/权限/codec节拍。
+不能借用SmartPA owner或新增stub宣称通话音频修好。本轮只读材料归档
+`x9/out/call-voice-md-handshake/`（原asm、源码切片、task-route-and-dma-decoded.json）；
+没有生产改码、编译、测试、设备操作或镜像。
 
 iOS原件VirtualAudio factory21ebc8比较CFString62e790的UID`Baseband Voice`，匹配后21ee7c
 创建592B/vtable621c30的独立设备，包含`Baseband Downlink`/`Baseband Uplink`。
@@ -421,6 +1078,109 @@ CTAudioSampleRateSwitchDidComplete；CT callback328944的type0..2经table524698�
 `3196333F-5A48-373B-B427-0146DC1177FB`，原件build metadata为20H392/16.7.16。
 不能仅广告设备UID或复用Speaker/Hawking媒体设备就称voice接通。
 全部窄切片/私有原件在主checkout`x9/out/call-audio-analysis/`；没有生产改动/编译/设备验收。
+
+新增stream入口静态证据：Baseband Voice factory调用base ctor `20c078`，`20c110`把真实
+输入AudioObjectID保存于device+b8；slot88/`327b18`分别调用`20a4c4(dir0/dir1)`。
+该函数用实际ID查询`stm#`的`inpt/outp` scope，经AudioObjectGetPropertyDataSize/
+GetPropertyData取得真实stream ID，再由virtual+188/`20a29c→231740`构造owned wrapper。
+不是写UID就凭空生成双向stream。voice+240另是`dispatch_once→216d50`创建的CT singleton
+shared owner（`217124`调用CTServerConnectionCreateOnTargetQueue），**不是MD DMA/media指针**。
+模块内CreateIOProcID helper `322d3c`检查错误及非NULL IOProc，但它从voice入口的完整caller/
+真实硬件provider仍未闭合，不把模块级API引用当voice streaming成功。窄切片/复读
+`x9/out/voice-provider-analysis/{voice-provider-boundary.json,macho_functions.py}`；原件静态，
+没有audio生产改动、构建或设备动作。
+
+#### USIP AD50 前置与实际 MD SpeechOn：不同层、不同 owner
+
+HAL真打开`/dev/usip` O_RDWR，`c00844f1/c00844f3`读phone-call config/hwif；参考驱动实际copy u32，
+不能当8B task-info/ready。已抓DT config3/hwif0、真实拨出opendsp3；`configSpeechInfo1a6840`
+清128B并从动态config/hwif填+3/+55，不把它们替换为默认常量。
+
+固定`mtk-usip.c`的open发送 **AP AD50 / IPI_MSG_A2D_GET_EMI_ADDRESS，不是MD3D00**：
+header16B（magic8888/scene/u8 src1,target2/type1/ack0/idAD50/payload_size16/param2=0），
+payload两个u64 `{USIP_AP_PA+0x30000,0x30000}`。main scene0及enh bit1时sub scene19共用payload，
+BYPASS_ACK，send_result0不等于DSP回执。范围包含PHONECALL8000和SMARTPA28000，
+不能借SmartPA core-A/ticket替代独立call owner。当前实际LK ID24 descriptor为
+AP=f0d00000/MD=42d00000/size60000/flags2；这是日志事实，不硬编码为构建参数。
+当前`x9_modem.inc`明确跳过ID24映射/清零，ap_off=ffffffff不是NC offset。
+未来只能先按锁内crs/regs配对读真实descriptor并取得独立访问/lifetime资格，不能盲map/clear/start/ready。
+
+另外`SpeechOnByApplication1ad1d0/1ad300`真发 **MD2f20/sub25/128B sph_info**；
+MD body校验并保存配置→Spc_SpeechOn→SP_SpeechOn→af20已由原件及Android拨出af20 result0闭合。
+此控制响应仍不证明MD PCM环、iOS双向声音或AD50消费者。
+同版AD50 DSP consumer、真实8B task-info/core、独立USIP生命周期、MD3D00/D300和UL/DL PCM地址/节拍仍缺；
+不用另一SPC空sendIpcCmd返回0、参考路由或REG_DMA两个65536B来填空。
+准确分层、原汇编及参考推导（未发送、非抓包）在`x9/out/call-md-voice-owner/usip-ad50-and-md-speech-on-contract.json`。
+
+#### 通话 AFE descriptor / DSP trigger owner：原 HAL 决定门与参考实现
+
+本轮只读原件及已有拨出日志。**固定输入首先缺同版 `audio_dsp` 固件**：已抓 properties 的
+OTA 分区列表含此名，但现有 `.local/x9` 分区备份、modem 原件与已抓 vendor 文件中没有该
+payload，也没有同版 audio DSP 模块。不能拿 `scp_b`、SmartPA A-core 固件或开源默认路由替代。
+真实 task-info[scene0] 的8B、独立 `ADSP_USIP_PHONECALL` owner 与 DSP consumer 仍缺。
+
+原 HAL `AudioDspPhoneCall::setPhoneCallDspShareMem25f380` 将 bool&1 依次写入实际字符串
+`adsp_calldl_sharemem_scenario`（VA100c7c）、`adsp_callul_sharemem_scenario`（VA125bc8）；
+第一项成功才写第二项，两项成功才返回0。下面仅是由这些**同名 controls** 锚定的 MT6993
+reference 实现（HEAD `4d505a4292dab3176a45fec66dc85debc362e24c`），**不是同版驱动或固件执行证明**：
+
+- `mt6993-afe-pcm.c:1428..1550/2134..2141` 按实际 task attrs 将 CALLDL 的 MEMDL、CALLUL 的
+  MEMUL/MEMREF（只有 memif>=0）设为 `use_adsp_share_mem`，没有固定 DL/UL/REF 编号。
+  substream 未关便从1解除为0会标记 `err_close_order` 并触发 AEE；setter 返回0也不能证明
+  实际 attrs 选到 memif，更不是 DSP ready。不能只释放通用 audio ticket 便退休此 owner。
+- `mtk-afe-fe-dai.c:418..440` 的共享内存分支调用 `mtk_adsp_allocate_mem`；后者
+  `mtk-dsp-mem-control.c:1077..1137/1434..1468` 从 `AUDIO_DSP_AFE_SHARE_MEM_ID` gen_pool
+  分配真实 `snd_dma_buffer`，pool 源于 `ADSP_AUDIO_COMMON_MEM_ID` reserve memory，
+  **不是 USIP_ID24 或 ADD0/ADD1 注册的 AP↔DSP 两个65536B region**。
+- AFE `:475..546` 设置真实 dma_addr/bytes/channel/rate/format 后调用 `afe_pcm_ipi_to_dsp`。
+  `mtk-dsp-mem-control.c:1369..1400` 根据动态 memif 与 default/runtime/ref_runtime 选择 task；
+  `mtk-dsp-common.c:495..578` 再检查 task、runtime/default，将物理 ring bridge、PCM attrs、
+  memif/IRQ 写进该 task 的 `audio_afepcm_buf`，复制至同 owner 的 `msg_atod_share_buf`。
+  HWPARAM201 / PREPARE203 发送 PAYLOAD+NEED_ACK，payload 是 **physical descriptor address**，
+  不是 PCM samples；方向 DL1/UL2/REF4 也须走真实 REF_RUNTIME 判定。scene 由 CALLDL→PHONE_CALL_SUB、
+  CALLUL→PHONE_CALL 映射，不猜实际 core。发送还受 `is_audio_task_dsp_ready`/default 门约束。
+  外层 AFE 忽略发送返回值，内层忽略 attr 构造返回值，不能以 hwparams 成功代替消费或 ACK。
+- **实际 trigger 决定门**：`mtk-afe-fe-dai.c:919..935` 对 `use_adsp_share_mem` 返回 false；
+  `mt6993-afe-pcm.c:216/303` 因而跳过主机 memif/IRQ 启停，其 owner 在 DSP。
+  现有 host-only AFE 播放/录音、SmartPA coreA 或两条 REG_DMA 环不能冒充此通话硬件 provider。
+
+还必须区分真实本次拨出路线：MO 原日志 `:624..640` 实际执行 `modemPcmOpen` 和两次
+`Hostless_Speech` open（2ch/48000/1024×2/format0）。原 `modemPcmOpen28220c/282214`
+检查 ADSP option 与 frame-base scheduling；frame-base 真分支会跳2826f0，绕过 Hostless open。
+所以不能凭 `AudioDspPhoneCall::adspPcmOpen` 符号存在便称本次走了上面的 descriptor 链。
+reference Hostless 图连接 PCM_0/1 与 ADDA/I2SOUT，仅是候选图，未证本次所选端点。
+
+原 `SpeechExtMemUSIP::openShareMemory1bc970` 的另一 ioctl **c00844f0** 读 size，再映射
+AP parameter region。真实 maps 的 `/dev/usip` rw-s 长度30000，不是 PHONECALL8000。
+`formatShareMemory1bcc70` / `writeSphParamToShareMemory1bd050→1bd390` 将参数放在
+APmap+4000 的2bfe0区间，保存/发布 `vendor.audiohal.speech.shm_usip` 与
+`vendor.audiohal.speech.shm_widx`；当前 MO `configSpeechInfo` 的 usip param size/index均0，
+既不证明参数写入，也不证明通话 PCM。`AudioDspCallFinal::processDmaMsg238e80` 仅消费101
+dump与严格64B的103 dump metadata，不是 AD50/MD3D00 或物理 PCM consumer。
+
+完整窄切片、原日志行号、静态复提脚本与分层 JSON 在 gitignored
+`x9/out/call-voice-dsp-owner/owned-call-descriptor-boundary.json` 及同目录；未改生产源码、
+未编译、未运行测试/人工向量、未操作手机。此证据补齐独立 buffer/trigger 决定门，
+**仍不证明同版 DSP receipt、USIP_PHONECALL 消费、iOS Baseband Voice I/O 或双向声音成功**。
+
+#### IMSA 注册分流窄修与短信初始化配置边界
+
+RIL `onHandleUrc290e18..290ecc`先按4a01/tag100/u8分流：type0 CIREGU/tag101、type1 WFC、
+type2 ImsRegInfo、type3 RegResp。生产`X9Messages.inc`现在必须**type0**才解析101为注册bool0/1，
+不混CIREG query的0..4枚举；此修复只隔离实际parser分流，不设置网络ready。
+两条真实4a01/type2（retained-radio line5157/5321）证明共用消息：104是account_id、
+8105是URI、106是expire_time；**255是expiry，不是service mask**。expiry非零→report_type1，
+为零→0；type3另owner report_type2/account104/error107/reason108，core保存expiry=-1及code/reason。
+type2实际没有101，旧parser已忽略；不声称日志证明曾污染注册state。
+不以account猜stackId/personality，不用脱敏URI、未知expiry单位/clock或缺失Apple service mask补ActiveInfo。
+原dispatcher、core owner、帧解码及真实Baseband recipe单对象exit0/34warnings在
+`x9/out/call-init-production/registration-contract.json`；固定完整kernel结果见NOTES。
+
+短信原初始化emitter→callback准确对应：WMS3a DCDisconnectTimer、39 RetryInterval、38 RetryPeriod。
+这些配置回调成功/失败日志不产生ServiceReady，未证明unsupported配置终止初始化；
+不补无MD timer writer依据的fake success ACK。已有Android4601→601/602→SMSC形状与实现吻合，
+当前Messages同token commit/重开或MO对端收到无新增运行样本，不当作验收。
+精确原回调与边界在`x9/out/call-init-production/sms-followup-boundary.json`。
 
 ### SMS集成：未发布MT的原子host queue准入
 
@@ -441,6 +1201,213 @@ selected/partial/late-CNF及已mark-read的step2验证/hold不变；其他generi
 Apple readStored callback`1975920..38`实际用index/readtag/mode，`197596c`是25s host guard；
 未拿旧319中unsupported的存储启动日志当修复验收。9项新TAG人工源码向量、总42只编译未执行，
 SMS/CALL host、header与真实recipe两对象均exit0；统一kernel构建见NOTES。
+
+### Apple短信消费者 → Messages保存分支（原件静态，非当前消息验收）
+
+本轮核对Apple WMS01的TransferRoute parser **`1f192cfb8`**：
+ack_indicator/u8、transaction/u32 LE、format/u8、length/u16 LE及SMSC/TPDU bytes与
+当前桥匹配。WMS31 List parser **`1f192d720`**同样是count/u32与每项index/u32、tag/u8。
+没有找到新具体codec mismatch，不为“补全iOS”另造PDU parser或绕过原Messages存储。
+真实libCommCenterBase `asString1f0386df8` / 表20dad23d0明确
+MsgPduProcessStatus：1 MemoryFull、2 ParsingFailed、4 SmsSuccess、9 CMASSuccess；
+这个processing状态既不是QMI Result error，也不是Messages数据库提交结果。
+
+原SMSServiceSession的完整接收入口已静态闭合：
+`smsMessageReceived1f3cc4ebc→_processSMSorMMSMessageReceivedWithContext1f3cc4818`
+→CTMessageCenter `incomingMessageWithId`（49dc）→转dictionary（4be4）→
+`writeMessagePayloadToDisk:fileName`（4c44）→`_receivedSMSDictionary`（4c58）→
+`_processReceivedSMSMessage1f3cd41e0`→`didReceiveMessage:forChat:style:fromIDSID`（1f3cdc934）
+→IMDServiceSession `didReceiveMessages1c6518118→_storeMessage1c6518e88`
+→`_IMDStoreMessage1c650556c→IMDMessageStore.storeMessage1c64799e4`。
+payload文件写盘在前，不等于message record已提交，也不证明当前token走过此链。
+
+IMDPersistence `_IMDCreateIMDMessageRecordRefFromIMMessageItem1a8b33ad8`调用
+`_IMDMessageRecordCreate1a8ae2834`，按实际`_IMDIsRunningInDatabaseServerProcess`
+决定数据库server内建记录或sync-XPC路径；不是收到WMS就必然直接写SQL。
+数据库server create分支在 **`1a8ae3380`** 调AddMessageRecord1a8b5467c，
+locked callback1a8b54720于54740调用CoreSDB AddRecord1e75fbc78，
+再于 **54748** 调SaveStore1e75f7668。SaveStore于1e75f7698传transactionType=1到
+SaveWithPreAndPostCallbacksAndTransactionType1e75faa88，正常事务分支
+1e75facb0调用Commit1e75ff1f8。只有`sqlite3_get_autocommit=0`才在1e75ff228调用
+PerformSQL1e75f8890执行 **`COMMIT;`**（原CFString20d0a0360/data1e7606177/7B），
+再经1e75f88b8→Step1e75f5674→sqlite3_step1a987c348。这里已经连接真实调用，
+不是仅搜到COMMIT字符串；已经autocommit、无pending工作及特殊transactionType仍有不同分支。
+
+save于1e75facd4..face4把SQL result0/101（SQLITE_DONE）转bool，AddMessageRecord
+保存并返回它；**create的1a8ae3384**据此决定失败释放record并返回null，或取真实RecordID。
+因此实际保存成功须过这一决定分支，不能用callback出现替代：XPC completion
+**1a8b7b3e8即使Create null也调用**；IMD helper `didStoreBlock1c6505f0c`的w1来自
+storeMessage之前的shouldStoreDecision，不是SQL commit result。post callback（若提供）
+也在commit之前运行；这里SaveStore本身没有提供pre/post callbacks。
+
+原件静态保存控制流/失败分支已闭合，**仍无当前短信token到成功record/SQL分支、
+数据库重开/最终Messages显示、或MO对端收到的运行证据**；WMS37 receipt不改变此边界。
+精确原asm、selector解码与字段/事务JSON在`x9/out/sms-ios-consumer/`，包括
+`apple-storage-boundaries.json`、`apple-imdaemon-store-helper.annotated.asm`、
+`apple-add-message-record.asm`、`apple-coresdb-save-commit.asm`、
+`apple-coresdb-sqlite-commit.asm`、`apple-xpcserver-record-create-tail.asm`。
+新支岛target与COMMIT常量已从当前root Cryptex cache只读核对：12个支岛各12B、
+CFString32B、SQL7B均与先前采样逐字一致；`apple-root-cache-provenance.{json,txt}`
+保存实际subcache/offset/VA/raw bytes。旧sysos mount只作比较来源，不再作为权威原cache。
+从主目录可用`/opt/homebrew/opt/llvm@22/bin/llvm-objdump -d --start-address=0x1e75ff1f8 --stop-address=0x1e75ff240 .local/apple/dsc-20H392/System/Library/PrivateFrameworks/CoreSDB.framework/CoreSDB`
+只读固定原件。不运行人工向量/测试，不读真实短信数据库文件、不改生产、不编译或操作设备。
+
+#### 通知 messageID → 同源 CTMessage 与同步取件回复（2026-11-16）
+
+本轮只推进原接收入口中的 `incomingMessageWithId:`，不重跑保存/ACK审查。
+当前root Cryptex cache的CTMessageCenter class `1e1dd72b8`、ro `1d5b0b6e0`、
+methodlist `188225d38`经实际slide-v2 rebase chain及relative-selector metadata确认，
+该方法实现为 **`188180200`**；其原件代码与同版CoreTelephony slice逐字一致。
+
+已有SMS入口把通知的 `uint messageID`传到`1f3cc49dc`；CoreTelephony于
+`188180224`保留原参数x2、`188180270`以w21构造XPC int64，再在
+`188180288..298`写入 **`kSmsMessageID`**。请求的`kRequest`为
+`kSmsRetrieveMessage`，没有据数字相等把此ID解释为MD token、QMUX txn或SQL RowID。
+
+取件helper `188158070`尾跳真实实现`188158bd0`。后者于`188158d04..d0c`
+把原connection+28与请求交给stub **`188224bfc`**；该12B原stub的GOT
+`1dac9ec78`经实际rebase chain指向 **`1d1bee000`**，并由当前原libxpc
+export trie确认是`xpc_connection_send_message_with_reply_sync`。
+返回reply在`188158d58`写入调用者的同一个out-reply owner，再检查dictionary类型与
+`kPosixError`/`kMachError`，同步返回packed状态。这里没有异步completion作为保存收据。
+
+`incomingMessageWithId:`在同步调用返回之后才从reply读取`kSmsMessageBody`、
+`kSmsMobileCountryCode`、`kSmsMessageType`与`kSmsSubInstance`，按type1/2调用
+`decodeSmsFromData:data:`/`decodeMessageFromData:data:`。返回CTMessage若非null，
+于`188180588..590`将**仍保留的原w21**交给`setMessageId:`，随后才返回给SMS入口；
+`setReplyEnabled:`和`setCountryCode:`是另外两个字段。由此静态闭合的是
+**通知uint ID → 请求kSmsMessageID → 返回CTMessage.messageId的同源身份链**，
+以及**取件同步reply → CTMessage构造/返回 → 既有dictionary/保存调用**的顺序。
+
+这不是CommCenter处理status4/强`sms::Model`到app通知ID的生产关联，也没有新增
+CTMessage.messageId到Messages GUID/成功record的强owner证明。Messages GUID、真实
+SQL RowID与MD物理ACK token仍须分别关联；同步取件成功不能充当SaveStore/COMMIT、
+数据库重开显示或WMS37物理ACK收据，已有SQL成功分支亦不替代当前运行的同源关联。
+原件bytes、读范围/subcache/offset、selector与export资格及重放命令保存在
+`x9/out/sms-save-authority/`的`identity-boundary.txt`、`identity-boundary.json`与
+`incoming-*.{asm,reads.json,original.bin}`；不读短信数据库、不扩server daemon，
+未改生产行为、未运行测试/构建或操作设备。
+
+#### 原MT入口 → 同源弱controller与ACK callback dispatch（2026-11-16）
+
+本轮停在真实controller dispatch边，不把MD token、通知ID、Model字段或SQL RowID
+按数值等同。原Base export trie确认`sms::Model::setMessageID(unsigned short)`
+**`1f033e584`**仅写`Model+34/u16`，getter **`1f033e58c`**仅读该字段；
+这两个accessor没有证明谁把它生产成通知的`uint messageID`。
+
+callback地址点 **`20dd22a10`**的7个slot经当前root cache实际slide-v2 chain资格确认，
+`+30`指向既有MT ACK callback operator **`1f197891c`**；原clone
+`1f19787f8..8874`也构造同地址点。只在既有SMS范围的local slice机械定位其
+ADRP+ADD：class-method窗口0 hit，lambda窗口找到 **`1f197272c/2730`**。
+这些inventory仅作lead，0 hit不等于系统不存在producer。原`LC_FUNCTION_STARTS`
+将该命中限定为 **`1f1971f78..1f1972d1c`**，不是附近猜测的函数边界。
+
+该原函数是`registerIndications_sync()::$_1`经`ClientRouter::setIndHandler`注册的
+实际`operator()(SubscriptionType&&, QMIServiceMsg const&)`。其普通TransferRoute MT
+路径于`1f197230c..2338`选择TLV11、解析到`sp+40`；`1f1972544..256c`从同driver
+`+88`弱control调用`__shared_weak_count::lock`，成功才取`driver+80`的controller
+指针。原12B支岛 **`1f2f99d70→194712078`**已由原libc++ export确认该lock，
+null control、lock失败或null pointer均走失败路径，不伪造ready。
+
+`1f19726c4..26d8`把原SIM、transport1、映射format、原PDU及ack_indicator门交给
+`sms::MTSmsDetails`；支岛 **`1f2f99524→1f03871a4`**由原Base constructor export确认。
+`1f197272c..2768`分配`0x48`字节callback并写同地址点，capture保留原driver/SIM、
+TLV transaction/u32（**callback+1c**，来自原`sp+44`）、format、PDU和两个bool门。
+`1f197276c..2784`随后以**同controller**的vtable **`+20`**调用，传入该details与该
+callback function；lock取得的临时强control覆盖这次调用的lifetime。
+TLV transaction的同源保留连接到既有ACK callback，不等于已证明MD物理token或通知ID。
+
+原CommandDrivers export确认`CSISMSCommandDriver::create` **`1f40fde44..1f40fe0a4`**，
+原function-starts同时确认其named block **`1f40fe0a4..1f40fe0e0`**。
+create的原`x2`是caller提供的`shared_ptr<SmsControllerInterface>`，先通过同controller
+vtable`+a0`取得队列并交driver factory；block capture保留新driver强pair与原controller
+强pair。该block于`1f40fe0b0..d0`增加原controller的weak count，再将**原ptr/control**
+写入`driver+80/+88`，不是新Model或native epoch。因此静态闭合的是
+**caller强controller → driver弱pair → 成功weak lock的临时强lifetime → 原MT
+details/同capture ACK callback → 同controller+20 dispatch**。
+
+**该轮首缺是supplied/loaded controller的concrete vtable+20实现，以及它生产
+Model/status到通知uint ID的同源关联**。该轮没有扩server或该实现；原件可达接线不等于
+当前设备已执行、Messages成功record/COMMIT/重开显示或WMS37物理ACK成功。
+新原code按每段≤1KiB只读，原件/解码/provenance/命令与exit记录在
+`x9/out/sms-notification-owner/owner-boundary.{txt,json}`及相邻`*.reads.json`；
+未改生产、未读短信数据库、未运行测试/构建或操作设备。
+
+#### Concrete sms::Controller+68 → parser异步response owner（2026-11-16）
+
+本轮只推进上节的supplied controller边。原root executable indirect/nlist与12B stub
+确认`CSISMSCommandDriver::create` import **`10107e928`**；单target direct-BL机械库存
+仅命中`1003ca1a4`。原`LC_FUNCTION_STARTS`限定wrapper
+**`1003ca098..1003ca2d8 /576B`**，它retain/copy入参`x2`强pair后原样交create，
+不是concrete constructor。仅再对这个新wrapper做一次single-target库存，两个命中
+`1007eb1cc/2e4`均属于原函数 **`1007ea650..1007eb9f0 /5024B`**；库存仍仅为lead。
+
+该原creator分配`0xa80`字节object，`1007ea6d4..6e8`把主AP **`10159e758`**和
+secondary AP **`10159e958`**安装到同object与其 **`+68`**。原output pair保存同object，
+其own `+48/+50`弱pair经lock取得强control后，`1007eb188..194`与`2b0..2bc`
+分别将**同object+68**及同control交给上述wrapper的`x2`（driver type分别为1/0）。
+原root format6 pagechain确认两个AP共享RTTI **`10159edd8`**，原name
+**`N3sms10ControllerE`**；secondary offset-to-top为 **`-0x68`**。
+这把typed `SmsControllerInterface`参数接到原concrete **`sms::Controller+68`**，
+不是按附近符号或shared-cache slide mask猜root磁盘指针。
+
+该secondary AP的 **`+20`**槽`10159e978`经原format6实际chain membership指向
+**`1007f898c`**；原8B thunk先`sub x0,x0,#0x68`，再跳到
+**`1007f7918..1007f8500 /3048B`**。这静态闭合真正concrete+20实现；
+没有据原disk rebase宣称当前设备已加载或调用它。
+
+该实现保留原details与原callback入参，按details `+8`的原format分支。
+普通解析路径经`100813488..134e0 /88B`构造strong **`CTParserXPCRequest`**，
+再经`1007f85a0..88cc /812B`以同一owned-copy details强pair调用`MTSmsDetailsSerialized`并填请求。
+上述constructor/serialization、`MTSmsDetails` copy及lock均由必要原root named imports
+确认；它们不是`sms::Model` constructor。controller原 **`+a70/+a78`**在creator中
+保存CTParserClient strong pair；`1007f8140..14c`把同请求及parser callback function
+交原import **`10107e250`**，签名为`CTParserClient::sendXPCMessage`接收request强pair与
+`function<void(shared_ptr<CTParserXPCResponse>)>`。这里是parser异步入口，不是数据库保存。
+
+parser callback AP **`1015a0d30`**的`+30`槽`1015a0d60`经原format6链指向
+**`100813f14..100814254 /832B`**。operator于`100813f40..44`move入参response
+ptr/control到本地并清原pair，再lock同capture弱controller；原named
+`CTParserXPCResponse::hasError`调用返回w0=0且owner有效时，`100813fb0..10081400c`保留同response
+强pair、同details强pair及原callback输入，交controller方法 **`1007f622c`**消费。
+**到此收束，未读该消费者或server，也未证明它生产Model/status4→通知uint ID。**
+另一路`1007f7ccc..ce4`调用原callback时传 **raw6/null strong pair**；此raw enum语义
+没有新资格，不命名为某类失败、更不当保存或物理ACK结果。
+
+新原text按每段≤1KiB读；七个完整函数合 **10388B**，另八个named stub共96B。
+所有r1采样/库存实际exit0，准确命令、stdout/stderr/数值exit、原bytes/offset、复用原
+function/fixup metadata与窄合同保存在`x9/out/sms-controller-dispatch/`。前置wildcard
+失败保留exit1，最终reader guards维护后未重采。尚缺`1007f622c`的response→Model/status
+producer及通知关联；GUID→成功record、当前Messages COMMIT/重开/物理ACK/MO验收仍另缺。
+未改生产SMS行为、未测试/编译、未操作设备/mount或读取数据库。
+
+#### parser response → concrete Model/status；SIM不是通知ID（2026-11-16）
+
+续接新原件已闭合同Controller的 `1007f622c → GSMModel/C2KModel → 1007f72bc`
+及最终raw status/当前pair回原callback；未reset分支保同Model，特殊reset分支是raw1/null。
+**details+0 → Model+8/u32是SIM slot**，
+真`subscriber::isValidSimSlot`消费证明，不能当通知messageID；Model+34/u16仍独立。
+Controller+e0及其下游已读，但Controller+9c0的actual supplier/通知uint ID producer
+仍缺。18个新函数30776B/必要RTTI与imports、实际exit和精确边界见
+[parser Model专项报告](2026-11-16_reverse-sms-parser-model-report.md)。
+无生产短信delta、测试/编译/设备动作，不把raw4、callback或scratch发布标签当COMMIT/物理ACK。
+
+#### Controller+9c0 owner → Operation通知ID（2026-11-16）
+
+[本轮完整静态报告](2026-11-16_reverse-sms-notification-consumer-report.md) 已补上一条
+缺边：保留factory installer＋新MessageCenterModel创建flow，将同Model强pair经factory+10
+（100369f88）传旧creator并retain到Controller+9c0/+9c8；实际Model+40经weaklock、内容
+own-copy及强队列context，构造独立 **SmsOperation**。当前Operation ID=-1时，同Model的
+MessageIdManager+8/u32分配计数值，写 **Operation+0xc/u32**，同ID→同强pair进入内存树；
+随后SIM1通知payload把该ID写真 **kCTMessageIdKey**、typeKey=1/code0x1d。**这不是原
+sms::Model+34/u16、SIM/Model+8，也不是GUID/SQL RowID/MD transaction或nativeepoch。**
+
+原件最终18新函数11552B/9exact imports，合同
+`x9/out/sms-notification-consumer-20261116/notification-consumer-contract-r2.json`。
+旧installer只复用已有LLVM原指令字，不冒充新采样/live运行；name库存r1的越界记录和
+cache命中guard exit1均保留纠偏，最终RTTI/keys独立资格。没有生产delta或测试/构建/设备
+动作。通知深层fanout/subscriber receipt、同ID retrieve server与map退休、Messages
+GUID→成功record/COMMIT/重开、物理ACK/MO仍缺；前段静态通路不是完整短信验收。
 
 ### WMS37物理ACK completion：实际host receipt后退休
 
@@ -554,7 +1521,8 @@ RIL `RmmCallControlCommonRequestHandler::requestDial` `0x381410..0x3817a0`：
 `onHandleRequest` `0x380ebc..0x380ed8` 传入的第三个 `requestDial` bool/w4决定 IMS 请求分支；
 这不是“所有 domain0 都依赖网络状态”。`getEccPreferredDomain` `0x387a30` 仍查询运行状态；测得0
 **不代表所有卡/网络/拨号类型默认0，也不证明 iOS 已有 IMS 请求上下文**。本阶段 `x9cw_dial_profile` 由调用者显式提供，
-只接受 `{sim=1,address_type=2,call_type=1,domain=0,ecc_domain=0,clir=0}`；还没有生产策略选择器。
+初始实现只接受 `{sim=1,address_type=2,call_type=1,domain=0,ecc_domain=0,clir=0}`；
+本文件末节记录后续已明确raw CLIR1/2的codec扩展，仍没有生产策略选择器。
 不把 QMI CallType 数值直接当 MIPC type，也不把 CNF result当通话状态或ID。
 
 iOS20H392 `sendDialReq` `0x1f1ac1f8c` 构造 VOICE20/tag1；CallingNumber writer
@@ -728,3 +1696,1254 @@ host `clang++ -c` 和header C11 `-fsyntax-only -Wall -Wextra -Werror`通过，�
 4. 已保存一次真实来电，不再要求补来电；来电 admission / MT 状态 / 双向音频仍需接入，多通话不依据单通话样本扩展。
 
 在这些输入闭合前不发布 VOICE，不以猜测默认值或探针 boot.img 代替依据。
+
+## 2026-11-16 初始化前置 NAS45：真实 owner 与本地 receipt 修复
+
+本轮沿正常 typed Client 初始化追踪，不改 loader/factory，不借 IMSA registered bool 或
+VOICE03 完成初始化。以下代码与三个决定性 vtable 指针的原始字节，分别与当前挂载根盘
+Cryptex 中的 dyld cache 做了窄范围比较（12 个代码 slice + 7 个 owner/code/table slice
+均相符）；这证明原件来源一致，**不是设备已经执行、注册或拨号成功的日志**。
+
+- `Client::initialize1b7c3d768` 的 MainQueue 调用
+  `IPTelephonyManager::initializeFromSIM1b7cc1a90`。`1b7cc1e44` 先将真实
+  clientId/personality/StackConfig 保存到 `DeferredInit`；`1b7cc1e48` 从
+  StackConfig+2b4 取实例，`1b7cc1e68` 进入 `initializeNasClient1b7cbee3c`。
+  后者使用真实 NasDeviceClient+108、IMSClientManager queue 和 IPManager+68 的
+  IMSNasClientDelegate alias，不凭空创建 SipStack 或向空 delegate 回调。
+- QMI backend `QMINasClient::initialize1b7d6021c` 将 owned client name 和 subscription
+  存入自己的 +c8 map。**event2** 的 capture address point 为 `1d90c99b8`，
+  +30 指向 `1b7d64b60`；**event1** 为 `1d90c9b30` / `1b7d65554`，后者是 stopped
+  路径，不能因文件名或注册事件混为 ready producer。
+- event2 构造 **NAS45 BindSubscription**：`1b7d64c30` 的 message 为45；
+  `1b7d64d58..60` 将内部 SubscriptionType2 转为 tag01/**u8 wire1**，另一个为0，
+  不是直接发送内部枚举，也不是 DMS/DSD 的 u32。`1b7d64d9c` 设置原 SendProxy
+  guard 25000ms。
+- Bind consumer `1b7d65084` 只有 Response error0 才继续；失败只记录错误，不完成初始化。
+  成功 `1b7d65258` 调 `startListening`，`1b7d65284..2ac` 仅对 +c8 map 中 subscription
+  匹配的 owned name 调真实 delegate+10，再擦已处理的条目。IPManager ctor 安装的 NAS
+  alias address point 为 `1d90c08b0`，+10 指向 thunk `1b7cc0ef0`，调整 -68 后进入
+  `nasSystemInitialized1b7cbeffc`。
+- `nasSystemInitialized` 先查同 clientId 的 +138 DeferredInit；没有 pending 仅日志，
+  不造栈。普通分支 `1b7cbf1d4..1e0` 将 node+68 的 **owned StackConfig** 送进
+  `_initializeFromSIM1b7cbf240`，再擦 deferred 项。该函数设置真实 delegates 并进入
+  `BambiClient::initializeStack1b7da81e0`；Bambi 必须先找到真实 SipStack，才调用
+  `SipStack::initialize1b7d00710` 和 SDP template 初始化。注册仍使用真实 pending
+  SipRegistrationConfig → `BambiClient::startRegistration1b7da884c` → AP
+  `SipStack::startRegistration1b7d025e0`，不是 MD 代发或常量 Registered。
+
+可达生产修复仅限原 `x9q_send` NAS45 分支：旧代码先改 `c.sim_slot/next` 并清 registration
+cache，再使用不能证明 host queue receipt 的普通 `p.send`。现在 NAS03/45 共用现有 bounded
+32-entry FIFO 和 per-client completed cache，45 保留原请求、txn、旧 SIM、目标 SIM、本地和真实
+QMUX generation；只有固定 Result45 **实际入 host queue** 后才换路由并重启后续 sample。
+OOM/full 只保留并重试本地回复，不向 MD 重发任何命令，也不取消/重定向已有 query token。
+新换路由 bind 遇到已有未终态 NAS03/NetworkName owner 为 BUSY；换路由 receipt 等待期间
+不准入新 NAS44/03/45 旧路由 owner，避免其被随后的 rebind 提前置为失活。
+
+03/45 在通用 TLV 校验前仅接管同实际 client generation/txn 的既有 owner：先匹配 txn 再比较
+完整原请求，改变 message/body/length 的同 txn 重用仍保留首个 owner/result，不额外回复或绑定。
+completed 的精确重复只 replay 首结果，不 rebind、不重置 flags。45 的本地25s guard在 admission
+开始计时，并在 single-owner → bb mutex、实际 frame transfer 前复核；过期后仅保留同 txn 的
+NOT_READY 错误等待 receipt，迟到 success 不再改路由。已 receipt 的 success replay 不另计 guard。
+NAS03 未新增超时；DEL/真实 QMUX allocation 更换仍清理旧 owner，DMS54/DSD27 原路径未改。
+
+这是 **NAS bind 初始化前置的本地路由/回复修复**，不是 NAS 全部 bootstrap、MD IMS 注册、完整
+用户态 provider、Call admission 或 media-ready。普通 `Call::dial` 仍是前述 AP manager 的直接调用，
+`x9c_dial_submit` 仍无生产 caller，VOICE09 仍不公告；不能把这次45成功当成“最终修好通话”。
+没有新增 SMS ready/ACK、设备操作、测试套件、人工向量或探针镜像。
+
+本轮实际生产 recipe `Builder.compile_one(X9Baseband.cpp.o)` exit0（34 条已有警告）；没有 link、
+boot pack 或上机验收。原件窄切片、cache 对比 JSON、`compile-bootstrap.py`、recipe result 和编译日志
+在 worktree 的 gitignored `x9/out/call-client-bootstrap/`，不提交 Apple/设备原件。
+
+## 2026-11-16 通话 action 参数、深所有权与原 AP 漏路隔离
+
+2026-11-16；源码基线 `9db480c4`。本文是当前 20H392 原件的静态 ABI 契约，
+**不是已安装的 provider，也不证明拨号、音频或注册成功**。未操作设备、出探针、
+构建产物或执行测试。本轮没有新增空 loader / unused API。
+
+### 1. 来源资格与纠正
+
+- 当前挂载 `CommCenter` UUID：`20b0ce28-18a1-3eea-aa2d-ef53e33c039a`。
+- 当前 `IPTelephony` UUID：`8b3ce7d6-41f4-3eed-bbcc-7bf1dff85575`。
+- 原 Cryptex dyld cache 的 exports trie 与八处新切片均实际读取；八处切片与
+  当前 extracted dylib 相符。这只是原件来源资格，不是运行成功。
+- 真 `Call` vtable address point 是 `0x1d90b7dc8`，不是导出 vtable 符号起点。
+  **AP `+0x10` 是 `ring() const`；拨号在 `+0x80`。** 旧表未回写覆盖。
+- 以下地址都是 unslid 静态 VA。执行必须绑定实际加载的同 UUID/ABI/代码，
+  并使用 dyld fixup 后的运行时地址；磁盘 encoded pointer 不能直接调用。
+- C++ mangled method 名不编码返回类型；原 caller 没有消费同步 status。
+  不能据此添加 `errno`/成功返回，也不能把 action 返回当 modem acceptance、
+  registered 或 connected。
+
+### 2. 完整 action 参数表
+
+表中的 `string`/`vector` 是原 userland `std::__1` libc++ ABI，不是 C 指针。
+所有槽相对**真 address point**，`x0` 均为本次实际 `Call*`。
+
+| 槽 | 真方法 / 实现 | 其余物理输入 | 原异步 owned 参数 / AP 路径 |
+| --- | --- | --- | --- |
+| `+10` | `ring` `1b7c42d90` | 无 | UUID；block `1b7c42e5c` → `ringCall` |
+| `+18` | `answer` `1b7c436c0` | `x1 string const&` | UUID、参数 string 深拷贝；block `1b7c43800` → manager virtual `+20` |
+| `+20` | `hangup` `1b7c434b4` | `x1 CallEndReason const&` | 仅读首 u32 后转换 reason string，UUID/string 深拷贝；block `1b7c43628` → manager virtual `+28` |
+| `+28` | `setTextMediaSessionMode` `1b7c432fc` | `w1 u32 enum` | 写 `Call+40`，另 owned UUID/u32 → block `1b7c433d4` → AP setter |
+| `+30` | `setRelayCall` `1b7c43898` | `w1 bool` | 写 `Call+44`，另 owned UUID/bool → block `1b7c43970` → `setRelayMode` |
+| `+38` | `setCallIdBlocking` `1b7c42d84` | `w1 bool,w2 bool` | 只写 `Call+09=w1,Call+08=w2`，没有 AP work |
+| `+40` | `playDtmf` `1b7c40bec` | `w1 unsigned char` | UUID/u8；block `1b7c40cc0` → byte overload |
+| `+48` | `playDtmf` `1b7c40d50` | `x1 vector<unsigned char> const&` | UUID 与 vector **内容**深拷贝；block `1b7c40e90` → vector overload |
+| `+50` | `stopDtmf` `1b7c40ff8` | 无 | UUID；block `1b7c410c4` → `stopDtmf` |
+| `+58` | `reportBrandedCallingImageFetchingFailure` `1b7c41150` | 无 | UUID；block `1b7c4121c` → 同名 manager 方法 |
+| `+60` | `mute` `1b7c43ac4` | `w1 bool` | 原件只有 `ret`，不能声称已改变媒体 |
+| `+68` | `refresh` `1b7c42ee8` | `w1 bool` | UUID/bool；block `1b7c42fbc` → `refreshCall` |
+| `+70` | `hold` `1b7c4304c` | 无 | UUID；block `1b7c43118` → `deactivateCall` |
+| `+78` | `resume` `1b7c431a4` | 无 | UUID；block `1b7c43270` → `activateCall` |
+| `+80` | `dial` `1b7c41468` | `x1 calledAddress string const&`; `x2 CallConfig const&`; `x3 additional string const&`; `w4 bool` | calledAddress + owning options；block `1b7c41878` → `initializeNonEmergencyCall` |
+| `+88` | `pull` `1b7c429c8` | `x1 string const&`; `x2 CallConfig const&` | owning options；block `1b7c42cec` → `initializePullCall` |
+
+普通 model 的 `+80` 调用处 `1007cb970` 中，`x3` 是空 string，`w4` 来自原
+`CallInfo+57` 的 `Is Listed As Emergency`；不能把它猜成 Android 域值。
+仍必须保留完整五参数 ABI，不用普通 caller 当前空值删参数。
+
+DTMF vector 原 ctor `1b7ad04ec` 分别深拷贝到 local、block `+38`，以及执行
+block 后的 manager 按值参数。只复制 vector 的 24B 指针头会产生悬空/双释放。
+
+`hangup` 原 `1d90b8990` 表是两级 pointer：1 → `DoNotDisturb`，
+2 → `CallWaitingDisabled`，3 → `SRVCC`，4 → `DeferToSecondary`，
+5 → `Blocked`；其余 → `UserTriggered`。这是 **Apple 原 reason string**，
+尚不是 Android/MD cause 的可互换值。
+
+### 3. `CallConfig` 完整 copy / destructor 已闭合
+
+| 项目 | 原 ABI |
+| --- | --- |
+| 存储 extent / 对齐 | `0xf8` / 8B；真实 caller 的 `sp+3c8` 与相邻 `sp+4c0`，最大 optional engaged 字节 `+f0` |
+| 完整 copy | CommCenter 私有 `100dd7560(dst,src)` |
+| 完整 destructor | CommCenter 私有 `1007cd508(this)`，完整函数至 `1007cd5a0` |
+| optional string copy helper | `10001f234`；storage string 24B，`+18` engaged |
+
+完整字段：`+00 u8`、`+08 owned string`、`+20 u8`、`+28 owned string`、
+`+40..6f` 48B 原 direct-copy 区、`+70/+88/+a0/+b8` 四个 owned strings、
+`+d0 u32`、`+d8 optional<owned string>`（engaged 在 `+f0`）。
+
+**不能 raw memcpy 全结构，不能丢普通 dial 暂未读取的 `+28/+d0`。**
+正常 cleanup 按 optional、`+b8/+a0/+88/+70/+28/+08` 逆序释放 owning strings；
+不对 48B header 单独执行析构。
+
+决定证据：`100dcfbbc` 将 `sp+4e0` 深拷贝到 `sp+3c8`；
+`100dcfbdc..100dcfc50` 在正常 action 返回后逐字段 cleanup；
+异常路径 `100dcff0c..100dcff10` 对**同一 destination**调用 `1007cd508`。
+这比根据附近函数名猜析构更直接。
+
+排除候选：`100dd77d8` 是大 CallInfo/package 析构；`100dd7718` 是大 nested
+package；`100dd76b8` 仅 subregion；`100dd73f8` 是更大 string package。
+scratch 旧文件名不构成类型证据，以上均不能作为 whole-config destructor。
+
+owner 必须在完整 copy 成功后发布。原 copy 的异常路径已经清理构造成功的
+子域，不得对失败的 partial construction 再运行 whole destructor。
+
+### 4. `IMSCallOptions` 不是 `0x13a0` POD
+
+- 完整 owning copy：IPTelephony 私有 local `1b7c41904(dst,src)`。
+- 完整 destructor：私有 local `1b7b432d8(this)`。
+- `+08` 是 `ImsUuid` vptr、`+10` 是 owning UUID string；
+  `+28` 是 `0x160` BambiCallOptions（copy `1b7b42aa4`、dtor `1b7b42cc4`）；
+  `+188` 是 `0x1200` BambiEmergencyCallOptions（copy `1b7b41970`），
+  含 owning strings、SipRegistrationConfig、SipStackConfig、SipUri；
+  `+1388` 是 owning clientId string。
+- 普通 dial 从 local 深拷贝到 block `+38`；block `1b7c418bc` 再深拷贝
+  给按值 manager 参数。pull 同样深拷贝到 block `+20`，执行时再 copy。
+  不能把 block payload 当 `memcpy(0x13a0)`。
+- **LocationInfo 的 48B 仅是 header**：Bambi `+90..bf` direct copy，
+  后面 `+c0/+d8/+f0/+108` 是四个深拷贝 string。完整 LocationInfo extent
+  是 `0x90`，dtor `1b7ab56e4` 读取其 ownbase `+30/+48/+60/+78`。
+  异常路径调完整 LocationInfo dtor，正常 Bambi dtor逐 string inline。
+  原行为没有把这四个 owner 浅拷贝。
+
+原 cache exports trie 的 `IMSCallOptions`、`BambiCallOptions`、
+`BambiEmergencyCallOptions`、`ims::CallConfig` ctor/dtor 限定前缀没有导出；
+extracted dylib `nm` 的 options ctor/dtor 是 local `t`，两证据一致。
+**不能伪造 external declaration 并以为可链接**。如生产 userland 要使用这些
+私有 helper，必须有实际 loaded-image 资格与 function-pointer 接入路径。
+
+已可复用的导出包括完整 `Call::dial/pull`、Call 构造/析构、text/relay/CLIR、
+answer/hangup/DTMF/stop/branded、ring/refresh/hold/resume；可导入不代表应该
+调用原 AP action。`mute` 在本次限定 exports 中没有可导入项且原槽 no-op。
+
+### 5. 最窄生产接入边界与剩余依赖
+
+可以复用的输入边界是 **typed `Call` action 本身**，无需先构造 AP options。
+每次先深 own 完整 typed 参数，以及临时 Call 的 `+10 UUID`、`+28 clientId`、
+`+08/+09 CLIR`、`+40 text`、`+44 relay`。不要捕获裸 `Call*`、借用 string/
+config/vector pointer，也不要将 userland C++ ownership 当 kernel request 头。
+原临时 action handle 的析构不是 MD terminal event；已有生命周期证据不重扫。
+
+text/relay 要保留原字段 mutation，同时隔离其 MainQueue AP 发送；CLIR 是
+唯一原 field-only setter。所有其它 AP actions（含 pull、DTMF、hold/resume）
+都要隔离，不能 MD admission 后又 fallback 到 original，产生双发。
+**不能调用原 dial/pull “仅生成 options”——它们会排入 AP queue。**
+
+目前仍缺下列真实生产边，故本轮没有可诚实落地的完整 action/provider：
+
+1. 当前 typed factory/action 到实际 userland adapter、私有 ABI lifecycle 的加载/安装路径。
+2. logical VOICE09 client/context、broker admission，以及 UUID/clientId 对 MD epoch/subscription 的真实关联。
+3. Android 证据限定的每 action 策略、cause、CS/IMS/handover producer；Apple reason string 不能替代 MD enum。
+4. 请求 owned 生命周期经现有 broker，到权威 MD terminal receipt，再到匹配的 typed delegate/当前 Call owner。
+5. 通话专用物理音频、最终 UI/对端端到端验收。本契约不证明这两者。
+
+### 6. 本地取证与重放
+
+本轮 `x9/out/call-action-adapter/`（gitignored，原件 bytes 不入 git）：
+
+- `typed-action-owned-contract.json`：全槽参数/owned/AP 隔离及缺边；
+- `callconfig-real-dtor.asm`、`config-copy-callers.asm`、`callconfig-dtor-xrefs.asm`；
+- `options-deep-copy-dtors.asm`、`locationinfo-dtor.asm`、`end-reason-table.json`；
+- `read-original-options.py`、`options-original-qualified.json`、`options-original-exports.txt`、
+  `options-local-symbols.txt`、`original-*.bin`：原 cache exports 与八处相符切片；
+- `write-owned-contract.py`、`root-query.py`、`macho-read.py`。
+
+原件仍存在时，在本功能树执行 `python3 x9/out/call-action-adapter/read-original-options.py`
+可重放限定 export/bytes 读取；`python3 x9/out/call-action-adapter/root-query.py
+f:0x1007cd508 f:0x100dcfbbc` 可重放 config 析构与同 destination cleanup。
+这都是离线文件读取，不触手机。
+
+复用既有 `x9/out/call-typed-actions/`、`call-typed-dial-context/` 与
+`call-provider-install/` 的已归档证据，不覆盖旧结论。本轮正式编译、CI、启动结果：
+均无；没有通话短信最终修复镜像。NOTES、合入和取证归档由 root 统一记录。
+
+## 拨号 profile 的 CARD_TYPE 与 AP72→MCL72 owned 生命周期（2026-11-16）
+
+本节补上匹配设备原 `libmtkmipc-ril.so` 的输入/ownership 证据，不是新生产桥、
+完整初始化或通话修复。原件 SHA256 为
+`19fb2bc0c2b5532d8b4f8460779159277ebfe54930eff0be2198d9e871f5bdba`；
+34 组固定 ELF 切片、原始字节 hash、编号反汇编与 contract JSON 位于 gitignored
+`x9/out/call-profile-input/`。不拿其他 Android 版本的常量代替匹配设备 producer。
+
+**MCL1 是卡类型，不是 NR capability。** 默认表 initializer `1b4384/1b4394/
+1b43cc..1b43e8` 确认 key1 名称 literal `0xf136c="RFX_STATUS_KEY_CARD_TYPE"`、
+variant tag2、初始 int **-1**。`RmmSimCommUrcHandler::onHandleUrc36c458..4c8`
+读取原 owned MIPC data 的 MID，并将 **4512** 分派给 `handleCardType36e1c0`。
+该 handler 从 original message+40 的 data 读 uint8 tags100/101/102：
+
+| 已证输入 | 实际 CARD_TYPE 贡献 | 原件位置 |
+| --- | --- | --- |
+| tag100=0 / 1 | SIM `0x1` / USIM `0x2` | `36e390/36e3b8`，原 literal `USIM` / `SIM` |
+| tag101=0 / 1 | RUIM `0x8` / CSIM `0x4` | `36e40c/36e434`，原 literal `RUIM` / `CSIM` |
+| tag101=3 | 两个 CDMA bits `0xc` | `36e628` |
+| tag102=1 | OR `0x10`，不猜其语义名称 | `36e45c..468` |
+
+组合在 `36e458` OR 后，经 `36e4e8..510` 的 per-slot MCL manager 将 **真实计算值**
+作为 owned int variant 写入 key1。中间 key239/key1 的附带 event 分支仍汇合到该写入。
+原 getter 缺 tag 各 default2，且两类型均2的特例最终 `36e6bc` 写0；这是原件 fallback，
+不能作为桥的有效卡类型来源。前述 `isVoiceGsmRat` 的 `key1&0xc` 因此实际检查卡类型 bits；
+NAS/data RAT、IMSA registered、初始 -1 均不能补出已知 CARD_TYPE 或 network-ready。
+
+**AP72 的 reset 来自真正 current-calls response，而非空对象初始化。** 普通未被 GWSD
+截获的 `requestGetCurrentCalls381354..398` 在 original request 的 slot 上构造0909，
+`callToMipcMsgAsync` 保留 original request reference。`handleCurrentCallsCnf3851b4..1c8`
+先要求原 message+40 data 非空且 MIPC result0；失败发送 error38 的 VoidData response。
+成功时 `385208..218` 读 native count tag100；原 getter default0 **不等于 strict decoder
+已确认 count0**。真实 count0 分支 `3852d8/3852e0` 置 output byte size0 并直接跳 `3856c8`；
+`3856d4..750` 构造 `RfxCallListData(array,0)`，以 original request ID+0c、original MCL
+message reference 构造 error0 owned response，再 `responseToTelCore`。
+
+`RfxMclMessage::obtainResponse19f4c4..530` 保留原 request 的 +18/+1c/+24 字段，
+将 supplied data clone 到 response+10。Dispatch `1d6d4c..db0` 用 response+24 精确匹配
+pending AP request+20 并移除该节点；`1d7404..43c` 以 matched AP fields 和原 response
+error+48/data+10 构造 AP response，`1a51d0..1ec` clone data 到 AP response+48。
+clone manager `1cf310..458` 按 request ID 查 response-kind1 的 copy-by-object 函数；
+缺注册项返回 null，不生成 empty success。`CallListData::copyDataByObj1c31e8..1f4`
+保留原 +8 pointer/+10 size 并建立新 owner；这是静态 ownership 链，不冒称新增 runtime 验证。
+
+AP response loop `1d8404..8430` 送入 MainThread。Rtm 真实 direct current-calls reset route
+是 **AP request ID c938**：`26ba14..1c→26bd2c→26bd34`，不是 cf21/cf34；GWSD/fake-mode
+可提前截获。`handleGetCurrentCallsResponse26c1d8..218` 从实际 response+48 的 data 读取
+size+10，**unsigned size<=7** 才将 slot AP72 写为 owned int0。该 route/handler 在此之前
+**没有 error gate**。生产桥应取更严格的 owned、successful、native-count 明确0子集，
+不能照抄 error-void empty、缺 count default0 或 size1..7 来授予 baseline/profile。
+
+**AP72→MCL72 是软件 status 同步，不是 MD ACK。** 显式 policy setter
+`setEccPreferredRat2794d8/279570..598` 将原 input w1 原值写入 AP72；普通 MO 不因此获得
+默认0。AP `setValue1ca0b0` 的 extra flags 为0；即使值相等且 notify=false，实际调用仍经
+`1ca230..238→1ca89c` 到 forwarding。它同步的是已发生的 setValue 事件，不是从“相等”
+推导出缺省 reset。`1ca8a8..8d0→updateValueMdComm1cabd0` clone 原 variant，生成 type6
+StatusSync 并 `requestToMcl`；AP message 在 `1a5d18..4c` 拥有 +24 slot/+54 key/+58 variant
+和 +88/+89/+8a flags。`1df01c..54` 再 clone，生成 MCL message；`19fcc0..fd04` 明确其
+type6/+1c slot/+68 key/+70 owned variant/+a0..a2 flags，正常路径进入 MCL queue。
+
+MCL Messenger `1e7a0c..58` 用同 slot manager，clone message+70，按 key+68 调用
+`setValueByRfx(...,w5=1)` 禁止回响 AP。`1dd730→1dce80` 的 storage base 是 manager+10；
+缺 entry 在 `1dcf80..90` 分配并赋原 owned variant，existing changed entry 在
+`1dd5d4..dc` 赋原值，同值保留原 owner。只有真实 reset 生命周期最终得到 **MCL72=int0**
+后，才能应用上节已证的“104所有分支返回0”；不把 queue transfer 当网络/IMS/media-ready。
+
+当前 `X9Calls.inc` 的 VOICE03 注册后 baseline query 已有自己的 token/result/native-empty
+严格门，可提供桥自身的 owned successful-empty 事件，但不能声称现有 baseline_known
+本身已包含 Android AP72/MCL72 manager lifecycle。Android matching UI/framework 的
+**拨号意图→raw CLIR1/2 producer 仍缺**：retained AIDL Parcel 只证 int 字段，原 Rtm/Rmm
+consumer 与 Apple 两套枚举已闭不代表该缺边已闭。本轮不开放默认 profile、不加 unused
+接口，不新增设备抓取、探针、测试或镜像，不将静态进度描述为生产修复。
+
+本机精确重读：仓库根执行
+`python3 x9/out/call-profile-input/read-original-profile-input.py`；该脚本先核对上述原件 SHA，
+只读固定 VA，写同目录的 `profile-input-original-proof.json`、`*.original-code.bin` 与
+`*.numbered.asm`。结论/边界在 `call-profile-input-contract.json`；实际 source head 与
+branch 记录在 proof JSON 中。原始与衍生设备字节均不提交 git。
+
+## 2026-11-16 实跑 Hostless owner：动态 PCM 选择，不补固定硬件路由
+
+本轮只读原 HAL 新范围与已保存 MO 日志，不重跑旧 probe。原 controller ctor
+`27f940` 的 GOT `44d900` 由 `R_AARCH64_GLOB_DAT` 明确指向
+`android::keypcmHostlessSpeech45d4e0`；相同 String8 传给 **this+3f8/+420**
+两个独立 AudioPcmControl。`modemPcmOpen282630..282684` 对它们分别传
+flags=`10000000`/`0`、owned mMdConfig、prepare=false；不是先前 frame-base
+`adspPcmOpen` 的 descriptor 路线。
+
+真实 MO `mo-call-audio.txt:625..633` 只有两次 `Hostless_Speech` open；
+`:2145..2166/2256..2275` 的 stop/close 同样有两个 Speech owner，而 HW_SRC_1/3
+的所有 controls 明确 **mPcm==NULL**。结合 ctor/open 分支，这次 basic Hostless
+owner 已收束；不凭缺 start 日志断言未启动，也不把 open 当 DSP receipt。
+原 `AudioPcmControl2632c4..263310` 是用实际名称经
+`GetCardIndexByString315000/GetPcmIndexByString314f40` 查动态 descriptor，
+读取 card+18/pcm+1c，未找到为-1；不是硬编码 card0/PCM编号。
+`263488..263518` 调 `pcm_open` 并要求 non-null/`pcm_is_ready`，false prepare
+参数不调用 `pcm_prepare`，本地成功不产生 iOS stream 或 firmware ACK。
+
+还缺实际 ALSA descriptor/card/PCM 与通话时 DAPM/mixer 选择。同次 kernel 日志
+只证明模块名 `snd_soc_mt6993_afe.ko`、`mt6993_mt6681.ko`，不证明已有对应 payload
+或具体文件路径。reference 的 PCM_0/1→ADDA/I2S候选图不能直接变成生产寄存器值；
+同版 audio_dsp、scene0 task-info8B、独立 USIP_PHONECALL 与 iOS BasebandVoice I/O
+仍未闭合。不借媒体录放或 SmartPA owner 填通话声音。本轮没有独立可确认的生产
+mutation，因此未改码、未编译/pack/上机，不把该静态收束称作最终音频修复。
+
+原件窄范围、relocations、原日志行号与边界保留在 gitignored
+`x9/out/voice-hostless-route/hostless-production-boundary.json`；只读复提命令
+`python3 x9/out/voice-hostless-route/read-hostless-owner.py`。下一仅从真实缺失输入
+或可达生产连接继续，不重复已闭范围、旧镜像、人工向量或未变更内核构建。
+
+## 2026-11-16 生产装载入口收束：能复用的安装链与首缺 caller
+
+基线 `a2b9036c`；本次只核当前仓库生产源和挂载根盘的 launchd 配置，不重复
+typed/action/broker 原件切片。**缺的是连接代码和 owned 输入 producer，不是一个
+待下载的二进制文件。** 没有新增空 loader、unused API 或探针。
+
+可复用的具体 own-code 安装链已经在生产源码中：
+
+1. `x9/build/build.py:304..312` 调用 torch/camera builder；
+   `x9/torch/build.py` 用 Xcode iPhoneOS SDK 编译、ad-hoc 签名 arm64 iOS16 dylib，
+   生成 hash-addressed root 路径和 `generated/x9_torch_bridge.inc` 的 embed 数据。
+2. `kern_exec.c:8817..8820` 在 PID1 启动 launchd 前调用 torch/camera install；
+   `x9_torch_install.inc` 经既有 `x9_bbfw_write/equal` 发布/核对自有库，
+   拒绝未知现存文件或 symlink，要求明确 opt-in 和可写原生 UFS 根盘。
+3. `kern_exec.c:5838..5842` 的 exec 环境插入点调用现有 helpers；
+   torch/camera **只匹配 `/usr/sbin/mediaserverd`**，AppSync 仅匹配其三个
+   verifier/UI executable，已有 DYLD key 不追加。没有匹配 CommCenter 的分支。
+4. `torch/media_bridge.m::initTorch` 是实际 dylib constructor：先要求真实
+   torch backend，再用 UUID/image/原 IMP/caller gate 安装 ObjC hook。
+   这证明有完整 own-code 加载模式，**不是 C++ CallFactory hook 已实现**。
+
+参考 `hackios-xnu-kernel/userland/src/inject.c::replace_virtual` 已有 expected
+pointer 比对、`vm_protect(...VM_PROT_COPY)` 的 process-private vtable 修改方式；
+它的 20F66 地址/目标不能直接迁成 20H392 Call provider。无需为此移植通用 tweak
+loader或替换 Apple launchd/cache。
+
+挂载根盘 `com.apple.CommCenter.plist` 和 `/System/Library/xpc/launchd.plist`
+对应项都启动原 `/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter`
+（`_wireless`），已有 `com.apple.commcenter.atcs.xpc` / `com.apple.ipTelephony`
+MachServices，但没有 DYLD injection 环境。这是**持久配置观察**，不是实时进程
+加载证明。仓库没有 Call runtime builder/embed/env 集成或 typed factory/action
+替换实现；不能把 mediaserverd/AppSync 模式已存在写成“CommCenter adapter已加载”。
+
+**首缺可达 caller 已落到当前代码：** `X9Calls.inc:372` 的
+`static x9c_dial_submit(slot,req,len,profile)` 只有定义，没有生产调用。
+现有 `X9QMIAT.inc:780 → X9Calls.inc:451 x9c_request` 仍只接44/03/21，
+20落 `UNSUPPORTED`。`x9_call_wire.h` 的 measured SIM2 profile validator 不是
+真实用户意图/卡路由 producer；普通 QMI20 也不携带原 typed UUID/clientId 与
+per-subscription broker context/epoch 的绑定。因此只安装 dylib 并不能补出
+`typed action → owned user context → 现有 broker → admitted kernel dial`。
+
+下一实装需要一个带原 typed Call UUID/clientId、完整 owned 参数、真实
+per-subscription broker context/profile/generation 的 caller，以及相应接收
+admission 和匹配 terminal event 返回路径；不能用默认 profile、派生 UUID、
+单开09或先给20加 switch case代替。此次没有找到能独立修复的已可达生产窄问题，
+故未改 loader/内核，也未编译、运行测试、操作设备或生成 boot.img。
+
+源码位置/引用及挂载 job 摘录保留在 gitignored
+`x9/out/call-production-connect/{production-connect-source.json,production-entry-refs.txt,commcenter-launch-entry.json}`；
+NOTES 与归档由 root 统一记录。
+
+## Android 拨号意图 producer 的首个缺失原件（2026-11-16）
+
+本轮仅核对已抓 input 的 manifest/文件名，不重复 native CLIR、prefix、CARD_TYPE 或 AP72。
+`android-calls-20261115-183941/capture-manifest.json` 有124条抓取记录，但 **APK/JAR/DEX
+code artifact 为0**；实际 files 树225项、incoming树33项、modem vendor/source/parts/mdota
+分别8/2/8/784项，文件名 inventory 亦无 Java code 候选。没有 matching DEX，不启动 ASC。
+
+同一抓取 `build.txt` 记录 Android17 的
+`OPPO/PLJ110/OP5E17L1:17/CP2A.260605.016/B.46c413f-20895a6-20bdbdd:user/release-keys`。
+已保存 `mapped-paths.json` 明确出现下列**实际设备路径，但未保留文件字节**：
+
+- 首缺 producer 输入：`/system/framework/telephony-common.jar`、
+  `/apex/com.android.telephonycore/javalib/framework-telephony.jar`。
+- 同 build 链接/厂商扩展输入：`/system/framework/framework.jar`、
+  `/system/framework/oplus-framework.jar`、`/system_ext/framework/mediatek-framework.jar`。
+- 已观察 IMS APK：`/system_ext/priv-app/ImsService/ImsService.apk`；
+  抓取的 `3302-cmdline.txt` 实为 `com.mediatek.ims`，不是 Phone/Dialer 进程。
+
+Telecom metadata 中虽有 `com.android.phone`/`com.android.contacts`，但没有其确切 APK
+位置或 code artifact；不编造 TeleService/Dialer 固定路径。上述 JAR 若无 DEX，仍需同 build
+真实 code companion，不能拿 AOSP、另一版本或猜测的 sidecar 代替。本轮无设备操作、
+通话要求、探针、测试、编译或生产代码改动；**matching intention→raw CLIR 缺边保持阻断**，
+不开放默认0或新增 unused profile 准入。父代理统一安排后续输入，不要求用户此刻操作。
+
+证据与 source SHA/head 在 gitignored `x9/out/dial-intent-input/dial-intent-input-proof.json`，
+文件名快照在 `bounded-artifact-inventory.json`；重读现存 metadata 使用
+`python3 x9/out/dial-intent-input/inspect-retained-intent-input.py`，不重新扫描或接触设备。
+
+## 2026-11-16 SMS 当前生产链复核：版本与最终验收边界
+
+复核 source **`a2b9036cc5b8e19d3b99cb4115a559abdd5f7090`** 的现有生产入口：
+WMS 初始化→真实 per-SIM host-ready；WMS20→605 token→唯一 writer→匹配606/result/MR；
+8601/8603→原 token/mask/txid→MT host queue receipt→WMS37→原物理 ACK→terminal host receipt。
+这些路径已有生产调用者，不是 staging API；本轮未发现新的、有独立原件依据的 codec/dispatch
+矛盾，未重跑已修 queue/malformed/lifecycle 类，不为“补全”制造成功 ACK、ready 或重发行为。
+
+物理 writer 的精确定义仍须保留：`x9_modem_s3.inc:34..75` 的 result0 在 AP CCCI ring 完整
+写入、barriers 与 producer-index commit 之后返回，pending doorbell BUSY不再重复通知。
+它经 `x9_mipc_bridge.inc:531..534` 推进 ACK result；**不是新增的 modem 侧确认、数据库提交或
+对端送达证明**，本轮也没有捕获新的物理 result0。
+
+旧319的 SIM2 token703/txn27→modem CNF是历史运行观察；其 boot.img/source 未对齐，
+不能套用当前 HEAD 或最新 NAS45 kernel。旧220的来信 token1、Android 的601/602/605/606/
+8601/8602形状也不能拼成当前 iOS 同一样本成功。主 `x9/out` 限定目录/文件名盘点仍未找到
+可认定为当前同 token 的 Messages 成功 record/COMMIT→重开显示、相关物理 ACK与WMS37完成，
+或 MO 对端收到证据；空 grep/带 `stored` 的无关进程日志不证明短信成功或失败。
+
+**首缺权威输入**是当前 image/source 对齐的一条完整短信运行链，其后才是同 token 的 MT
+保存成功、重开持久化和 ACK，以及 MO 对端确认；既有 Apple 静态 SQL success 分支不替代它。
+本轮不要求新抓手机，不读取个人短信数据库；无生产 delta便不重编旧产物，不出探针或最终镜像。
+当前源码精确行号、旧证据资格与限定盘点在 gitignored
+`x9/out/sms-production-audit/current-sms-final-evidence-boundary.json` 及同目录；仅新增此短小节，
+无源码修改、编译、测试/人工向量或设备操作，完整短信验收仍未完成。
+
+## 2026-11-16 matching Java 拨号 producer：显式 CLIR 与 per-sub 来源（仅静态）
+
+此前缺失的同版 Java 原件现已只读提取，build 为 Android17
+`CP2A.260605.016/B.46c413f-20895a6-20bdbdd`；raw/hash/ADB command 的权威记录在
+`x9/out/android-call-inputs-20261116-092442/files-manifest.json`，不重算原件 hash。
+本节只收束已有 ASC 反编译与 refs，**没有原 DEX code_item 偏移/opcode 复核或运行证明**；
+下列 `*.java:L..L` 都是保留反编译文件的行号，不冒充原字节地址。
+
+- `GsmMmiCode.java:1598..1611`、`ImsPhoneMmiCode.java:1498..1511` 的
+  `getCLIRMode`：SC31 的 action `*`/Activate → raw2，`#`/Deactivate → raw1；
+  action 判定分别在 `1434..1453`、`1285..1304`。
+  `CommandsInterface.java:29..31` 命名 DEFAULT0/INVOCATION1/SUPPRESSION2，非 Apple privacy enum。
+- temporary 不是单独设置 CLIR：regex 的 group12 经 `makeEmptyNull` 成实际非空 dialingNumber，
+  还需 SC31 和上述 action；对应 `GsmMmiCode.java:436..468,1714..1723`、
+  `ImsPhoneMmiCode.java:272..313,1681..1690`，空串处理分别在 `74..81`、`29..36`。
+- `ImsPhone.java:318..399` 先把 tracker `getClirMode()` 放进 builder，再由 temporary MMI
+  覆盖并仅将 extracted number 送 tracker；普通无 prefix **不等于固定 raw0**。
+  `ImsPhoneCallTracker.java:3171..3182` 读取 `clir_sub_key + mPhone.getSubId()`；
+  `Phone.java:3805..3822` 的保存者也用该 per-sub key，并检查 commit 失败。
+- 缺 preference 时传入动态 `mInterfaceImpl.getClirDefaultSuppression()`；factory 选择在
+  `ImsPhoneCallTracker.java:1140`。现存 `IOplusImsPhoneCallTracker.java:81..84` 仅 interface
+  返回0，未取得实际被选厂商实现；另有 null preference/default-phone guard 返回0。
+  **二者均不是当前运行默认值**，不据此制造默认 profile/0 值准入。
+- 非 ECC tracker 保留 `DialArgs.clirMode`（`3219..3235`），`dialInternal:182` 写 `oir`；
+  Java `ImsCallSessionProxy.java:4594..4656` 普通非 ECC/非 `*82` 正常 voice 分支保持该 int，
+  经 `ImsRILAdapter.java:3773..3787,2528..2531,2207..2236` → **MTK**
+  `RadioVoiceProxy.java:66..78` → `RILUtils.java:4270..4306` 的 HAL `Dial.clir` 原值赋值。
+  此为 Java 静态路径，不替代旧 native 证据或本次真实 MD receipt。
+- Java owner：`ImsService.java:1026..1064,3244..3260` 按 phone index 建 adapter、取同 index
+  handler/adapter 创建 session；session 留 `mPhoneId`/adapter（`2000..2016`），adapter 留
+  constructor phoneId 并据此选 HIDL/AIDL service（`1569..1572,1762..1772,1848..1858`）。
+  这不是当前 subscription/SIM/native epoch 或 handover 后绑定已经闭合。
+
+证据在 `x9/out/dial-java-producer/matching-java-producer-final.json`；已有命令产物为
+同目录 `get-*.stdout/stderr`、`tel-getclirmode-refs.txt`、`ims-dial-refs.txt` 等。
+`replay-commands.txt` 明标重建 recipe 而非历史 argv/exit；本轮未重跑 ASC、扩大扫描或触设备。
+fresh `x9/out/call-owned-runtime/` 的 CLIR/OIR 零命中亦不证明 raw0。仍缺实际 default 实现/值、
+完整可达 iOS owned producer/backend 与最终事件/媒体验收；无生产源码、测试、编译、CI/镜像，
+VOICE09 保持关闭，不新增 unused API、默认 profile 或开放拨号准入。
+
+### selected CLIR factory 的原 DEX 分支（2026-11-16）
+
+续查只沿上述 `OplusTelephonyFactory` 新 lead，不重扫已排除的 wrapper 类。
+matching `telephony-common.jar:classes.dex` 的四个原 `code_item` 已独立读取，
+以下 offset 是**原未压缩 DEX**内位置，不是 ASC 重建 DEX 或 Java 行号：
+
+- `getInstance`：`0x12b348`，instructions 从 `0x12b358` 开始。
+  `myUserId()==0` 时用 `newInstance` 加载
+  **`/system_ext/framework/oplus-telephony-common.jar`**，类名
+  **`com.oplus.internal.telephony.OplusTelephonyFactoryImpl`**；正常返回后保存 factory，
+  `sIsValidOplusFeature=true`。非 owner Android user 则构造 base factory、置 false。
+  **Android user ID 不是 SIM slot 或 iOS PersonalityID。**
+- ASC 此次 Java 输出遗漏了真实的 `mLock` monitor 和 `Exception` fallback。
+  原 DEX 的 `cu0x10..0x43` try 范围有 `Exception → cu0x24` handler：
+  反射失败会打印错误、构造 base factory并置 false；catch-all `cu0x22` 经
+  monitor-exit 再抛出。不能将“代码会尝试加载 vendor”写成实际选择成功。
+- `newInstance`：`0x12b4a4`，用实际 parent classloader 创建 `PathClassLoader`，
+  `Class.forName(...,true,loader)` 后取无参构造并 `newInstance`。
+- `ImsPhoneCallTracker::getClirMode`：`0x20ed00`，确认
+  `clir_sub_key + mPhone.getSubId()`，并把实际 `mInterfaceImpl` 的
+  `getClirDefaultSuppression()`返回值交给 `SharedPreferences.getInt`。
+  interface 默认方法 `0x329aec` 的原两条指令确为返回0；仍不证明 vendor override
+  或当前 preference/实际拨号值。
+
+新的首缺输入是上面**selected factory jar**，它不在现有 `files-manifest.json`
+采集清单，也未在本树原件/备份的 exact-basename 查找中找到；已留的
+`oplus-framework.jar` 是另一份 wrapper，不能代用。下一需要同版该 jar 的
+`getFeature`选择分支及 tracker implementation，再核其 default 方法和运行分支。
+保留的 main/radio log没有本次 factory/default 搜索的决定性输出，不能推断成功或失败。
+
+原件解码、位置 JSON、ASC输出和实际命令在 `x9/out/call-clir-selected/`。
+初次原 DEX parser 因 Android17 hidden-API metadata enum4 不受支持而 exit1；
+仅在 decoder 中保留未知注解的 numeric value 后 exit0，原 archive/DEX bytes未改变，
+每条输出指令均核对其原 offset/raw bytes。不将 metadata workaround 当 runtime 策略。
+本项无生产修改、构建、设备操作或功能验收，仍不开放 VOICE09/20 或赋予默认profile。
+
+## 2026-11-16 同版 DSP 原件：task-info producer 与 USIP AD50 的窄契约
+
+新 capture `android-call-inputs-20261116-092442` 已保留 active `audio_dsp_b`
+**33554432B** 和7个真实 audio 模块；旧“未抓同版 payload”阻断已解除。
+本节只收束现存 qualification/JSON/selected asm，不重新解包、反汇编、hash或扫描。
+以下 `.ko` 地址均为 **ELF section-relative offset**，不是运行 VA。
+
+容器头候选给出 `adsp_0_sram [200,a480)`、`adsp_0_dram [b560,6398e0)`、
+`adsp_1_sram [63a9c0,643c40)`、`adsp_1_dram [644d20,15a4020)`（hex），
+各有 `cert1/cert2`；这是头/长度一致性，不是证书验证、loader地址或entrypoint证明。
+现存 strings 有真实 `task_phone_call_*`，但字符串不能证明已装载、scene0归属或receipt。
+
+真实 `audio_ipi.ko .init.text+38..90` 循环48次，生产 `g_audio_task_info`
+的 **48×8B**：`+0 u32 dsp_id / +4 support / +5 use_adsp / +6 use_scp /
++7 controller`。ioctl **40046914** 的 `.text+470..47c` 向用户copy **384B**；
+入口还可能初始化DSP，不把它当纯只读查询，也不在本轮实际调用。
+scene0的 `.rodata+3d38` 首byte **14(hex)** 使dispatch到 `.text+b758`：
+`get_adsp_core_total()>1 → dsp_id3`；fallback再次查询，`1→2 / 0→4`。
+只有3分支才经 `.text+ae48..88` 的 **dsp_id−2** 得physical core1（仍有total检查），
+`.text+b350..36c` 给controller **43**。这不是实跑scene0的8B值；
+`get_adsp_core_total` 在该模块仍为import，两个core的resume日志不能代替其回读。
+
+真实 `snd-soc-mtk-common.ko .text+4bdc→4f88` 取
+`get_smem_phy_start_addr(0,24,&size)`，`4c1c` 的AD50 producer依据
+`EMI_TABLE` 生成两个u64 **{AP PA+30000(hex), 30000(hex)}**，不是MD PA。
+`4d10..30` 发送scene0；enhancement bit1条件下 `4d4c..88` 可另发scene19。
+数值 `data_type=1 / ack_type=0 / payload=16B / transport=32B` 与既有reference
+契约一致；这是实际AP producer，不是DSP消费确认或通话双向media owner。
+
+已抓 `adsp-v3.ko` 仅 **40184B**，init调用的是import `adsp_system_bootup`；
+它不能补出主loader的实际加载/地址契约或上述core-total定义。剩余首缺是实际
+loader/core-total、scene0实跑task-info8B和可归属DSP receipt，之后仍需通话时
+DAPM/mixer选择、独立USIP_PHONECALL及iOS BasebandVoice双向I/O；不写猜测路由。
+精确原件资格、section/行号索引和缺口在gitignored
+`x9/out/voice-dsp-payload/{final-dsp-contract.json,final-evidence-index.md}`；
+只重读已有证据即可复核，不接触设备或旧备份。本轮仅docs，无production delta、
+测试、编译、CI、boot pack或上机；VOICE09不因静态收束开放。
+
+## 2026-11-16 同版 Android17 SMS owner：raw 接收 ACK 不等于 Messages commit
+
+本次已抓 matching `telephony-common.jar`（Android17 `CP2A.260605.016/B.46c413f-20895a6-20bdbdd`），
+仅收束既有 ASC Java、selected DEX 和原 offset JSON，不重跑提取、hash、测试或设备命令。
+以下 `code_item` 均是原 `classes.dex` 文件偏移；`+offset` 仅指 ASC rebuilt-ref 渲染的相对指令位置。
+**长构造器标签纠正：** extractor 按 method name 索引，两个 `<init>` 覆盖了 selected 标题；
+原 JSON 的 SmsDispatchersController 长 ctor 是 **`0x175c0c/512B`**，短 ctor 才是 `0x175e1c/26B`。
+保留原件不改写，不将该错标题当原长方法地址，也不把 rebuilt 相对位置直接算成已核对的原绝对地址。
+
+长 ctor 的 selected `+0100` 创建 GsmInboundSmsHandler；Gsm ctor `0x1f2c14/+0026`
+将 `Phone.mCi.setOnNewGsmSms(handler,1,null)` 绑定事件1，factory `0x1f2a0c/+0014` 调 `start()`。
+这是静态 owner/start 链，不证明当前进程实际 override、StartupState 推进或 baseband ready。
+DeliveringState `0x1138e8/+01ac` 在事件1内调用 `handleNewSms`；事件2另在 `+015c` 调
+`processMessagePart`。`handleNewSms 0x1170fc/+003e` 调 dispatchMessage；其 receive-disabled、
+polling、satellite 等 gate 本次只有 retained ASC Java，不声称这些 gate 的原指令已逐项闭合。
+
+**条件化的普通 CS GSM 接收分支：** radio-specific `0x1f2a38/+0162` → normal
+`0x116084/+0198` → raw helper。`addTrackerToRawTable 0x115dc8/+0098` 调 provider insert，
+随后 parse row id、设 tracker 删除条件并返回1；duplicate 返回5。`sRawUri` 在 retained Java
+构造器指向 `Telephony.Sms.CONTENT_URI/raw`，不是最终 SMS app inbox 或 iOS Messages 数据库。
+helper `0x115f50/+001a` 在 result1 时**先排事件2，再返回1**；duplicate5 则直接转1、不排新事件2。
+`handleNewSms/+008c` 对 -1 跳过 ACK，result1 置 success=true 后 `+0098` 同步调用
+notify/ACK；这条分支不等待事件2广播完成、最终短信 app 保存或重开显示。
+
+Gsm ACK `0x1f2ccc` → `resultToCause 0x1f2bb4`：`-1/1→0`、`3→0xd3`、其它 `→0xff`；
+其中 -1 的 cause 映射**不代表 handleNewSms 已发 ACK**。RIL `0x14941c` 先 canMakeRequest，
+再申请 decimal request37，经 serial/lambda → RadioMessagingProxy `0x158cd4`，非 empty 时
+调用真实 `IRadioMessaging` AIDL 或 `V1_4/IRadio` HIDL。Android request37 与 QMI WMS37
+是不同命名空间；调用存在不等于 modem ACK、completion，也未证本次实际 AIDL/HIDL 分支。
+
+selected 未保存完整 try/exception-handler 表，ASC Java 有类型/控制流失真；raw helper Java
+还漏掉 selected 中 URI-error 分支。因此不补猜完整异常条件、provider transaction COMMIT 或 IMS 契约。
+fresh 日志现位于主 `x9/out/call-owned-runtime/`；既有窄筛初始化/SMS ACK为0 hits，窗口09:15后，
+不能据此判未初始化/失败；旧 Java/IMS owner 活动也不能拼成本次短信接收成功。
+既有 kernel memory-full D3 映射与此静态分支吻合，无新独立 codec/dispatch 矛盾，不造 ready/ACK。
+**Android raw 接收 ACK 不能替代 iOS 验收：** 仍需当前 image/source 对齐的同 token Messages
+COMMIT、重开持久化、相关物理 ACK/WMS完成，以及 MO 对端收到；本次没有 production delta 或镜像。
+原偏移、标签边界与逐条只读 `cat/sed` 入口在 gitignored
+`x9/out/init-sms-java/matching-sms-final-contract.json`；root 统一归档/交接，无编译、CI 或上机结果。
+
+## 2026-11-16 actual personality 更新、typed Client 输入与退休边界
+
+以下为当前root/cache原件静态链，**不是已安装的MTK typed backend或通话/SMS验收**。
+前节普通typed client的路由继续成立；本节补齐它依赖的真实owner、队列和re-add边界。
+
+### 更新的是强owned model，不是临时Call或单slot helper
+
+CommCenter原 `PersonalitiesTracker` 绑定点 `1007a1fe4..1007a2034` 将
+handler+990的tracker与callback **`1007a5150`** 绑定；输入target queue来自handler+18。
+event前24B为真实PersonalityID，action在+18/u8。原jump table `10114d135` 为
+`0e1cf42af4f40000`：0→added、1→enabled、6/7→removed，2/4/5返回；
+不替action3猜业务语义。handler+48是manager secondary interface，其+128/+130/+138
+经this−0x30 thunks到 `handlePersonalityAdded_sync1f2e52048`、
+`handlePersonalityEnabled_sync1f2e52f58`、`handlePersonalityRemoved_sync1f2e53bc8`。
+
+added已有controller分支 `1f2e528d8..8fc`、enabled正常分支 `1f2e53180..1a4`
+都从强controller virtual+38调用 **`getModel_sync1f2e421c8`** 得model强pair，
+再从model virtual+30调用 **`updatePersonalityInfo1f2e77c04`**，传入真实
+`shared_ptr<PersonalityInfo const> const&`。后者 `1f2e77d00..d08` 将model+28/+30
+替换为incoming强pair，再同步调用model+58的Config强owner；不是只更新integer slot。
+**+58原先被称为observer的类型判断已由末节原ctor/vtable证据纠正**，不能据此添加订阅器。
+`getPersonalityInfo1f2e77d7c` 在x8返回该强pair并increment control。
+model getter本身没有revision/MD epoch，也不能由本函数未见mutex否定调用者串行化。
+
+### tracker退休fence与manager getter同步必须区分
+
+`PersonalitiesTracker::bind1f038aa40` 先unbind旧hookup，再创建**独立serial child queue**，
+target为输入queue。`updateEvent1f038c1c4` 保存weak hookup/group、复制event、retain强record，
+经async **`1f038c4e0`** 调tracker+50第一阶段，随后group notify **`1f038c75c`**
+调tracker+70→上述CommCenter handler。两个执行阶段都weak-lock并检查旧hookup+20。
+`unbind1f038a944` 在 `1f038a95c` 先清旧hookup+20，再清owner和三个callback。
+所以不能把“已排旧event在rebind后调用新callback”当作既定行为；反过来，这也不是
+native binding/epoch、已发MD mutation或typed delegate终态的退休fence。
+
+原件decoder已修正：四个dispatch stub是 **ADRP/LDR GOT/BR**，不是ADRP/ADD直达。
+当前GOT mapping的slide-v2实值 `page_size=4096 / delta_mask=0x00ffff0000000000 /
+value_add=0`；各GOT均通过page-start与实际rebase chain成员资格，再核对当前export trie：
+
+| 原stub | 原GOT | unslid target / 真export |
+| --- | --- | --- |
+| `1f03c19b8` | `20f7e8d98` | `18dba5310 _dispatch_async_f` |
+| `1f03c1a0c` | `20f7e8e90` | `18dba555c _dispatch_group_notify_f` |
+| `1f03c1a24` | `20f7e8f48` | `18db970d0 _dispatch_queue_attr_make_with_qos_class` |
+| `1f03c1a3c` | `20f7e8f58` | `18dba5814 _dispatch_queue_create_with_target$V2` |
+
+weak-lock veneer **`1f2f7b31c`** 原12B `b0bcd0f010e2019100021fd6` 直接解析到
+真export **`194712078 __ZNSt3__119__shared_weak_count4lockEv`**。旧
+`qualified/original-producer-proof.json` 四个`optimized_queue_stubs.target=20f7e8000`
+**无效且保留不覆盖**；其它21个text/6个data/25个export不因此失效。新补证独立在
+`qualified-queue/original-queue-proof.json`，此次只读target/metadata，没有重读旧21个text范围。
+
+### 普通typed factory真正消费的Client强pair
+
+已知 `100dcf174` 为factory准备临时Client pair时调用 **`100dd1168`**：
+从CallInfo+0xd8读slot，driver+88 virtual+190的结果分普通/另一Client路径，
+**不以该未知predicate或factory的emergency形参推测全部紧急策略**。
+普通分支tail-call **`100dd3498`**，调用原 `PersonalityIdFromSlotIdEx` 得真实ID，
+再经Registry service-map helper **`1001acd00`** 取强
+`SystemDeterminationManagerInterface`。root GOT `10151b320` 的原import为此RTTI，
+不是独立CallFactory item；磁盘bind编码 `8010000000000e62` 不是可调用地址。
+manager primary addresspoint **`20e057338`** 的+18（slot `20e057350`）实际目标为
+**`getIMSClientRef1f2e4c210`**。
+
+这个getter首先调用 **`isPresent1f038b750`**（原veneer `1f2fb16cc`），不是
+`sd::isSimPersonality`。isPresent只检查非空ID并按ID查强record是否存在，**不检查
+record+31的SIM类型、+34的物理slot或当前初始化/注册状态**。
+present分支从manager+18取queue，根据保存的dispatch包装状态选
+`_dispatch_async_and_wait1f2e82fe8→18dba52ec` 或
+`_dispatch_sync1f2e83084→18dba5a00`；原wrapper均将真实结果搬入x8 sret。
+实际map访问block **`1f2e61a04`** 查manager+68的PersonalityID→强controller map，
+存在则virtual+60→**`getImsClientRef1f2e68b38`**，从controller+d8/e0返回强Client pair，
+缺entry则空pair。non-present分支另有特殊PersonalityID比较/诊断路径，不能简化成SIM0 fallback。
+
+这闭合了普通typed action→真实强manager/controller/Client输入，不把clientId当personalityId。
+**仍不能把三个独立读取（slot→ID、isPresent、manager排队后的Client）视作原子
+record/revision快照，也不能把强pair成功视作REGISTERED或media-ready。**
+物理provenance仍须取同一owned record，并由provider自有binding/epoch跨异步准入复核。
+
+### removed→re-add不会自然生成新的Client身份
+
+manager removed正常分支只查强controller并virtual+178；完整本函数没有erase该map entry。
+controller removed `1f2e69980` 的+a0/+a8真实槽分别为
+`deinitializeImsClient_sync1f2e6f40c` / `updateImsClientNetworkServices_sync1f2e6f000`，
+还清理model、状态和DCN owner；不是Client destructor。普通deinit/cleanup/late callback
+与root factory ret-deleter的原边界复用前节已认证证据，不再次声称remove即终态。
+
+随后**若同ID entry仍在**，manager added替换model强info，virtual+170→
+`handlePersonalityAdded_sync1f2e696c4`，再virtual+90→
+`createIMSClient_sync1f2e6803c`。后者入口 `1f2e68054..58` 只要controller+d8 Client非空
+就直接返回，不生成新UUID/Client。因此同一Client/clientId可以跨record替换与re-add保留；
+不能仅按clientId或Call地址建立native epoch，不以强owner寿命代替当前record绑定有效性。
+这是一条条件化原件控制流证明，**不是实机已发生移除/re-add或late event误投的观察**。
+
+证据都在 `x9/out/call-context-producer/`。`qualified-client-targets/original-client-proof.json`
+含9个前次成功比较的保留raw范围、此次唯一新增的isPresent text、7个data范围及3个新ABI目标；
+第一次client pass因误给predicate猜名而exit1，未覆盖raw，resume只使用保留的9个text，
+读新predicate/目标并核对原vtable rebase后 **exit0**。两个空objdump输出和此前short-VA查询
+均保留为invalid，不用于结论。维护工具 **`x9/tools/call_context_evidence.py`** 消除scratch
+import依赖，支持独立producer/queue/client模式，只允许NEW `x9/out`输出；本轮只静态syntax
+parse，未为了维护版本重跑已闭范围。需要重放时从主目录使用已有root mount，例如：
+
+```sh
+python3 x9/tools/call_context_evidence.py --mode queue --out x9/out/<唯一名>
+python3 x9/tools/call_context_evidence.py --mode client --out x9/out/<另一个唯一名>
+```
+
+本轮未修改生产call/SMS行为、运行测试/构建/CI或操作设备。下一真正接线仍是owned
+record→logical binding/MD epoch→profile/admission→匹配typed终态；不能新增空loader或
+默认profile绕过。**VOICE09仍关闭，VOICE20仍无生产caller**；CallList/handover、独立
+双向DSP和当前Messages同token COMMIT/重开/物理ACK/MO对端验收仍未完成。
+
+## 2026-11-16 显式 Android CLIR 的现有 codec 保真修复
+
+上一轮matching Java producer已补齐一个过去不具备的输入子集：temporary SC31的
+明确raw CLIR1/2，由非空extracted dialingNumber与同一DialArgs owner携带；它不是
+查询vendor/default结果，也不是把Apple CLIR/CT枚举直接作为Android raw值。
+复用 `dial-java-producer/matching-java-producer-final.json` 与
+`call-privacy-policy/privacy-policy-original-proof.json` 的已有原件/selected证据，
+本轮不再反汇编这些范围或查询旧wrapper。
+在**non-ECC、普通十进制号码、raw CLIR已明确为1/2**的子集，原Rtm `265500`
+不经key124覆盖，Rmm `387fb0` 的`*82`与ECC分支也不适用，原值进入108/u8。
+selected vendor factory/default仍缺失，但不能把这个独立缺口扩大成“显式1/2也只能丢弃”。
+
+当前代码的陈旧限制是 `x9cw_dial_profile_valid` 要求clir==0，且encoder无条件写108=0。
+现修复**既有函数**，没有新增unused profile API或生产caller：
+
+- profile validator接受已由调用者明确拥有的Android raw0/1/2；0仅保留已有capture子集，
+  **不增加missing/vendor/network-default选择规则**。
+- `x9cw_dial` 在改写output前先copy scalar profile，验证同一个local snapshot后逐字段序列化，108取真实
+  `route.clir`，不硬编码0。原号码own-copy/同buffer规则、route/type/domain/ecc-domain约束保持。
+- 物理writer上游既有 `x9cw_native_dial` 同步接纳mandatory108/u8的0/1/2，仍要求
+  相同tag/order/width/decimal/NUL/padding和其余四个measured字段；大于2失败，不截断成byte0。
+- QMI号码parser仍拒绝额外CLIR/未知字段；**并未从QMI的缺字段或者Call+08/+09猜raw值**。
+  默认/Apple typed privacy转换、完整owned route与binding仍须真实producer。
+
+这是现有encoder与native validator的功能扩展，**不是已接通iOS显式隐藏/显示号码**。
+其0分支保持原包；1/2分支在现有40byte scalar tail中只改变108的value，号码不插入prefix。
+无新通话类型、SIM0或domain选择，没有改registration、lease、token、epoch、terminal或SMS路径。
+`X9Calls.inc::x9c_dial_submit` 仍无生产caller，VOICE09未公告，不能由codec成功授予REGISTERED。
+
+测试源只补上显式1/2与无效3/0x100的期望，**本轮未执行任何测试脚本/套件或人工向量**。
+固定输入 `prepare-local.py --check` exit0；仅按正常recipe编译实际消费者
+`X9Baseband.cpp.o` 与 `sweet_x9_gpu_dependencies.o`。首次源码与review后先copy再验证的最终r2源码
+分别编译，均为 **exit0，两项True，34/251 warnings**；第二次对应真实源码变化，不是产物复检。
+输入为 `aad2b3ab`＋各次codec diff，首次记录
+`x9/out/call-profile-producer/{source-head.txt,source-input.diff,compile-command.txt,
+compile-recipe.py,single-compile.log,compile-exit.txt,compile/recipe-results.json}`。
+最终r2记录为同目录 `source-input-r2.diff/compile-recipe-r2.py/single-compile-r2.log/
+compile-exit-r2.txt/compile-r2/recipe-results.json`，原session29457已实际取得exit0。
+scalar local snapshot防止验证后再次读取caller字段，不代表跨并发record/revision的原子性。
+没有link、boot pack、CI或设备操作，也没有构建后二次hash/解包/反汇编检查。
+完整typed/backend/profile/epoch/state/media和当前Messages最终验收仍未完成；后续应连接真实
+owned producer，而不是为此小修复开放默认profile或重复收集已闭合的CLIR原件。
+
+## 2026-11-16 model+58 的真实 Config owner：不是可订阅 observer
+
+前节旧update切片只能证明model先写`+28/+30`强PersonalityInfo，再调用`+58`对象的
+virtual+10；它不能给该对象命名为observer。本次只新增ctor/config范围，复用旧update raw，
+不重采getter、tracker/queue或CallList。当前root/cache原件资格见
+`x9/out/call-owned-next/record-observer/qualified-r4/original-config-proof.json`，实际 **exit0**。
+
+### 输入与具体 addresspoint
+
+- 真export `IMSSubscriberModel C1 1f2e76ed0`直接branch到`C2 1f2e77538`。
+  C2保存`x2→x23`，将该**按值传入、ABI间接寻址的ConfigInterface shared_ptr**强copy到
+  model`+58/+60`；不是第四个业务参数。`x4`的PersonalityBoundInstance强pair另在`+48/+50`。
+  这两个实际ctor为同参数forward，不沿用其它类C2的VTT参数假设。
+- 真export `IMSSubscriberConfig C1 1f2e42d6c→C2 1f2e42d70`；C2参数为Registry、
+  PersonalityInfo、PersonalityBoundInstance的pair引用。
+- Config ctor `1f2e42f04..f0c`安装实际addresspoint **`20e056820`**，真vtable export
+  **`__ZTVN2sd19IMSSubscriberConfigE=20e056810`**。原slide-v2链成员槽
+  **`20e056830`（virtual+10）→1f2e430fc**，原export确为
+  `sd::IMSSubscriberConfig::updatePersonalityInfo(shared_ptr<PersonalityInfo const> const&)`。
+  nlist仅作初始lead，资格依赖原ctor、原page chain及真export，不是重建符号命名。
+
+### 实际更新与顺序
+
+Config update只有8B：`add x0,x0,#0x38; b 1f2e43104`。
+新增原helper **`1f2e43104..4317c`（120B）** 先取并retain incoming strong control，
+再写Config`+38/+40`，随后release old control，同步返回；旧control最后强引用的分支
+会调用其deleter/release helper，不是新record订阅事件。
+组合既有model切片，顺序是 **model强record替换→同incoming pair的Config强record替换**。
+这条实际函数链没有第三方observer登记或独立dispatch enqueue，不从该赋值推断整个系统
+都没有其它观察机制。它也不生成record revision、native binding lease、Call UUID/MD epoch，
+不能以strong pair成功或clientId仍在证明REGISTERED/media-ready。
+
+原scope的七个text于失败r2已真实与cache相等；r4复用这些raw及原page，只新增helper120B
+（cache31 offset`0x61c3104`）并保存必要header/load-command/export/slide元数据。
+原七个callable/vtable export全部为 **flags0 / REGULAR**。r2/r3失败真正原因是scratch
+trie parser在advance child cursor后才取suffix，产生空symbol；**不是缺vtable export或
+ABSOLUTE kind**。失败目录和最初`--macho`忽略范围的巨大输出保留、标无效，不覆盖原证据。
+契约/命令/失败边界为同目录 `model-config-contract.json/commands.txt/
+reader-failure-and-resume.txt`；原source-head仍`aad2b3ab`，不以事后维护提交替换。
+
+维护 **`x9/tools/call_context_evidence.py --mode config`** 只读8个新text、1个data槽与system
+image/export，使用原slide chain及具体update/vtable真export检查，不执行旧producer/client/
+queue范围。维护版仅静态Python syntax和diff review，**本次实际原件资格来自scratch reader，
+未为维护版重新采样**。未来在主checkout已有root mount上，用NEW目录可独立重放：
+
+```sh
+python3 x9/tools/call_context_evidence.py --mode config --out x9/out/<唯一新目录>
+```
+
+这不是production provider/hook。下一仍要真实typed action的同owned record/revision关联到
+logical allocation/txn与native epoch并接匹配终态；现有44只携SIM、20只携号码，不能充当
+record变更通知。**VOICE09保持关闭，VOICE20无生产caller**，完整通话媒体/CallList/handover
+及当前Messages持久化、物理ACK、MO对端验收仍未完成。
+
+同轮短信源码审查仅排除一条猜测缺口：`release_pending`槽不被分配，DEL_CLIENT先完成
+`x9m_del`清旧订阅/local generation更新，再清pending2；MT enqueue亦拒绝pending/unused。
+所以没有显式generation形参本身不足以证明跨client发布，不补无据API/ACK/ready。
+精确链记录在 `x9/out/sms-owned-next/owner-boundary.txt`；没有短信production delta或新实机结果。
+
+## 2026-11-16 普通 factory 的 Client 基类与逐动作强 pair 关联
+
+本次只新增两个原件 RTTI，共 **40B**，以及 exact typeinfo name、必要 libc++abi
+export/slide 元数据；复用已有 ctor、factory、Client lookup 与 action caller raw，
+不重采 getter/queue/Config/CallList。实际原件资格 **exit0，0旧text/0新text**，见
+`x9/out/call-context-join/qualified-r1/original-client-adjustment-proof.json`。
+
+### 原 Client → ClientHandle 的实际 adjustment 为 0
+
+Client RTTI **`1d90b8838`** 的原 slide-v2 chain vptr 指向
+`__si_class_type_info` addresspoint **`1dab5a588`**，exact name为
+`N3ims6ClientE`，直接非虚基类 RTTI 为 **`1d90b8948`**。
+后者为 `__class_type_info` addresspoint **`1dab5a520`**，exact name为
+`N3ims12ClientHandleE`，没有直接基类。两 RTTI 与两 ABI vtable 的 selected
+真 export 均为 **flags0 / REGULAR**，不靠手工 mask 猜目标。
+
+既有 Client ctor `1b7c3eb80/1b7c3eb9c` 在**同一个 this**先装 ClientHandle
+addresspoint `1d90b8860`，再装 Client addresspoint `1d90b86d8`。
+普通 factory **`10019c298`** 直接取输入强 pair 的 Client pointer，
+**`10019c2c0`** 原样以 x2 传给 Call ctor，没有 cast 或指针 adjustment。
+因此闭合的是原 `ims::Client → ims::ClientHandle` adjustment0；
+**不能把该 strong Client pair/control reinterpret 为 PersonalitySpecificImpl、
+PersonalityBoundInstance 或 record owner，更不能把 Client+10 的 clientId string
+当 record pointer。** 这不排除另一个独立证明的 derived ClientHandle 携带额外 context。
+
+### 普通 factory action 的本次临时 Client 与本次新 Call
+
+helper **`100dcf174`** 从 driver+328 取 factory，再在 **`100dcf1a0`** 针对
+本次原 CallInfo 调 `100dd1168 → normal 100dd3498` 获取真实 strong Client。
+**`100dcf1ac`** 传 x2=helper栈上的 pair，**`100dcf1b8`** 传同一 CallInfo，
+**`100dcf1c0`** dispatch factory+40；**`100dcf1c4..1f8`** 随即释放临时
+Client control。该 pair 的栈地址不能跨返回/异步逃逸。
+
+普通 `10019c234` 分支没有从 factory this 获取 PBI/record；每次成功创建独立
+0x60 Call/control，返回 allocation+18 的 object 与新 control。复用原 Call ctor 证据，
+Call 只 own-copy UUID+10、ClientHandle+10 的 clientId→Call+28，
+没有保存 strong Client、Client pointer、PBI/record 或 native identity。
+strong Client 成功只证明本次对象寿命；相同 UUID/clientId 不证明跨动作的同 record。
+
+第三真实 caller **`100dd484c..4930`** 只有 driver/原 CallInfo 输入；
+`4860/4868` 保存同一 CallInfo并取+b8，`4880..4888` 调同一 helper新建 Call，
+`4894..48a4` 对**本次返回 Call**调用 virtual+30=`setRelayCall(b8==1)`，
+`48e8..4920` 释放本次 Call control。这闭合了 **CallInfo+b8→本次新 Call**，
+没有独立 PBI/record 输入、owner copy 或 same-record/native 检查。
+第二 caller `100dcf9b4` 同样重新创建；其 `9d4` dynamic_cast 与 `9dc..9fc` retain
+只 adjustment/own 返回 Call，不恢复 Client 或之前动作的 record。
+
+所以真实同步接线输入是 **原 UUID/CallInfo + 本次 ClientHandle strong pair +
+本次返回 CallHandle strong pair**；仍不能从 strong Client 恢复另有 owner 的 PBI。
+controller/model 的独立 PBI 原件资格另见
+`x9/out/call-record-snapshot/qualified-instance-r1/original-instance-proof.json`，
+不把两个强 pair 或 clientId 相等当作同动作 record 的原子快照/退休 fence。
+逐动作同 owned record 与真实状态更新/退休顺序仍须接实证 producer，
+不新增假 revision/native epoch、默认 profile 或 unused API。
+
+完整窄契约/执行命令在 `x9/out/call-context-join/typed-context-join-contract.{json,txt}`
+与 `commands.txt`。本次没有生产行为改动、编译、测试/人工向量、CI、设备操作或 boot pack；
+**VOICE09仍关闭，完整通话短信目标未完成**。
+
+## 2026-11-16 MD 显式 CLIR 的实际受门控消费者
+
+本轮只新增读取十个有具体符号边界的 nanoMIPS 函数（共2802B），以及 prefix24B、
+selected dispatch entry2B、format5B；复用旧 Apple privacy/CT、Android Java producer、
+Rtm/Rmm 与 `mipc_call_dial_req` 切片，**不重采旧范围，也不扩大到其它 CLIR 控制**。
+源为固定 `.local/x9/modem/parts/modem_a.img`，ROM VA90000000对应文件offset200。
+原件切片与派生asm分开保存，十个函数的 decoder 均为 **exit0**；不是设备执行或通话成功。
+
+### 从原108到真实 handler，而非凭函数名选消费者
+
+- 旧 parser `9131cf5e..7c`检查存在的108长度为1B，u8原值写入独立request `+d0`；明确
+  非零跳过106 fallback，missing/zero仍有fallback。`9131d02a..03a`向
+  `l5mipc_ilm_send` 提交message **db19**，原request为a6。
+- 新 `l5ucc_main9139fe3a..913a0070` 对db19落入common hook；新
+  `bespoke_common_l5ucc_main_handler91302c3c..64`只接75a9/db53/db54，对db19返回0。
+  因此 main `913a006a`调用真实 `l5ucc_enque_req9139fcee..9139fe3a`，并非直接无条件dial。
+- enqueue `9139fd2c..56` retain原local_para并copy到新ILM `+8`，原message id从`+6`
+  保留到新ILM `+6`；node pending byte先置0。队列长度/控制队列及系统状态决定何时进入
+  `l5ucc_process_req_ilm9139fae6..9139fcee`，相关短trigger切片也保留。不能绕过这些门。
+- process `9139fb6a..86`用`message-db19`索引table **92992744**。本轮只读它的db19
+  entry，原signed halfword为0，选中next-PC **9139fb8a**，该块`9139fb8e`真实调用
+  **l5ucc_dial_hdlr91390b76..91390dee**。还须通过pending、控制状态和真实request验证；
+  这闭合的是受门控静态consumer路由，不是对当前运行状态或网络结果的证明。
+
+### raw1/2的实际效果边界
+
+上述dial handler `91390c76..88`按真实process分类调用normal或ECC wrapper。本轮只读
+normal **913a1510..152a**：request`+c0==2`时，原号码`+9`、原raw CLIR`+d0`
+与limit b4传到 **l5ucc_add_clir_prefix_origin913a1388..1496**。首先必须由
+**l5ucc_clir_special_case_handler913a1284..1388**返回0，才进入以下普通prefix分支：
+
+| 已拥有的MD raw值 | 新原件决定门 |
+| --- | --- |
+| 1 | `913a13de/e2`选择原literal **924325ec=`#31#`** |
+| 2 | `913a13da/ea`选择原literal **924325f4=`*31#`** |
+| 0 | `913a13c8/cc`先调用 **l5ucc_get_clir_status913a120e..1238**，取得existing CLIR；不是显式允许显示 |
+
+`913a1440..4c`真实调用snprintf，新增原format **92378658=`%s%s\0`**，参数是selected
+prefix和原号码；正常长度门后`913a145c..60`将结果交给 `l5_strncpy`，destination仍是
+原owned号码buffer。encoder本身仍只序列化mandatory108/u8，**没有向AP号码自行插prefix**。
+special-case拦截、ECC支路、default getter的下游策略与当前网络效果不在本轮新增scope内；
+不把这条受门控prefix分支描述为所有拨号均无条件执行。
+
+现行 `x9_call_wire.h` 对明确raw1/2保值、非Apple枚举cast的注释没有可证错误，只补上
+上述实际MD prefix与zero/default边界；**没有行为变更、映射API、生产provider或默认值**。
+Apple `Call+9/+8`的(1,1)/(1,0)/(0,0) SIP效果已由前节证明，但不能把它们按字节互抄成
+Android raw，也不能从prefix观测反推完整Apple策略/route准入或隐藏/显示的网络验收。
+
+原件及紧凑契约为主checkout `x9/out/call-profile-input-next/` 的
+`privacy-input-contract.json`、`new-md-*-ranges.json`、`*.original.bin`、`*.numbered.asm`
+及四个 `read-md-*-ranges.py`。这些scratch reader按显式新范围读取；已有旧原件身份仅引用，
+本轮未重新hash全ROM。matching Java `ImsCallProfile` 的附带ASC结果仅作为未opcode-qualified
+的namespace线索，不参与该消费者结论。未运行测试、编译、CI、boot pack或操作设备；
+**VOICE09未公告、VOICE20无生产caller**，完整通话/媒体与当前Messages最终验收仍未完成。
+
+## 2026-11-16 同 record 的构造关联与可变 PBI：不是原子 action snapshot
+
+本次新增 controller 的 C1/C2 和一个真正调用三个 create import 的 root 函数，
+不重采 model/config getter、manager queue 或旧 Call action。维护 reader 的
+`instance`、`factory` 两模式分别实际 **exit0**：前者2个新text/2个真export，
+后者1个新text/3个当前root原indirect-symbol import。原件证据与命令在
+`x9/out/call-record-snapshot/`；这不是已安装的provider或运行准入。
+
+### Controller 独立拥有 PBI 与 Model
+
+真export **C1 `1f2e66b4c`** 单B到 **C2 `1f2e66b6c`**，本类不插入VTT参数。
+C2的x6为PBI pair引用，`1f2e66dcc..df4`保存pointer/control至
+**controller+68/+70**并retain；x5为Model pair引用，`1f2e66e3c..e64`保存至
+**+a0/+a8**并retain。同一PBI实参又在`1f2e66f10`以x3传入factory virtual+20，
+不能把controller的强Client+d8/e0解释成这两个不同对象的owner。
+
+`1f2e66f24..f3c`对全局`214b894a0`原子递增，并将**旧counter值**存controller+d0。
+它是controller identifier来源，不是record revision、physical SIM、MD epoch或Call UUID。
+counter存在不能证明移除/re-add会重建controller，更不能替代旧Client的退休fence。
+
+### 三个 create 使用同一个强 record 与同一个 PBI
+
+对三个既有root import的exact branch inventory仅用于定位：它们均在
+**`100315488..100315924`**，边界由当前root `LC_FUNCTION_STARTS`给出。
+随后只读该新函数；原import table确认`10107f99c/10107f990/10107f9a8`分别为
+Config/Model/Controller的create，不用shared-cache slide mask解码root磁盘fixup。
+
+该函数先取得强PersonalityInfo pair于sp+60/+68；其pointer为x24。原
+`100315510..520`从**同一x24**读取record+31/u8与+38/u32，写入新8B PBI对象
+的+0与+4；新32B control/object allocation的PBI强pair保存于sp+50/+58。
+这两个字段不是整个PersonalityInfo的复制，不把原+38命名成新增版本号。
+
+- `100315530..53c`将sp+60的record和sp+50的PBI交给Config create。
+- `100315550..560`将Config强pair、**同sp+60 record/同sp+50 PBI**交给Model create。
+- `10031564c..65c`将刚建立的Model强pair及**仍为同sp+50的PBI**交给Controller create。
+- 返回controller强pair前后按原control清理临时Model/PBI/record；下游ctor已各retain其owner。
+
+结合前节已闭的ctor，Config+38/+40与Model+28/+30是同一初始record的强pair，
+Config+48/+50、Model+48/+50和Controller+68/+70各own同一个初始PBI。
+这闭合的是**一次构造内部的同owner关联**，并未新核manager所持factory+30的
+loaded指针/安装选择，也没有把此创建动作与后续每个CallFactory action原子join。
+
+### PBI强owner不冻结后续record或生成epoch
+
+复用旧原model update：`1f2e77c34..40`先把新record+38/u32普通store到
+**原PBI+4**，之后`1f2e77d00..1c`才替换Model强record、同步替换Config强record。
+没有该范围内的revision通知、原子snapshot或独立queue receipt。
+因而PBI可保留相同pointer/control而+4改变；同PBI或同controller identifier
+不证明当前record没变化，异步消费者也不能混用旧record和最新PBI+4。
+
+维护重放需已有只读root/cache、capstone与NEW输出目录：
+
+```sh
+python3 x9/tools/call_context_evidence.py --mode instance --out x9/out/<新目录一>
+python3 x9/tools/call_context_evidence.py --mode factory --out x9/out/<新目录二>
+```
+
+本轮实际执行的是维护reader的新增模式，未为旧producer/queue/client/config模式重采；
+未测试、编译kernel、CI、boot pack或操作设备。下一仍需在真实同controller/queue边界
+own-copy当前record和Client，联结本次CallInfo/UUID并跨实际record更新/native epoch复核，
+而不是以PBI+4、44成功或Client寿命充当snapshot。**VOICE09仍关闭，20无生产caller**。
+
+## 2026-11-16 合法 changed duplicate：03/21 保留首终态 owner
+
+现行生产 `X9Calls.inc` 修复两条确切同 transaction 分支，不改44或MD mutation：
+
+- **21**：已接受txn78/id7后，合法txn78/id8曾因旧ID比较失败得到BUSY；原query/905
+  owner继续处理906，又可返回同txn成功。现在同slot/local generation/txn且原binding与
+  **实际QMUX allocation**仍live时消费repeat，原id7/token/epoch不改、不重发MD。
+- **03**：已answered的txn91 enable随后合法changed disable，曾额外发ARG。现在保留
+  首terminal（已queue或本地保留）；pending changed决定首ARG的行为不变，fresh txn92
+  仍能拥有独立disable。这不是永久txn缓存，也不扩展generic malformed repeat保护。
+
+实际`bb_x9_call_result`在`x9/baseband/qcom/baseband/coachz_baseband.cpp:1528..1560`，
+仅success受原deadline约束，error仍可receipt；故本次没有根据fixture推测修改deadline。
+DEL仍只清host结果/route并保留selected/physical-uncertain MD token/epoch，真实END后新owned
+empty snapshot及无busy才退休；没有从906成功构造END、idle、REGISTERED或媒体能力。
+
+新增两个宿主fixture源码断言（`ios_end_changed_duplicate`、`handover_completed_changed`）
+仅`clang++ -c` **exit0**，**未执行**。生产head`90079648`的实际Baseband对象 **exit0**；
+正常完整kernel **98/98对象、link/strip exit0**，产物
+`x9/out/x9-call-duplicate-owner-20261116/kernel.development.sweet`，未boot pack/上机。
+精确源审/fixture编译材料归档为`x9/out/call-terminal-audit/`，root对象命令/日志在
+`x9/out/call-context-capture/`。VOICE09仍关闭、VOICE20无生产caller，完整功能未完成。
+
+## 2026-11-16 同 CTMessage 的 GUID 选择与转换内 ACK：不等于保存成功
+
+当前root cache原relative method entry`1f3ce8f08`及`LC_FUNCTION_STARTS`确认
+`_convertCTMessageToDictionary:requiresUpload:`为 **`1f3cbec88..1f3cbf8e4 /3164B`**。
+只新增该函数及必要key/selector/export；旧receive/取件/SQL原件只复用。
+metadata、text、key、targets、exports五次实际 **exit0**；不是运行短信验收。
+
+入参同CTMessage由x2→x25→sp+38，`1f3cbf170`重载为x26。原
+`1f3cbf388..3d4`以`uniqueIdentifier`、`UUIDString`为selector参数，经helper
+`1f9dee540`的w0 bit0门控后，分别调用同CTMessage和其返回对象，选出字符串x21。
+这里未新资格该helper的符号，不以猜测名字充当证据。无selected string时
+`1f3cbf418`经原island调用真export **`_StringGUID1929004b8`**；若它亦返回null，
+`1f3cbf420`跳过key插入，不能称每次conversion都有GUID。
+
+原global **`21242ebd0`**经实际rebase chain指向CFString`20e0c18a8`，其data
+`1f3cee30d`明确为length1 **`g`**。`1f3cbf424..434`将同dictionary x27、该key和
+selected string x21传给真export **`CFDictionarySetValue186e80b34`**。
+因此GUID是该CTMessage的独立identifier分支或fallback输出，**不是把通知uint/messageId
+直接转成GUID/SQL RowID**。本次仍未闭dictionary g到实际成功record的最终身份关联。
+
+`1f3cbf598/650`各重载同sp+38的CTMessage为x21；在`1f3cbf708/70c`条件门未跳过时，
+`1f3cbf724`调用其`messageId`，`728..730`将该值交给sharedMessageCenter的
+**`acknowledgeIncomingMessageWithId:`**。调用位于conversion内、同步`ret1f3cbf820`
+之前；复用原receive caller`1f3cc4be4`返回后，才可能过length门写payload`4c44`、
+调用`_receivedSMSDictionary4c58`并进入既有条件保存链。不能把此ACK API出现或conversion
+返回当SQL COMMIT、数据库重开显示或WMS37的物理ACK收据，更不能说保存无条件成功。
+
+原bytes、pagechain、exact selector/export、五次命令/exit与窄合同保存在主
+`x9/out/sms-guid-owner/{identity-contract.json,executed-commands.txt,read-guid-owner.py}`
+及`metadata-r1/convert-r1/keys-r1/targets-r1/exports-r1/`。`convert-r1`复用首metadata，
+未为已闭metadata/receive/SQL重采；独立review只读已有证据。没有生产SMS行为修改、测试、
+设备/数据库读取、镜像复检或ready/ACK伪造；强Model到通知ID和当前Messages最终验收仍另缺。
+
+## 2026-11-16 Root factory 的实际选择与 Manager owner：仍无逐动作 capture
+
+本轮只补前节尚未资格化的选择输入：维护reader新增`selection`模式，读取root
+`100531f50..100532010`和system Manager create/C1/C2共**4个新text范围1956B**，
+另核1个root named import（12B）、1个root factory槽（8B）及必要函数表/fixup元数据。
+实际stdout已完成`4 text ranges; 0 data ranges; 3 exports; qualified ABI targets=0;
+root imports=1; root fixups=1`且完整proof已落盘，stderr为空；但外层zsh随后写readonly
+`status`失败、wrapper **exit1**，**reader独立数值exit未知**，不补写exit0或重采。
+这里`0 data ranges`只指数值列表，不排除上述独立资格化槽与元数据。
+
+### 被选入的 unique factory 到原 creator
+
+- Root `100531f8c..1fdc`从输入Registry强pair（x20）retain并创建24B factory，安装
+  addresspoint **`1015494a8`**，将同Registry pointer/control存其+8/+10并retain。
+  `100531fe0..1ff0`以unique_ptr间接地址x1=&sp8和同Registry pair x0=x20，调用原
+  named import **`10107f4a4`**；原indirect/nlist确认其为Manager::create，不以名字线索替代原表。
+- System真export **create `1f2e4ae64`**在`4ae98..4aeac`取走并清输入unique_ptr，
+  将同factory交给 **C2 `1f2e4b2e0`**；真 **C1 `1f2e4b120`**只有单B直达C2，无VTT改参。
+  C2 `4b4f8/4b4fc`再次取走并清中间unique_ptr，**`4b50c`保存于manager+60**。
+- 原root `LC_DYLD_CHAINED_FIXUPS`与所在page-chain确认addresspoint+30的
+  **`1015494d8`**属于**format6 / DYLD_CHAINED_PTR_64_OFFSET**，原word
+  `0x10000000315488`解析为 **`100315488`**；不用shared-cache slide mask。
+  原root `LC_FUNCTION_STARTS`同时核selection所在函数及该目标边界。由此接上旧added路径
+  `1f2e521c0`读取manager+60、`1f2e52200`调用virtual+30与前节保留的root creator。
+
+这是原件中**实际传入并由Manager拥有的factory选择链**，不再仅是孤立creator的三次构造关联；
+仍不是当前设备live GOT、已加载MTK backend或运行时安装验收。
+
+### 同 queue 参数不等于 record/Client/UUID snapshot
+
+C2 `1f2e4b348..370`以null attribute、qos0x19/relative priority0调用stub
+`1f2e83024`，随后将stub **`1f2e83030`**的返回对象保存**manager+18**；两stub的dispatch
+名字仅复用旧indirect线索，本轮没有重新资格化其真实目标或验证实机队列属性。
+原C2 `4b530..554`及旧added/getter沿用该+18对象作队列参数。旧added将强queue、
+weak-lock后的manager delegate+38强pair及PersonalityID传入factory+30；原creator按该ID
+从Registry取得record，并将同queue参数转给controller。它没有本次CallInfo/UUID输入。
+
+旧getter block `1f2e61a04`按manager+68 map取得并retain controller，virtual+60到
+`1f2e68b38`仅返回controller+d8/e0的Client强pair，**不返回当前record/PBI**。
+一次初始record/controller关联、后续Client getter和CallFactory action属于不同调用/时点；
+同queue参数不能自动使它们成为原子snapshot。仍未闭真实逐动作的强record+Client capture
+及本次CallInfo/UUID关联，不新增无caller adapter、snapshot或installer API，也不把可变PBI、
+controller counter/clientId或44成功当record revision/native epoch。
+
+紧凑契约、retained原件及原命令归档为`x9/out/call-context-capture-review/`的
+`selection-owner-contract.{json,txt}`、`qualified-selection-r1/original-selection-proof.json`和
+`qualification-wrapper-result.txt`（保留原source-head/采集路径）。维护重放入口为
+`python3 x9/tools/call_context_evidence.py --mode selection --out x9/out/<新目录>`；
+r1之后exact ctor export、C1 operands、page-chain末节点及system load-command size/end
+guard仅静态AST parse/diff review，**没有重跑reader或旧模式、测试、编译、CI、boot/设备动作**。
+
+## 2026-11-16 Dictionary 的 BlastDoor returned-object gate：不是保存身份收据
+
+沿前节dictionary `g`的下一实际owner边，只新增dictionary入口/BlastDoor method、外层
+callback、nested continuation和必要selector/class/helper资格。六次窄采样均实际 **exit0**；
+未扩BlastDoor server、未重采旧receive/巨大process-SMS函数或SQL链，也没有短信运行验收。
+
+- 原relative entry **`1f3ce8cc8`**的`_processReceivedDictionary:storageContext:withCompletionBlock:`
+  实际只有 **`1f3cc00b4..1f3cc00b8 /4B`**，`b 1f3d0cec0`到真实
+  `_processReceivedDictionaryInBlastDoor:storageContext:withCompletionBlock:` selector stub。
+  `head-r1`首读1024B含邻函数，**仅首4B归本method**，不重读或把邻1020B当本体。
+- 原relative entry **`1f3ce8ef0`**指向BlastDoor method
+  **`1f3cd3ad4..1f3cd3be4 /272B`**。原dictionary x2 retain→x22，`3b10..3b20`
+  从前节已资格的原slot **`21242ebd0`（g）**取值。stack block base为sp+8；其
+  **+20=原g、+28=session、+30=storageContext、+38=原dictionary、+40=原completion**。
+  `3b98`以`3b6c` helper返回的x21交真selector **`sendSMSDictionary:withCompletionBlock:`**，
+  原class-ref **`21242e4f0→1e2851470`**/ro`1e1303870`明确为 **IMBlastdoor**。
+- 外层callback **`1f3cd3be4..1f3cd4044 /1120B`**的x1 retain→x19是**returned
+  parser object**，不是capture的原dictionary。nonnull x19在`3d50..3d70`经过真
+  **`_IMWeakLinkClass("BlastDoorSMSMessage", "BlastDoor")`**及真
+  **`objc_opt_isKindOfClass`** bit0门；通过才在`3dcc`将**returned x19**与原session/
+  storageContext交`_processReceivedSMSMessage:storageContext:withCompletionBlock:`。
+  nil/error或class gate都不等于数据库保存结果，不能让原dict冒充typed returned对象。
+- 在外层 **`3d90..3da0`**构造的nested continuation
+  **`1f3cd4044..1f3cd41e0 /412B`**仅捕原g（+20）与原completion（+28）；
+  `417c..4190`在completion非空时原样转发w1/x2。这里没有SQL COMMIT或物理WMS37
+  receipt，也**不证明returned对象GUID等于原g**，更不证明成功RecordID。
+
+五个helper veneers的原目标与独立原export trie（flags0）相符：
+`1f9dee600→1800bb4a4 _objc_retain_x1`、`1f9dee618→1800bb4e0 _objc_retain_x2`、
+**`1f9dee624→1800bb864 _objc_retain_x20`**（不是retain_x3）、
+`1f9dee528→1800c13f8 _objc_opt_isKindOfClass`、
+`1f9dee21c→1928d90a4 _IMWeakLinkClass`；原CFString分别length19/9，明确上述class/framework名。
+**资格边界**：其余`1f9dee60c/63c/648/690/4b0`没有本轮或已保存旧proof的独立原target资格；
+上文capture的原g/completion origin与send的“同dictionary”身份跨这些helper属于
+**retain-copy ABI推断**，不是全部strong-owner copy均已证明。capture槽offset、真实
+selector/class、callback x1→已资格retain_x1→returned x19和typed class gate不依赖这些helper命名。
+
+主 **`x9/out/sms-dictionary-owner/`**保留raw/pagechains、`reads.json`、六次命令/log/exit、
+`dictionary-owner-contract.json`和`metadata-erratum.txt`。历史`continuation-r1/proof.json`
+的`callback.origin`误写外层method `3b50/3b5c`，**正确来源是外层callback的3d90..3da0**；
+原proof未覆盖。历史targets里未命名helpers以独立helper-export proof补证。
+scratch reader r4仅修origin元数据及未来head范围，只作语法检查，未再次执行采样。
+下一真正缺口仍是returned **BlastDoorSMSMessage.GUID producer**与原dict g→成功record身份，
+以及另一端CTParser response→Model/status→通知ID；不绕过sanitizer、不伪造成功/ACK/ready。
+
+## 2026-11-16 Call driver 的 incoming record 与强 Model owner：仍非动作 snapshot
+
+本轮限定新增root **5个text范围4320B、3个独立槽24B**及必要原函数表/fixup元数据，
+`action`、`action-owner`、`action-update`、`action-assignment`、`action-driver`五次reader
+实际 **exit0**，stderr均为空；没有重采旧selection/getter/CallList/CLIR/dial原件。
+`0 data ranges`不排除独立资格化槽。下述对象是**IMSCallModel**，不能与前面的
+`sd::IMSSubscriberModel`（controller+a0、record+28/+30、可变PBI）混用。
+
+### 真实 callable record 入口、PID map 与 update owner
+
+旧driver ctor `100dc8cf8..8d04`实际安装AP **`1015fa180`**；新原format6槽
+**`1015fa360 = AP+1e0`**的word `0x10000000dd6508`解析为
+**`100dd6508..100dd6ecc /2500B`**。这是该已构造concrete driver的callable槽，
+不只依赖`handlePersonalityAdded: Invalid PersonalityInfo!`字符串名字；本轮没有再闭
+其upstream dispatchcaller、实机加载或queue属性。
+
+入口`100dd6538..6568`从x1取得incoming record强pair：null早退，record+31/u8须<2，
+从record+18复制PersonalityID，并读record+34/u32；后两个数值不命名为枚举状态或epoch。
+`100dd6570..657c`按同driver和PersonalityID调用新lookup
+**`100dcbdac..100dcbf14 /360B`**：在**driver+298**树中以node+20 key查找，命中时
+`100dcbe88/8c`返回并retain **node+38/+40**的Model强pair，miss返回null pair。
+已有Model分支`100dd6608..6618`将**同Model和原incoming record pair**交给virtual+1d8。
+
+缺Model分支`100dd69b8`从driver+328取得原强CallFactory，`100dd6a0c..6a2c`调用
+**virtual+48**，传原incoming record pair、两个delegate pair及driver+20 queue，
+x8=&sp28承接Model强pair；`100dd6bb4..6bd0`将返回pair retain至同map的node+38/+40。
+本轮**没有资格+48目标或其下游ctor**，不能把它写成普通newCall的+40路径，也不能
+单凭Factory相同就断言这个分支无条件构造下述concrete Model。
+
+旧普通Model factory caller `10019c678`直达新资格ctor
+**`1007c276c..1007c2c5c /1264B`**。该ctor `1007c29c0..29cc`实际安装
+AP **`10159c718`**，`1007c2a00..2a28`将输入record pair强copy至
+**model+70/+78**并retain control。新原format6槽
+**`10159c8f0 = AP+1d8`**指向 **`1007cc880..1007cc8cc /76B`**；它把同incoming
+pair赋给model+70，`1007cc894`调用新强赋值helper
+**`1001348a4..10013491c /120B`**。helper先retain incoming control，再在
+`1001348d4`存新pair，最后release旧control；这是**record owner mutation顺序**，
+不是action/queue/native retirement fence。随后update刷新model+2f0上下文，不返回
+record revision、native epoch或通知receipt。
+
+### 与真实 dial 的接点及尚未闭合的边
+
+新原format6槽 **`10159c830 = 同AP+118`**指向旧dial **`1007cb578`**，旧text仅复用。
+旧driver dial `100dcdf78`保留入口x3→x25的Model pair；`100dce268`以同driver/CallInfo
+创建新Call，`100dceb44..b68`向仍同Model的virtual+118传新Call强pair及本次owned
+CallInfo/config/号码。因此concrete AP同时具有真实record update和dial action接点，
+不再以subscriber PBI/count/clientId替代record owner。
+
+但incoming record入口没有本次CallInfo/CallUUID直接输入。**仍未闭current Model record
+与独立Manager Client resolver的同record、同queue原子capture，以及该record到本次
+UUID的强身份关联**；旧Call只own UUID/clientId、不pin强Client/record。updater实际
+dispatchcaller、queue interleaving、native epoch/retirement及设备loaded backend仍未资格。
+本轮不新增无caller capture/provider/installer API，不宣称完整snapshot或通话功能完成。
+
+原件、每次实际command/exit和窄合同位于`x9/out/call-action-owner/`的
+`action-record-owner-contract.{json,txt}`与五个`qualified-*-r1/`（保留原source-head及
+采集路径，整合时只归档、不重采）。维护入口为
+`python3 x9/tools/call_context_evidence.py --mode <上述五模式> --out x9/out/<新目录>`，
+依赖当前既有root mount及本仓库固定`.local`输入；每次必须用fresh out。
+收束仅做reader可读性清理、AST parse和diff检查，**没有重跑reader/旧模式、测试、编译、
+CI、设备、mount/数据库或构建后镜像二次检查**。
+Root整合另补action函数表与共用format6 reader的load-command count/size/end、
+duplicate fixup和最小28B header的fail-closed guard；这些最终维护改动仅AST parse及
+静态review，不冒称上述五次r1采样已执行新guard，也没有再次原件采样。
+
+
+## 2026-11-16 VOICE21 原 QMUX owner/deadline 到 native admission 与 writer
+
+上一post-wait修复只检查take/end_snapshot后的owner，`end_submit`仍能等待MD mutex，
+且排队后的writer只核native target。若actual QMUX已release或原25s guard到期，QMI
+线程尚未dispatch DEL/poll，旧路径仍可分配/选择新的905。该空窗是当前production
+END路径的source interleaving，不是实机复现，也不靠clientId/PBI/record getter猜测。
+
+现在END job从现有bound context捕**actual `c.bridge_generation`**，与QMI-local
+`generation`分开。`x9_md_mipc_call_end_submit`必须带原local port/node/allocation与
+absolute64-bit deadline，并own-copy native target和host scalar。成功admission把它们
+保存在同一个native token槽；原native epoch/revision/ID/SIM检查仍在MD锁下。
+
+- 新内部`coachz_baseband_call_guard`只由实际MD allocator/writer使用，按**MD → bb_lock**
+  锁序验证live/non-release/non-private service9、channel、server node、exact actual
+  allocation与当前64-bit单调时钟；持有bb_lock同步运行无heap/API重入的commit callback。
+- admission callback在双锁内保存frame、host/native owner并commit state1，故guard-fail
+  不分新wire token。writer native检查到BB等待期间MD锁持续持有；BB检查通过才在双锁内
+  commit state2及拷到唯一writer frame。不是先读getter解锁再commit的另一post-wait补丁。
+- stale/expired **state1**通过原state6/`take=-3`一次性本地拒绝；清匹配end lease，不伪造
+  CNF、不TX、不重发。submit失败且host已失效/到期由原reply owner决定NOT_READY。
+- **state2已selected/partial**仍不可撤销，释放/超时后的原905继续排空real CNF；只有
+  原native END＋owned empty＋drained slots可退休，不把success CNF强制改成END。
+  物理`x9md_tx`始终在双锁释放后，不在bb_lock内做CCCI或QMI调用。
+
+源码lock-order复核：`coachz_baseband_poll`在解bb_lock后才call bb_send/bb_del_client；
+commit callback不调用任何MD/bridge API或heap allocator。共享allocator/selection只提取
+原已有动作；generic staged mutation/DIAL/SMS的原validation与native lease合同保留。
+这不是给generic905加全部host guard，也不开放VOICE09或无productioncaller的VOICE20。
+
+原输入diff/窄contract及编译日志在`x9/out/call-end-native-owner-20261116/`。
+9个新增host源向量覆盖submit/BB admission等待、无QMI poll时writer拒绝、BB selection
+等待及已selected释放后的旧token排空；只编译，未执行。CALL和共享SMS fixture的最终
+`clang++ -std=c++17 -Wall -Wextra -Werror -c`均exit0；SMS fixture没有CALL allocation，
+新guard stub一律拒绝，不虚构voice owner。实际kernel对象/build结果见NOTES。
+
+该修复只将**actual-QMUX owner与既有native END epoch/ID**联系到同一提交token。
+逐动作强record/Client/CallInfo UUID、record更新退休/native epoch、DIAL typed backend/profile、
+CallList/handover、双向DSP及Messages同token COMMIT/重开/物理ACK/MO验收仍另缺。
+
+### 2026-11-16：SMS 同 envelope 的条件 XPC send 与 factory 分流
+
+新原FS19完整函数7848B、7exact undefined imports，所有新function readers实际exit0；
+详见[fanout/factory报告](2026-11-16_reverse-sms-fanout-and-factory-report.md)，私有raw/合同在
+`x9/out/sms-retrieve-retirement-20261116/`。不重采上一轮Model/Operation ID或当前app取件/SQL。
+
+- envelope100b73080的原keys为kEvent/kNotificationEvent/kNotificationDict/kNotificationAdditional。
+  kEvent先true；真实innerinvoke100b742e8改同envelope的kEvent为signed事件code，再进broadcast。
+  **事件code0x1d≠嵌套kCTMessageIdKey的Operation通知u32**，也不等同SIM/PDU/GUID/RowID/nativeepoch。
+- 真temporary predicate槽1015d3018→100b75ac0实际返回1。code0x1d的broadcast100b74464
+  按node+50/+58 vector的同code或-1通配过滤，在100b74570..578带node+20连接与同envelope到
+  真xpc_connection_send_message；它只是条件发送调用，不是Messages receipt/同步reply/COMMIT。
+- helper100a3a604成功weak lock同service+48 supplied pair后dispatch_async；outerinvoke12B
+  加载inner block再tail-branch inner+10。innercopy显式retain envelope/servicepair；outercopy36B
+  只见成功lock pair retain，不见显式inner block retain，generic descriptor/lifetime尚未资格。
+  不从此报UAF或造新adapter。
+- 同Model pair的installed factory+18/+20两条实际边分别资格为TerminalRegistrationController
+  （own+a0/+a8）与PhoneNumberRegistrationController（条件getter+174非零、own+58/+60）。
+  不是已资格retrieve server；不按槽序继续猜业务。下一从真实kSmsRetrieveMessage注册/handler闭
+  同Operation通知ID→同Model+60取件/退休，再到GUID成功record/COMMIT与物理ACK/MO。
+- 失败保留：误猜100a38cec的库存guard实际exit1、未读原text；后续control RTTI tagged name
+  guard亦exit1。前两Controller RTTI仅从保存byte/chain离线恢复exit0，原reader仍exit1，不掩tag。
+  本轮无生产delta/编译/测试/CI/设备动作，完整通话短信目标仍active。

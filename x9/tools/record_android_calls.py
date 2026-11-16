@@ -8,10 +8,12 @@ The bounded worker persists between CLI turns; stop requests use a local file.
 """
 import argparse
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -24,8 +26,8 @@ def now():
     return datetime.datetime.now().astimezone().isoformat()
 
 
-def private_write(path, data):
-    with path.open('wb') as f:
+def private_write(path, data, exclusive=False):
+    with path.open('xb' if exclusive else 'wb') as f:
         os.chmod(path, 0o600)
         f.write(data)
 
@@ -62,6 +64,80 @@ def mark(out, label):
     with p.open('a') as f:
         p.chmod(0o600)
         f.write(json.dumps(record) + '\n')
+
+
+def snapshot(out):
+    """Save a bounded, read-only snapshot without changing log settings.
+
+    Keep stdout/stderr even on failure: some su wrappers report a shell error
+    in stdout and exit zero. Metadata distinguishes transport exit from a
+    recognizable source shape; neither is a call/SMS success receipt.
+    """
+    commands = [
+        ('radio-logcat.txt', ['exec-out', 'logcat', '-b', 'radio', '-d', '-v', 'threadtime']),
+        ('main-logcat.txt', ['exec-out', 'logcat', '-b', 'main', '-d', '-v', 'threadtime']),
+        ('telephony-registry.txt', ['exec-out', 'dumpsys', 'telephony.registry']),
+        ('telecom.txt', ['exec-out', 'dumpsys', 'telecom']),
+        ('dmesg.txt', ['exec-out', "su -c 'dmesg'"]),
+    ]
+    # Preflight all local names before collecting anything. Never overwrite
+    # evidence or leave a worker running after the CLI turn finishes.
+    names = ['snapshot.json']
+    for name, _ in commands:
+        names.extend([name, name + '.stderr'])
+    if any((out / name).exists() for name in names):
+        raise ValueError('snapshot already exists; preserve it and use a new case')
+    adb = device(out)
+    selected = read_json(out / 'session.json')['serial']
+    r = subprocess.run([adb[0], 'devices'], capture_output=True, timeout=10)
+    connected = [parts[0] for line in r.stdout.decode(errors='replace').splitlines()[1:]
+                 if len(parts := line.split()) == 2 and parts[1] == 'device']
+    if r.returncode or connected != [selected]:
+        raise ValueError('expected the sole selected connected device; serial withheld')
+    state = {'started': now(), 'read_only': True, 'logcat_cleared': False,
+             'state': 'collecting', 'records': []}
+    # Exclusive creation also rejects a concurrent snapshot invocation.
+    private_write(out / 'snapshot.json', (json.dumps(state, indent=2) + '\n').encode(),
+                  exclusive=True)
+    failed = False
+    try:
+        for name, args in commands:
+            command = adb + args
+            timed_out = False
+            try:
+                r = subprocess.run(command, capture_output=True, timeout=45)
+                data, errors, code = r.stdout, r.stderr, r.returncode
+            except subprocess.TimeoutExpired as e:
+                data, errors, code = e.stdout or b'', e.stderr or b'', None
+                timed_out = True
+            private_write(out / name, data, exclusive=True)
+            private_write(out / (name + '.stderr'), errors, exclusive=True)
+            if name.endswith('logcat.txt'):
+                recognized = b'--------- beginning of ' in data
+            elif name == 'telephony-registry.txt':
+                recognized = b'TelephonyRegistry' in data or b'mCallState=' in data
+            elif name == 'telecom.txt':
+                recognized = b'CallsManager:' in data
+            else:
+                clean = re.sub(rb'\x1b\[[0-9;]*m', b'', data)
+                recognized = re.search(rb'^\[\s*[0-9]+\.[0-9]+\]', clean, re.M) is not None
+            failed |= code != 0 or not recognized
+            state['records'].append({'file': name, 'command': shlex.join(command),
+                'exit': code, 'timed_out': timed_out, 'bytes': len(data),
+                'sha256': hashlib.sha256(data).hexdigest(),
+                'recognized_source_shape': recognized})
+            write_json(out / 'snapshot.json', state)
+    except BaseException:
+        state.update(state='interrupted', ended=now())
+        write_json(out / 'snapshot.json', state)
+        raise
+    state.update(state='incomplete' if failed else 'captured', ended=now())
+    write_json(out / 'snapshot.json', state)
+    print(json.dumps({'state': state['state'], 'read_only': True,
+        'files': [{'file': x['file'], 'bytes': x['bytes'], 'exit': x['exit'],
+                   'recognized_source_shape': x['recognized_source_shape']}
+                  for x in state['records']]}, indent=2))
+    return 2 if failed else 0
 
 
 def watch(out, seconds):
@@ -127,7 +203,7 @@ def status(out):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action', choices=['start', 'status', 'mark', 'stop', '_watch'])
+    p.add_argument('action', choices=['snapshot', 'start', 'status', 'mark', 'stop', '_watch'])
     p.add_argument('--out', required=True, type=Path)
     p.add_argument('--seconds', type=int, default=1200)
     p.add_argument('--label', default='manual')
@@ -138,7 +214,9 @@ def main():
     if not 10 <= args.seconds <= 1800:
         p.error('seconds must be 10..1800')
     try:
-        if args.action == '_watch':
+        if args.action == 'snapshot':
+            return snapshot(out)
+        elif args.action == '_watch':
             watch(out, args.seconds)
         elif args.action == 'start':
             if (out / 'live.json').exists() or (out / 'live-logcat.txt').exists():

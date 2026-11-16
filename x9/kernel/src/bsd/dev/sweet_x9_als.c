@@ -72,7 +72,7 @@ decode_mtk(const void *record, unsigned int length, uint32_t gain,
 	int32_t raw;
 	uint64_t time, level;
 	if (!record || length != X9_ALS_MTK_DATA_BYTES || !gain) return EINVAL;
-	if (p[0] != 5 || p[1] != 0) return ENOTSUP; /* LIGHT / DATA_ACTION */
+	if (p[0] != X9_ALS_MTK_TYPE || p[1] != 0) return ENOTSUP; /* front lux / DATA_ACTION */
 	raw = (int32_t)le32(p + 12);
 	time = le64(p + 4);
  if (raw < 0 || !time || (time >> 63) || p[2] > 3) return ERANGE;
@@ -160,7 +160,7 @@ x9_als_configure_mtk(const void *info, unsigned int length)
 	uint32_t gain;
 	int error;
 	if (!info || length != X9_ALS_MTK_INFO_BYTES) return EINVAL;
-	if (p[0] != 5) return ENOTSUP;
+	if (p[0] != X9_ALS_MTK_TYPE) return ENOTSUP;
 	gain = le32(p + 4);
 	if (!gain) return EINVAL;
 	lck_mtx_lock(&x9_als_lock);
@@ -223,7 +223,7 @@ sysctl_x9_als_test_lux SYSCTL_HANDLER_ARGS
 	else if (value == -1) valid = 0;
 	else if (value < 0 || value > (int)X9_ALS_MAX_LUX) error = ERANGE;
 	else {
-		uint8_t record[X9_ALS_MTK_DATA_BYTES] = {5, 0, 3, 0, 1};
+		uint8_t record[X9_ALS_MTK_DATA_BYTES] = {X9_ALS_MTK_TYPE, 0, 3, 0, 1};
 		uint32_t raw = (uint32_t)value * 1000u;
 		uint32_t lux;
 		uint64_t scp_time;

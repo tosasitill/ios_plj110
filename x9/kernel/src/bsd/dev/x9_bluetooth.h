@@ -2,12 +2,14 @@
 #ifndef X9_BLUETOOTH_H
 #define X9_BLUETOOTH_H
 #include <stdint.h>
+#include <stdbool.h>
 #define X9_BT_ABI_VERSION 1u
 #define X9_BT_FRAME_MAX 4096u
 #define X9_BT_SECTION_MAX 32u
 enum x9_bt_state {
     X9_BT_DISABLED, X9_BT_PASSIVE, X9_BT_WAIT_POWER, X9_BT_ROM_QUERY,
-    X9_BT_ROM_READY, X9_BT_FAILED
+    X9_BT_ROM_READY, X9_BT_FAILED, X9_BT_INITIALIZING, X9_BT_READY,
+    X9_BT_ASLEEP, X9_BT_TRANSITION
 };
 enum x9_bt_selector {
     X9_BT_GET_STATUS, X9_BT_GET_SECTION, X9_BT_SEND_H4, X9_BT_RECV_H4
@@ -25,6 +27,7 @@ struct x9_bt_section {
 extern "C" {
 #endif
 void x9_bluetooth_start(void);
+bool x9_bluetooth_irq_filter(uint32_t intid);
 void x9_bluetooth_status(struct x9_bt_status *status);
 int x9_bluetooth_section(uint32_t index, struct x9_bt_section *section);
 int x9_bluetooth_send(const void *packet, uint32_t length);

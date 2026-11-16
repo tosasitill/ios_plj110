@@ -264,8 +264,9 @@ void sweet_x9_microphone_init(void)
 {
     if(!sweet_early_is_x9())return;
     /* ADT is a mode-only fallback, not a readiness/ownership assertion.
-     * Explicit x9_mic=0 also overrides it. Reject malformed properties. */
-    int fallback=0;DTEntry chosen;const void *p=NULL;unsigned size=0;
+     * Explicit x9_mic=0 also overrides it. Reject malformed properties.
+     * No ADT property: mode 2 (native capture, default since audio47). */
+    int fallback=2;DTEntry chosen;const void *p=NULL;unsigned size=0;
     if(SecureDTLookupEntry(NULL,"/chosen",&chosen)==kSuccess &&
        SecureDTGetProperty(chosen,"x9-microphone-mode",&p,&size)==kSuccess && size==4) {
         uint32_t value=0;memcpy(&value,p,sizeof(value));

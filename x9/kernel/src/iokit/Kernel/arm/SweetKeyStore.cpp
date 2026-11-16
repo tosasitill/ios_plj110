@@ -25,6 +25,7 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <libkern/c++/OSString.h>
 #include <sys/proc.h>
+#include <libkern/OSAtomic.h>
 
 /* libaks selectors (AppleKeyStore.framework, iOS 16.7). */
 enum {
@@ -183,6 +184,84 @@ sweet_aks_configuration(IOExternalMethodArguments *args)
  return sweet_aks_struct_out(args,buf,n);
 }
 
+/*
+ * kAKSWrapKey / kAKSUnwrapKey, as HakiOS MiniAppleKeyStore (same iOS 16 D22
+ * userland). securityd wraps every item's key with its class key; log 330
+ * (unified log): every wrap was answered e00002c7, so no keychain item could
+ * be stored and bluetoothd exited "restarting reason=130" after "Failed to
+ * set new identity root" (SecItemAdd -25291), every 10 s. There is no SEP and
+ * no secret: the wrapped key is the key mixed with a fixed pattern, 8 bytes
+ * longer as with AES key wrap (RFC 3394) which callers size for. Fixed, so
+ * items stored on the persistent root unwrap again after a reboot.
+ */
+static const uint8_t sweet_aks_wrap_mark[4] = { 'H', 'K', 'w', 'r' };
+static void
+sweet_aks_wrap_mix(uint8_t *bytes, uint32_t length)
+{
+	for (uint32_t i = 0; i < length; i++) {
+		bytes[i] ^= (uint8_t)(0x5a + 37 * i);
+	}
+}
+static IOReturn
+sweet_aks_struct_in(IOExternalMethodArguments *args, uint8_t *buf, uint32_t cap, uint32_t *len)
+{
+	if (args->structureInputDescriptor != NULL) {
+		IOMemoryDescriptor *in = args->structureInputDescriptor;
+		IOByteCount n = in->getLength();
+		if (n == 0 || n > cap) return kIOReturnBadArgument;
+		IOReturn r = in->prepare();
+		if (r != kIOReturnSuccess) return r;
+		IOByteCount got = in->readBytes(0, buf, n);
+		in->complete();
+		if (got != n) return kIOReturnUnderrun;
+		*len = (uint32_t)n;
+		return kIOReturnSuccess;
+	}
+	if (args->structureInput == NULL || args->structureInputSize == 0 ||
+	    args->structureInputSize > cap) {
+		return kIOReturnBadArgument;
+	}
+	memcpy(buf, args->structureInput, args->structureInputSize);
+	*len = args->structureInputSize;
+	return kIOReturnSuccess;
+}
+static IOReturn
+sweet_aks_wrap(IOExternalMethodArguments *args)
+{
+	uint8_t wrapped[8 + 64];
+	uint32_t length = 0;
+	if (args->scalarInputCount < 2) return kIOReturnBadArgument;
+	IOReturn r = sweet_aks_struct_in(args, wrapped + 8, 64, &length);
+	if (r != kIOReturnSuccess) return r;
+	memcpy(wrapped, sweet_aks_wrap_mark, sizeof(sweet_aks_wrap_mark));
+	wrapped[4] = (uint8_t)args->scalarInput[1];
+	wrapped[5] = wrapped[6] = wrapped[7] = 0;
+	sweet_aks_wrap_mix(wrapped + 8, length);
+	r = sweet_aks_struct_out(args, wrapped, 8 + length);
+	if (r != kIOReturnSuccess) return r;
+	if (args->scalarOutputCount >= 1) {
+		args->scalarOutput[0] = args->scalarInput[1];
+		args->scalarOutputCount = 1;
+	} else {
+		args->scalarOutputCount = 0;
+	}
+	return kIOReturnSuccess;
+}
+static IOReturn
+sweet_aks_unwrap(IOExternalMethodArguments *args)
+{
+	uint8_t wrapped[8 + 64];
+	uint32_t length = 0;
+	IOReturn r = sweet_aks_struct_in(args, wrapped, sizeof(wrapped), &length);
+	if (r != kIOReturnSuccess) return r;
+	if (length <= 8 || memcmp(wrapped, sweet_aks_wrap_mark, sizeof(sweet_aks_wrap_mark)) != 0) {
+		return kIOReturnBadArgument;
+	}
+	sweet_aks_wrap_mix(wrapped + 8, length - 8);
+	args->scalarOutputCount = 0;
+	return sweet_aks_struct_out(args, wrapped + 8, length - 8);
+}
+
 static uint32_t
 sweet_aks_struct_out_size(IOExternalMethodArguments *args)
 {
@@ -251,13 +330,24 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 		args->scalarOutputCount = 0;
 		ret = sweet_aks_device_state(args);
 		break;
+	case kAKSWrapKey:
+		ret = sweet_aks_wrap(args);
+		break;
+	case kAKSUnwrapKey:
+		ret = sweet_aks_unwrap(args);
+		break;
 	default:
 		ret = kIOReturnUnsupported;
 		break;
 	}
 
 	/* Selector 17 succeeds thousands of times during normal X9 UI work. */
-	if (!(sweet_early_is_x9() && selector == 17 && ret == kIOReturnSuccess)) {
+	/* Wrap/unwrap run once per keychain item: log the first few successes. */
+	static SInt32 wrap_logs;
+	bool quiet = sweet_early_is_x9() && ret == kIOReturnSuccess &&
+	    (selector == 17 || ((selector == kAKSWrapKey || selector == kAKSUnwrapKey) &&
+	    OSIncrementAtomic(&wrap_logs) >= 8));
+	if (!quiet) {
 		char name[32];
 		proc_selfname(name, sizeof(name));
 		IOLog("SWEET AKS: %s sel %u arg0 %llu in %u/%u out %u/%u -> 0x%x\n", name, selector,

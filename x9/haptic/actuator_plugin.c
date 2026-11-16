@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include "../kernel/src/bsd/dev/x9_haptic.h"
 enum {PLUGIN=1,ACTUATOR=2,OUTPUT=3,MAX_CLIENTS=64,QUEUE=16,PERIOD=512};
+#define LEAD_NS 20000000ULL
 struct client {UInt32 id;bool used,running;};
 static struct client clients[MAX_CLIENTS];
 static struct x9_haptic_packet queue[QUEUE];
@@ -89,7 +90,10 @@ static void service(__unused void *context)
          * Long stale queues fault instead of replaying old feedback later. */
         unsigned budget=4;
         while(count && budget--) {
-            if(now_ns()<due_at[first])break;
+            /* Release LEAD early: the kernel then completes its 20 ms
+             * prefill (+ boost startup) by the presentation time instead
+             * of starting it there (log 329/330 "delayed"). */
+            if(now_ns()+LEAD_NS<due_at[first])break;
             if(now_ns()>due_at[first]+50000000ULL){fault_io();break;}
             struct x9_haptic_packet *p=&queue[first];
             size_t bytes=24+(size_t)p->frames*2;
