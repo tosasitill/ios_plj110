@@ -1252,6 +1252,42 @@ CFString32B、SQL7B均与先前采样逐字一致；`apple-root-cache-provenance
 从主目录可用`/opt/homebrew/opt/llvm@22/bin/llvm-objdump -d --start-address=0x1e75ff1f8 --stop-address=0x1e75ff240 .local/apple/dsc-20H392/System/Library/PrivateFrameworks/CoreSDB.framework/CoreSDB`
 只读固定原件。不运行人工向量/测试，不读真实短信数据库文件、不改生产、不编译或操作设备。
 
+#### 通知 messageID → 同源 CTMessage 与同步取件回复（2026-11-16）
+
+本轮只推进原接收入口中的 `incomingMessageWithId:`，不重跑保存/ACK审查。
+当前root Cryptex cache的CTMessageCenter class `1e1dd72b8`、ro `1d5b0b6e0`、
+methodlist `188225d38`经实际slide-v2 rebase chain及relative-selector metadata确认，
+该方法实现为 **`188180200`**；其原件代码与同版CoreTelephony slice逐字一致。
+
+已有SMS入口把通知的 `uint messageID`传到`1f3cc49dc`；CoreTelephony于
+`188180224`保留原参数x2、`188180270`以w21构造XPC int64，再在
+`188180288..298`写入 **`kSmsMessageID`**。请求的`kRequest`为
+`kSmsRetrieveMessage`，没有据数字相等把此ID解释为MD token、QMUX txn或SQL RowID。
+
+取件helper `188158070`尾跳真实实现`188158bd0`。后者于`188158d04..d0c`
+把原connection+28与请求交给stub **`188224bfc`**；该12B原stub的GOT
+`1dac9ec78`经实际rebase chain指向 **`1d1bee000`**，并由当前原libxpc
+export trie确认是`xpc_connection_send_message_with_reply_sync`。
+返回reply在`188158d58`写入调用者的同一个out-reply owner，再检查dictionary类型与
+`kPosixError`/`kMachError`，同步返回packed状态。这里没有异步completion作为保存收据。
+
+`incomingMessageWithId:`在同步调用返回之后才从reply读取`kSmsMessageBody`、
+`kSmsMobileCountryCode`、`kSmsMessageType`与`kSmsSubInstance`，按type1/2调用
+`decodeSmsFromData:data:`/`decodeMessageFromData:data:`。返回CTMessage若非null，
+于`188180588..590`将**仍保留的原w21**交给`setMessageId:`，随后才返回给SMS入口；
+`setReplyEnabled:`和`setCountryCode:`是另外两个字段。由此静态闭合的是
+**通知uint ID → 请求kSmsMessageID → 返回CTMessage.messageId的同源身份链**，
+以及**取件同步reply → CTMessage构造/返回 → 既有dictionary/保存调用**的顺序。
+
+这不是CommCenter处理status4/强`sms::Model`到app通知ID的生产关联，也没有新增
+CTMessage.messageId到Messages GUID/成功record的强owner证明。Messages GUID、真实
+SQL RowID与MD物理ACK token仍须分别关联；同步取件成功不能充当SaveStore/COMMIT、
+数据库重开显示或WMS37物理ACK收据，已有SQL成功分支亦不替代当前运行的同源关联。
+原件bytes、读范围/subcache/offset、selector与export资格及重放命令保存在
+`x9/out/sms-save-authority/`的`identity-boundary.txt`、`identity-boundary.json`与
+`incoming-*.{asm,reads.json,original.bin}`；不读短信数据库、不扩server daemon，
+未改生产行为、未运行测试/构建或操作设备。
+
 ### WMS37物理ACK completion：实际host receipt后退休
 
 原物理token ACK结果已take后，legacy void-send仍可在OOM/queue-full时丢WMS37回复并清owner。
