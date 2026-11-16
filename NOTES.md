@@ -167,7 +167,7 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **构建/交付实际结果**：生产提交 **`bfbc0e51`**；`prepare-local.py --check` actual exit0。`build.py all --boot-config x9/build/boot-device.json --name x9-display-default-on-20261116` actual exit0，**103/103 overlay（3 prebuilt）**、link/strip/shim/boot均成功，自有dylib签名86112B；日志Image **31903744B**、boot **14938112B**。同一kernel的两次boot-only关闭与rollback包装均exit0（相同Image/boot大小），保留所有既有warning原日志。默认输入546B且不含两开启token；off564B、rollback576B，均不改设备基础参数/不删no-op参数。没有额外解包/hash/反汇编检查，未跑测试/硬件场景。
 - **主目录镜像**：整目录无覆盖迁回主checkout：`x9/out/x9-display-default-on-20261116/boot.img`（新默认双开）、`x9/out/x9-display-off-20261116/boot.img`（显式两项0）、`x9/out/x9-display-default-rollback-20261116/boot.img`（两项0+单次mgwipe1）；输入及console/exit在主checkout `x9/out/display-default-on-20261116/`。旧fill-v2/UI镜像未改；GPU280 allowlist不变、无plugin-package，设备仍为280时无需mailbox。本轮无设备/root/cache写入，键盘/边缘/点击/岛/剪裁/性能仍未实机验收。合main/push与清理实际结果另记，不覆盖主checkout SMS工作或其他分支。
 
-- **同期main整合**：构建后其它窗口将SMS文档checkpoint合main/origin **`3c1ca34a`**并占用主checkout main；本轮不切换或更新该工作树。最初ff-only整合被安全拒绝；随后merge NOTES冲突actual exit1，保留完整incoming SMS交接，仅顶部插入本轮默认开启段。同期只3文档、无生产delta，`bfbc0e51`新镜像无需重编。功能分支经GitHub PR服务端合main，不force main、不操作其他工作树。确切发布/清理结果完成后记录。
+- **同期main整合**：构建后其它窗口将SMS文档checkpoint合main/origin **`3c1ca34a`**并占用主checkout main；本轮不切换或更新该工作树。最初ff-only整合被安全拒绝；随后merge NOTES冲突actual exit1，保留完整incoming SMS交接，仅顶部插入本轮默认开启段。同期只3文档、无生产delta，`bfbc0e51`新镜像无需重编。功能分支经GitHub PR服务端合main，不force main、不操作其他工作树。确切发布/清理结果见下条。
 
 #### 2026-11-16 SMS ACK concrete owner（同 ID 内存退休静态收束；物理 ACK 仍缺）
 
@@ -178,6 +178,8 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **首资格里程碑**：bounded两key reader actual exit0：10123c5e5=`kSmsMessageIsMobileOriginated`，10123c603=`kSmsMessageWasAcknowledged`。精确旧proof1010817b4为bool dyn_cast_or_default、101085084为xpc_bool_create，只复用无新import读取；因此handler跳过MO=true或ID=-1分支，否则保ID调+e0。原format6保留page5/actual slot raw证明 **101528df0→1000c05b0**，无新slot/page遍历；原完整FS1000c05b0..1000c0694/228B从库存promote actual exit0，只构造捕同object/原u32 ID的block与返回byte。尚未展开invoke1000c7878/1000c7964/1000c7998，不称map退休或物理ACK。
 - **开始/范围**：上一轮checkpoint 2086b125/ff9e900f已合main/push，属progress，完整通话短信goal仍active。当前main/origin **ff9e900f** clean、旧句柄终态；本轮单代理 `feat/sms-ack-owner`、scratch `x9/out/sms-ack-owner-20261116/`。沿已资格handler1004bad6c的service+e0，先资格第二key10123c5e5/reply10123c603、精确imports1010817b4/101085084及同Model AP101528d10的slot101528df0，再追同u32 ID map mutation/下游ACK。两key保留data矿actual exit0/无覆盖，尚未读新原数据或资格名字；原text库存/80页chains只复用，不重扫、不重编/复检成功kernel、不测试/人工向量/设备/共享输入动作。
 
+
+- **实际发布/分支清理**：GitHub **PR #3** `https://github.com/tosasitill/ios_plj110/pull/3` 于 **2026-11-16T12:11:33Z** 服务端merge **`74b12c98`**，head **`253babac`**，source **`bfbc0e51`** 已资格为published main祖先。feature正常ff到origin/main后转本轮工作树为分离HEAD；带精确远端head253babac lease删除远端feature actual exit0，正常 `branch -d feat/display-default-on` actual exit0（没有-D）。主checkout由其它窗口自行转main/推进SMS，本轮未切换/写它；其它工作树不动。生成头/local配置/pycache **35项**已无覆盖迁到主checkout `x9/out/display-default-on-archive-20261116/`，仅保留本轮`.local`链接待最后unlink，target/备份不动。最后此notes-only交接沿published main分离HEAD commit/push，再正常remove本轮临时树；确切最终commit/push/remove/remote结果留同out原日志。无新生产delta/重编/CI/测试/设备结果，默认开启不等于硬件验收。
 
 #### 2026-11-16 display-fill：用户批准合 main / 删除分支（源码收尾，未实机）
 
