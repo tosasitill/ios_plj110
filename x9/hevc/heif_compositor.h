@@ -19,6 +19,7 @@ struct x9_heif_geometry {
     uint32_t id, width, height; /* after this item's ordered transforms */
     uint32_t coded_width, coded_height; /* ispe, before item transforms */
     uint32_t derived_count, auxiliary_count;
+    uint32_t pixel_aspect_h, pixel_aspect_v; /* admitted output pasp; absent0 */
 };
 /* The document and its borrowed immutable bytes must outlive the plan. The
  * plan validates ALL reachable dimg/auxl nodes, active-stack cycles, tile
@@ -27,11 +28,11 @@ struct x9_heif_geometry {
  * This original entrypoint uses EXACT_SAMPLES: fractional clean-aperture
  * sizes/origins return ENOTSUP, never unannounced rounding/resampling. The
  * with_policy entrypoint can explicitly plan LINEAR_CEIL rasterization.
- * Arbitrary aux types remain in the graph. Non-square pasp is rejected before
- * callbacks: this packed plan does not yet implement aspect-aware transform/
- * derived metric propagation. Square pasp (any equal positive spacings) is
- * retained and needs no correction. Coded CM sample forwarding independently
- * supports non-square pasp. */
+ * Arbitrary aux types remain in the graph. Non-square pasp is supported for
+ * an untransformed coded root, retained as OUTPUT sample spacings, not a
+ * square-pixel conversion. Its use in transformed/derived graphs rejects
+ * before callbacks: aspect-aware metric propagation is not yet implemented.
+ * Square pasp (any equal positive spacings) needs no correction. */
 int x9_heif_plan_create(
     const struct x9_heif_document *, uint32_t item_id, struct x9_heif_plan **);
 int x9_heif_plan_create_with_policy(const struct x9_heif_document *, uint32_t item_id,
@@ -53,6 +54,8 @@ struct x9_heif_raster {
     uint32_t width, height, format;
     size_t stride, bytes;
     uint8_t *data; /* compositor-owned malloc; release with raster_close */
+    uint32_t pixel_aspect_h, pixel_aspect_v; /* output sample spacings, absent0;
+        * a consumer must not silently assume square when these differ */
 };
 /* Callback fills ONE untransformed coded item's visible raster, or an iovl
  * canvas's declared RGBA16 fill CONVERTED to the selected working space; never retains

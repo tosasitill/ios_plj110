@@ -103,13 +103,6 @@ static int visit(struct x9_heif_plan *p, uint32_t id, unsigned depth, uint32_t *
     if (!image) return ENOMEM;
     int e = x9_heif_get_image(p->document,id,image);
     if (!e && (image->width > X9_HEIF_MAX_DIMENSION || image->height > X9_HEIF_MAX_DIMENSION)) e = EMSGSIZE;
-    /* Coded-sample CM/CV forwarding supports non-square pasp. This packed
-     * renderer does not yet carry a physical sample metric through ordered
-     * crops/rotations/derived placements. Reject before ANY source callback,
-     * rather than silently lose even a nonessential descriptive property or
-     * pretend Normal pixel transfer has made the samples square. Equal raw
-     * spacings (not only 1,1) need no aspect correction. */
-    if (!e && image->pixel_aspect_h != image->pixel_aspect_v) e = ENOTSUP;
     if (!e) {
         node->type = image->type; node->rows = image->rows; node->columns = image->columns;
         node->premultiplied = image->premultiplied_reference_count;
@@ -120,6 +113,8 @@ static int visit(struct x9_heif_plan *p, uint32_t id, unsigned depth, uint32_t *
         }
         node->geometry.coded_width = image->width; node->geometry.coded_height = image->height;
         node->geometry.derived_count = image->derived_count;
+        node->geometry.pixel_aspect_h = image->pixel_aspect_h;
+        node->geometry.pixel_aspect_v = image->pixel_aspect_v;
         e = transforms(p,image,node);
     }
     for (unsigned n = 0; n < image->derived_count && !e; n++) {
@@ -167,6 +162,16 @@ int x9_heif_plan_create_with_policy(const struct x9_heif_document *document, uin
     p->document = document; p->clap_policy = policy;
     int e = id ? 0 : x9_heif_primary(document,&id);
     if (!e) e = visit(p,id,0,&p->root);
+    /* Validate the WHOLE reachable graph before any raster callback. Only an
+     * untransformed coded root has unambiguous retained non-square sample
+     * spacings here. Never ignore a child's pasp, swap axes speculatively or
+     * call Normal transfer a square-pixel conversion. Equal raw spacings need
+     * no correction. Full transform/derived physical metrics remain missing. */
+    for (unsigned n = 0; n < p->count && !e; n++) {
+        const struct node *node = &p->nodes[n];
+        if (node->geometry.pixel_aspect_h != node->geometry.pixel_aspect_v &&
+            (n != p->root || node->type != X9_HEIF_HVC1 || node->transform_count)) e = ENOTSUP;
+    }
     if (e) free(p); else *out = p;
     return e;
 }
@@ -220,7 +225,8 @@ static int allocate(struct composition *c, uint32_t w, uint32_t h, struct x9_hei
         c->live_bytes > c->budget || bytes > c->budget-c->live_bytes) return EMSGSIZE;
     uint8_t *data = calloc(1,(size_t)bytes);
     if (!data) return ENOMEM;
-    *r = (struct x9_heif_raster){w,h,(uint32_t)c->format,(size_t)stride,(size_t)bytes,data};
+    *r = (struct x9_heif_raster){ .width = w, .height = h, .format = (uint32_t)c->format,
+        .stride = (size_t)stride, .bytes = (size_t)bytes, .data = data };
     c->live_bytes += (size_t)bytes; return 0;
 }
 static void release(struct composition *c, struct x9_heif_raster *r)
@@ -403,6 +409,8 @@ static int compose(const struct x9_heif_plan *plan, enum x9_heif_raster_format f
     int e = render(c,plan->root);
     if (!e) {
         *out = c->cache[plan->root];
+        out->pixel_aspect_h = plan->nodes[plan->root].geometry.pixel_aspect_h;
+        out->pixel_aspect_v = plan->nodes[plan->root].geometry.pixel_aspect_v;
         memset(&c->cache[plan->root],0,sizeof(*out));
     }
     for (unsigned n = 0; n < plan->count; n++) x9_heif_raster_close(&c->cache[n]);

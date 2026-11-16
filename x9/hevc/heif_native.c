@@ -3,6 +3,7 @@
 #include "heif_compositor.h"
 #include "heif_metadata.h"
 #include "vt_decoder.h"
+#include "vt_image_metadata.h"
 #include <CoreGraphics/CoreGraphics.h>
 #include <VideoToolbox/VideoToolbox.h>
 #include <errno.h>
@@ -38,6 +39,30 @@ static int put_number(CFMutableDictionaryRef d, CFStringRef key, uint32_t n)
     CFNumberRef number = CFNumberCreate(NULL,kCFNumberSInt64Type,&value);
     if (!number) return ENOMEM;
     CFDictionarySetValue(d,key,number); CFRelease(number); return 0;
+}
+static int copy_aspect(uint32_t h, uint32_t v, CFDictionaryRef *out)
+{
+    *out = NULL;
+    if (!h && !v) return 0;
+    if (!h || !v) return EBADMSG;
+    CFMutableDictionaryRef d = CFDictionaryCreateMutable(NULL,0,
+        &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    if (!d) return ENOMEM;
+    int e = put_number(d,kCMFormatDescriptionKey_PixelAspectRatioHorizontalSpacing,h);
+    if (!e) e = put_number(d,kCMFormatDescriptionKey_PixelAspectRatioVerticalSpacing,v);
+    if (e) CFRelease(d); else *out = d;
+    return e;
+}
+static OSStatus check_aspect(CVPixelBufferRef pixel, CFDictionaryRef expected)
+{
+    if (!expected) return noErr;
+    uint32_t eh, ev, ah, av;
+    CFTypeRef actual = CVBufferCopyAttachment(pixel,kCVImageBufferPixelAspectRatioKey,NULL);
+    int e = x9_hevc_read_pixel_aspect(expected,&eh,&ev);
+    if (!e) e = x9_hevc_read_pixel_aspect(actual,&ah,&av);
+    if (!e && (!ah || (uint64_t)eh*av != (uint64_t)ah*ev)) e = EBADMSG;
+    if (actual) CFRelease(actual);
+    return parser_error(e); /* read-only; never repair a lost transfer attachment */
 }
 static int rgb_profile(CFDataRef data)
 {
@@ -283,6 +308,14 @@ static OSStatus transfer_image(CVPixelBufferRef source, CVPixelBufferRef target,
     if (!e) e = VTSessionSetProperty(transfer,kVTPixelTransferPropertyKey_DestinationICCProfile,profile);
     if (!e) e = VTPixelTransferSessionTransferImage(transfer,source,target);
     if (!e) {
+        /* Every current call keeps sample dimensions unchanged. Normal must
+         * retain an explicitly present source ratio through color transfer;
+         * validate it before the packed compositor consumes the actual bytes. */
+        CFTypeRef aspect = CVBufferCopyAttachment(source,kCVImageBufferPixelAspectRatioKey,NULL);
+        e = check_aspect(target,aspect);
+        if (aspect) CFRelease(aspect);
+    }
+    if (!e) {
         CFTypeRef actual = CVBufferCopyAttachment(target,kCVImageBufferICCProfileKey,NULL);
         if (!actual || CFGetTypeID(actual) != CFDataGetTypeID() || !CFEqual(actual,profile)) e = kVTPixelTransferNotSupportedErr;
         if (actual) CFRelease(actual);
@@ -455,7 +488,8 @@ static uint16_t alpha_half(float alpha)
     if (remainder > halfway || (remainder == halfway && (value & 1))) value++;
     return (uint16_t)value;
 }
-static OSStatus export_raster(struct native_context *c, struct x9_heif_raster *r, CVPixelBufferRef *out)
+static OSStatus export_raster(struct native_context *c, struct x9_heif_raster *r,
+    CFDictionaryRef aspect, CVPixelBufferRef *out)
 {
     CVPixelBufferRef source = NULL, target = NULL;
     uint8_t *bytes = NULL;
@@ -488,6 +522,8 @@ static OSStatus export_raster(struct native_context *c, struct x9_heif_raster *r
         c->linear ? kCVPixelFormatType_128RGBAFloat : kCVPixelFormatType_64RGBAHalf,
         r->data,r->stride,release_pixels,NULL,NULL,&source);
     if (!e) r->data = NULL; /* ONLY successful CV owner adoption transfers bytes */
+    if (!e && aspect) CVBufferSetAttachment(source,kCVImageBufferPixelAspectRatioKey,
+        aspect,kCVAttachmentMode_ShouldPropagate);
     if (!e && c->linear) {
         size_t stride = (size_t)r->width*8, size = stride*r->height;
         if (!e) { bytes = calloc(1,size); if (!bytes) e = kVTAllocationFailedErr; }
@@ -563,6 +599,7 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
     CFMutableDictionaryRef info = CFDictionaryCreateMutable(NULL,0,
         &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
     CVPixelBufferRef pixel = NULL;
+    CFDictionaryRef aspect = NULL;
     struct x9_heif_raster raster = {0};
     struct x9_heif_geometry geometry;
     int e = !c->file || !c->working || !c->items || !info || !c->working_space ||
@@ -571,6 +608,10 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
     if (!e) e = x9_heif_open(CFDataGetBytePtr(c->file),(size_t)CFDataGetLength(c->file),&c->document);
     if (!e) e = x9_heif_plan_create_with_policy(c->document,id,clap_policy,&c->plan);
     if (!e) e = x9_heif_plan_geometry(c->plan,id,&geometry);
+    /* Qualify/allocate output spacings before any hardware frame. The plan
+     * only admits non-square for an untransformed coded root; it does not
+     * guess how a transform or child placement changes a physical metric. */
+    if (!e) e = copy_aspect(geometry.pixel_aspect_h,geometry.pixel_aspect_v,&aspect);
     if (!e) {
         c->resampling = x9_heif_plan_requires_resampling(c->plan);
         c->linear = x9_heif_plan_requires_linear_composition(c->plan);
@@ -597,7 +638,10 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
     if (!e) e = c->linear ? x9_heif_compose_linear_float(c->plan,native_raster,c,c->raster_budget,&raster) :
         x9_heif_compose_packed_with_budget(c->plan,X9_HEIF_RGBA_HALF,native_raster,c,c->raster_budget,&raster);
     OSStatus result = c->failure ? c->failure : parser_error(e);
-    if (!result) result = export_raster(c,&raster,&pixel);
+    if (!result && (raster.pixel_aspect_h != geometry.pixel_aspect_h ||
+        raster.pixel_aspect_v != geometry.pixel_aspect_v)) result = kVTVideoDecoderBadDataErr;
+    if (!result) result = export_raster(c,&raster,aspect,&pixel);
+    if (!result) result = check_aspect(pixel,aspect);
     if (!result) {
         e = put_number(info,CFSTR("ItemID"),geometry.id);
         if (!e) e = put_number(info,CFSTR("Width"),geometry.width);
@@ -617,6 +661,7 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
         if (!result) {
             CFDictionarySetValue(info,CFSTR("Items"),c->items);
             CFDictionarySetValue(info,CFSTR("WorkingRGBICCProfile"),c->working);
+            if (aspect) CFDictionarySetValue(info,kCMFormatDescriptionExtension_PixelAspectRatio,aspect);
             CFDictionarySetValue(info,CFSTR("GraphColorInterpretation"),
                 graph_color == X9_HEIF_GRAPH_COLOR_PER_ITEM ?
                     CFSTR("explicit per-item sources; common ICC composition; iovl colr interprets fill only") :
@@ -648,6 +693,7 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
         }
     }
     if (pixel) CVPixelBufferRelease(pixel);
+    if (aspect) CFRelease(aspect);
     x9_heif_raster_close(&raster);
     if (info) CFRelease(info);
     for (unsigned n = 0; n < c->count; n++) {

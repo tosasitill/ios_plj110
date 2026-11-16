@@ -26,9 +26,10 @@ enum x9_heif_graph_color_policy {
  * Progressive chroma siting is explicitly attached to the transfer view;
  * field sequences/different top-bottom locations reject during preflight.
  * Unsupported CICP values never become guessed BT709/sRGB defaults.
- * Non-square pasp anywhere in the reachable graph currently rejects BEFORE
- * hardware: sample-aspect forwarding exists at the coded CM/CV layer, not
- * aspect-aware derived geometry or a square-pixel raster conversion here.
+ * An untransformed coded root retains its non-square pasp on the returned
+ * CVPixelBuffer through Normal transfer; no pixels are resized or relabelled
+ * square. Non-square pasp in transformed/derived graphs rejects BEFORE
+ * hardware until aspect-aware physical metric propagation is implemented.
  * Aux/alpha, fractional crop, Rext and ordinary ImageIO/CMPhoto routing are
  * still unsupported by THIS exact-samples entrypoint: any aux rejects before
  * the first hardware decode. Fractional sampling has the explicit options
