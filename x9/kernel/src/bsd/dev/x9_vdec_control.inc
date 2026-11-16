@@ -348,6 +348,24 @@ static int vcontrol_recheck(struct x9_vdec_control *c, uint64_t end)
     bool pending = false;
     int e = vcontrol_snapshot(c,end,VCONTROL_RING_FIELDS,&common);
     c->status.ring_valid_bitmap = 0;
+    c->status.picture_observed = 0;
+    if (!e) {
+        struct x9_vcp_picture_snapshot picture[2];
+        for (unsigned n = 0; n < 2 && !e; n++)
+            e = x9_vcp_parse_picture_snapshot(X9_VCP_PICTURE_ABI_MT6993_CAPTURE1,
+                c->scratch+n*X9_VCP_INSTANCE_SLOT_BYTES,X9_VCP_INSTANCE_SLOT_BYTES,
+                &picture[n]);
+        /* Equal independent NC copies reject a visible update, but are not
+         * a firmware seqlock, matched frame or valid negotiation. Even zero
+         * and unknown picture/crop/DPB fields remain raw observations. Keep
+         * rechecking a changing picture without suppressing stable rings. */
+        if (!e && memcmp(&picture[0],&picture[1],sizeof(picture[0])))
+            pending = true;
+        else if (!e) {
+            c->status.picture = picture[1];
+            c->status.picture_observed = 1;
+        }
+    }
     for (unsigned kind = 0; kind < 3 && !e; kind++) {
         struct x9_vcp_ring_snapshot ring;
         e = vcontrol_ring_snapshot(c,kind,&ring);
@@ -379,6 +397,7 @@ static int vcontrol_notification(void *cookie, uint64_t epoch, uint64_t end,
     c->status.last_notification = *q; c->status.notifications++;
     c->status.recheck_pending = 1;
     c->status.ring_valid_bitmap = 0;
+    c->status.picture_observed = 0;
     memset(c->status.rings,0,sizeof(c->status.rings));
     if (q->firmware_status) return EIO;
     /* During INIT there is no bound VSI yet: retain the actual event until

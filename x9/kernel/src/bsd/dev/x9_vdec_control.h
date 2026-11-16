@@ -73,6 +73,8 @@ struct x9_vdec_control_status {
     struct x9_vcp_bus_call_log service_call; /* last reserved/failed batch, incl packet */
     uint32_t input_records, output_records; /* includes partial/error attempts */
     uint32_t ring_valid_bitmap; /* independently parsed rings in latest recheck */
+    uint32_t picture_observed; /* equal sampled fields ONLY, NOT negotiated/ready */
+    struct x9_vcp_picture_snapshot picture; /* check picture_observed; never layout authority */
     struct x9_vdec_control_start_resources resources; /* latest attempt, NOT a completed frame */
     struct x9_vcp_output_record output; /* latest offered extents, NOT pixel layout */
     struct x9_vcp_init_result init;

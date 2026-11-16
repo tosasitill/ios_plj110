@@ -49,6 +49,7 @@
 #define X9_VCP_INSTANCE_SLOT_BYTES 0x19e8u
 #define X9_VCP_INSTANCE_SLOT_COUNT 32u
 #define X9_VCP_DECODE_ABI_MT6993_CAPTURE1 1u
+#define X9_VCP_PICTURE_ABI_MT6993_CAPTURE1 1u
 #define X9_VCP_DECODE_MAX_PLANES 8u /* accessed array capacity, NOT a format */
 #define X9_VCP_GET_KERNEL_PARAM 0xc009u
 #define X9_VCP_GET_KERNEL_PARAM_DONE 0xd009u
@@ -498,6 +499,32 @@ struct x9_vcp_decode_snapshot {
  */
 int x9_vcp_parse_decode_snapshot(uint32_t abi, const uint8_t *, uint32_t bytes,
                                 struct x9_vcp_decode_snapshot *);
+
+/* GET_PARAM_PIC_INFO's exact 64B, CROP_INFO's four raw words and the raw
+ * firmware DPB count. These are observations, NOT a negotiated output format.
+ * fb_bytes has eight ABI entries, not eight active/writable planes. Linux
+ * selects its plane count from a separately returned capability table; its
+ * bytesperline consumer stores buf_w unchanged, even for non-linear formats.
+ * No byte stride, packing, HYFBC conversion or CPU pixel permission is implied.
+ */
+struct x9_vcp_picture_snapshot {
+    uint32_t pic_w, pic_h, buf_w, buf_h;
+    uint32_t fb_bytes[X9_VCP_DECODE_MAX_PLANES];
+    uint32_t bitdepth, layout_mode, fourcc, field;
+    int32_t crop_left, crop_top;
+    uint32_t crop_width, crop_height;
+    uint32_t raw_dpb_size, low_power_mode;
+};
+/* Explicit matching decoder ABI and one complete immutable host VSI slot.
+ * Snapshot only the evidenced ranges before zeroing out; overlap is allowed.
+ * Preserve zero/stale/unknown values and signed crop origins: no guessed crop,
+ * alignment, format fallback, active planes or readiness validation. DPB is
+ * VSI+e78, NOT Linux's later low-power/non-HEIF global-limit-adjusted budget.
+ * No live memory access, state mutation, DMA/ring retirement or delivery.
+ * On an unsupported ABI or malformed input the entire output is zero.
+ */
+int x9_vcp_parse_picture_snapshot(uint32_t abi, const uint8_t *, uint32_t bytes,
+                                 struct x9_vcp_picture_snapshot *);
 
 /* Initial service SHM request, not the per-instance memory allocator.
  * TCM 0x11782..0x11898: context=0, instance token=UINT64_MAX, type=8;

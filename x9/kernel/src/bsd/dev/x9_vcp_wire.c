@@ -843,6 +843,48 @@ int x9_vcp_parse_decode_snapshot(uint32_t abi, const uint8_t *input,
     return 0;
 }
 
+int x9_vcp_parse_picture_snapshot(uint32_t abi, const uint8_t *input,
+                                 uint32_t bytes, struct x9_vcp_picture_snapshot *out)
+{
+    struct {
+        uint8_t picture[64], crop[16], dpb[4], low_power_mode;
+    } s;
+    uint32_t word;
+    if (!out) return EINVAL;
+    if (abi != X9_VCP_PICTURE_ABI_MT6993_CAPTURE1) {
+        memset(out, 0, sizeof(*out));
+        return ENOTSUP;
+    }
+    if (!input || bytes != X9_VCP_INSTANCE_SLOT_BYTES) {
+        memset(out, 0, sizeof(*out));
+        return EINVAL;
+    }
+    memcpy(s.picture, input + 0xf50, sizeof(s.picture));
+    memcpy(s.crop, input + 0xfd8, sizeof(s.crop));
+    memcpy(s.dpb, input + 0xe78, sizeof(s.dpb));
+    s.low_power_mode = input[0x1003];
+    memset(out, 0, sizeof(*out));
+    out->pic_w = get32(s.picture);
+    out->pic_h = get32(s.picture + 4);
+    out->buf_w = get32(s.picture + 8);
+    out->buf_h = get32(s.picture + 12);
+    for (unsigned i = 0; i < X9_VCP_DECODE_MAX_PLANES; i++)
+        out->fb_bytes[i] = get32(s.picture + 16 + 4 * i);
+    out->bitdepth = get32(s.picture + 48);
+    out->layout_mode = get32(s.picture + 52);
+    out->fourcc = get32(s.picture + 56);
+    out->field = get32(s.picture + 60);
+    word = get32(s.crop);
+    memcpy(&out->crop_left, &word, sizeof(word));
+    word = get32(s.crop + 4);
+    memcpy(&out->crop_top, &word, sizeof(word));
+    out->crop_width = get32(s.crop + 8);
+    out->crop_height = get32(s.crop + 12);
+    out->raw_dpb_size = get32(s.dpb);
+    out->low_power_mode = s.low_power_mode;
+    return 0;
+}
+
 int x9_vcp_parse_vp_request(const struct x9_vcp_init *instance, const uint8_t *input,
                            uint32_t bytes, struct x9_vcp_vp_request *out)
 {
