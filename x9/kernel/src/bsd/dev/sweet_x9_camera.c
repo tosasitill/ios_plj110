@@ -445,7 +445,8 @@ static int cam_close(dev_t d,__unused int f,__unused int t,__unused struct proc 
 static int cam_ioctl(dev_t d,u_long cmd,caddr_t data,int f,__unused struct proc *p)
 {
     if(minor(d)>1)return ENXIO;
-    if(minor(d)==1 && cmd!=X9_CAMERA_GET_STATUS && cmd!=X9_CAMERA_GET_STOP && cmd!=X9_CAMERA_GET_LENSES)return EPERM;
+    if(minor(d)==1 && cmd!=X9_CAMERA_GET_STATUS && cmd!=X9_CAMERA_GET_STOP &&
+        cmd!=X9_CAMERA_GET_LENSES && cmd!=X9_CAMERA_GET_SWITCH_CAPACITY)return EPERM;
     if(cmd==X9_CAMERA_GET_STATUS) {
         lck_mtx_lock(&camera_lock);memcpy(data,&st,sizeof(st));lck_mtx_unlock(&camera_lock);return 0;
     }
@@ -463,6 +464,17 @@ static int cam_ioctl(dev_t d,u_long cmd,caddr_t data,int f,__unused struct proc 
     if(cmd==X9_CAMERA_GET_STOP) {
         lck_mtx_lock(&camera_control_lock);memcpy(data,&cam_stop_last,sizeof(cam_stop_last));
         lck_mtx_unlock(&camera_control_lock);return 0;
+    }
+    if(cmd==X9_CAMERA_GET_SWITCH_CAPACITY) {
+        struct x9_camera_switch_capacity r={.version=1,.flags=X9_CAMERA_SWITCH_SERIAL,
+            .limit=CAM_NATIVE_MAX_PINNED_EPOCHS};
+        /* All native epoch writers hold this control lock. No MMIO, new
+         * reservation, map mutation or lease validation is performed here. */
+        lck_mtx_lock(&camera_control_lock);
+        r.retired=cam_native_epoch_count;
+        if(r.retired+1<r.limit)r.remaining=r.limit-r.retired-1;
+        lck_mtx_unlock(&camera_control_lock);
+        memcpy(data,&r,sizeof(r));return 0;
     }
     if(cmd==X9_CAMERA_STOP) {
         int e=0;

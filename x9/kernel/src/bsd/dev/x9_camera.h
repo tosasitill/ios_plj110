@@ -59,6 +59,14 @@ struct x9_camera_lenses {
     struct { uint32_t sensor, chip_id, flags, reserved; } lens[X9_CAMERA_SENSOR_COUNT];
 };
 #define X9_CAMERA_GET_LENSES _IOR('C', 0x9e, struct x9_camera_lenses)
+/* Read-only accounting, NOT a physical lease or nondisruptive-switch grant.
+ * Remaining is conservative: reserve one history slot for the current
+ * stream's eventual retirement before its replacement can be opened. */
+#define X9_CAMERA_SWITCH_SERIAL 1u
+struct x9_camera_switch_capacity {
+    uint32_t version, flags, limit, retired, remaining, reserved[3];
+};
+#define X9_CAMERA_GET_SWITCH_CAPACITY _IOR('C', 0x9f, struct x9_camera_switch_capacity)
 /* Explicit stop receipt; close(2)==0 is not proof that cdev d_close ran.
  * Requests contain version/sensor/generation_before only, all else zero.
  * owned_* journal ATTEMPTED callbacks, not DMA leases or hardware grants.

@@ -37,4 +37,20 @@ static uint32_t x9_camera_backend_mask(void)
 }
 static bool x9_camera_backend_ready(void)
 { return x9_camera_backend_mask()!=0; }
+
+/* Independent status vnode only. Conservatively refuse a new physical lens
+ * BEFORE stopping the recording's live stream when pinned histories are full. */
+static inline int x9_camera_switch_remaining(uint32_t *remaining)
+{
+    int fd = open(X9_CAMERA_STATUS_DEVICE, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    struct x9_camera_switch_capacity r = {0};
+    int query = ioctl(fd, X9_CAMERA_GET_SWITCH_CAPACITY, &r);
+    int closed = close(fd);
+    if (query || closed || r.version != 1 || r.flags != X9_CAMERA_SWITCH_SERIAL || r.limit != 8 ||
+        r.retired > r.limit || r.remaining != (r.retired + 1 < r.limit ? r.limit - r.retired - 1 : 0) ||
+        r.reserved[0] || r.reserved[1] || r.reserved[2]) return -1;
+    *remaining = r.remaining;
+    return 0;
+}
 #endif

@@ -1,7 +1,27 @@
-# X9 前后相机初步移植
+# X9 原生相机桥
 
-**已实现控制层、RAW10 帧接口、iOS 双流桥、冷启动 sensor-probe/standby 配置、共享接收电源与 MM 寄存器时钟事务、SENINF/CAMSV 接收计划及带供电前置的寄存器预检；采集后端仍缺失，不能拍摄。**
-没有假帧、测试图案、Android 代理或 Camera.app 成功状态伪造。默认关闭。
+## 当前状态（2026-11-16）
+
+**原生单路采集、四颗物理镜头接线、后置变焦路由和 iOS 软件视频配置已进入源码/构建阶段；尚无 mode2 的真实预览、拍照、录像或切镜验收。** 最新有效日志 `~/330.txt` 仍为 `x9_camera=1 / platform=0`，不能据此判断新候选的效果。没有假帧、测试图案、Android 代理或 Camera.app 成功状态伪造。
+
+| 路径 | 源码能力与边界 |
+|---|---|
+| 原生采集 | `x9_camera=2` 才准入；真实 ID/probe/close、PHY/CSI/CAMSV、IRQ、SID80、RAW 与退休守卫必须逐项成功，不以注册代替画面 |
+| 镜头 | 默认广角/前置；`x9_camera_lenses=1` 候选才开启超广角与长焦的四路准入；没有多路并发 grant |
+| 后置变焦 | 后置广角逻辑流的 `ZoomFactor`：`0.6≤z<1` 超广角，`1≤z<3` 广角，`z≥3` 长焦；缺长焦时广角数字裁切。D22 保留独立长焦 ID:2，尚无原生 0.6/3 按钮或虚拟三摄合同 |
+| 切镜 | 目标稳定120ms、驻留至少450ms；先真实 STOP/close，再启动新镜头；保持 graph/输出池/host clock，曝光 seed 等待实际控制记录，8个真实新帧作有限亮度过渡。**仍有冷启动采集缺口，不是 iPhone 双路预热的无间断切换** |
+| 视频配置 | 精确20H392 UUID/IMP 守卫，原 D22 plist 读入后仅在内存适配单源 Photo、1080p30/720p30/640×480；保留原音频节点，禁用未实现的 HDR/防抖/depth/AF/闪光等能力；不改 Apple 磁盘资产 |
+| 视频编码 | 注册原 Apple `VCPHEVC` 软件 `hvc1` 工厂，并记录真实工厂创建结果；注册失败只公告 Photo。没有可用 AVC 软件工厂证据，不把 HEVC 冒充 H264；**没有硬件编码或持续实时吞吐证明** |
+| 帧率 | `MinimumFrameRate` / `MaximumFrameRate` / `MaximumAllowedFrameRate` 控制真实 frame length（2..30fps）；录像时固定到有效上限。按各传感器 line/step 量化，metadata 报告实际时长，不 sleep/改 PTS/重放帧；各输出拒绝重复/倒序 PTS |
+| 切镜预算 | 独立只读32B `GET_SWITCH_CAPACITY`，为当前流退休预留 history slot；耗尽时在 STOP 前拒绝新目标、保留旧流。八个 exported epoch pin 上限不解除，不复用未退休映射 |
+
+**尚未闭合的验收**：Camera.app 图标与视频模式是否出现、四 ID/close→真实 RAW→handler→移动画面、编码器真实选中/编码、视频 start/stop、QuickTime 音视频封装、Photos 保存/重开播放、切镜 `source_gap` 和画面。保持同 graph 或软件工厂 `result=0` 都不是录像完成证明。真正同步预热/无采集中断需要底层多路采集及 iOS 同步源合同；硬件 VENC、镜头标定、AF/OIS 与原生三摄 UI 仍未完成。
+
+设备由用户手动 `fastboot boot` 候选并提供新日志；沿用 GPU280 时无需 mailbox。不默认启用 `x9_mgwipe=3` 缓存重建。确切提交、候选路径、构建结果与下一动作见 `NOTES.md` §5。
+
+## 基础接口与历史实现记录
+
+以下保留逐层实现时的约束；“采集后端缺失”“无 native caller”“Photo-only”等为当时状态，**不是当前总状态**，以本节上方状态、当前源码与新候选日志为准。
 
 **接口版本**：kernel-private platform 现为 **version4**，mandatory `configure`/`exposure` callback 将真实 sensor-session 配置/曝光交给 provider；completed-frame 与 CAMSV completion 仍为 **version3**。用户 RAW10 header 仍120B，使用 `RWFRAME2` magic 与同帧 SOF 观察时间；ioctl/status/control 尺寸不变。旧 platform version1/2/3 provider 与 `RWFRAME1` 图像不能混用，不以 DONE 时间伪造缺失 SOF。native sensor adapter 尚无 engine 调用注册者，不是 capture READY 或实机预览证明。
 

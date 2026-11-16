@@ -158,6 +158,17 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 iPhone式切镜连续性与视频能力续接（进行中）
+
+- 单代理续用 `feat/camera-integration` / `.worktrees/camera-integration`，基线 `c3289258` clean；仍无新r4运行日志，最新330为mode1。scratch仅本树 `x9/out/camera-seamless-video-20261116/`。不操作设备/ADB/mailbox/分区，不运行测试套件，不二次检查成功构建产物。
+- **确定缺口**：bridge仅公告Photo格式；未实现帧率与`VideoRecordingInProgress`控制。当前物理DMA/供电/退休合同只允许一颗传感器，冷STOP/close/start必有采集缺口；不能把保持graph、冻结旧帧/改PTS或复用未退休映射称iPhone同步双路无缝切换。八个exported epoch lifetime上限仍在，必须保留安全守卫。
+- **参考/原件新证据**：hackios `userland/src/inject_media.c:406–440`注册Apple软件HEVC；本次20H392 DSC原VCPHEVC导出`HEVCVideoEncoder_CreateInstance`，`VCPHEVCRegisterEncoder`原4B为ret；H264SW的`VCPAVCRegisterEncoder`亦ret且无导出encoder create，不能把HEVC编码器登记成H264。原VT有`VTRegisterVideoEncoderWithInfo`及真实encoder-list keys。三个Mach-O UUID/loadcommands/nm与bounded原disassembly保留本轮out。初次`llvm-objdump --macho`忽略范围生成大日志，随后不用`--macho`获得bounded正文，未把大输出送上下文。
+- **下一源码范围**：资格化CMCapture的D22 plist读入方法，按真实X9单源能力适配内存中的Photo/最高1080p30模式与软件HEVC注册；保留原音频节点，不篡改Camera.app或磁盘Apple资产。补真实帧率约束、稳定graph/host-time、切镜防抖与真实新帧的曝光/颜色过渡，不宣称同步融合/无采集间断。视频编码/音视频封装/Photos保存与原生变焦按钮仍需各自运行验收；本条非完成声明。
+- **源码里程碑**：新增 `camera_profile.h/media_profile.m`，精确hook `+[FigCaptureFlatPlist flatPlistWithContentsOfURL:]` 原IMP `1a208b90c+slide`，先读取真实D22原plist，仅native ready后内存替换单源Photo/1080p30/720p30/640×480，保留D22 :0/:1/:2身份与原音频，去缺失virtual/depth并关闭未实现的布尔能力；不改磁盘Apple原件。原HEVC factory/VT及真实keys逐image UUID验证后注册hvc1，`IsHardwareAccelerated=false`，透明三参factory仅记录实际创建结果；注册失败Photo-only。帧率属性2..30通过物理line/step→frame length生效，录像固定有效上限、metadata保持实际时长，各输出拒绝旧PTS。后置目标稳定120ms/驻留450ms，真实STOP/close/start保留graph/pools/clock，只携bounded WB、不携旧LSC/CCM，旧曝光ns/gain按新sensor限幅seed，实际控制记录一致后8个新RAW亮度easing，日志显式记source_gap，不重放旧帧。
+- **退休预算/并发修正**：新增32B只读 `GET_SWITCH_CAPACITY/0x9f`（旧88Bstatus/80Blenses不变），在writer同`camera_control_lock`读取8个epoch历史，remaining=limit-retired-1（正值时），预留当前流最终退休。Zoom setter和worker在STOP前拒绝无预算；拒绝时只回退仍相同的请求，不覆盖新zoom，zoom写入与worker目标验收同锁；没有新增lease/MMIO/映射释放。此限制仍意味着有限次数切镜，非无限无缝功能。
+- **编译记录/修复**：bridge `compile-r1` actual exit0（142912B，当时后续变化未齐）；`compile-r2` actual exit1（5条错误：rate guard误放RequestStreams，无f/isp且continue不在loop）。原失败保留，已移到worker曝光块后。最终 `compile-r3` actual exit0，原log报告bridge159616B（1 unused static warning +既有initializer linker warning）；无二次产物检查。新kernel ABI正常单对象编译在本轮out `kernel-compile-r1`，终态下一条补记。README已新增当前状态/边界，旧Photo-only/backend缺失标为历史。没有新运行日志/测试套件/设备动作，目标未验收完成。
+- **kernel单对象终态**：正常Builder `compile_one(sweet_x9_camera.o)` **True/actual exit0，172 warnings**，原session52402已终态，新32B预算ABI与现有native源共同编译通过；bridge session11307亦已终态。接下来固定源码commit/push后以唯一r5整包；保持camera2、加lenses1、GPU280和其余MG参数不变，不启用未确认的mgwipe3。本轮没有CI run ID、设备启动/编码/保存结果。
+
 #### 2026-11-16 四镜头接线与后置变焦切换：r4 完整构建成功，尚未上机验收
 
 - **开始状态（历史，以下源码里程碑已推进）**：当前树 `feat/camera-integration`，基线 `b1f6bce3`。上轮未提交源码已接收；开始审查并正常编译，不执行测试套件或设备操作。最新有效运行证据仍330/mode1，r3/mode2未验收。

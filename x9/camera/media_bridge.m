@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT
  * HakiOS FigCaptureDevice vendor adaptation; see LICENSE.hakios.
- * Exact 20H392 CMCapture UUID/IMP gates. No audio, VT, global GPU hooks.
+ * Exact 20H392 CMCapture UUID/IMP gates. Capture profile/software HEVC live
+ * in media_profile.m; no audio or global GPU hooks.
  */
 #import <Foundation/Foundation.h>
 #include <objc/runtime.h>
@@ -15,6 +16,7 @@
 #include <sys/ioctl.h>
 #include "../kernel/src/bsd/dev/x9_camera.h"
 #include "camera_status.h"
+#include "camera_profile.h"
 #include "../torch/media_callers.h"
 
 extern int x9_camera_device_create(CFAllocatorRef, CFDictionaryRef, void **);
@@ -93,6 +95,7 @@ static void imageAdded(const struct mach_header *mh,__unused intptr_t imageSlide
     }
     torchVendorWithCaller=torchChain ? forward : NULL;
     originalVendor=method_setImplementation(m,(IMP)x9_camera_media_shared_vendor);hooked=true;
+    x9_camera_install_profile(slide);
     dprintf(2,"X9 CAMERA MEDIA: exact 20H392 vendor hook%s; no vendor until physical backend ready\n",
         torchChain ? " (retaining torch caller gate)" : "");
 }

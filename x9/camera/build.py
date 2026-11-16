@@ -111,7 +111,7 @@ def main():
     subprocess.run(common + ['-dynamiclib', '-framework', 'Foundation', '-framework', 'CoreMedia',
                             '-framework', 'CoreVideo', '-framework', 'IOSurface',
                             '-install_name', '/usr/lib/libx9-camera.dylib',
-                            str(HERE / 'media_bridge.m'), str(HERE / 'camera_device.c'),
+                            str(HERE / 'media_bridge.m'), str(HERE / 'media_profile.m'), str(HERE / 'camera_device.c'),
                             str(HERE / 'camera_isp.c'), '-o', str(library)], check=True)
     subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(library)], check=True)
     ctl = a.out / 'cameractl'

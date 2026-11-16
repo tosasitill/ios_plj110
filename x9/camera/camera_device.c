@@ -59,8 +59,10 @@
 #include "../kernel/src/bsd/dev/x9_camera.h"
 #include "camera_stop.h"
 #include "camera_status.h"
+#include "camera_profile.h"
 _Static_assert(sizeof(struct hakios_camera_frame)==120,"RAW10 v2 wire layout");
 _Static_assert(__builtin_offsetof(struct hakios_camera_frame,sof_time_lo)==100,"RAW10 timing offset");
+_Static_assert(sizeof(struct x9_camera_switch_capacity)==32,"read-only switch capacity ABI");
 
 void hakios_camera_say(const char *format, ...) __attribute__((format(printf, 1, 2)));
 
@@ -448,6 +450,7 @@ struct output {
 	uint64_t        revision;               /* config/handler/enable admission, monotonic within this object */
 	bool            said_shape;
 	uint64_t        delivered, refused;
+	uint64_t        last_pts_units;         /* real host timestamp per output, across rear switches */
 	CVPixelBufferRef held[HELD];            /* the pictures given last, kept from the pool (see deliver) */
 	unsigned        held_next;
 	bool            said_pool;
@@ -475,13 +478,13 @@ static const struct camera {
 	int             formats[2][3];  /* sensor width, height, frames a second of "Photo" and of a video format */
 } cameras[3] = {
 	{ 1, "Back Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:0", false, 4.0, 1.8, 1.22, 65.0,
-	  { { 4032, 3024, 30 }, { 4032, 3024, 30 } } },        /* "Photo", "Video-60" */
+	  { { 4032, 3024, 30 }, { 4096, 3072, 30 } } },        /* "Photo", "X9-Video-30" */
 	{ 2, "Front Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:1", false, 2.87, 2.2, 1.0, 70.0,
-	  { { 3088, 2320, 30 }, { 3840, 2160, 30 } } },        /* "Photo", "Video-30" */
+	  { { 3088, 2320, 30 }, { 3264, 2448, 30 } } },        /* same real preview mode, cropped output */
     /* Exact D22 standalone telephoto ID:2/port, not virtual dual ID:3.
      * Optical fields remain a D22-compatible descriptor, not X9 calibration. */
     { X9_CAMERA_TELEPHOTO, "Back Telephoto Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:2",
-      false, 6.0, 2.6, 1.0, 28.0, { {4032,3024,30}, {4032,3024,30} } },
+      false, 6.0, 2.6, 1.0, 28.0, { {4032,3024,30}, {4096,3072,30} } },
 };
 
 /* X9 rear zoom policy, relative to the wide camera: 0.6 / 1 / 3 anchors.
@@ -499,6 +502,16 @@ static struct lens_choice rear_lens(uint32_t sensor,uint32_t mask,float zoom)
         c.sensor=X9_CAMERA_TELEPHOTO;c.base_zoom=3;
     }
     return c;
+}
+
+static mach_timebase_info_data_t camera_timebase;
+static pthread_once_t camera_timebase_once = PTHREAD_ONCE_INIT;
+static void camera_timebase_init(void) { mach_timebase_info(&camera_timebase); }
+static double elapsed_ms(uint64_t now, uint64_t then)
+{
+    pthread_once(&camera_timebase_once, camera_timebase_init);
+    return now >= then && camera_timebase.denom ?
+        (double)(now - then) * camera_timebase.numer / camera_timebase.denom / 1e6 : 0;
 }
 
 struct still_request {
@@ -619,6 +632,8 @@ struct stream {
 	bool            stopping;        /* no new shutter tickets may race the old run's cancellation */
 	_Atomic int     format_index;
 	_Atomic double  min_fps, max_fps;
+	_Atomic double  allowed_fps;
+	_Atomic bool    recording;      /* recording state, not an encoded/file-completion receipt */
 	_Atomic float   zoom;           /* ZoomFactor: the picture is the middle 1/zoom of the sensor each way */
 
     uint32_t ready_mask; /* constructor's qualified physical backend mask */
@@ -837,6 +852,10 @@ stream_copy_property(CMBaseObjectRef o, CFStringRef key, CFAllocatorRef allocato
 		value = number_f(s->min_fps);
 	} else if (key_is(key, "MaximumFrameRate")) {
 		value = number_f(s->max_fps);
+	} else if (key_is(key, "MaximumAllowedFrameRate")) {
+		value = number_f(s->allowed_fps);
+	} else if (key_is(key, "VideoRecordingInProgress")) {
+		value = CFRetain(s->recording ? kCFBooleanTrue : kCFBooleanFalse);
 	} else if (key_is(key, "Clock")) {
 		value = CFRetain(CMClockGetHostTimeClock());
 	} else if (key_is(key, "TorchLevel") || key_is(key, "ExposureBias")) {
@@ -1004,20 +1023,56 @@ stream_set_property(CMBaseObjectRef o, CFStringRef key, CFTypeRef value)
         double minimum=s->camera->sensor==X9_CAMERA_BACK &&
             (s->ready_mask&(1u<<X9_CAMERA_ULTRAWIDE))?0.6:1;
         zoom = zoom < minimum ? minimum : zoom > MAX_ZOOM ? MAX_ZOOM : zoom;
-		if (fabs(zoom - s->zoom) >= 0.25 || (zoom == 1) != (s->zoom == 1)) {
+		pthread_mutex_lock(&s->lock);
+		bool switches = s->running && rear_lens(s->camera->sensor, s->ready_mask, (float)zoom).sensor != s->physical_sensor;
+		pthread_mutex_unlock(&s->lock);
+		if (switches) {
+			uint32_t remaining = 0;
+			if (x9_camera_switch_remaining(&remaining)) return ERR_NOT_AVAILABLE;
+			if (!remaining) return ERR_UNSUPPORTED; /* preserve old zoom/stream/recording */
+		}
+		pthread_mutex_lock(&s->lock);
+		float old_zoom = s->zoom;
+		s->zoom = (float)zoom;
+		pthread_mutex_unlock(&s->lock);
+		if (fabs(zoom - old_zoom) >= 0.25 || (zoom == 1) != (old_zoom == 1)) {
 			say("stream: zoom %.2fx", zoom);
 		}
-		s->zoom = (float)zoom;
 		return 0;
 	}
-	if (key_is(key, "MinimumFrameRate") || key_is(key, "MaximumFrameRate")) {
+	if (key_is(key, "MinimumFrameRate") || key_is(key, "MaximumFrameRate") || key_is(key, "MaximumAllowedFrameRate")) {
 		double fps = 0;
 
-		if (value != NULL && CFGetTypeID(value) == CFNumberGetTypeID()) {
-			CFNumberGetValue(value, kCFNumberDoubleType, &fps);
+		if (value == NULL || CFGetTypeID(value) != CFNumberGetTypeID() ||
+		    !CFNumberGetValue(value, kCFNumberDoubleType, &fps) || !isfinite(fps)) return ERR_PARAM;
+		bool minimum = key_is(key, "MinimumFrameRate"), allowed = key_is(key, "MaximumAllowedFrameRate");
+		if (allowed && fps == 0) fps = 30; /* remove extra ceiling, not the physical 30fps cap */
+		if (fps < 2 || fps > 30) return ERR_UNSUPPORTED;
+		pthread_mutex_lock(&s->lock);
+		/* These scalars do not replace/retire graph storage. Reconfiguration
+		 * after Stop (before the next Begin) and callback reentry are safe. */
+		if ((minimum && fps > s->max_fps) || (!minimum && !allowed && fps < s->min_fps)) {
+			pthread_mutex_unlock(&s->lock);
+			return ERR_PARAM;
 		}
-		*(key_is(key, "MinimumFrameRate") ? &s->min_fps : &s->max_fps) = fps;
+		if (allowed) s->allowed_fps = fps;
+		else if (minimum) s->min_fps = fps;
+		else s->max_fps = fps;
+		pthread_mutex_unlock(&s->lock);
 		say_once("stream: set", key, value);
+		return 0;
+	}
+	if (key_is(key, "VideoRecordingInProgress")) {
+		if (value == NULL || CFGetTypeID(value) != CFBooleanGetTypeID()) return ERR_PARAM;
+		bool recording = CFBooleanGetValue(value);
+		pthread_mutex_lock(&s->lock);
+		if (recording && atomic_load(&s->first_errno)) {
+			pthread_mutex_unlock(&s->lock);
+			return ERR_NOT_AVAILABLE;
+		}
+		s->recording = recording;
+		pthread_mutex_unlock(&s->lock);
+		say("video recording state=%u; graph/pools/host clock retained, software HEVC only", recording);
 		return 0;
 	}
 	if (key_is(key, "VideoOutputConfigurations") || key_is(key, "VideoOutputsEnabled") || key_is(key, "VideoOutputHandlers")) {
@@ -1484,6 +1539,7 @@ deliver(struct stream *s, const struct output_snapshot *snapshot, const struct i
 	 * Output mutations reject while admitted; Stop closes admission and cannot declare retirement until it is over. */
 	pthread_mutex_lock(&s->lock);
 	if (!s->running || !s->graph_running || s->callback_active || !snapshot_current(s, snapshot) ||
+	    f->time <= s->out[snapshot->slot].last_pts_units ||
 	    (snapshot->still && (s->stills_wanted == 0 || s->stills_head == NULL ||
 	    s->stills_head->ticket != snapshot->still_ticket || s->stills_consumed + 1 != snapshot->still_ticket ||
 	    s->stills_head->run_epoch != snapshot->run_epoch ||
@@ -1493,6 +1549,7 @@ deliver(struct stream *s, const struct output_snapshot *snapshot, const struct i
 		return false;
 	}
 	s->callback_active = true;
+	s->out[snapshot->slot].last_pts_units = f->time;
 	pthread_mutex_unlock(&s->lock);
 	((pixel_buffer_handler)snapshot->handler)(pb, pts);
 
@@ -1846,6 +1903,14 @@ worker(void *context)
 	struct af af = { 0 };
 	int device = s->camera_fd, error = 0;
     uint64_t last_sequence=0,last_time=0,last_sof=0;
+    uint32_t candidate_sensor = 0;
+    uint64_t candidate_since = 0, switched_at = 0, old_done = 0;
+    double previous_exposure_ns = 0, previous_gain = 1, previous_green = 0;
+    double transition_green = 0;
+    bool seed_pending = false, seed_observed = true, switch_gap_pending = false;
+    uint32_t seed_lines = 0, seed_gain = 0, seed_frame_lines = 0;
+    uint64_t seed_issued_at = 0;
+    unsigned transition_frames = 0;
 
 	camera_worker_thread = true;
 	camera_worker_stream = s;
@@ -1864,13 +1929,37 @@ worker(void *context)
 
         struct lens_choice choice=rear_lens(s->camera->sensor,s->ready_mask,atomic_load(&s->zoom));
         if(choice.sensor!=s->physical_sensor) {
+            uint64_t now = mach_absolute_time();
+            if (candidate_sensor != choice.sensor) {
+                candidate_sensor = choice.sensor; candidate_since = now;
+            }
+            /* Stable target + minimum dwell prevent repeated cold retirements
+             * around a pinch/ramp anchor. Never claim the new lens is already applied. */
+            bool stable = elapsed_ms(now, candidate_since) >= 120 &&
+                (!switched_at || elapsed_ms(now, switched_at) >= 450);
             /* This boundary is outside RAW rendering/handlers. Never switch
              * a queued shutter to another lens or join a callback thread. */
             pthread_mutex_lock(&s->lock);
-            bool switch_now=s->running && !s->stopping && !s->stills_wanted && !s->callback_active;
+            bool switch_now=stable && s->zoom == choice.requested_zoom &&
+                s->running && !s->stopping && !s->lens_switching &&
+                !s->stills_wanted && !s->callback_active;
             if(switch_now && s->run_epoch==UINT64_MAX) {pthread_mutex_unlock(&s->lock);error=EOVERFLOW;break;}
             if(switch_now)s->lens_switching=true;
             pthread_mutex_unlock(&s->lock);
+            if (switch_now) {
+                uint32_t remaining = 0;
+                int query = x9_camera_switch_remaining(&remaining);
+                if (query || !remaining) {
+                    pthread_mutex_lock(&s->lock);
+                    s->lens_switching=false;
+                    /* Do not overwrite a newer request made during the query. */
+                    if (s->zoom == choice.requested_zoom) s->zoom=s->applied_zoom;
+                    pthread_mutex_unlock(&s->lock);
+                    say("rear switch refused BEFORE STOP: capacity query=%d remaining=%u; live stream retained",
+                        query, remaining);
+                    switch_now=false;
+                }
+            }
             if(switch_now) {
                 uint32_t old_sensor=s->physical_sensor;
                 error=close_camera_once(s,device);device=-1;
@@ -1885,15 +1974,24 @@ worker(void *context)
                 if(sent!=sizeof(select)) {error=sent<0?errno:EMSGSIZE;break;}
                 pthread_mutex_lock(&s->lock);
                 s->physical_sensor=choice.sensor;s->base_zoom=choice.base_zoom;
-                s->applied_zoom=choice.requested_zoom;s->run_epoch++;s->lens_switching=false;
+                s->applied_zoom=choice.requested_zoom;s->run_epoch++;
                 pthread_mutex_unlock(&s->lock);
                 free(buffer);buffer=NULL;bytes=0;last_sequence=0;tuned_for=~0u;
-                isp_init(&isp);memset(&af,0,sizeof(af));lux=cct=-1;
+                /* Keep graph/pools/host timestamps. Reset sensor-specific
+                 * LSC/CCM/AF, carry only bounded common WB gains, not calibration. */
+                float wb[3]; memcpy(wb, isp.wb, sizeof(wb));
+                isp_init(&isp);
+                for (unsigned i = 0; i < 3; i++) isp.wb[i] = fmaxf(0.5f, fminf(wb[i], 4));
+                memset(&af,0,sizeof(af));lux=cct=-1;
+                transition_green=previous_green;transition_frames=8;
+                seed_pending=previous_exposure_ns>0;seed_observed=!seed_pending;
+                switched_at=mach_absolute_time();old_done=last_time;switch_gap_pending=true;
+                candidate_sensor=0;
                 say("rear lens switched %u -> %u: %.2fx (base %.2fx), physical close/start; no fusion",
                     old_sensor,choice.sensor,choice.requested_zoom,choice.base_zoom);
                 continue;
             }
-        }
+        } else candidate_sensor=0;
 
 		if (buffer == NULL) {
 			n = read(device, &head, sizeof(head));
@@ -1954,11 +2052,42 @@ worker(void *context)
         isp.zoom=s->applied_zoom/s->base_zoom;
 		bool af_now = s->af_now, af_locked = s->af_locked;
 		float af_window[4];
+		double maximum = fmin(s->max_fps, s->allowed_fps);
+		double minimum = s->recording ? maximum : fmin(s->min_fps, maximum);
 
 		memcpy(af_window, s->af_window, sizeof(af_window));
 		s->af_now = false;
 		pthread_mutex_unlock(&s->lock);
 		isp.turned = s->camera->turned;
+		if (!isp_frame_rate(&isp, f, minimum, maximum)) { error = ERANGE; break; }
+		if (seed_pending) {
+			uint32_t step = isp_exposure_step(f->sensor), low = isp_exposure_minimum(f->sensor);
+			double requested = previous_exposure_ns / f->line_ns;
+			uint32_t high = (isp.max_frame_lines - f->margin) / step * step;
+			seed_lines = (uint32_t)fmin(fmax(requested, low), high) / step * step;
+			seed_gain = (uint32_t)fmin(fmax(previous_gain * f->gain_unity, f->gain_unity), f->gain_max);
+			seed_frame_lines = seed_lines + f->margin;
+			if (seed_frame_lines < isp.min_frame_lines) seed_frame_lines = isp.min_frame_lines;
+			seed_frame_lines = (seed_frame_lines + step - 1) / step * step;
+			c = (struct hakios_camera_command){.command=HAKIOS_CAMERA_EXPOSURE,
+			    .a=seed_lines,.b=seed_gain,.c=seed_frame_lines};
+			ssize_t sent = write(device, &c, sizeof(c));
+			if (sent != sizeof(c)) { error = sent < 0 ? errno : EMSGSIZE; break; }
+			isp.asked_lines=seed_lines;isp.asked_gain=seed_gain;isp.asked_frame_lines=seed_frame_lines;isp.asked=true;
+			seed_issued_at=mach_absolute_time();
+			seed_pending=false;
+			continue; /* This RAW predates the seed. Do not claim the new lens is settled. */
+		}
+		if (!seed_observed) {
+			seed_observed=f->exposure_lines==seed_lines && f->frame_lines==seed_frame_lines &&
+			    abs((int)f->gain-(int)seed_gain) <= (int)(seed_gain/32+2);
+			if (!seed_observed) {
+				if (elapsed_ms(mach_absolute_time(), seed_issued_at) > 2000) {
+					error=ETIMEDOUT; say("rear seed controls not observed; no retry/replay"); break;
+				}
+				continue; /* keep the real native counter/controls guard */
+			}
+		}
 		if (isp_ae(&isp, f, &st, &c)) {
 			ssize_t sent = write(device, &c, sizeof(c));
 
@@ -1968,6 +2097,9 @@ worker(void *context)
                 break;
             }
 		}
+		/* This RAW may precede a rate-control update. Do not publish it
+		 * under the new video rate contract until actual frame length agrees. */
+		if (f->frame_lines < isp.min_frame_lines || f->frame_lines > isp.max_frame_lines) continue;
 		if (af_now) {
 			/* (whatever it was doing: at once, from the next frame) */
 			af.state = AF_STEADY;
@@ -1977,7 +2109,21 @@ worker(void *context)
 		af_frame(device, &af, f, raw, af_window, af_locked);
 		s->frames++;
 
-		CFDictionaryRef metadata = frame_metadata(&isp, f, &st, s->port,s->applied_zoom);
+		/* Luminance easing uses ONLY new-lens RAW and its measured levels.
+		 * No image replay/crossfade or fake time. Not parallax/optical calibration. */
+		struct isp presentation = isp;
+		if (transition_frames && transition_green > 1 && st.mean[1] * isp.digital > 1) {
+			double ratio = fmax(0.5, fmin(2, transition_green / (st.mean[1] * isp.digital)));
+			double ease = pow(ratio, (double)transition_frames / 8);
+			if (st.bright * isp.digital * ease > 0.95 * 959 && ease > 1)
+				ease = fmax(1, 0.95 * 959 / (st.bright * isp.digital));
+			presentation.digital = (float)fmin(4, isp.digital * ease);
+		}
+		previous_exposure_ns=(double)f->exposure_lines*f->line_ns;
+		previous_gain=(double)f->gain/f->gain_unity;
+		previous_green=st.mean[1]*presentation.digital;
+		CFDictionaryRef metadata = frame_metadata(&presentation, f, &st, s->port,s->applied_zoom);
+		bool invoked = false;
 
 		/*
 		 * Only once the graph has started the stream. Its PixelBufferHandler blocks hand the buffer
@@ -1990,11 +2136,22 @@ worker(void *context)
 			struct output_snapshot snapshot = { 0 };
 
 			if (!snapshot_take(s, i, hakios_camera_sof_time(f), &snapshot)) continue;
-			(void)deliver(s, &snapshot, &isp, f, raw, metadata);
+			invoked |= deliver(s, &snapshot, &presentation, f, raw, metadata);
 			snapshot_release(&snapshot);
 		}
 		if (metadata != NULL) {
 			CFRelease(metadata);
+		}
+		if (invoked && switch_gap_pending) {
+			say("rear switch first real handler: sensor=%u source_gap=%.1f ms start_to_RAW=%.1f ms; "
+			    "same graph/host clock, no duplicate frame", f->sensor,
+			    old_done ? elapsed_ms(f->time, old_done) : 0, elapsed_ms(f->time, switched_at));
+			switch_gap_pending=false;
+		}
+		if (transition_frames && --transition_frames == 0) {
+			pthread_mutex_lock(&s->lock);
+			s->lens_switching=false;
+			pthread_mutex_unlock(&s->lock);
 		}
 		if (s->frames == 1 || s->frames % 300 == 0) {
 			say("frame %llu: exposure %.1f ms, gain %.1fx, digital %.2fx, green %.0f above black; white balance R %.2f "
@@ -2078,6 +2235,7 @@ stream_stop_locked(CMBaseObjectRef o, CMBaseObjectRef *release)
 		s->stills_wanted = 0; /* Explicit stop cancels old requests; never count them as pictures given. */
 		s->stills_consumed = s->stills_issued;
 		s->stills_head = s->stills_tail = NULL;
+		s->recording = false;
 		pthread_mutex_unlock(&s->lock);
 		stills_release(cancelled_requests);
 		say("stream stopped: frames=%llu photographs=%llu cancelled=%u", (unsigned long long)s->frames,
@@ -2354,6 +2512,8 @@ stream_create(CFAllocatorRef allocator, const struct camera *camera, CFStringRef
 	atomic_init(&s->format_index, 0);
 	atomic_init(&s->min_fps, 2);
 	atomic_init(&s->max_fps, 30);
+	atomic_init(&s->allowed_fps, 30);
+	atomic_init(&s->recording, false);
 	atomic_init(&s->zoom, 1);
 	pthread_mutex_init(&s->lock, NULL);
 	s->torch = -1;
@@ -2374,7 +2534,8 @@ stream_create(CFAllocatorRef allocator, const struct camera *camera, CFStringRef
 	CFDictionaryRef f[2] = { format(camera->formats[0][0], camera->formats[0][1], camera->formats[0][2], false, camera->fov),
 		format(camera->formats[1][0], camera->formats[1][1], camera->formats[1][2], false, camera->fov) };
 
-	s->formats = CFArrayCreate(NULL, (const void **)f, 1, &kCFTypeArrayCallBacks); /* Photo-only bring-up. */
+	s->formats = CFArrayCreate(NULL, (const void **)f, x9_camera_video_profile_ready() ? 2 : 1,
+	    &kCFTypeArrayCallBacks); /* video requires qualified software HEVC registration */
 	s->supported = supported(stream_props, sizeof(stream_props) / sizeof(stream_props[0]));
 	CFRelease(f[0]);
 	CFRelease(f[1]);
