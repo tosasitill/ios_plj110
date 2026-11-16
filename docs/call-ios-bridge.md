@@ -2712,7 +2712,7 @@ callback、nested continuation和必要selector/class/helper资格。六次窄�
   **`1f3cd3ad4..1f3cd3be4 /272B`**。原dictionary x2 retain→x22，`3b10..3b20`
   从前节已资格的原slot **`21242ebd0`（g）**取值。stack block base为sp+8；其
   **+20=原g、+28=session、+30=storageContext、+38=原dictionary、+40=原completion**。
-  `3b98`以同dictionary交真selector **`sendSMSDictionary:withCompletionBlock:`**，
+  `3b98`以`3b6c` helper返回的x21交真selector **`sendSMSDictionary:withCompletionBlock:`**，
   原class-ref **`21242e4f0→1e2851470`**/ro`1e1303870`明确为 **IMBlastdoor**。
 - 外层callback **`1f3cd3be4..1f3cd4044 /1120B`**的x1 retain→x19是**returned
   parser object**，不是capture的原dictionary。nonnull x19在`3d50..3d70`经过真
@@ -2730,6 +2730,10 @@ callback、nested continuation和必要selector/class/helper资格。六次窄�
 **`1f9dee624→1800bb864 _objc_retain_x20`**（不是retain_x3）、
 `1f9dee528→1800c13f8 _objc_opt_isKindOfClass`、
 `1f9dee21c→1928d90a4 _IMWeakLinkClass`；原CFString分别length19/9，明确上述class/framework名。
+**资格边界**：其余`1f9dee60c/63c/648/690/4b0`没有本轮或已保存旧proof的独立原target资格；
+上文capture的原g/completion origin与send的“同dictionary”身份跨这些helper属于
+**retain-copy ABI推断**，不是全部strong-owner copy均已证明。capture槽offset、真实
+selector/class、callback x1→已资格retain_x1→returned x19和typed class gate不依赖这些helper命名。
 
 主 **`x9/out/sms-dictionary-owner/`**保留raw/pagechains、`reads.json`、六次命令/log/exit、
 `dictionary-owner-contract.json`和`metadata-erratum.txt`。历史`continuation-r1/proof.json`
