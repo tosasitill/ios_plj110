@@ -820,6 +820,22 @@ static void ios_end_duplicate(){
  x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
  assert(qmi_replies==1&&writes==2); // no BUSY + late-success pair or second mutation
 }
+static void ios_end_changed_duplicate(){
+ bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();
+ const uint64_t query=x9c_end_job.token,epoch=x9c_end_job.epoch;
+ uint8_t q[]={0,78,0,0x21,0,4,0,1,1,0,8}; // same txn, different valid target
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
+ assert(!qmi_replies&&!writes&&x9c_end_job.token==query&&x9c_end_job.id==7&&x9c_end_job.epoch==epoch);
+ x9mi_tick();end_query_cnf();const uint64_t token=x9c_end_job.token;
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
+ assert(!qmi_replies&&x9c_end_job.token==token&&x9c_end_job.id==7);x9mi_tick();
+ assert(writes==2&&x9cw_u16(last_frame+10)==0x905&&x9cw_u32(last_frame+28)==7);
+ uint8_t p[24];x9cw_header(p,24,0x906,2,(unsigned)token);x9cw_scalar(p+16,0,0,4);
+ x9mi_rx(p,sizeof(p));x9c_poll();
+ assert(qmi_replies==1&&!qmi_error&&x9c_end_job.used&&x9c_end_job.answered&&x9_mc_end_token==token);
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
+ assert(qmi_replies==1&&writes==2&&x9c_end_job.id==7&&x9c_end_job.epoch==epoch);
+}
 static void ios_end_abandon(){
  bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();end_query_cnf();
  x9c_del(0);x9q_clients[0].generation++;x9mi_tick();x9c_poll();
@@ -1042,6 +1058,18 @@ static void handover_request_identity(){
  assert(x9c_reg_wait[0][0].answered&&!x9c_clients[0].handover);
  x9c_poll();x9mi_tick();assert(!writes&&!x9c_cmd_init.token);
 }
+static void handover_completed_changed(){
+ bind_voice();x9w_control_ready=true;x9c_cmd_init.confirmed=true;
+ x9c_init[1].stage=X9_CI_DONE;x9c_init[1].registered=1;
+ handover_begin();x9c_poll();
+ assert(qmi_replies==1&&!qmi_error&&x9c_reg_wait[0][0].answered&&x9c_clients[0].handover);
+ const uint64_t binding=x9c_clients[0].binding;
+ handover_begin(0,0,91); // changed value under the already-terminal transaction
+ assert(qmi_replies==1&&!qmi_error&&x9c_clients[0].handover&&x9c_clients[0].binding==binding);
+ x9c_poll();x9mi_tick();assert(qmi_replies==1&&!writes&&call_batches==1);
+ handover_begin(0,0,92);x9c_poll(); // a fresh transaction still owns its disable
+ assert(qmi_replies==2&&!qmi_error&&!x9c_clients[0].handover&&call_batches==2&&!writes);
+}
 static void handover_rx_fence(){
  rx_progress(130,7,0);rx_progress(2);rx_progress(132);
  uint8_t current[704],out[704];x9cw_header(current,16,0x909,2,0);
@@ -1218,14 +1246,14 @@ int main(int argc,char **argv){
   {"end_reason_provenance",end_reason_provenance},{"outbound_end_reason",outbound_end_reason},{"incoming_end_reason",incoming_end_reason},
   {"ios_end_stale_query",ios_end_stale_query},{"ios_end_presend",ios_end_presend},
   {"ios_end_abandon",ios_end_abandon},{"ios_end_late_cnf",ios_end_late_cnf},
-  {"ios_end_duplicate",ios_end_duplicate},
+  {"ios_end_duplicate",ios_end_duplicate},{"ios_end_changed_duplicate",ios_end_changed_duplicate},
   {"incoming_states",incoming_states},{"incoming_state_invalid",incoming_state_invalid},{"incoming_observer",incoming_observer},
   {"register_codec",register_codec},{"register_transition",register_transition},{"register_sequence",register_sequence},
   {"register_timeout",register_timeout},{"register_deleted",register_deleted},{"register_unsupported",register_unsupported},
   {"handover_codec",handover_codec},{"handover_concurrent_bootstrap",handover_concurrent_bootstrap},
   {"handover_subscription_fence",handover_subscription_fence},{"handover_pending_timeout",handover_pending_timeout},
   {"handover_pending_overflow",handover_pending_overflow},{"handover_transport_loss",handover_transport_loss},
-  {"handover_request_identity",handover_request_identity},
+  {"handover_request_identity",handover_request_identity},{"handover_completed_changed",handover_completed_changed},
   {"handover_rx_fence",handover_rx_fence},
   {"registration_queue_wait",registration_queue_wait},{"registration_queue_timeout",registration_queue_timeout},
   {"registration_alloc_oom",registration_alloc_oom},{"registration_alloc_poison",registration_alloc_poison},

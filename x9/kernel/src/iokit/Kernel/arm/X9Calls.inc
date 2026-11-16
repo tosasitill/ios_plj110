@@ -670,19 +670,21 @@ static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
         w.options.handover==options.handover)return true;
      /* Never advance/grant a changed request under an old transaction. */
      if(!w.answered){x9c_reg_answer(slot,index,X9Q_ARG);x9c_response_poll();}
-     else {x9q_packet p(req,X9Q_ARG);p.send(local,port);}
+     // An answered owner already has its first terminal (queued or retained).
+     // Changed reuse must not append ARG after that transaction's success/error.
      return true;
     }
    }
    err=x9c_bind_pending(slot,true)?X9Q_BUSY:x9c_reg_begin(slot,req,len);if(!err)return true;
   }else if(x9cw_u16(req+3)==0x21){
    unsigned op,id;
-   /* Same validated host transaction while its epoch is still owned is
-    * not a second request or a reason to send BUSY and later success for
-    * the same transaction. Keep scalar identity after req is erased. */
+   /* The live allocation's validated host transaction already owns its
+    * target. Even a changed ID cannot append BUSY then the original success,
+    * or retarget its MD command. Keep identity after req is erased; actual
+    * QMUX allocation is fenced by end_live, not only the local generation. */
    if(x9cw_qmi_action(req,len,&op,&id)&&x9c_end_job.used&&
       x9c_end_job.slot==slot&&x9c_end_job.generation==x9q_clients[slot].generation&&
-      x9c_end_job.transaction==x9cw_u16(req+1)&&x9c_end_job.id==id)return true;
+      x9c_end_job.transaction==x9cw_u16(req+1)&&x9c_end_live(x9c_end_job))return true;
    err=x9c_bind_pending(slot,true)?X9Q_BUSY:x9c_end_begin(slot,req,len);if(!err)return true; /* asynchronous owned reply */
   }
  }
