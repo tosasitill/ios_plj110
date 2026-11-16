@@ -8,7 +8,7 @@
 #include "x9_haptic.h"
 struct x9_haptic_converter {
     uint32_t phase, step, conversion, intensity, sharpness, decimator;
-    int32_t dc, envelope, lowpass, sum, hold, event_peak;
+    int32_t dc, envelope, lowpass, sum, hold;
 };
 /* Q15 sine approximation on a full unsigned 32-bit turn. Bhaskara's
  * approximation, bounded 64-bit intermediates, exact zero at half turns. */
@@ -49,21 +49,16 @@ static inline int x9_haptic_convert_sample(struct x9_haptic_converter *c,int16_t
     if(++c->decimator<4)return 0;
     c->decimator=0;int32_t value=c->sum/4;c->sum=0;
     if(c->conversion==X9_HAPTIC_RETUNE) {
-        /* Pure f0 sine (an LRA turns a 3rd harmonic into buzz), chip gain
-         * 0x80 = OPPO vmax_map maximum. Strength per EVENT as HakiOS
-         * gain_for() chooses it: full from a third of full scale, 5/8 for
-         * the softest tap. Inside the event the drive follows iOS's envelope
-         * linearly, so tails decay crisply. Log 327 applied the floor per
-         * sample (smeared tails, "loose"); log 328 went fully proportional
-         * (iOS taps peak at 1000..33000, so most were "too light"). */
-        int32_t env=c->envelope,third=32767/3,amp=0;
-        if(env<=256)c->event_peak=0;
-        else {
-            if(env>c->event_peak)c->event_peak=env;
-            int32_t p=c->event_peak;
-            int32_t g=p>=third?32767:32767*5/8+(int32_t)((int64_t)(32767*3/8)*p/third);
-            amp=(int32_t)((int64_t)g*env/p);
-        }
+        /* As OPPO streams haptic PCM (RichTap stream mode, aw_stream_mode/
+         * aw_set_gain): samples go to RTP unchanged, strength is one chip
+         * gain <= HAPTIC_GAIN_LIMIT 0x80 (ours) at max boost. So drive is
+         * strictly LINEAR in iOS's envelope: no per-sample (327: smeared) or
+         * per-event floor. Only the iOS->OPPO scale is ours: x3 left typical
+         * taps (peaks ~3000..5000 of 32767, HakiOS) too light in log 328;
+         * x6 puts a ~5500 tap at OPPO's full level, 1000 at 18%.
+         * Pure f0 sine: an LRA turns a 3rd harmonic into buzz. */
+        int64_t scaled=(int64_t)c->envelope*6;
+        int32_t amp=scaled>32767?32767:(int32_t)scaled;
         value=(int32_t)((int64_t)amp*x9_haptic_sine(c->phase)/32768);
         c->phase+=c->step;
         value=(int32_t)((int64_t)value*c->intensity/1000);
