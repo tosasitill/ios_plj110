@@ -158,6 +158,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 SMS 同 ID 退休 / ACK（入口 checkpoint；下游仍未闭合）
+
+- **真实ACK入口**：原已读registrar1004b9764..1004b977c供应 **10123c366=kSmsAcknowledgeMessage → handler1004bad6c，w3=3**，不猜flags语义。完整原FS1004bad6c..1004baf70/516B从上轮保留NEW原字节promote，actual exit0、没有新读原text。经Registry::getServiceMap与旧getter1000a95fc得到service；kSmsMessageID按unsigned转换，default **-1**（retrieve为0），另取尚未资格key10123c5e5，import1010817b4的default为0。service非空时，只有 `((ID == -1) OR 第二转换值)` 的bit0为0才在1004bae74实际调service virtual **+e0**，x1保原ID；否则以w0=0进入reply包装。第二字段、包装import101085084和reply key10123c603均未补猜测名字；不能把该virtual调用/回复认作map删除、Messages COMMIT或物理ACK。
+- **两lead纠偏**：bounded原CString10123c31c实际为 **kSmsGetRecievedMessageIds**（保留原拼写），不是ACK/退休；handler1004ba4f4..1004ba8f4/1024B仅经同getter调virtual+100填两组u32 vectors，无request单ID。相邻10123c336实际 **kSmsGetIncomingMessageCount**，handler1004ba8f4..1004baa84/400B仅virtual+d8 count。两body都从保留raw资格、actual exit0；不以临时vector/free称map退休。其余7个原registrar精确名字资格exit0后只展开真ACK，不扩MMS/模拟/emergency/phone-reg业务；初始暂定文件名root-registered-retire-handler原样保留，角色以此纠偏为准。
+- **范围/停止点**：本轮单代理 `feat/sms-retire-ack`，clean parent **5f406973**；checkpoint时观察main/origin已由其它工作推进至 **f1d91a25**，不冒充本轮输入。累计 **3完整原FS函数1940B、无新import资格**，全部复用上轮16998412B原text库存，80页chains不重遍历。报告 `docs/2026-11-16_reverse-sms-ack-handler-report.md`；raw/精确argv/stdout/stderr/exit、scope/timeline及checkpoint合同在 `x9/out/sms-retire-ack-20261116/`。无生产delta/测试/人工向量/compile/kernel/boot/CI run/设备/ADB/mailbox/mount/数据库/分区或共享输入操作，无待取reader句柄；最新有效CALL/SMS kernel仍41deaefb输入的 `x9/out/x9-call-end-native-owner-20261116/kernel.development.sweet`，未复检。
+- **下一唯一窄边**：先矿保留data，再bounded资格10123c5e5/10123c603及精确imports1010817b4/101085084；读取同Model AP101528d10的+e0 slot **101528df0** 后只沿真target查同u32 ID/Model+60 map的callback、erase、size变化与下游Controller ACK，先矿旧body再promote原库存，不重扫原text或80页chains。server+128 Registry安装/current concrete选择、publisher原init entry仍条件化。完整通话短信goal继续active：GUID/record/COMMIT重开、MT物理ACK/MO、CALL逐动作owner/UUID/nativeepoch/双向媒体均未验收。git提交/整合/push确切结果随后记录；checkpoint不是完整功能完成。
+
+
 #### 2026-11-16 屏下超声波指纹：只读可行性评估（未 bring-up）
 
 - **最终发布/复核**：报告/交接经 GitHub **PR #1** 于 `2026-11-16T11:38:35Z` 合并，merge **`f1d91a25`**；祖先复核 `2998514a` 在 published main。同期main不断前进，两个atomic直接push均安全拒绝（refs未改变），改用服务端merge，未force push或操作其它工作树。纯文档复核，未构建/上机；退出前保留私有证据至主checkout `x9/out/fingerprint-assessment-20261116/`，清理自有worktree/ref。
