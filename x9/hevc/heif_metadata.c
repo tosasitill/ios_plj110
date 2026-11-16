@@ -149,6 +149,38 @@ static int auxiliary_info(const struct x9_heif_document *document,
         CFDictionarySetValue(info,CFSTR("AuxiliaryTypeOrigin"),CFSTR("auxC-fullbox0-type-NUL-opaque-tail"));
         e = put_number(info,CFSTR("AuxiliaryTypeClassification"),aux->type);
     }
+    if (!e && aux->envelope.recognized) {
+        /* This is a raw byte-shape observation only. In particular no
+         * normative SEI165/alpha validity, scalar interpretation, CoreMedia
+         * AuxiliaryTypeInfo, or hardware/associated-layer grant is emitted. */
+        const struct x9_heif_auxiliary_envelope *envelope = &aux->envelope;
+        const uint8_t *nal = NULL, *payload = NULL;
+        if (aux->type != X9_HEIF_AUXILIARY_HEVC_ALPHA ||
+            aux->subtype.bytes < 13 || envelope->nal.offset != aux->subtype.offset+8 ||
+            envelope->nal.bytes != aux->subtype.bytes-8 ||
+            envelope->outer_bytes != aux->subtype.bytes-4 ||
+            envelope->payload.offset < envelope->nal.offset+4 ||
+            envelope->payload.offset > aux->subtype.offset+aux->subtype.bytes ||
+            envelope->payload.bytes != aux->subtype.offset+aux->subtype.bytes-envelope->payload.offset)
+            e = EBADMSG;
+        if (!e) e = x9_heif_span_data(document,envelope->nal,&nal);
+        if (!e) e = x9_heif_span_data(document,envelope->payload,&payload);
+        CFDataRef nal_data = NULL, payload_data = NULL;
+        if (!e) {
+            nal_data = CFDataCreate(NULL,nal,(CFIndex)envelope->nal.bytes);
+            payload_data = CFDataCreate(NULL,payload,(CFIndex)envelope->payload.bytes);
+            if (!nal_data || !payload_data) e = ENOMEM;
+        }
+        if (!e) {
+            CFDictionarySetValue(info,CFSTR("AuxiliarySubTypeEnvelopeShape"),
+                CFSTR("CMPhoto-observed-inner-plus4-inner-4e01-a5-FFsize-payload"));
+            CFDictionarySetValue(info,CFSTR("AuxiliarySubTypeEnvelopeNALBytes"),nal_data);
+            CFDictionarySetValue(info,CFSTR("AuxiliarySubTypeEnvelopePayloadBytes"),payload_data);
+            e = put_number(info,CFSTR("AuxiliarySubTypeEnvelopeOuterBytes"),envelope->outer_bytes);
+        }
+        if (nal_data) CFRelease(nal_data);
+        if (payload_data) CFRelease(payload_data);
+    }
     if (type) CFRelease(type);
     if (data) CFRelease(data);
     return e;

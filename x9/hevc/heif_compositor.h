@@ -19,7 +19,8 @@ struct x9_heif_geometry {
     uint32_t id, width, height; /* after this item's ordered transforms */
     uint32_t coded_width, coded_height; /* ispe, before item transforms */
     uint32_t derived_count, auxiliary_count;
-    struct x9_heif_alpha_association alpha; /* container edge, not HEVC PRIMARY/layer */
+    struct x9_heif_alpha_association alpha; /* container edge plus optional raw
+        * producer-shaped subtype spans, NOT HEVC PRIMARY/layer or valid alpha */
     struct x9_heif_sample_aspect source_aspect; /* pre-item-transform, separate provenance;
         * explicit canvas pasp, or absent-pasp identity's unique child OUTPUT */
     uint32_t source_aspect_item_id; /* immediate dimg child for absent-pasp identity,

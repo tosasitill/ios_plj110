@@ -50,11 +50,24 @@ enum x9_heif_auxiliary_type {
     X9_HEIF_AUXILIARY_HEVC_ALPHA,
     X9_HEIF_AUXILIARY_MIAF_ALPHA
 };
+/* Optional byte-shape observation, NOT normative auxC or SEI validation.
+ * CMPhoto's observed HEVC165 producer emits BE32(inner+4), BE32(inner),
+ * 4e01, a5, FF-coded payload size, then that exact payload. The first size
+ * includes the INNER length field, not its own field: total bytes=inner+8.
+ * The producer's final delimiter lies inside payload; there is no required
+ * additional 80 byte. Unknown/nonmatching subtypes remain entirely opaque.
+ * Recognition proves neither the actual auxC writer factory binding nor
+ * canonical EBSP/RBSP, alpha scalars, associated PRIMARY/layer or pixels. */
+struct x9_heif_auxiliary_envelope {
+    uint32_t recognized, outer_bytes;
+    struct x9_heif_span nal, payload; /* unchanged borrowed bytes, no unescaping */
+};
 struct x9_heif_auxiliary_info {
     uint32_t present;
     enum x9_heif_auxiliary_type type;
     struct x9_heif_span urn; /* exact aux_type bytes, excludes terminating NUL */
     struct x9_heif_span subtype; /* ALL bytes after NUL, not an AU or decoded SEI */
+    struct x9_heif_auxiliary_envelope envelope;
 };
 /* One selected master->alpha relationship, not pitm or an HEVC VPS/layer
  * association. An alpha source may have other masters; those are NOT silently

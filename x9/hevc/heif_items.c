@@ -519,6 +519,38 @@ int x9_heif_item_offset_reference(const struct x9_heif_document *d, uint32_t ite
     }
     return ENOENT;
 }
+static void auxiliary_envelope_observe(const struct x9_heif_document *d,
+    struct x9_heif_auxiliary_info *aux)
+{
+    /* No framing discriminator is defined for arbitrary opaque auxC tails.
+     * Recognize ONLY the complete observed HEVC-alpha producer byte shape;
+     * nonmatches are not errors and are never passed to the AU165 parser. */
+    if (aux->type != X9_HEIF_AUXILIARY_HEVC_ALPHA || aux->subtype.bytes < 13 ||
+        aux->subtype.bytes-4 > UINT32_MAX) return;
+    struct cursor c = { d->data, aux->subtype.offset,
+        aux->subtype.offset+aux->subtype.bytes };
+    uint32_t outer = 0, inner = 0;
+    if (u32(&c,4,&outer) || u32(&c,4,&inner) ||
+        outer != aux->subtype.bytes-4 || inner != aux->subtype.bytes-8 ||
+        (uint64_t)inner+4 != outer) return;
+    if (d->data[c.at] != 0x4e || d->data[c.at+1] != 0x01 ||
+        d->data[c.at+2] != 165) return;
+    c.at += 3;
+    uint64_t payload_bytes = 0, value = 0;
+    int terminated = 0;
+    while (c.at < c.end) {
+        if (integer(&c,1,&value) || payload_bytes > c.end-c.at ||
+            value > c.end-c.at-payload_bytes) return;
+        payload_bytes += value;
+        if (value != 255) { terminated = 1; break; }
+    }
+    if (!terminated || !payload_bytes || payload_bytes != c.end-c.at) return;
+    aux->envelope = (struct x9_heif_auxiliary_envelope) {
+        .recognized = 1, .outer_bytes = outer,
+        .nal = { aux->subtype.offset+8, inner },
+        .payload = { c.at, payload_bytes }
+    };
+}
 static int property_parse(const struct x9_heif_document *d,
     const struct x9_heif_property *p, struct x9_heif_image *out, uint32_t *seen)
 {
@@ -593,6 +625,7 @@ static int property_parse(const struct x9_heif_document *d,
                     aux->type = X9_HEIF_AUXILIARY_HEVC_ALPHA;
                 else if (aux->urn.bytes == sizeof(miaf)-1 && !memcmp(d->data+c.at,miaf,sizeof(miaf)-1))
                     aux->type = X9_HEIF_AUXILIARY_MIAF_ALPHA;
+                auxiliary_envelope_observe(d,aux);
             }
         }
         break;
