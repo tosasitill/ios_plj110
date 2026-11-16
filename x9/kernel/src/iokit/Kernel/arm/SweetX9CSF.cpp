@@ -24,6 +24,8 @@ extern "C" void sweet_x9_csf_prepare(void);
 extern "C" int sweet_x9_csf_boot(vm_offset_t gpu);
 extern "C" vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 extern "C" volatile uint64_t sweet_x9_gpu_busy_ns;
+extern "C" volatile int sweet_x9_display_dark;
+extern "C" void sweet_x9_gpu_activity(void);
 #include "X9GPUCache.h"
 bool x9_gpu_acelite_active;
 
@@ -676,7 +678,10 @@ extern "C" bool sweet_x9_csf_resident_release_slot(unsigned index,uint64_t epoch
 }
 
 extern "C" bool sweet_x9_render_owner_enter(void) {
- if(!metal_service_lock)return false;IOLockLock(metal_service_lock);return true;
+ if(!metal_service_lock)return false;IOLockLock(metal_service_lock);
+ if(!resident_wake()){IOLockUnlock(metal_service_lock);return false;}
+ sweet_x9_gpu_activity();
+ return true;
 }
 extern "C" void sweet_x9_render_owner_leave(void) {IOLockUnlock(metal_service_lock);}
 /* Caller holds the owner lock. True while a render group is parked on AS1:
@@ -693,12 +698,38 @@ extern "C" uint64_t sweet_x9_render_async_completed(void) {return __atomic_load_
 extern "C" int sweet_x9_render_display_try_enter(void) {
  if(!metal_service_lock)return 0;
  if(!IOLockTryLock(metal_service_lock))return -1;
+ /* Never wait for MCU wake/PING on the display timer workloop. */
+ if(resident&&resident->sleeping) {
+  IOLockUnlock(metal_service_lock);
+  if(!__atomic_load_n(&sweet_x9_display_dark,__ATOMIC_ACQUIRE))sweet_x9_gpu_activity();
+  return -1;
+ }
  /* A parked render group (x9_gpu_park) owns AS1 but has no work outstanding. */
  if((resident&&resident->uncertain)||
     (render_engine_installed&&(!render_ready()||(gr64(resident->gpu,0x2440)&&!render_parked.g)))) {
   IOLockUnlock(metal_service_lock);return -2;
  }
  return 1;
+}
+/* Governor only. Owner lock excludes running synchronous/pipelined jobs.
+ * Queued jobs acquire this same lock and wake before touching any GPU bank.
+ * Idle trylock never waits behind a client's context lock. */
+extern "C" int sweet_x9_render_idle(int dark) {
+ static int sleep_opt=-1;
+ if(sleep_opt<0)sleep_opt=sweet_x9_arg("x9_gpu_sleep",1);
+ if(!metal_service_lock||!IOLockTryLock(metal_service_lock))return 0;
+ int ret=0;
+ if(!dark)ret=resident_wake()?1:-1;
+ else if(render_engine_installed&&resident&&resident->ready&&!resident->uncertain) {
+  if(resident->sleeping)ret=1;
+  else if(__atomic_load_n(&render_async_enqueued,__ATOMIC_ACQUIRE)==
+          __atomic_load_n(&render_async_completed,__ATOMIC_ACQUIRE)&&
+          __atomic_load_n(&sweet_x9_display_dark,__ATOMIC_ACQUIRE)) {
+   if(!render_retire_parked("display idle"))ret=-1;
+   else if(__atomic_load_n(&sweet_x9_display_dark,__ATOMIC_ACQUIRE))ret=sleep_opt?resident_sleep():1;
+  }
+ }
+ IOLockUnlock(metal_service_lock);return ret;
 }
 extern "C" void sweet_x9_render_bootstrap(void) {
  int opt=0;

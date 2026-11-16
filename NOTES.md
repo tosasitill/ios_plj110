@@ -158,6 +158,17 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 CPU/GPU 原厂参考负载调频与显示空闲（编译候选，待实机）
+
+- **范围/基线**：单代理 `feat/power-policy`，功能树 `.worktrees/power-policy`，实际 main 基线 **39a02fa8**；不改主 checkout `feat/sms-retrieve-route` 的未提交 NOTES，不动其它工作树/设备。overlay 三源文件加 resident include，未改 XNU patches、GPU280 allowlist、设备配置或原厂固件。
+- **实证**：只读最新 `~/330.txt`：56–70s GPU平均4–18%，CPU请求104/135/162×26MHz，`ui_boost=39/39` 多次；GPUEB ceiling=7、actual idx7，旧 governor 仍请求idx0，71s restores约600。旧输入路径250ms touch/recent swaps→500ms lease→CPU所有簇top/GPUfastest，静态与实跑一致。旧显示路径 `sweetfb_stayon` 缺省1忽略off；X9没有Qualcomm fDsi，原off分支只在fDsi非空时关面板；VSync不停，正常亮度又将DBV0夹到2。
+- **原厂来源/边界**：`.local/references/oppo-modules-dt-mt6993`（4d505a42）`vendor/oplus/kernel/cpu/uad/touch_boost.c` 默认小核1300000kHz、大/超大核0，100ms lease/150ms输入间隔；`cpufreq_uag_main.c` 默认target load80（multi_tl sys95、hmbird90是不同策略，未混用）。GPU参考GED按工作量调频及a16w `mali_kbase_csf_firmware.c:3523–3572`/PM IN_SLEEP、register macros：host-power GLB_REQ_STATE12..14 SLEEP=2，MCU_STATUS HALT=2且MCU_CONTROL bit31，wake先ACTIVE=0再清bit31+doorbell。这些是公开源码默认/协议，不宣称已采到PLJ110当前ColorOS闭源PowerHAL实际参数。
+- **实现**：CPU使用XNU `processor_cpu_load_info`（recount累计user/system/idle，32bit tick差值可回绕），按每簇最忙核×当前请求/80选真实LUT OPP；500MHz以上最低OPP为idle，100ms降频滞回，touch只有短时小核托底，lease到期/灭屏即时去托底，不因换帧/按住手指拉全簇top。85–95°C渐进CPU cap，未知温度不超LK基线；电压仍交MCUPM。GPU按真实采样间隔与doorbell→fence累计时间缩放，不再touch→max；900MHz只是活跃渲染floor，idle降最低OPP；GPUEB ceiling/floor纳入目标，仅有真实工作时纠正stack drift，不循环对抗热限频，负回包/uncertain停GPU策略但CPU继续。
+- **休眠实现**：灭屏清两边旧touch lease、事件序列防lost wake；无运行owner/async队列完成后先走原CSG SUSPEND+flush+AS1 detach，再经原host-power接口进MCU retention SLEEP，必须state ACK+HALT+doorbell-disable三者成立。AS0/L2/GPUEB POWER/ACTIVE及全部buffer保留；每个RenderOwner访问先ACTIVE→doorbell→fresh PING，display timer仅非阻塞触发唤醒。错误保留全部资源、不reset/不新DMA。`x9_gpu_sleep=0`禁MCU sleep但保留队列退休。确认display-idle且CPU后台peak<5%时 governor50→1000ms，display/job事件及时唤醒；删除每2s绑三核跑依赖加法的测频，暗屏日志30s。
+- **显示**：X9缺省 `sweetfb_stayon=0`（其它板仍1，可显式1恢复），off由既有LK DCS DBV0真清屏、不走正常亮度最小值夹制，wake还原最新亮度；取消/排完已武装GUI后停软件VSync/通知，on重arm；不新增SLEEP_IN/共享rail电源写。触摸/SCP/无线/UFS原工作流保持，不冒称整SoC suspend；特别 `dv=1` INIT-only/DDR高票与`ug=5`安全floor不改，不能把本轮称为原厂整机待机功耗。
+- **构建里程碑**：`prepare-local.py --check` actual exit0。首轮完整 `build.py all --boot-config x9/build/boot-device.json --name x9-power-policy-20261116` actual exit0，103/103 overlay，已链接/打包；它早于显示修补，不推荐该中间镜像。未跑测试脚本/测试套件、未重解包校验成功产物；无CI run ID（本轮是本地overlay构建）。最终源码提交后用唯一v2名称重编，结果待下条补记。scratch/原始构建输出 `x9/out/power-policy-20261116/`，没有设备写/ADB/fastboot/mailbox。
+- **待验收**：用户手动boot最终v2，连续触摸/滚动不应全簇top，停止活动后降频；锁屏应DBV0、停止VSync、`X9 GPU PM: MCU retention sleep confirmed`，随后`X9 POWER: display-idle ...1000ms`（后台负载忙可维持50ms）；电源键/自动亮屏需MCU awake+fresh PING、画面/触摸/亮度恢复，多轮锁/解锁和后台音频/蜂窝必须验证。尚无该策略的实机帧率/温度/睡醒结果，GPU热度仅保守CPU温度代理，不等价全SoC温控。
+
 #### 2026-11-16 远端仅保留本地同名分支（实际删除完成）
 
 - **用户范围/基线**：单代理 `feat/remote-local-prune-20261116`，main输入 **3e4d50e7**。真实ls-remote的26条远端heads与本地10条heads按名称比较（排除本轮临时分支）；用户明确要求删除远端独有分支，不自动push本地独有分支，也不合入未知旧生产delta。根活动SMS的未提交NOTES从未由本轮切换/写入/恢复。
