@@ -9,9 +9,18 @@
 #include <strings.h>
 #include "../../kernel/src/bsd/dev/x9_modem_bridge.h"
 static int lock_depth;
+static void (*during_md_lock)();
+static unsigned md_lock_until_hook;
 #define LCK_GRP_DECLARE(n, s) int n
 #define LCK_MTX_DECLARE(n, g) int n
-static void lck_mtx_lock(int *){assert(!lock_depth);lock_depth=1;}
+static void lck_mtx_lock(int *){
+ assert(!lock_depth);
+ if(during_md_lock){
+  assert(md_lock_until_hook);
+  if(!--md_lock_until_hook){auto hook=during_md_lock;during_md_lock=nullptr;hook();}
+ }
+ lock_depth=1;
+}
 static void lck_mtx_unlock(int *){assert(lock_depth);lock_depth=0;}
 static int x9_at_enabled(){return 1;}
 static int sweet_x9_arg(const char *,int){return 1;}
@@ -808,6 +817,29 @@ static void ios_end_presend(){
  rx_progress(6);x9mi_tick();x9c_poll();assert(writes==1&&!x9c_end_job.used&&!x9_mc_end_token&&
   qmi_replies==1&&qmi_error==X9Q_NOT_READY);
 }
+static void end_release_during_md_lock(){call_bridge_generation[0]=0;}
+static void end_expire_during_md_lock(){fake_ms=x9c_end_job.deadline;}
+/* Compile-only source vectors: the callback models loss while acquiring
+ * take (first lock) or end_snapshot (second lock), without dispatching DEL.
+ * No claim of a host identity guard inside end_submit or the MD writer. */
+static void ios_end_postwait(unsigned wait,bool expire){
+ bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();
+ uint8_t p[704],out[X9_MIPC_FRAME_MAX];unsigned n=current_frame(p,1);
+ x9cw_put16(p+12,(unsigned)x9c_end_job.token);x9mi_rx(p,n);
+ const uint64_t generation=x9q_clients[0].generation,next=x9_mi_next;
+ const uint64_t binding=x9c_clients[0].binding;
+ md_lock_until_hook=wait;during_md_lock=expire?end_expire_during_md_lock:end_release_during_md_lock;
+ x9c_end_poll(out);assert(!during_md_lock&&!md_lock_until_hook);
+ assert(!x9c_end_job.used&&!x9_mc_end_token&&x9_mi_next==next);
+ assert(x9q_clients[0].generation==generation&&x9c_clients[0].bound&&x9c_clients[0].binding==binding);
+ x9c_response_poll();assert(qmi_replies==(expire?1u:0u));
+ if(expire)assert(qmi_error==X9Q_NOT_READY);
+ x9mi_tick();assert(writes==1&&x9cw_u16(last_frame+10)==0x909);
+}
+static void ios_end_take_generation(){ios_end_postwait(1,false);}
+static void ios_end_snapshot_generation(){ios_end_postwait(2,false);}
+static void ios_end_take_deadline(){ios_end_postwait(1,true);}
+static void ios_end_snapshot_deadline(){ios_end_postwait(2,true);}
 static void ios_end_duplicate(){
  bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();uint64_t query=x9c_end_job.token;
  end_request();assert(x9c_end_job.token==query&&!qmi_replies&&!writes);
@@ -1245,6 +1277,8 @@ int main(int argc,char **argv){
   {"progress_identity_provenance",progress_identity_provenance},
   {"end_reason_provenance",end_reason_provenance},{"outbound_end_reason",outbound_end_reason},{"incoming_end_reason",incoming_end_reason},
   {"ios_end_stale_query",ios_end_stale_query},{"ios_end_presend",ios_end_presend},
+  {"ios_end_take_generation",ios_end_take_generation},{"ios_end_snapshot_generation",ios_end_snapshot_generation},
+  {"ios_end_take_deadline",ios_end_take_deadline},{"ios_end_snapshot_deadline",ios_end_snapshot_deadline},
   {"ios_end_abandon",ios_end_abandon},{"ios_end_late_cnf",ios_end_late_cnf},
   {"ios_end_duplicate",ios_end_duplicate},{"ios_end_changed_duplicate",ios_end_changed_duplicate},
   {"incoming_states",incoming_states},{"incoming_state_invalid",incoming_state_invalid},{"incoming_observer",incoming_observer},

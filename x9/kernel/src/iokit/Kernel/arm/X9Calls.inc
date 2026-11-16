@@ -507,7 +507,13 @@ static void x9c_end_poll(uint8_t *frame){
    bool valid=x9cw_u16(frame+12)==token&&x9cw_current(frame,n,&current)&&!current.result&&
     x9_md_mipc_call_end_snapshot(&target)==1&&target.epoch==j.epoch&&target.native_id==j.id&&target.sim==j.sim;
    bzero(frame,X9_MIPC_FRAME_MAX);
-   if(j.answered||!valid){x9c_end_answer(j,X9Q_NOT_READY);bzero(&j,sizeof(j));return;}
+   /* take/snapshot may wait for the MD mutex while the actual QMUX client
+    * is released, before this thread can dispatch DEL_CLIENT. Revalidate
+    * the read-only stage's owner/deadline before enqueueing a new mutation.
+    * This is a post-wait fence, not an atomic BB/MD submission lease. */
+   if(j.answered||!valid||!x9c_end_live(j)||x9q_ms()>=j.deadline){
+    x9c_end_answer(j,X9Q_NOT_READY);bzero(&j,sizeof(j));return;
+   }
    uint8_t action[32];unsigned k=x9cw_action(j.req,sizeof(j.req),action,sizeof(action),j.id,target.native_id,j.sim,1);
    j.token=k?x9_md_mipc_call_end_submit(action,k,&target):0;bzero(action,sizeof(action));
    if(!j.token){x9c_end_answer(j,X9Q_BUSY);bzero(&j,sizeof(j));return;}
