@@ -5253,6 +5253,205 @@ def common_vp_evidence(elf, build_id):
     return result
 
 
+def mmdvfs_v5_enable_vcp_evidence(elf):
+    """Exact new v5 export/body/RELA, not v3 free_run or native cold ownership.
+
+    The complete 125-instruction body was qualified against the saved LLVM
+    assembly once. This profile uses selected bytes/symbols and ALL body/export
+    relocations; no whole-module hash, loaded-note recapture or v3 inference.
+    Section offsets and NOBITS symbols are not loaded pointers/count snapshots.
+    External feature-provider bodies and callers are deliberately not inferred.
+    """
+    result = dict(profile_match=False,
+        identity_scope='complete selected function and GPL export plus linked RELA only',
+        whole_module_identity_proven=False, loaded_module_pairing_proven=False,
+        runtime_enable_disable_executed=False, runtime_count_snapshot_proven=False,
+        runtime_ipi_quiescence_proven=False, runtime_power_ownership_proven=False,
+        runtime_irq_or_dma_retirement_proven=False, native_cold_provider_implemented=False)
+    expected_body = bytes.fromhex(
+        '3f2303d5fd7bbba9f90b00f9f85f02a9f65703a9f44f04a9fd03009117000090e80240f9680100b408a14039331c0012'
+        'f403012a1f01136bc9000054f603002a0000009460010034e001801202000014a0028012f44f44a9f90b40f9f65743a9'
+        'f85f42a9fd7bc5a8bf2303d5c0035fd6000000900000009100000094e803162a3603003615000090a50240b945010035'
+        '08000090080140391f010071880080520015881a00000094a50240b900080035e803162ae90240f9ea03142a0b098052'
+        '4a1d4092a50400112c1140f94a31ab9ba50200b94b4140b96b0500114b4100b928000014e90240f9ea03142a0b098052'
+        '581d4092190000902a1140f90b2bab9b250340b96b4140b9eb040034c5040034bf040071a102005415000090b5020091'
+        'e00315aa00000094e00315aa0000009408000090080140391f010071880080520015881a00000094250340b9e90240f9'
+        '00030035080980522a1140f9082ba89b0b4140b9e803162a0c0980526b050051a50400510a2bac9b4b4100b9250300b9'
+        '0a000090f5031f2a4a0140396a010037000000900000009100000094e003152aadffff17b502801204000014e90240f9'
+        'f503002ae803162a8a1e40920b098052291140f94925ab9b000000900000009101000090210000910401001202238052'
+        'e303152ae603132a274140b900000094e8ffff17')
+    sections = {}
+    for name, typ in (('.text', 1), ('.bss', 8), ('.data', 1),
+                      ('.rodata', 1), ('__ksymtab_gpl', 1), ('__ksymtab_strings', 1)):
+        matches = [(i, s) for i, s in enumerate(elf.sections) if s['name'] == name]
+        if len(matches) != 1 or matches[0][1]['type'] != typ:
+            return result
+        sections[name] = matches[0]
+    text_index, text_section = sections['.text']
+    if span(elf.data(text_section), 0x58c, 0x1f4) != expected_body:
+        return result
+    anchors = (
+        ('mtk_mmdvfs_enable_vcp', '.text', 2, 0x58c, 0x1f4),
+        ('__ksymtab_mtk_mmdvfs_enable_vcp', '__ksymtab_gpl', 0, 0xe4, 0),
+        ('__kstrtab_mtk_mmdvfs_enable_vcp', '__ksymtab_strings', 0, 0xd5, 0),
+        ('__kstrtabns_mtk_mmdvfs_enable_vcp', '__ksymtab_strings', 0, 0x61, 0),
+        ('mmdvfs_data', '.bss', 1, 0x40, 8),
+        ('vcp_power', '.bss', 1, 0x58, 4),
+        ('mmup_ena', '.bss', 1, 0, 1),
+        ('log_level', '.bss', 1, 0x5c, 4),
+        ('mmdvfs_vcp_pwr_mutex', '.data', 1, 0x90, 0x30),
+        ('mmdvfs_mmup_ipi_mutex', '.data', 1, 0xc0, 0x30),
+    )
+    selected_anchors = {}
+    for name, section, typ, offset, size in anchors:
+        index, sec = sections[section]
+        found = [s for s in elf.symbols if s['name'] == name and
+                 (s['section'], s['type'], s['value'], s['bytes']) ==
+                 (index, typ, offset, size)]
+        if len(found) != 1:
+            return result
+        selected_anchors[name] = dict(section=section, offset=offset,
+            bytes=size, symbol_type=typ, runtime_value_proven=False)
+    selected_data = (
+        ('GPL_export_descriptor', '__ksymtab_gpl', 0xe4, bytes(12)),
+        ('export_name', '__ksymtab_strings', 0xd5, b'mtk_mmdvfs_enable_vcp\0'),
+        ('empty_export_namespace', '__ksymtab_strings', 0x61, b'\0'),
+        ('diagnostic_format', '.rodata', 0x26a,
+         b'\x015[mmdvfs][err]%s:%d: ret:%d enable:%d vcp_power:%d idx:%hhu usage:%d\n\0'),
+        ('diagnostic_function_name', '.rodata', 0x751, b'mtk_mmdvfs_enable_vcp\0'),
+    )
+    data_evidence = []
+    for name, section, offset, raw in selected_data:
+        _, sec = sections[section]
+        if span(elf.data(sec), offset, len(raw)) != raw:
+            return result
+        data_evidence.append(dict(name=name, section=section, offset=offset,
+            bytes=len(raw), file_offset=sec['offset'] + offset, raw_hex=raw.hex()))
+    expected_relas = []
+    # Anonymous section-symbol references retain exact addends. Do not flatten
+    # symtabs or mistake .bss+0x40 for bytes of a captured runtime pointer.
+    for section, addend, rows in (
+        ('.bss', 0x40, ((0x5a8, 275), (0x5ac, 286), (0x640, 286),
+                       (0x670, 286), (0x6d8, 286), (0x738, 286))),
+        ('.bss', 0x58, ((0x610, 275), (0x614, 285), (0x634, 285),
+                       (0x65c, 285), (0x680, 275), (0x68c, 285),
+                       (0x6d4, 285), (0x708, 285))),
+        ('.bss', 0, ((0x61c, 275), (0x620, 278), (0x6bc, 275), (0x6c0, 278))),
+        ('.bss', 0x5c, ((0x70c, 275), (0x714, 278))),
+        ('.data', 0x90, ((0x5fc, 275), (0x600, 277), (0x71c, 275), (0x720, 277))),
+        ('.data', 0xc0, ((0x6a4, 275), (0x6a8, 277))),
+        ('.rodata', 0x26a, ((0x754, 275), (0x758, 277))),
+        ('.rodata', 0x751, ((0x75c, 275), (0x760, 277))),
+    ):
+        expected_relas.extend(('.text', offset, (typ, '', section, 3, 0, addend))
+                              for offset, typ in rows)
+    for offset, name in (
+        (0x5cc, 'is_vcp_suspending_ex'), (0x604, 'mutex_lock'),
+        (0x630, 'vcp_register_feature_ex'), (0x6b0, 'mutex_lock'),
+        (0x6b8, 'mutex_unlock'), (0x6d0, 'vcp_deregister_feature_ex'),
+        (0x724, 'mutex_unlock'), (0x778, '_printk'),
+    ):
+        expected_relas.append(('.text', offset, (283, name, None, 0, 0, 0)))
+    expected_relas.extend((
+        ('__ksymtab_gpl', 0xe4, (261, 'mtk_mmdvfs_enable_vcp', '.text', 2, 0x58c, 0)),
+        ('__ksymtab_gpl', 0xe8, (261, '', '__ksymtab_strings', 3, 0, 0xd5)),
+        ('__ksymtab_gpl', 0xec, (261, '', '__ksymtab_strings', 3, 0, 0x61)),
+    ))
+    # Every relocation in the complete body and 12B GPL export must belong to
+    # the qualified set, including multiplicity; extra/REL entries fail closed.
+    observed = []
+    qualified_ranges = {text_index: ('.text', 0x58c, 0x780),
+        sections['__ksymtab_gpl'][0]: ('__ksymtab_gpl', 0xe4, 0xf0)}
+    for rel in elf.sections:
+        if rel['type'] not in (4, 9) or rel['info'] not in qualified_ranges:
+            continue
+        if rel['type'] != 4 or rel['entry'] != 24 or rel['bytes'] % 24:
+            raise ValueError('v5 selected ranges require complete linked RELA')
+        section, start, end = qualified_ranges[rel['info']]
+        data = elf.data(rel)
+        for at in range(0, len(data), 24):
+            offset = struct.unpack_from('<Q', data, at)[0]
+            if start <= offset < end:
+                observed.append((section, offset))
+    if sorted(observed) != sorted((section, offset) for section, offset, _ in expected_relas):
+        return result
+    relocations = [captured_rela(elf, section, offset, expected)
+                   for section, offset, expected in sorted(expected_relas)]
+    spans = (
+        ('data_pointer_and_low8_feature_range', 0x5a8, 0x5c8),
+        ('suspend_query_and_early_errors', 0x5c8, 0x5fc),
+        ('power_mutex_and_enable_lowbit', 0x5fc, 0x610),
+        ('first_enable_feature4_or5_registration', 0x610, 0x640),
+        ('successful_enable_two_count_increments', 0x640, 0x670),
+        ('disable_two_nonzero_counts_and_last_power', 0x670, 0x6a4),
+        ('last_disable_IPI_mutex_pair_then_feature4_or5_deregistration', 0x6a4, 0x6e0),
+        ('successful_disable_two_count_decrements', 0x6e0, 0x70c),
+        ('normal_result_log_flag_and_power_unlock', 0x70c, 0x730),
+        ('count_error_or_provider_return_and_diagnostic_tail', 0x730, 0x780),
+    )
+    instructions = [dict(name=name, function='mtk_mmdvfs_enable_vcp', section='.text',
+        start=start, end_exclusive=end, file_offset=text_section['offset'] + start,
+        raw_hex=expected_body[start - 0x58c:end - 0x58c].hex())
+        for name, start, end in spans]
+    result.update(profile_match=True, profile='captured MT6993 mmdvfs v5 enable/disable ABI 1',
+        selected_anchors=selected_anchors, selected_data=data_evidence,
+        complete_function=dict(section='.text', offset=0x58c, bytes=0x1f4,
+            end_exclusive=0x780, instructions=125,
+            file_offset=text_section['offset'] + 0x58c, raw_hex=expected_body.hex()),
+        instruction_evidence=instructions, relocation_evidence=relocations,
+        export=dict(section='__ksymtab_gpl', descriptor_offset=0xe4, bytes=12,
+            value_field_relocation_type=261, function_offset=0x58c,
+            name_offset=0xd5, namespace_offset=0x61, namespace_empty=True,
+            relocation_offsets=[0xe4, 0xe8, 0xec], runtime_resolution_proven=False),
+        argument_gate=dict(enable_low_bit=0, feature_low_bits=8,
+            data_pointer_symbol='mmdvfs_data', data_pointer_bss_offset=0x40,
+            feature_limit_member_offset=0x28, feature_limit_member_bytes=1,
+            null_data_or_feature_greater_equal_limit_return=-22,
+            null_data_branch=0x5b0, range_branch=0x5c4,
+            suspend_query_call=0x5cc, suspending_nonzero_return=-16,
+            suspend_branch=0x5d0, enable_lowbit_branch=0x60c,
+            v3_free_run_early_success_is_not_this_body=True),
+        counts=dict(global_symbol='vcp_power', global_bss_offset=0x58, global_bytes=4,
+            feature_array_member_offset=0x20, feature_record_stride=0x48,
+            feature_count_member_offset=0x40, feature_count_bytes=4,
+            enable_global_store=0x65c, enable_feature_store=0x668,
+            disable_feature_store=0x704, disable_global_store=0x708,
+            successful_updates_are_plus_or_minus_one=True,
+            arithmetic_is_32bit_without_enable_overflow_guard=True,
+            disable_requires_both_counts_nonzero_branches=[0x694, 0x698],
+            zero_count_return=-22, initial_or_live_count_values_proven=False),
+        feature_provider=dict(selector_symbol='mmup_ena', selector_bss_offset=0,
+            selector_member_bytes=1, zero_selects_feature=5, nonzero_selects_feature=4,
+            first_global_enable_only=True, register_call=0x630,
+            last_global_disable_only=True, deregister_call=0x6d0,
+            register_failure_branch=0x638, deregister_failure_branch=0x6dc,
+            failure_returns_provider_result_without_local_count_store=True,
+            success_or_nontransition_returns_zero=True,
+            provider_bodies_and_loaded_feature_state_proven=False),
+        synchronization=dict(power_mutex_symbol='mmdvfs_vcp_pwr_mutex',
+            power_mutex_data_offset=0x90, power_mutex_bytes=0x30,
+            power_lock_call=0x604, power_unlock_call=0x724,
+            main_count_and_feature_call_paths_hold_power_mutex=True,
+            null_range_suspend_errors_occur_before_power_lock=True,
+            ipi_mutex_symbol='mmdvfs_mmup_ipi_mutex', ipi_mutex_data_offset=0xc0,
+            ipi_mutex_bytes=0x30, last_disable_ipi_lock_call=0x6b0,
+            last_disable_ipi_unlock_call=0x6b8, deregister_after_ipi_pair=0x6d0,
+            empty_ipi_mutex_pair_is_not_firmware_ack_or_DMA_retirement=True,
+            all_IPI_producers_and_inflight_work_proven=False),
+        diagnostics=dict(log_level_bss_offset=0x5c, normal_log_lowbit_branch=0x718,
+            locked_count_or_provider_errors_print_even_if_normal_log_flag_clear=True,
+            early_null_range_suspend_errors_do_not_print_here=True,
+            count_error_entry=0x730, provider_error_entry=0x73c, print_call=0x778,
+            print_then_main_mutex_unlock_branch=0x77c),
+        scope=dict(all_125_body_words_and_38_body_relocations_qualified=True,
+            all_3_GPL_export_relocations_qualified=True,
+            no_v3_profile_or_free_run_inference=True,
+            no_external_caller_or_provider_body_inference=True,
+            count_or_mutex_result_is_not_hardware_retirement=True,
+            Android_driver_export_is_not_XNU_registration_or_cold_authority=True))
+    return result
+
+
 def module(blob):
     elf = ELF(blob)
     result = dict(build_id=None, modinfo={}, debug_sections=[], symbols={})
@@ -5289,6 +5488,8 @@ def module(blob):
             result['mblocks']['records'].append(dict(index=i, num=num,
                 initial_dma_address=dma, initial_cpu_address=cpu, initial_bytes=size))
     result['loaded_pairing_proven'] = False
+    if result['modinfo'].get('name') == ['mtk_mmdvfs_v5']:
+        result['mmdvfs_v5_enable_vcp_evidence'] = mmdvfs_v5_enable_vcp_evidence(elf)
     if result['modinfo'].get('name') == ['mtk_vcodec_dec']:
         result['decoder_common_evidence'] = decoder_common_evidence(elf, result['build_id'])
         result['decoder_init_evidence'] = decoder_init_evidence(
