@@ -2545,3 +2545,59 @@ python3 x9/tools/call_context_evidence.py --mode factory --out x9/out/<新目录
 未测试、编译kernel、CI、boot pack或操作设备。下一仍需在真实同controller/queue边界
 own-copy当前record和Client，联结本次CallInfo/UUID并跨实际record更新/native epoch复核，
 而不是以PBI+4、44成功或Client寿命充当snapshot。**VOICE09仍关闭，20无生产caller**。
+
+## 2026-11-16 合法 changed duplicate：03/21 保留首终态 owner
+
+现行生产 `X9Calls.inc` 修复两条确切同 transaction 分支，不改44或MD mutation：
+
+- **21**：已接受txn78/id7后，合法txn78/id8曾因旧ID比较失败得到BUSY；原query/905
+  owner继续处理906，又可返回同txn成功。现在同slot/local generation/txn且原binding与
+  **实际QMUX allocation**仍live时消费repeat，原id7/token/epoch不改、不重发MD。
+- **03**：已answered的txn91 enable随后合法changed disable，曾额外发ARG。现在保留
+  首terminal（已queue或本地保留）；pending changed决定首ARG的行为不变，fresh txn92
+  仍能拥有独立disable。这不是永久txn缓存，也不扩展generic malformed repeat保护。
+
+实际`bb_x9_call_result`在`x9/baseband/qcom/baseband/coachz_baseband.cpp:1528..1560`，
+仅success受原deadline约束，error仍可receipt；故本次没有根据fixture推测修改deadline。
+DEL仍只清host结果/route并保留selected/physical-uncertain MD token/epoch，真实END后新owned
+empty snapshot及无busy才退休；没有从906成功构造END、idle、REGISTERED或媒体能力。
+
+新增两个宿主fixture源码断言（`ios_end_changed_duplicate`、`handover_completed_changed`）
+仅`clang++ -c` **exit0**，**未执行**。生产head`90079648`的实际Baseband对象 **exit0**；
+正常完整kernel **98/98对象、link/strip exit0**，产物
+`x9/out/x9-call-duplicate-owner-20261116/kernel.development.sweet`，未boot pack/上机。
+精确源审/fixture编译材料归档为`x9/out/call-terminal-audit/`，root对象命令/日志在
+`x9/out/call-context-capture/`。VOICE09仍关闭、VOICE20无生产caller，完整功能未完成。
+
+## 2026-11-16 同 CTMessage 的 GUID 选择与转换内 ACK：不等于保存成功
+
+当前root cache原relative method entry`1f3ce8f08`及`LC_FUNCTION_STARTS`确认
+`_convertCTMessageToDictionary:requiresUpload:`为 **`1f3cbec88..1f3cbf8e4 /3164B`**。
+只新增该函数及必要key/selector/export；旧receive/取件/SQL原件只复用。
+metadata、text、key、targets、exports五次实际 **exit0**；不是运行短信验收。
+
+入参同CTMessage由x2→x25→sp+38，`1f3cbf170`重载为x26。原
+`1f3cbf388..3d4`以`uniqueIdentifier`、`UUIDString`为selector参数，经helper
+`1f9dee540`的w0 bit0门控后，分别调用同CTMessage和其返回对象，选出字符串x21。
+这里未新资格该helper的符号，不以猜测名字充当证据。无selected string时
+`1f3cbf418`经原island调用真export **`_StringGUID1929004b8`**；若它亦返回null，
+`1f3cbf420`跳过key插入，不能称每次conversion都有GUID。
+
+原global **`21242ebd0`**经实际rebase chain指向CFString`20e0c18a8`，其data
+`1f3cee30d`明确为length1 **`g`**。`1f3cbf424..434`将同dictionary x27、该key和
+selected string x21传给真export **`CFDictionarySetValue186e80b34`**。
+因此GUID是该CTMessage的独立identifier分支或fallback输出，**不是把通知uint/messageId
+直接转成GUID/SQL RowID**。本次仍未闭dictionary g到实际成功record的最终身份关联。
+
+`1f3cbf598/650`各重载同sp+38的CTMessage为x21；在`1f3cbf708/70c`条件门未跳过时，
+`1f3cbf724`调用其`messageId`，`728..730`将该值交给sharedMessageCenter的
+**`acknowledgeIncomingMessageWithId:`**。调用位于conversion内、同步`ret1f3cbf820`
+之前；复用原receive caller`1f3cc4be4`返回后，才可能过length门写payload`4c44`、
+调用`_receivedSMSDictionary4c58`并进入既有条件保存链。不能把此ACK API出现或conversion
+返回当SQL COMMIT、数据库重开显示或WMS37的物理ACK收据，更不能说保存无条件成功。
+
+原bytes、pagechain、exact selector/export、五次命令/exit与窄合同保存在主
+`x9/out/sms-guid-owner/{identity-contract.json,executed-commands.txt,read-guid-owner.py}`
+及`metadata-r1/convert-r1/keys-r1/targets-r1/exports-r1/`。`convert-r1`复用首metadata，
+未为已闭metadata/receive/SQL重采；独立review只读已有证据。没有生产SMS行为修改、测试、
+设备/数据库读取、镜像复检或ready/ACK伪造；强Model到通知ID和当前Messages最终验收仍另缺。
