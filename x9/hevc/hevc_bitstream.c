@@ -31,6 +31,11 @@ static uint32_t get(struct bits *b, unsigned n)
     for (unsigned i = 0; i < n && !b->error; i++) v = (v << 1) | bit(b);
     return v;
 }
+static uint64_t get48(struct bits *b)
+{
+    uint64_t hi = get(b,16);
+    return (hi << 32) | get(b,32);
+}
 static void skip(struct bits *b, unsigned n)
 {
     for (unsigned i = 0; i < n && !b->error; i++) (void)bit(b);
@@ -216,10 +221,23 @@ static int trailing_bits(struct bits *b)
     while (b->left && !b->error) if (bit(b)) return EINVAL;
     return b->error || b->pos != b->n ? EINVAL : 0;
 }
+/* The future-extension data is opaque. The final one bit is rbsp_stop_one_bit,
+ * followed by 0..7 alignment zeroes, not guessed extension syntax lengths.
+ * Read once through the canonical emulation-prevention reader. */
+static int extension_tail(struct bits *b)
+{
+    unsigned saw_one = 0, zeroes = 0;
+    while (!b->error && (b->left || b->pos < b->n)) {
+        if (bit(b)) { saw_one = 1; zeroes = 0; }
+        else zeroes++;
+    }
+    return b->error || !saw_one || zeroes > 7 ? EINVAL : 0;
+}
 static unsigned be16(const uint8_t *p) { return ((unsigned)p[0] << 8) | p[1]; }
 static uint32_t be32(const uint8_t *p)
 { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
 #define MAIN_COMPATIBILITY (UINT32_C(1) << (31 - X9_HEVC_PROFILE_MAIN))
+#define REXT_COMPATIBILITY (UINT32_C(1) << (31 - X9_HEVC_PROFILE_REXT))
 static int nal(const uint8_t *p, size_t n, unsigned type)
 {
     if (n < 2 || (n < 3 && type != 36 && type != 37) ||
@@ -235,8 +253,40 @@ struct sps_info {
     uint32_t decoder_profile, profile_compatibility;
     uint32_t max_sub_layers, max_dpb, max_reorder;
     uint32_t log2_max_poc_lsb, log2_ctb;
+    uint32_t chroma_format_idc, separate_colour_plane_flag;
+    uint32_t bit_depth_luma_minus8, bit_depth_chroma_minus8;
+    uint32_t profile_space, tier_flag;
+    uint64_t profile_constraints;
+    uint32_t extension_flags, range_extension_flags;
+    uint32_t min_cb, max_tb, scaling_list_enabled;
 };
-static int sps(const uint8_t *p, size_t n, struct sps_info *c, struct x9_hevc_vui *out)
+static int ptl_has(unsigned profile, uint32_t compatibility, unsigned indicated)
+{ return profile == indicated || (compatibility & (UINT32_C(1) << (31-indicated))); }
+/* 7.3.3 fixes the PTL field at 48 bits; its meaning depends on BOTH the
+ * profile and compatibility flags. Keep the raw bits (including ignored
+ * reserved bits), but do not accept depths contradicting explicit maxima.
+ * These local checks do not establish complete Annex A profile conformance. */
+static int ptl_depth_limits(const struct sps_info *s)
+{
+    if (!(s->profile_compatibility & (UINT32_C(1) << (31-s->profile)))) return EINVAL;
+    unsigned range = 0, fourteen = 0;
+    for (unsigned i = 4; i <= 11; i++)
+        if (ptl_has(s->profile,s->profile_compatibility,i)) range = 1;
+    unsigned depth = s->bit_depth_luma_minus8 > s->bit_depth_chroma_minus8 ?
+        s->bit_depth_luma_minus8+8 : s->bit_depth_chroma_minus8+8;
+    if (!range) return 0;
+    if (((s->profile_constraints & (UINT64_C(1) << 43)) && depth > 12) ||
+        ((s->profile_constraints & (UINT64_C(1) << 42)) && depth > 10) ||
+        ((s->profile_constraints & (UINT64_C(1) << 41)) && depth > 8)) return EINVAL;
+    fourteen = ptl_has(s->profile,s->profile_compatibility,5) ||
+        ptl_has(s->profile,s->profile_compatibility,9) ||
+        ptl_has(s->profile,s->profile_compatibility,10) ||
+        ptl_has(s->profile,s->profile_compatibility,11);
+    if (fourteen && (s->profile_constraints & (UINT64_C(1) << 34)) && depth > 14) return EINVAL;
+    return 0;
+}
+static int sps_read(const uint8_t *p, size_t n, struct sps_info *c,
+    struct x9_hevc_vui *out, int inspect)
 {
     if (nal(p,n,33) || (p[1] & 7) != 1) return EINVAL;
     struct bits b = { .p = p + 2, .n = n - 2 };
@@ -245,10 +295,11 @@ static int sps(const uint8_t *p, size_t n, struct sps_info *c, struct x9_hevc_vu
     if (sub > 6) return EINVAL;
     unsigned nesting = bit(&b);
     if (!sub && !nesting) return EINVAL;
-    unsigned space = get(&b, 2); (void)get(&b, 1);
+    unsigned space = get(&b, 2); c->tier_flag = get(&b, 1);
+    c->profile_space = space;
     c->profile = get(&b, 5);
     c->profile_compatibility = get(&b, 32);
-    skip(&b, 48); c->level = get(&b, 8);
+    c->profile_constraints = get48(&b); c->level = get(&b, 8);
     unsigned pp[7] = {0}, lp[7] = {0};
     for (unsigned i = 0; i < sub; i++) { pp[i] = bit(&b); lp[i] = bit(&b); }
     if (sub) for (unsigned i = sub; i < 8; i++) if (get(&b, 2)) return EINVAL;
@@ -258,14 +309,20 @@ static int sps(const uint8_t *p, size_t n, struct sps_info *c, struct x9_hevc_vu
     }
     c->sps_id = ue(&b);
     unsigned chroma = ue(&b);
-    if (chroma != 1 || space ||
+    if (b.error || chroma > 3) return EINVAL;
+    c->chroma_format_idc = chroma;
+    c->separate_colour_plane_flag = chroma == 3 ? bit(&b) : 0;
+    unsigned monochrome_rext = inspect && !chroma && c->profile >= 1 &&
+        c->profile <= 11 && (c->profile == X9_HEVC_PROFILE_REXT ||
+        (c->profile_compatibility & REXT_COMPATIBILITY));
+    if (space || (!monochrome_rext && (chroma != 1 ||
         (c->profile != X9_HEVC_PROFILE_MAIN && c->profile != X9_HEVC_PROFILE_MAIN10 &&
-         c->profile != X9_HEVC_PROFILE_MAIN_STILL)) return ENOTSUP;
+         c->profile != X9_HEVC_PROFILE_MAIN_STILL)))) return ENOTSUP;
     /* Main Still Picture is an independent-picture subset, not Main10 or
      * Rext. Keep its original profile/NALs; require explicit Main compatibility
      * before selecting the provider's existing Main capability. */
-    c->decoder_profile = c->profile;
-    if (c->profile == X9_HEVC_PROFILE_MAIN_STILL) {
+    c->decoder_profile = monochrome_rext ? 0 : c->profile;
+    if (!monochrome_rext && c->profile == X9_HEVC_PROFILE_MAIN_STILL) {
         if (!(c->profile_compatibility & MAIN_COMPATIBILITY)) return ENOTSUP;
         c->decoder_profile = X9_HEVC_PROFILE_MAIN;
     }
@@ -273,17 +330,26 @@ static int sps(const uint8_t *p, size_t n, struct sps_info *c, struct x9_hevc_vu
     uint32_t l = 0, r = 0, t = 0, bot = 0;
     if (bit(&b)) { l = ue(&b); r = ue(&b); t = ue(&b); bot = ue(&b); }
     unsigned yd = ue(&b), cd = ue(&b);
-    if (b.error || c->sps_id > 15 || !c->coded_width || !c->coded_height ||
+    unsigned unit = chroma ? 2 : 1;
+    if (b.error || c->sps_id > 15 || !c->coded_width || !c->coded_height || yd > 8 || cd > 8 ||
         c->coded_width > X9_HEVC_MAX_DIM || c->coded_height > X9_HEVC_MAX_DIM ||
-        (c->coded_width & 1) || (c->coded_height & 1) ||
-        (uint64_t)l + r >= c->coded_width / 2 ||
-        (uint64_t)t + bot >= c->coded_height / 2) return EINVAL;
-    if (yd != cd || (yd != 0 && yd != 2) ||
-        (c->decoder_profile == X9_HEVC_PROFILE_MAIN && yd)) return ENOTSUP;
+        c->coded_width % unit || c->coded_height % unit ||
+        ((uint64_t)l + r) * unit >= c->coded_width ||
+        ((uint64_t)t + bot) * unit >= c->coded_height) return EINVAL;
+    if (!monochrome_rext && (yd != cd || (yd != 0 && yd != 2) ||
+        (c->decoder_profile == X9_HEVC_PROFILE_MAIN && yd))) return ENOTSUP;
+    /* hvcC's retained depth fields are three bits. Depth16 needs a real
+     * configuration-record representation, not truncation to depth8. */
+    if (monochrome_rext && (yd > 7 || cd > 7)) return ENOTSUP;
+    c->bit_depth_luma_minus8 = yd; c->bit_depth_chroma_minus8 = cd;
+    if (inspect) {
+        int e = ptl_depth_limits(c);
+        if (e) return e;
+    }
     c->bit_depth = yd + 8;
-    c->crop_x = l * 2; c->crop_y = t * 2;
-    c->width = c->coded_width - (l + r) * 2;
-    c->height = c->coded_height - (t + bot) * 2;
+    c->crop_x = l * unit; c->crop_y = t * unit;
+    c->width = c->coded_width - (l + r) * unit;
+    c->height = c->coded_height - (t + bot) * unit;
     unsigned poc = ue(&b);
     if (b.error || poc > 12) return EINVAL;
     c->log2_max_poc_lsb = poc + 4;
@@ -301,17 +367,19 @@ static int sps(const uint8_t *p, size_t n, struct sps_info *c, struct x9_hevc_vu
     if (b.error || ctb > 6 || ctb < 4 || c->coded_width % (1u << min_cb) ||
         c->coded_height % (1u << min_cb)) return EINVAL;
     c->log2_ctb = ctb;
+    c->min_cb = min_cb;
     unsigned min_tb = bounded_ue(&b,min_cb-3) + 2;
     unsigned max_tb = ctb < 5 ? ctb : 5;
     if (b.error || min_tb > max_tb) return EINVAL;
-    (void)bounded_ue(&b,max_tb-min_tb);
+    c->max_tb = min_tb + bounded_ue(&b,max_tb-min_tb);
     (void)bounded_ue(&b,ctb-min_tb); (void)bounded_ue(&b,ctb-min_tb);
-    if (bit(&b) && bit(&b)) scaling_lists(&b);
+    c->scaling_list_enabled = bit(&b);
+    if (c->scaling_list_enabled && bit(&b)) scaling_lists(&b);
     (void)bit(&b); (void)bit(&b); /* AMP, SAO */
     if (bit(&b)) {
         unsigned ypcm = get(&b,4) + 1, cpcm = get(&b,4) + 1;
         unsigned pcm = bounded_ue(&b,max_tb-3) + 3;
-        if (b.error || ypcm > c->bit_depth || cpcm > c->bit_depth ||
+        if (b.error || ypcm > c->bit_depth || cpcm > cd + 8 ||
             pcm < (min_cb < 5 ? min_cb : 5)) return EINVAL;
         (void)bounded_ue(&b,max_tb-pcm); (void)bit(&b);
     }
@@ -332,12 +400,18 @@ static int sps(const uint8_t *p, size_t n, struct sps_info *c, struct x9_hevc_vu
         if (b.error) return EINVAL;
         /* No multilayer/3D/SCC/Rext/unknown extension decoder support. Do
          * not skip guessed extension lengths and claim a valid Main SPS. */
-        if (extensions) return ENOTSUP;
+        if (!inspect && extensions) return ENOTSUP;
+        c->extension_flags = extensions;
+        if (extensions & 0x70) return ENOTSUP; /* multilayer / 3D / SCC */
+        if (extensions & 0x80) c->range_extension_flags = get(&b,9);
+        if (extensions) c->decoder_profile = 0; /* inspection is not admission */
     }
-    int e = trailing_bits(&b);
+    int e = c->extension_flags & 15 ? extension_tail(&b) : trailing_bits(&b);
     if (!e && out) { v.sps_id = c->sps_id; v.vps_id = c->vps_id; *out = v; }
     return e;
 }
+static int sps(const uint8_t *p, size_t n, struct sps_info *c, struct x9_hevc_vui *out)
+{ return sps_read(p,n,c,out,0); }
 static void apply_sps(struct x9_hevc_config *c, const struct sps_info *s)
 {
     c->coded_width = s->coded_width; c->coded_height = s->coded_height;
@@ -349,6 +423,14 @@ static void apply_sps(struct x9_hevc_config *c, const struct sps_info *s)
     c->profile_compatibility = s->profile_compatibility;
     c->max_sub_layers = s->max_sub_layers;
     c->max_dpb = s->max_dpb; c->max_reorder = s->max_reorder;
+    c->chroma_format_idc = s->chroma_format_idc;
+    c->separate_colour_plane_flag = s->separate_colour_plane_flag;
+    c->bit_depth_luma_minus8 = s->bit_depth_luma_minus8;
+    c->bit_depth_chroma_minus8 = s->bit_depth_chroma_minus8;
+    c->profile_space = s->profile_space; c->tier_flag = s->tier_flag;
+    c->profile_constraints = s->profile_constraints;
+    c->sps_extension_flags = s->extension_flags;
+    c->sps_range_extension_flags = s->range_extension_flags;
 }
 static const struct x9_hevc_parameter_set *find_set(const struct x9_hevc_config *c,
                                                    unsigned type, unsigned id)
@@ -358,7 +440,85 @@ static const struct x9_hevc_parameter_set *find_set(const struct x9_hevc_config 
             return &c->parameter_sets[i];
     return NULL;
 }
-int x9_hevc_config_parse(const uint8_t *p, size_t n, struct x9_hevc_config *c)
+struct pps_info {
+    unsigned extension_flags, range_extension_flags, transform_skip_size;
+    unsigned sao_scale_luma, sao_scale_chroma;
+};
+/* Inspection validates each PPS through its own linked SPS. Ordinary native
+ * parse retains its existing ID/reference-only PPS admission. This bounded
+ * subset does not parse multilayer/3D/SCC or cross-component/chroma-QP-list
+ * configurations (the latter two must be zero for accepted chroma0/1). */
+static int pps_inspect(const uint8_t *p, size_t n, unsigned pid,
+    const struct sps_info *s, struct pps_info *out)
+{
+    if (nal(p,n,34) || (p[1] & 7) != 1) return EINVAL;
+    struct bits b = { .p = p+2, .n = n-2 };
+    struct pps_info info = {0};
+    unsigned id = bounded_ue(&b,63), sid = bounded_ue(&b,15);
+    skip(&b,2+3+2); /* dependent/output, extra header bits, sign hiding/CABAC */
+    (void)bounded_ue(&b,14); (void)bounded_ue(&b,14);
+    bounded_se(&b,-(26+6*(int)s->bit_depth_luma_minus8),25);
+    (void)bit(&b); /* constrained intra */
+    unsigned transform_skip = bit(&b);
+    if (bit(&b)) (void)bounded_ue(&b,s->log2_ctb-s->min_cb);
+    bounded_se(&b,-12,12); bounded_se(&b,-12,12);
+    if (bit(&b) && !s->chroma_format_idc) return EINVAL;
+    skip(&b,3); /* weighted P/B and transquant bypass */
+    unsigned tiles = bit(&b); (void)bit(&b); /* entropy sync */
+    if (tiles) {
+        unsigned ctb = 1u << s->log2_ctb;
+        unsigned cols = (s->coded_width+ctb-1)/ctb;
+        unsigned rows = (s->coded_height+ctb-1)/ctb;
+        unsigned nc = bounded_ue(&b,cols-1), nr = bounded_ue(&b,rows-1);
+        if (b.error || (!nc && !nr)) return EINVAL;
+        if (!bit(&b)) {
+            unsigned used = 0;
+            for (unsigned i = 0; i < nc && !b.error; i++) {
+                unsigned width = bounded_ue(&b,cols-1) + 1;
+                if (width > cols-used-1) return EINVAL;
+                used += width;
+            }
+            used = 0;
+            for (unsigned i = 0; i < nr && !b.error; i++) {
+                unsigned height = bounded_ue(&b,rows-1) + 1;
+                if (height > rows-used-1) return EINVAL;
+                used += height;
+            }
+        }
+        (void)bit(&b); /* loop filter across tiles */
+    }
+    (void)bit(&b); /* loop filter across slices */
+    if (bit(&b)) {
+        (void)bit(&b); /* override */
+        if (!bit(&b)) { bounded_se(&b,-6,6); bounded_se(&b,-6,6); }
+    }
+    if (bit(&b)) {
+        if (!s->scaling_list_enabled) return EINVAL;
+        scaling_lists(&b);
+    }
+    (void)bit(&b); (void)bounded_ue(&b,s->log2_ctb-2);
+    (void)bit(&b); /* slice segment extension present */
+    if (bit(&b)) info.extension_flags = get(&b,8);
+    if (b.error || id != pid || sid != s->sps_id) return EINVAL;
+    if (info.extension_flags & 0x70) return ENOTSUP;
+    if (info.extension_flags & 0x80) {
+        if (transform_skip) info.transform_skip_size = bounded_ue(&b,s->max_tb-2);
+        unsigned cross = bit(&b), chroma_qp = bit(&b);
+        info.range_extension_flags = cross | (chroma_qp << 1);
+        if (cross || (!s->chroma_format_idc && chroma_qp)) return EINVAL;
+        /* A chroma QP list is outside the currently admitted Main/Main10
+         * inspector subset; do not invent its variable-length boundary. */
+        if (chroma_qp) return ENOTSUP;
+        unsigned ymaximum = s->bit_depth_luma_minus8 > 2 ? s->bit_depth_luma_minus8-2 : 0;
+        unsigned cmaximum = s->bit_depth_chroma_minus8 > 2 ? s->bit_depth_chroma_minus8-2 : 0;
+        info.sao_scale_luma = bounded_ue(&b,ymaximum);
+        info.sao_scale_chroma = bounded_ue(&b,cmaximum);
+    }
+    int e = info.extension_flags & 15 ? extension_tail(&b) : trailing_bits(&b);
+    if (!e) *out = info;
+    return e;
+}
+static int config_read(const uint8_t *p, size_t n, struct x9_hevc_config *c, int inspect)
 {
     if (!p || !c || n < 23 || n > X9_HEVC_MAX_CONFIG || p[0] != 1) return EINVAL;
     memset(c, 0, sizeof(*c));
@@ -384,7 +544,7 @@ int x9_hevc_config_parse(const uint8_t *p, size_t n, struct x9_hevc_config *c)
             if (type == 32) id = get(&b, 4);
             else if (type == 33) {
                 struct sps_info one = {0};
-                int e = sps(p + at, bytes, &one,NULL);
+                int e = sps_read(p + at, bytes, &one,NULL,inspect);
                 if (e) return e;
                 id = one.sps_id; reference = one.vps_id;
             } else {
@@ -435,45 +595,83 @@ int x9_hevc_config_parse(const uint8_t *p, size_t n, struct x9_hevc_config *c)
     const struct x9_hevc_parameter_set *selected_vps = find_set(c, 32, selected_sps->reference_id);
     if (!selected_vps) return EINVAL;
     struct sps_info representative = {0};
-    int e = sps(p + selected_sps->offset, selected_sps->bytes, &representative,NULL);
+    int e = sps_read(p + selected_sps->offset, selected_sps->bytes, &representative,NULL,inspect);
     if (e) return e;
     apply_sps(c, &representative);
     if ((p[1] >> 6) || (p[1] & 31) != c->profile || p[12] != c->level ||
-        (p[16] & 3) != 1 || (p[17] & 7) + 8 != c->bit_depth ||
-        (p[18] & 7) + 8 != c->bit_depth) return EINVAL;
+        (p[16] & 3) != c->chroma_format_idc || (p[17] & 7) != c->bit_depth_luma_minus8 ||
+        (p[18] & 7) != c->bit_depth_chroma_minus8) return EINVAL;
+    if (inspect && (((p[1] >> 5) & 1) != c->tier_flag ||
+        be32(p+2) != c->profile_compatibility ||
+        (((uint64_t)be16(p+6) << 32) | be32(p+8)) != c->profile_constraints)) return EINVAL;
     for (unsigned i = 0; i < c->parameter_set_count; i++) {
         const struct x9_hevc_parameter_set *set = &c->parameter_sets[i];
         if (set->type == 33) {
             struct sps_info one = {0};
-            e = sps(p + set->offset, set->bytes, &one,NULL);
+            e = sps_read(p + set->offset, set->bytes, &one,NULL,inspect);
             if (e) return e;
             if (one.coded_width != c->coded_width || one.coded_height != c->coded_height ||
                 one.width != c->width || one.height != c->height ||
                 one.crop_x != c->crop_x || one.crop_y != c->crop_y ||
                 one.profile != c->profile || one.bit_depth != c->bit_depth ||
                 one.level != c->level || one.max_sub_layers != c->max_sub_layers ||
-                one.decoder_profile != c->decoder_profile) return ENOTSUP;
+                one.decoder_profile != representative.decoder_profile) return ENOTSUP;
+            if (inspect && (one.chroma_format_idc != c->chroma_format_idc ||
+                one.bit_depth_chroma_minus8 != c->bit_depth_chroma_minus8 ||
+                one.profile_space != c->profile_space || one.tier_flag != c->tier_flag ||
+                one.profile_compatibility != c->profile_compatibility ||
+                one.profile_constraints != c->profile_constraints ||
+                one.extension_flags != c->sps_extension_flags ||
+                one.range_extension_flags != c->sps_range_extension_flags)) return ENOTSUP;
             if (one.max_dpb > c->max_dpb) c->max_dpb = one.max_dpb;
             if (one.max_reorder > c->max_reorder) c->max_reorder = one.max_reorder;
         }
+        if (inspect && set->type == 34) {
+            const struct x9_hevc_parameter_set *linked = find_set(c,33,set->reference_id);
+            if (!linked) return EINVAL;
+            struct sps_info one = {0};
+            e = sps_read(p+linked->offset,linked->bytes,&one,NULL,1);
+            if (e) return e;
+            struct pps_info info = {0};
+            e = pps_inspect(p+set->offset,set->bytes,set->id,&one,&info);
+            if (e) return e;
+            if (info.extension_flags) c->decoder_profile = 0;
+            if (set == selected_pps) {
+                c->pps_extension_flags = info.extension_flags;
+                c->pps_range_extension_flags = info.range_extension_flags;
+                c->pps_log2_max_transform_skip_block_size_minus2 = info.transform_skip_size;
+                c->pps_log2_sao_offset_scale_luma = info.sao_scale_luma;
+                c->pps_log2_sao_offset_scale_chroma = info.sao_scale_chroma;
+            }
+        }
         if (set->type != 32) continue;
-        if (c->profile != X9_HEVC_PROFILE_MAIN_STILL) continue;
+        if (!inspect && c->profile != X9_HEVC_PROFILE_MAIN_STILL) continue;
         /* Do not infer Main support from profile_idc alone, or from an hvcC
          * label that disagrees with the actual parameter sets. VPS PTL starts
          * after its 32-bit RBSP prefix; read through the emulation-prevention
          * reader rather than indexing escaped bytes. This is still a syntax
          * gate, not validation of the entire VPS or proof of HW support. */
         struct bits v = { .p = p + set->offset + 2, .n = set->bytes - 2 };
-        unsigned space, profile, level;
+        unsigned space, profile, level, tier;
         uint32_t compatibility;
-        skip(&v, 32);
-        space = get(&v, 2); (void)get(&v, 1);
+        uint64_t constraints;
+        if (inspect) {
+            unsigned id = get(&v,4), internal = bit(&v), available = bit(&v);
+            unsigned layers = get(&v,6), sub = get(&v,3), nesting = bit(&v);
+            skip(&v,16); /* reserved_0xffff is ignored, not a layer-count field */
+            if (v.error || id != set->id || sub > 6 || (!sub && !nesting)) return EINVAL;
+            if (!internal || !available || layers || sub+1 != c->max_sub_layers) return ENOTSUP;
+        } else skip(&v, 32);
+        space = get(&v, 2); tier = get(&v, 1);
         profile = get(&v, 5);
         compatibility = get(&v, 32);
-        skip(&v, 48); level = get(&v, 8);
+        constraints = get48(&v); level = get(&v, 8);
         if (v.error || space || profile != c->profile || level != c->level) return EINVAL;
-        if (!(compatibility & MAIN_COMPATIBILITY) ||
-            !(be32(p + 2) & MAIN_COMPATIBILITY)) return ENOTSUP;
+        if (inspect && (tier != c->tier_flag || compatibility != c->profile_compatibility ||
+            constraints != c->profile_constraints)) return ENOTSUP;
+        if (c->profile == X9_HEVC_PROFILE_MAIN_STILL && c->chroma_format_idc == 1 &&
+            (!(compatibility & MAIN_COMPATIBILITY) ||
+            !(be32(p + 2) & MAIN_COMPATIBILITY))) return ENOTSUP;
     }
     c->pps_id = selected_pps->id;
     const struct x9_hevc_parameter_set *selected[3] = {selected_vps, selected_sps, selected_pps};
@@ -482,6 +680,16 @@ int x9_hevc_config_parse(const uint8_t *p, size_t n, struct x9_hevc_config *c)
         c->ps_bytes[i] = selected[i]->bytes;
     }
     return 0;
+}
+int x9_hevc_config_parse(const uint8_t *p, size_t n, struct x9_hevc_config *c)
+{ return config_read(p,n,c,0); }
+int x9_hevc_config_inspect(const uint8_t *p, size_t n, struct x9_hevc_config *c)
+{
+    if (!c) return EINVAL;
+    memset(c,0,sizeof(*c));
+    int e = config_read(p,n,c,1);
+    if (e) memset(c,0,sizeof(*c));
+    return e;
 }
 static int catalog_valid(const struct x9_hevc_config *c)
 {
@@ -503,12 +711,32 @@ static int catalog_valid(const struct x9_hevc_config *c)
     }
     return seen == 7 && bytes == c->annexb_bytes ? 0 : EINVAL;
 }
+/* An inspected catalog is not a decode token. In particular legacy IDR and
+ * parameter-set serialization do not re-read SPS syntax, so enforce the same
+ * existing Main/Main10 gate here rather than admitting monochrome by layout. */
+static int decode_config(const struct x9_hevc_config *c)
+{
+    if (c->chroma_format_idc != 1 || c->separate_colour_plane_flag ||
+        c->sps_extension_flags || c->pps_extension_flags ||
+        c->bit_depth_luma_minus8 != c->bit_depth_chroma_minus8 ||
+        c->bit_depth != c->bit_depth_luma_minus8+8) return ENOTSUP;
+    if (c->profile == X9_HEVC_PROFILE_MAIN10 &&
+        c->decoder_profile == X9_HEVC_PROFILE_MAIN10 &&
+        (c->bit_depth == 8 || c->bit_depth == 10)) return 0;
+    if ((c->profile == X9_HEVC_PROFILE_MAIN ||
+        (c->profile == X9_HEVC_PROFILE_MAIN_STILL &&
+        (c->profile_compatibility & MAIN_COMPATIBILITY))) &&
+        c->decoder_profile == X9_HEVC_PROFILE_MAIN && c->bit_depth == 8) return 0;
+    return ENOTSUP;
+}
 int x9_hevc_idr_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
     const uint8_t *p, size_t n, uint8_t *dst, size_t cap, size_t *written)
 {
     if (!c || !hvcc || !p || !written || !n || n > X9_HEVC_MAX_INPUT || catalog_valid(c) ||
         (c->length_size != 1 && c->length_size != 2 && c->length_size != 4)) return EINVAL;
     *written = 0;
+    int admission = decode_config(c);
+    if (admission) return admission;
     size_t at = 0, size = c->annexb_bytes;
     unsigned pictures = 0, vcl = 0, slices = 0, nals = 0, picture_pps = 0;
     /* Validation pass before writing anything, including length overflow. */
@@ -558,6 +786,9 @@ int x9_hevc_parameter_sets_annexb(const struct x9_hevc_config *c, const uint8_t 
     uint8_t *dst, size_t cap, size_t *written)
 {
     if (!c || !hvcc || !written || catalog_valid(c)) return EINVAL;
+    *written = 0;
+    int admission = decode_config(c);
+    if (admission) return admission;
     *written = c->annexb_bytes;
     if (!dst) return 0;
     if (cap < c->annexb_bytes) return EMSGSIZE;
@@ -628,6 +859,8 @@ static int au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
     if (!c || !hvcc || !p || !written || !n || n > X9_HEVC_MAX_INPUT || catalog_valid(c) ||
         (c->length_size != 1 && c->length_size != 2 && c->length_size != 4)) return EINVAL;
     *written = 0;
+    int admission = decode_config(c);
+    if (admission) return admission;
     size_t at = 0, size = 0;
     unsigned pictures = 0, slices = 0, vcl = 0, temporal = 0, nals = 0, picture_pps = 0;
     /* Stateful AU ordering follows 7.4.2.4.4, including legal mid-picture

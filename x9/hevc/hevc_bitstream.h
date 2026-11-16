@@ -4,6 +4,7 @@
  * are separate.
  * Main-compatible 8-bit Main Still Picture
  * uses the Main decode path; monochrome Rext alpha returns ENOTSUP (no fallback).
+ * config_inspect separately exposes bounded syntax facts, never admission.
  */
 #ifndef X9_HEVC_BITSTREAM_H
 #define X9_HEVC_BITSTREAM_H
@@ -15,6 +16,7 @@
 #define X9_HEVC_PROFILE_MAIN 1u
 #define X9_HEVC_PROFILE_MAIN10 2u
 #define X9_HEVC_PROFILE_MAIN_STILL 3u
+#define X9_HEVC_PROFILE_REXT 4u
 #define X9_HEVC_MAX_PARAMETER_SETS (16u + 16u + 64u)
 struct x9_hevc_parameter_set {
     uint32_t offset, bytes;
@@ -28,6 +30,21 @@ struct x9_hevc_config {
      * Compatibility flags retain their big-endian bit numbering: profile 1
      * is bit30, not bit1. This struct is private, not the vdec ioctl ABI. */
     uint32_t decoder_profile, profile_compatibility;
+    /* Inspection facts from the actual SPS, not the primary image's depth or
+     * an hvcC label. Constraints retain all 48 bits in the low bits of u64.
+     * decoder_profile=0 means no existing decode admission, not profile Main.
+     * RExt bits: SPS bit8 rotation ... bit0 CABAC bypass alignment; PPS bit0
+     * cross-component prediction, bit1 chroma QP list. Extension flags are
+     * the exact 8 syntax bits (range in bit7, extension_4bits in bits3..0).
+     * PPS facts below describe only the representative linked PPS. */
+    uint32_t chroma_format_idc, separate_colour_plane_flag;
+    uint32_t bit_depth_luma_minus8, bit_depth_chroma_minus8;
+    uint32_t profile_space, tier_flag;
+    uint64_t profile_constraints;
+    uint32_t sps_extension_flags, sps_range_extension_flags;
+    uint32_t pps_extension_flags, pps_range_extension_flags;
+    uint32_t pps_log2_max_transform_skip_block_size_minus2;
+    uint32_t pps_log2_sao_offset_scale_luma, pps_log2_sao_offset_scale_chroma;
     uint32_t ps_offset[3], ps_bytes[3], annexb_bytes;
     uint32_t max_sub_layers, max_dpb, max_reorder;
     /* All distinct VPS/SPS/PPS from the immutable hvcC, grouped in decoder
@@ -61,6 +78,19 @@ struct x9_hevc_vui {
 /* Returns 0 or a BSD errno. Rejects unsupported formats rather than inventing
  * capabilities. The VPS/SPS/PPS spans refer to the unchanged hvcC snapshot. */
 int x9_hevc_config_parse(const uint8_t *, size_t, struct x9_hevc_config *);
+/* Read-only bounded inspection, NOT native/Annex B admission. Supports the
+ * existing Main/Main10/Main-compatible Still subset plus base-layer chroma0
+ * RExt (profile4 or explicit compatibility4), luma/chroma syntax depths8..15,
+ * nine SPS RExt flags and base/PPS RExt syntax through exact RBSP trailing
+ * bits. Chroma0 crop units are 1x1; separate colour planes, multilayer/3D/SCC
+ * and depth16 remain unsupported. Future extension_4bits tails are opaque,
+ * canonical RBSP-bounded, not interpreted. All SPS must share the retained
+ * PTL/geometry/depth/extension facts. Every PPS is checked against its own
+ * referenced SPS; VPS is only ID/PTL-prefix checked, not fully validated.
+ * This is not complete Annex A/profile/level or coded-slice conformance, not
+ * AUX_ALPHA association, and not a newly proved decoder capability. Original
+ * spans/bytes stay intact. Failure clears output; parse retains its old gate. */
+int x9_hevc_config_inspect(const uint8_t *, size_t, struct x9_hevc_config *);
 /* NULL dst performs the same validation and reports required size. */
 int x9_hevc_idr_annexb(const struct x9_hevc_config *, const uint8_t *hvcc,
     const uint8_t *sample, size_t sample_bytes, uint8_t *dst, size_t capacity,
