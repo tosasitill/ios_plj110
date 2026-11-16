@@ -1935,3 +1935,41 @@ WMS 初始化→真实 per-SIM host-ready；WMS20→605 token→唯一 writer→
 fresh `x9/out/call-owned-runtime/` 的 CLIR/OIR 零命中亦不证明 raw0。仍缺实际 default 实现/值、
 完整可达 iOS owned producer/backend 与最终事件/媒体验收；无生产源码、测试、编译、CI/镜像，
 VOICE09 保持关闭，不新增 unused API、默认 profile 或开放拨号准入。
+
+## 2026-11-16 同版 DSP 原件：task-info producer 与 USIP AD50 的窄契约
+
+新 capture `android-call-inputs-20261116-092442` 已保留 active `audio_dsp_b`
+**33554432B** 和7个真实 audio 模块；旧“未抓同版 payload”阻断已解除。
+本节只收束现存 qualification/JSON/selected asm，不重新解包、反汇编、hash或扫描。
+以下 `.ko` 地址均为 **ELF section-relative offset**，不是运行 VA。
+
+容器头候选给出 `adsp_0_sram [200,a480)`、`adsp_0_dram [b560,6398e0)`、
+`adsp_1_sram [63a9c0,643c40)`、`adsp_1_dram [644d20,15a4020)`（hex），
+各有 `cert1/cert2`；这是头/长度一致性，不是证书验证、loader地址或entrypoint证明。
+现存 strings 有真实 `task_phone_call_*`，但字符串不能证明已装载、scene0归属或receipt。
+
+真实 `audio_ipi.ko .init.text+38..90` 循环48次，生产 `g_audio_task_info`
+的 **48×8B**：`+0 u32 dsp_id / +4 support / +5 use_adsp / +6 use_scp /
++7 controller`。ioctl **40046914** 的 `.text+470..47c` 向用户copy **384B**；
+入口还可能初始化DSP，不把它当纯只读查询，也不在本轮实际调用。
+scene0的 `.rodata+3d38` 首byte **14(hex)** 使dispatch到 `.text+b758`：
+`get_adsp_core_total()>1 → dsp_id3`；fallback再次查询，`1→2 / 0→4`。
+只有3分支才经 `.text+ae48..88` 的 **dsp_id−2** 得physical core1（仍有total检查），
+`.text+b350..36c` 给controller **43**。这不是实跑scene0的8B值；
+`get_adsp_core_total` 在该模块仍为import，两个core的resume日志不能代替其回读。
+
+真实 `snd-soc-mtk-common.ko .text+4bdc→4f88` 取
+`get_smem_phy_start_addr(0,24,&size)`，`4c1c` 的AD50 producer依据
+`EMI_TABLE` 生成两个u64 **{AP PA+30000(hex), 30000(hex)}**，不是MD PA。
+`4d10..30` 发送scene0；enhancement bit1条件下 `4d4c..88` 可另发scene19。
+数值 `data_type=1 / ack_type=0 / payload=16B / transport=32B` 与既有reference
+契约一致；这是实际AP producer，不是DSP消费确认或通话双向media owner。
+
+已抓 `adsp-v3.ko` 仅 **40184B**，init调用的是import `adsp_system_bootup`；
+它不能补出主loader的实际加载/地址契约或上述core-total定义。剩余首缺是实际
+loader/core-total、scene0实跑task-info8B和可归属DSP receipt，之后仍需通话时
+DAPM/mixer选择、独立USIP_PHONECALL及iOS BasebandVoice双向I/O；不写猜测路由。
+精确原件资格、section/行号索引和缺口在gitignored
+`x9/out/voice-dsp-payload/{final-dsp-contract.json,final-evidence-index.md}`；
+只重读已有证据即可复核，不接触设备或旧备份。本轮仅docs，无production delta、
+测试、编译、CI、boot pack或上机；VOICE09不因静态收束开放。
