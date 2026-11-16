@@ -61,7 +61,7 @@ static Boolean registered;
 struct pending_frame {
     uint64_t token, hdr_clvs;
     int32_t poc;
-    uint32_t pic_output_flag;
+    uint32_t pic_output_flag; /* derived eligibility, not raw header/output event */
     void *frame;
     CMVideoFormatDescriptionRef description;
     Boolean suppress, deferred;

@@ -1072,8 +1072,10 @@ int x9_hevc_poc_sequence_next(const struct x9_hevc_poc_sequence *current,
     memset(out,0,sizeof(*out)); memset(result,0,sizeof(*result));
     if (!current || !picture || previous.started > 1 || previous.prev_valid > 1 ||
         previous.eos_present > 1 || previous.eob_present > 1 || previous.eob_present ||
+        previous.associated_irap_no_rasl_output > 1 ||
         previous.started != !!previous.clvs || previous.started != previous.prev_valid ||
-        (!previous.started && (previous.eos_present || previous.prev_lsb || previous.prev_msb)) ||
+        (!previous.started && (previous.eos_present || previous.prev_lsb || previous.prev_msb ||
+            previous.associated_irap_no_rasl_output)) ||
         previous.prev_lsb > 65535 || previous.prev_msb < (int64_t)INT32_MIN-65535 ||
         previous.prev_msb > INT32_MAX ||
         previous.prev_msb+previous.prev_lsb < INT32_MIN ||
@@ -1111,9 +1113,18 @@ int x9_hevc_poc_sequence_next(const struct x9_hevc_poc_sequence *current,
     }
     next.clvs = previous.clvs + boundary; next.started = 1;
     next.eos_present = facts.eos_present; next.eob_present = facts.eob_present;
+    /* 3.3 associates to the previous IRAP in DECODING order, not a previous
+     * displayed picture or only the CLVS-start IRAP. A middle CRA replaces
+     * the association with NoRaslOutputFlag0 even though CLVS/POC persist.
+     * Keep this prospective until SUBMIT accepts this picture. */
+    if (irap) next.associated_irap_no_rasl_output = boundary;
+    unsigned rasl = facts.nal_type == 8 || facts.nal_type == 9;
+    unsigned output = facts.pic_output_flag &&
+        !(rasl && next.associated_irap_no_rasl_output);
     *out = next;
     *result = (struct x9_hevc_poc_picture){ .value = (int32_t)poc,
-        .no_rasl_output_flag = irap && boundary, .clvs = next.clvs };
+        .no_rasl_output_flag = irap && boundary, .pic_output_flag = output,
+        .clvs = next.clvs };
     return 0;
 }
 int x9_hevc_hdr_sequence_next(const struct x9_hevc_hdr_sequence *current,

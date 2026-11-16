@@ -121,8 +121,9 @@ static int video_receive(struct state *s, uint32_t wait_ms, OSStatus *error)
         free(raw); *error = kVTVideoDecoderBadDataErr; return EIO;
     }
     /* Correlated pixels, not accepted input, offered FB or DROPPED retirement,
-     * supply the output-order observation. The bitstream's raw output flag0
-     * is suppressed only AFTER a real terminal RECEIVE; it never authorizes
+     * supply the output-order observation. A derived PicOutputFlag0 (raw
+     * output flag0 OR RASL with associated-IRAP NoRaslOutputFlag1) is suppressed
+     * only AFTER a real terminal RECEIVE; it never authorizes
      * slice freeing or fabrication of a dropped completion. A caller's
      * DoNotOutputFrame suppresses VT rendering, not this physical observation.
      * Within one CLVS, 8.3.1/C.5.2 require strictly increasing output POC;
@@ -262,7 +263,7 @@ static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
     }
     s->pending[s->pending_count++] = (struct pending_frame){ .token = token,
         .hdr_clvs = prospective.clvs, .poc = picture_poc.value,
-        .pic_output_flag = metadata.pic_output_flag, .frame = frame,
+        .pic_output_flag = picture_poc.pic_output_flag, .frame = frame,
         .description = snapshot,
         .suppress = !!(flags & kVTDecodeFrame_DoNotOutputFrame) };
     snapshot = NULL; /* ownership transferred to this ORIGINAL token */

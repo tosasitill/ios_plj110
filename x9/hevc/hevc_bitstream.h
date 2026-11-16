@@ -157,17 +157,22 @@ int x9_hevc_sample_metadata(const struct x9_hevc_config *, const uint8_t *hvcc,
  * not the immediately previous AU. clvs follows genuine IRAP/EOS boundaries;
  * slice no_output_of_prior_pics_flag and host DRAIN never reset it.
  * Zero state starts a bitstream; commit next ONLY after accepted SUBMIT.
- * Metadata must come from sample_metadata. No POC sorting, RPS/DPB process,
- * pixels, buffer retirement or inferred output is performed. Outputs are
+ * Metadata must come from sample_metadata. Also derives 8.1.3 PicOutputFlag
+ * from raw pic_output_flag and the PREVIOUS IRAP in decoding order (3.3),
+ * including when a middle CRA updates the association without a new CLVS.
+ * This is eligibility only, not an output event. No POC sorting, RPS/DPB,
+ * pixels or buffer retirement is performed. Outputs are
  * disjoint; failure clears them. current may equal next. */
 struct x9_hevc_poc_sequence {
     uint64_t clvs;
     int64_t prev_msb; /* can be below INT32_MIN even when full POC is in range */
     uint32_t prev_lsb, prev_valid, started, eos_present, eob_present;
+    uint32_t associated_irap_no_rasl_output;
 };
 struct x9_hevc_poc_picture {
     int32_t value;
     uint32_t no_rasl_output_flag; /* for CURRENT IRAP, not an associated RASL */
+    uint32_t pic_output_flag; /* derived PicOutputFlag, not an observed output */
     uint64_t clvs;
 };
 int x9_hevc_poc_sequence_next(const struct x9_hevc_poc_sequence *,
