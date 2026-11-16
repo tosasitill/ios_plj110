@@ -3,7 +3,8 @@
 
 Modes qualify the personality producer, its dispatch targets, the typed Client
 input path, the model's concrete config owner, the controller's bound-instance
-owner, or its concrete root factory's shared record inputs. Requires capstone. Creates only
+owner, its concrete root factory's shared record inputs, or that factory's
+manager selection/queue ownership. Requires capstone. Creates only
 a NEW x9/out directory; original cache, root, extracted images and older evidence
 are never changed. A successful exit
 qualifies static bytes/exports, not a loaded backend, native epoch or call/SMS result.
@@ -17,7 +18,7 @@ from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM
 
 MAIN = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--mode', required=True, choices=('producer', 'queue', 'client', 'config', 'instance', 'factory'))
+parser.add_argument('--mode', required=True, choices=('producer', 'queue', 'client', 'config', 'instance', 'factory', 'selection'))
 parser.add_argument('--root-mount', type=Path, default=Path('/private/tmp/x9root'),
                     help='existing current root mount; this tool never attaches or changes it')
 parser.add_argument('--out', required=True, type=Path, help='NEW directory under repository x9/out')
@@ -27,6 +28,7 @@ CLIENT_ONLY = args.mode == 'client'
 CONFIG_ONLY = args.mode == 'config'
 INSTANCE_ONLY = args.mode == 'instance'
 FACTORY_ONLY = args.mode == 'factory'
+SELECTION_ONLY = args.mode == 'selection'
 OUT = args.out.resolve()
 if not OUT.is_relative_to((MAIN / 'x9/out').resolve()):
     parser.error('--out must be under repository x9/out')
@@ -92,7 +94,7 @@ paths = {'system': support / 'libSystemDetermination.dylib', 'base': support / '
          'cxx': MAIN / '.local/apple/dsc-20H392/usr/lib/libc++.1.dylib',
          'dispatch': MAIN / '.local/apple/dsc-20H392/usr/lib/system/libdispatch.dylib',
          'root': args.root_mount / 'System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter'}
-image_names = ('root',) if FACTORY_ONLY else ('system',) if CONFIG_ONLY or INSTANCE_ONLY else ('cxx', 'dispatch') if QUEUE_ONLY else tuple(paths)
+image_names = ('root', 'system') if SELECTION_ONLY else ('root',) if FACTORY_ONLY else ('system',) if CONFIG_ONLY or INSTANCE_ONLY else ('cxx', 'dispatch') if QUEUE_ONLY else tuple(paths)
 images = {k: Macho(paths[k]) for k in image_names}
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
 md.detail = True
@@ -121,6 +123,15 @@ slices = [
 ]
 if QUEUE_ONLY:
     slices = []
+elif SELECTION_ONLY:
+    # New manager-selection dependencies only. Do not repeat the old root
+    # creator, manager added/getter, controller or model/config ranges.
+    slices = [
+        ('root-manager-factory-selection', 'root', 0x100531f50, 0xc0),
+        ('manager-create-factory-owner', 'system', 0x1f2e4ae64, 0x2bc),
+        ('manager-C1-forward', 'system', 0x1f2e4b120, 4),
+        ('manager-C2-factory-queue-owner', 'system', 0x1f2e4b2e0, 0x424),
+    ]
 elif FACTORY_ONLY:
     # Original LC_FUNCTION_STARTS delimits this concrete creator. It calls
     # the three named imports below; do not infer it from a nearby symbol.
@@ -180,7 +191,7 @@ data_ranges = [('model-vtable-context', 'system', 0x20e058f38, 0x28),
                ('manager-secondary-personality-slots', 'system', 0x20e057718, 0x18),
                ('manager-secondary-addresspoint', 'system', 0x20e0575e0, 0x18),
                ('root-personality-event-jump-table', 'root', 0x10114d135, 8)]
-if QUEUE_ONLY or INSTANCE_ONLY or FACTORY_ONLY:
+if QUEUE_ONLY or INSTANCE_ONLY or FACTORY_ONLY or SELECTION_ONLY:
     data_ranges = []
 elif CONFIG_ONLY:
     data_ranges = [('config-personality-update-vtable-slot', 'system', 0x20e056830, 8)]
@@ -205,12 +216,14 @@ for name, image, va, n in data_ranges:
 
 # Read current-cache export tries, not reconstructed nlist, to name new ABI/queue targets.
 exports = []
-export_images = () if FACTORY_ONLY else ('system',) if CONFIG_ONLY or INSTANCE_ONLY else ('cxx', 'dispatch') if QUEUE_ONLY else ('system', 'base', 'cxx', 'dispatch')
+export_images = () if FACTORY_ONLY else ('system',) if CONFIG_ONLY or INSTANCE_ONLY or SELECTION_ONLY else ('cxx', 'dispatch') if QUEUE_ONLY else ('system', 'base', 'cxx', 'dispatch')
+original_headers = {}
 for image in export_images:
     obj = images[image]
     base = next(s[1] for s in obj.segs if s[0] == '__TEXT')
     header = read(base, 32)
     commands = read(base + 32, struct.unpack_from('<I', header, 20)[0])
+    original_headers[image] = (base, header, commands)
     p = 0
     link = exp = None
     for _ in range(struct.unpack_from('<I', header, 16)[0]):
@@ -333,7 +346,7 @@ stub_specs = ((0x1f03c19b8, '_dispatch_async_f'), (0x1f03c1a0c, '_dispatch_group
 if CLIENT_ONLY:
     stub_specs = ((0x1f2fb16cc, '__Z9isPresentRKNSt3__110shared_ptrIK8RegistryEERK13PersonalityID'),
                   (0x1f2e82fe8, '_dispatch_async_and_wait'), (0x1f2e83084, '_dispatch_sync'))
-elif CONFIG_ONLY or INSTANCE_ONLY or FACTORY_ONLY:
+elif CONFIG_ONLY or INSTANCE_ONLY or FACTORY_ONLY or SELECTION_ONLY:
     stub_specs = ()
 for va, expected in stub_specs:
     data = read(va, 12); ins = list(md.disasm(data, va)); regs = {}; target = None; got_proof = None
@@ -373,6 +386,8 @@ if CONFIG_ONLY:
                int(e['va'], 16) == 0x20e056810 for e in exports):
         raise ValueError('config addresspoint lacks the concrete original vtable export')
 root_imports = []
+function_boundaries = []
+root_fixups = []
 if INSTANCE_ONLY:
     for va, prefix in ((0x1f2e66b4c, '__ZN2sd23IMSSubscriberControllerC1E'),
                        (0x1f2e66b6c, '__ZN2sd23IMSSubscriberControllerC2E')):
@@ -386,7 +401,7 @@ if INSTANCE_ONLY:
     if len(instruction) != 1 or instruction[0].mnemonic != 'b' or len(instruction[0].operands) != 1 or \
             instruction[0].operands[0].type != ARM64_OP_IMM or instruction[0].operands[0].imm != 0x1f2e66b6c:
         raise ValueError('controller C1 does not directly forward to the qualified C2')
-if FACTORY_ONLY:
+if FACTORY_ONLY or SELECTION_ONLY:
     # Root imports use the executable's original indirect symbol table.
     # On-disk lazy/fixup words are not live pointers and are not decoded
     # with a shared-cache slide mask. Save only the named stub bytes here.
@@ -432,15 +447,23 @@ if FACTORY_ONLY:
             address += value
             starts.append(address)
             value = shift = 0
-    if 0x100315488 not in starts or starts[starts.index(0x100315488)+1:][:1] != [0x100315924]:
+    if FACTORY_ONLY and (0x100315488 not in starts or starts[starts.index(0x100315488)+1:][:1] != [0x100315924]):
         raise ValueError('root shared-record creator boundaries differ from original metadata')
+    if SELECTION_ONLY:
+        for first, last in ((0x10052f524, 0x1005328cc), (0x100315488, 0x100315924)):
+            if first not in starts or starts[starts.index(first)+1:][:1] != [last]:
+                raise ValueError('root selection/target function boundary differs')
+            function_boundaries.append({'image': 'root', 'start': hex(first), 'end': hex(last),
+                'source': 'original LC_FUNCTION_STARTS in current root executable'})
     so, sn, strings, strings_n = sym
     io, count = indirect
     if so+16*sn > len(obj.d) or strings+strings_n > len(obj.d) or io+4*count > len(obj.d):
         raise ValueError('original root import tables exceed file')
-    for va, expected in ((0x10107f990, '__ZN2sd18IMSSubscriberModel6create'),
-                         (0x10107f99c, '__ZN2sd19IMSSubscriberConfig6create'),
-                         (0x10107f9a8, '__ZN2sd23IMSSubscriberController6create')):
+    import_specs = ((0x10107f4a4, '__ZN26SystemDeterminationManager6create'),) if SELECTION_ONLY else (
+        (0x10107f990, '__ZN2sd18IMSSubscriberModel6create'),
+        (0x10107f99c, '__ZN2sd19IMSSubscriberConfig6create'),
+        (0x10107f9a8, '__ZN2sd23IMSSubscriberController6create'))
+    for va, expected in import_specs:
         matches = [(a, n, first, stride) for a, n, first, stride in sections
                    if stride == 12 and a <= va and va+stride <= a+n and (va-a) % stride == 0]
         if len(matches) != 1:
@@ -470,8 +493,138 @@ if FACTORY_ONLY:
             'string_file_offset': hex(strings+string_index),
             'instructions': [f'{i.mnemonic} {i.op_str}' for i in instructions],
             'scope': 'original named import; not a live GOT pointer or a loaded call backend'})
+if SELECTION_ONLY:
+    # Exact exported manager signatures and original function starts; nlist
+    # remains a lead only. No old method ranges are read for these guards.
+    manager_parameters = ('RKNSt3__110shared_ptrI8RegistryEENS0_10unique_ptrIN2sd29IMSSubscriberFactoryInterface'
+                          'ENS0_14default_deleteIS8_EEEE')
+    for va, prefix in ((0x1f2e4ae64, '__ZN26SystemDeterminationManager6createE'),
+                       (0x1f2e4b120, '__ZN26SystemDeterminationManagerC1E'),
+                       (0x1f2e4b2e0, '__ZN26SystemDeterminationManagerC2E')):
+        matches = [e for e in exports if int(e['va'], 16) == va]
+        if len(matches) != 1 or matches[0]['flags'] != '0x0' or matches[0]['symbol'] != prefix+manager_parameters:
+            raise ValueError('manager selection lacks exact REGULAR constructor/create export')
+    ins = list(md.disasm(images['system'].read(0x1f2e4b120, 4), 0x1f2e4b120))
+    if len(ins) != 1 or ins[0].mnemonic != 'b' or len(ins[0].operands) != 1 or \
+            ins[0].operands[0].type != ARM64_OP_IMM or ins[0].operands[0].imm != 0x1f2e4b2e0:
+        raise ValueError('manager C1 does not directly forward to qualified C2')
+    base, _, commands = original_headers['system']
+    p = 0
+    link = function_starts = None
+    while p < len(commands):
+        if p+8 > len(commands):
+            raise ValueError('truncated original system load command')
+        cmd, size = struct.unpack_from('<II', commands, p)
+        if size < 8 or p+size > len(commands):
+            raise ValueError('invalid original system load command size')
+        if (cmd == 0x19 and size < 72) or (cmd == 0x26 and size < 16):
+            raise ValueError('truncated original system selection dependency')
+        if cmd == 0x19 and commands[p+8:p+24].split(b'\0')[0] == b'__LINKEDIT':
+            vm, _, fo, _ = struct.unpack_from('<4Q', commands, p+24)
+            link = (vm, fo)
+        elif cmd == 0x26:
+            function_starts = struct.unpack_from('<II', commands, p+8)
+        p += size
+    if not link or not function_starts or not function_starts[1]:
+        raise ValueError('original system function starts unavailable; no extracted substitute')
+    off, size = function_starts
+    data = read(link[0]+off-link[1], size)
+    (OUT/'system-function-starts.original-data.bin').write_bytes(data)
+    starts = []
+    address = base
+    value = shift = 0
+    for byte in data:
+        value |= (byte & 127) << shift
+        if byte & 128:
+            shift += 7
+            if shift > 63:
+                raise ValueError('system function-start ULEB overflow')
+        else:
+            if value == 0:
+                break
+            address += value
+            starts.append(address)
+            value = shift = 0
+    for first, last in ((0x1f2e4ae64, 0x1f2e4b120), (0x1f2e4b120, 0x1f2e4b124), (0x1f2e4b2e0, 0x1f2e4b704)):
+        if first not in starts or starts[starts.index(first)+1:][:1] != [last]:
+            raise ValueError('original system selection function boundary differs')
+        function_boundaries.append({'image': 'system', 'start': hex(first), 'end': hex(last),
+            'source': 'current-cache original LC_FUNCTION_STARTS'})
+    # Root pointer format comes from its own LC_DYLD_CHAINED_FIXUPS. A root
+    # disk word is never decoded with the shared-cache slide-v2 mask.
+    obj = images['root']
+    p = 32
+    fix = None
+    while p < 32 + struct.unpack_from('<I', obj.d, 20)[0]:
+        cmd, size = struct.unpack_from('<II', obj.d, p)
+        if cmd == 0x80000034:
+            fix = struct.unpack_from('<II', obj.d, p+8)
+        p += size
+    if not fix or fix[0]+fix[1] > len(obj.d):
+        raise ValueError('root chained fixup metadata unavailable')
+    off, size = fix
+    version, startoff, _, _, _, _, symbols_format = struct.unpack_from('<7I', obj.d, off)
+    if version != 0 or symbols_format != 0 or startoff+4 > size:
+        raise ValueError('unsupported original root chained fixup header')
+    start = off+startoff
+    count = struct.unpack_from('<I', obj.d, start)[0]
+    if count != len(obj.segs) or startoff+4+4*count > size:
+        raise ValueError('root chained fixup segment table mismatch')
+    base = next(s[1] for s in obj.segs if s[0] == '__TEXT')
+    va = 0x1015494d8
+    matches = [(i, s) for i, s in enumerate(obj.segs) if s[1] <= va and va+8 <= s[1]+s[4]]
+    if len(matches) != 1:
+        raise ValueError('root factory slot not one file-backed segment')
+    index, (_, address, _, fo, file_size) = matches[0]
+    relative = struct.unpack_from('<I', obj.d, start+4+4*index)[0]
+    if not relative or startoff+relative+22 > size:
+        raise ValueError('root factory slot segment lacks chained starts')
+    meta = start+relative
+    metasz, pagesz, fmt, segoff, maxptr, pages = struct.unpack_from('<IHHQIH', obj.d, meta)
+    if fmt != 6 or pagesz != 0x4000 or maxptr or base+segoff != address or metasz < 22+2*pages or startoff+relative+metasz > size:
+        raise ValueError('unsupported original root format6 segment metadata')
+    page, offset = divmod(va-address, pagesz)
+    if page >= pages:
+        raise ValueError('root factory slot page exceeds chained table')
+    entry = struct.unpack_from('<H', obj.d, meta+22+2*page)[0]
+    if entry == 0xffff or entry & 0x8000:
+        raise ValueError('root factory slot needs unsupported missing/multi chain')
+    cursor = entry
+    chain = []
+    found = False
+    while cursor <= pagesz-8:
+        fileoff = fo+page*pagesz+cursor
+        if fileoff+8 > fo+file_size:
+            raise ValueError('root chain leaves file-backed segment')
+        raw = struct.unpack_from('<Q', obj.d, fileoff)[0]
+        delta = ((raw >> 51) & 0xfff)*4
+        chain.append({'offset': hex(cursor), 'raw': hex(raw), 'delta': delta})
+        found |= cursor == offset
+        if not delta:
+            break
+        if delta < 4 or cursor+delta > pagesz-8:
+            raise ValueError('root chain leaves page')
+        cursor += delta
+    if not found:
+        raise ValueError('root factory slot is not an original format6 chain member')
+    raw = struct.unpack('<Q', obj.read(va, 8))[0]
+    if raw >> 63 or (raw >> 36) & 0x7fff:
+        raise ValueError('factory slot is not an untagged format6 rebase')
+    target = base+(raw & ((1 << 36)-1))
+    if target != 0x100315488:
+        raise ValueError('root factory+30 target differs from retained creator')
+    (OUT/'root-factory-plus30.original-data.bin').write_bytes(obj.read(va, 8))
+    (OUT/'root-factory-fixup-header.original-data.bin').write_bytes(obj.d[off:off+28])
+    (OUT/'root-factory-segment-starts.original-data.bin').write_bytes(obj.d[meta:meta+metasz])
+    root_fixups.append({'va': hex(va), 'raw': hex(raw), 'target': hex(target),
+        'format': fmt, 'fixup_offset': hex(off), 'starts_offset': hex(startoff),
+        'segment_index': index, 'segment_address': hex(address), 'segment_file_offset': hex(fo),
+        'segment_starts_offset': hex(meta), 'page_size': pagesz, 'page_index': page,
+        'page_start': hex(entry), 'chain': chain, 'is_original_chain_member': True,
+        'scope': 'original root format6 rebase, not loaded GOT or shared-cache slide-mask'})
 proof_name = 'original-' + args.mode + '-proof.json'
 (OUT/proof_name).write_text(json.dumps({'scope':'Original static context ABI; not loaded backend or live call/SMS verification',
     'sources': {k:str(p) for k,p in paths.items()}, 'slices':proof, 'data':data_proof, 'exports':exports,
-    'optimized_queue_stubs':stubs, 'root_imports':root_imports, 'original_reads':reads}, indent=2)+'\n')
-print(f'{len(proof)} text ranges; {len(data_proof)} data ranges; {len(exports)} exports; qualified ABI targets={len(stubs)}; root imports={len(root_imports)}')
+    'optimized_queue_stubs':stubs, 'root_imports':root_imports, 'function_boundaries':function_boundaries,
+    'root_fixups':root_fixups, 'original_reads':reads}, indent=2)+'\n')
+print(f'{len(proof)} text ranges; {len(data_proof)} data ranges; {len(exports)} exports; qualified ABI targets={len(stubs)}; root imports={len(root_imports)}; root fixups={len(root_fixups)}')

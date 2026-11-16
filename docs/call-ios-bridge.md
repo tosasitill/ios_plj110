@@ -2646,3 +2646,54 @@ selected string x21传给真export **`CFDictionarySetValue186e80b34`**。
 及`metadata-r1/convert-r1/keys-r1/targets-r1/exports-r1/`。`convert-r1`复用首metadata，
 未为已闭metadata/receive/SQL重采；独立review只读已有证据。没有生产SMS行为修改、测试、
 设备/数据库读取、镜像复检或ready/ACK伪造；强Model到通知ID和当前Messages最终验收仍另缺。
+
+## 2026-11-16 Root factory 的实际选择与 Manager owner：仍无逐动作 capture
+
+本轮只补前节尚未资格化的选择输入：维护reader新增`selection`模式，读取root
+`100531f50..100532010`和system Manager create/C1/C2共**4个新text范围1956B**，
+另核1个root named import（12B）、1个root factory槽（8B）及必要函数表/fixup元数据。
+实际stdout已完成`4 text ranges; 0 data ranges; 3 exports; qualified ABI targets=0;
+root imports=1; root fixups=1`且完整proof已落盘，stderr为空；但外层zsh随后写readonly
+`status`失败、wrapper **exit1**，**reader独立数值exit未知**，不补写exit0或重采。
+这里`0 data ranges`只指数值列表，不排除上述独立资格化槽与元数据。
+
+### 被选入的 unique factory 到原 creator
+
+- Root `100531f8c..1fdc`从输入Registry强pair（x20）retain并创建24B factory，安装
+  addresspoint **`1015494a8`**，将同Registry pointer/control存其+8/+10并retain。
+  `100531fe0..1ff0`以unique_ptr间接地址x1=&sp8和同Registry pair x0=x20，调用原
+  named import **`10107f4a4`**；原indirect/nlist确认其为Manager::create，不以名字线索替代原表。
+- System真export **create `1f2e4ae64`**在`4ae98..4aeac`取走并清输入unique_ptr，
+  将同factory交给 **C2 `1f2e4b2e0`**；真 **C1 `1f2e4b120`**只有单B直达C2，无VTT改参。
+  C2 `4b4f8/4b4fc`再次取走并清中间unique_ptr，**`4b50c`保存于manager+60**。
+- 原root `LC_DYLD_CHAINED_FIXUPS`与所在page-chain确认addresspoint+30的
+  **`1015494d8`**属于**format6 / DYLD_CHAINED_PTR_64_OFFSET**，原word
+  `0x10000000315488`解析为 **`100315488`**；不用shared-cache slide mask。
+  原root `LC_FUNCTION_STARTS`同时核selection所在函数及该目标边界。由此接上旧added路径
+  `1f2e521c0`读取manager+60、`1f2e52200`调用virtual+30与前节保留的root creator。
+
+这是原件中**实际传入并由Manager拥有的factory选择链**，不再仅是孤立creator的三次构造关联；
+仍不是当前设备live GOT、已加载MTK backend或运行时安装验收。
+
+### 同 queue 参数不等于 record/Client/UUID snapshot
+
+C2 `1f2e4b348..370`以null attribute、qos0x19/relative priority0调用stub
+`1f2e83024`，随后将stub **`1f2e83030`**的返回对象保存**manager+18**；两stub的dispatch
+名字仅复用旧indirect线索，本轮没有重新资格化其真实目标或验证实机队列属性。
+原C2 `4b530..554`及旧added/getter沿用该+18对象作队列参数。旧added将强queue、
+weak-lock后的manager delegate+38强pair及PersonalityID传入factory+30；原creator按该ID
+从Registry取得record，并将同queue参数转给controller。它没有本次CallInfo/UUID输入。
+
+旧getter block `1f2e61a04`按manager+68 map取得并retain controller，virtual+60到
+`1f2e68b38`仅返回controller+d8/e0的Client强pair，**不返回当前record/PBI**。
+一次初始record/controller关联、后续Client getter和CallFactory action属于不同调用/时点；
+同queue参数不能自动使它们成为原子snapshot。仍未闭真实逐动作的强record+Client capture
+及本次CallInfo/UUID关联，不新增无caller adapter、snapshot或installer API，也不把可变PBI、
+controller counter/clientId或44成功当record revision/native epoch。
+
+紧凑契约、retained原件及原命令归档为`x9/out/call-context-capture-review/`的
+`selection-owner-contract.{json,txt}`、`qualified-selection-r1/original-selection-proof.json`和
+`qualification-wrapper-result.txt`（保留原source-head/采集路径）。维护重放入口为
+`python3 x9/tools/call_context_evidence.py --mode selection --out x9/out/<新目录>`；
+r1之后exact ctor export、C1 operands、page-chain末节点及system load-command size/end
+guard仅静态AST parse/diff review，**没有重跑reader或旧模式、测试、编译、CI、boot/设备动作**。
