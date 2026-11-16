@@ -165,6 +165,21 @@ struct image_attachment {
     CFStringRef source, destination;
     CFTypeID type;
 };
+int x9_hevc_read_pixel_aspect(CFDictionaryRef aspect, uint32_t *horizontal, uint32_t *vertical)
+{
+    if (!horizontal || !vertical || horizontal == vertical) return EINVAL;
+    *horizontal = *vertical = 0;
+    if (!aspect) return 0;
+    if (CFGetTypeID(aspect) != CFDictionaryGetTypeID()) return EBADMSG;
+    CFTypeRef h = CFDictionaryGetValue(aspect,kCMFormatDescriptionKey_PixelAspectRatioHorizontalSpacing);
+    CFTypeRef v = CFDictionaryGetValue(aspect,kCMFormatDescriptionKey_PixelAspectRatioVerticalSpacing);
+    int64_t x = 0, y = 0;
+    if (!h || !v || CFGetTypeID(h) != CFNumberGetTypeID() || CFGetTypeID(v) != CFNumberGetTypeID() ||
+        !CFNumberGetValue(h,kCFNumberSInt64Type,&x) || !CFNumberGetValue(v,kCFNumberSInt64Type,&y) ||
+        x <= 0 || y <= 0 || x > UINT32_MAX || y > UINT32_MAX) return EBADMSG;
+    *horizontal = (uint32_t)x; *vertical = (uint32_t)y;
+    return 0;
+}
 
 /* ICC and nclx-derived strings are both retained. Selection/precedence belongs
  * to the consumer's ColorSync path, not this decoder. Format-description keys
@@ -222,18 +237,8 @@ OSStatus x9_hevc_attach_image_metadata(CMVideoFormatDescriptionRef format,
             return kVTVideoDecoderBadDataErr;
         if (CFEqual(entries[i].source,
                     kCMFormatDescriptionExtension_PixelAspectRatio)) {
-            CFDictionaryRef aspect = values[i];
-            CFTypeRef horizontal = CFDictionaryGetValue(aspect,
-                kCMFormatDescriptionKey_PixelAspectRatioHorizontalSpacing);
-            CFTypeRef vertical = CFDictionaryGetValue(aspect,
-                kCMFormatDescriptionKey_PixelAspectRatioVerticalSpacing);
-            int64_t h = 0, v = 0;
-            if (!horizontal || !vertical ||
-                CFGetTypeID(horizontal) != CFNumberGetTypeID() ||
-                CFGetTypeID(vertical) != CFNumberGetTypeID() ||
-                !CFNumberGetValue(horizontal, kCFNumberSInt64Type, &h) ||
-                !CFNumberGetValue(vertical, kCFNumberSInt64Type, &v) ||
-                h <= 0 || v <= 0 || h > INT32_MAX || v > INT32_MAX)
+            uint32_t h, v;
+            if (x9_hevc_read_pixel_aspect(values[i],&h,&v))
                 return kVTVideoDecoderBadDataErr;
         }
         if (entries[i].type == CFNumberGetTypeID()) {
@@ -270,6 +275,18 @@ OSStatus x9_hevc_validate_hdr_metadata(CMVideoFormatDescriptionRef format, CVPix
     struct x9_hevc_hdr hdr;
     OSStatus hdr_error = x9_hevc_read_hdr_description(format,&hdr);
     if (hdr_error) return hdr_error;
+    CFTypeRef aspect = CMFormatDescriptionGetExtension(format,kCMFormatDescriptionExtension_PixelAspectRatio);
+    if (aspect) {
+        uint32_t eh, ev, ah, av;
+        CFTypeRef actual = CVBufferCopyAttachment(pixel,kCVImageBufferPixelAspectRatioKey,NULL);
+        int e = x9_hevc_read_pixel_aspect(aspect,&eh,&ev);
+        if (!e) e = x9_hevc_read_pixel_aspect(actual,&ah,&av);
+        /* Cross products fit uint64 even at UINT32_MAX. Equivalent reduced
+         * spacing pairs are legal; a missing CV ratio cannot match. */
+        if (!e && (!ah || (uint64_t)eh*av != (uint64_t)ah*ev)) e = EBADMSG;
+        if (actual) CFRelease(actual);
+        if (e) return kVTVideoDecoderBadDataErr;
+    }
     CFStringRef cm[] = { kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
         kCMFormatDescriptionExtension_ContentLightLevelInfo,
         kCMFormatDescriptionExtension_AmbientViewingEnvironment };

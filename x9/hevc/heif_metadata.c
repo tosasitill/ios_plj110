@@ -12,6 +12,41 @@ static int put_number(CFMutableDictionaryRef d, CFStringRef key, uint32_t n)
     CFDictionarySetValue(d,key,v); CFRelease(v); return 0;
 }
 static uint32_t code16(const uint8_t *p) { return (uint32_t)p[0] << 8 | p[1]; }
+static uint32_t code32(const uint8_t *p)
+{ return (uint32_t)p[0]<<24 | (uint32_t)p[1]<<16 | (uint32_t)p[2]<<8 | p[3]; }
+static int aspect_extension(const struct x9_heif_document *document,
+    const struct x9_heif_property *p, CFMutableDictionaryRef info,
+    CFMutableDictionaryRef extensions, uint32_t *seen)
+{
+    if (p->type != X9_HEIF_TYPE('p','a','s','p')) return 0;
+    if (*seen) return EEXIST;
+    if (p->payload.bytes != 8) return EBADMSG;
+    const uint8_t *raw = NULL;
+    int e = x9_heif_span_data(document,p->payload,&raw);
+    if (e) return e;
+    uint32_t h = code32(raw), v = code32(raw+4);
+    if (!h || !v) return EBADMSG;
+    CFNumberRef horizontal = number(h), vertical = number(v);
+    CFDictionaryRef aspect = NULL;
+    if (!horizontal || !vertical) e = ENOMEM;
+    if (!e) {
+        const void *keys[] = { kCMFormatDescriptionKey_PixelAspectRatioHorizontalSpacing,
+            kCMFormatDescriptionKey_PixelAspectRatioVerticalSpacing };
+        const void *values[] = { horizontal,vertical };
+        aspect = CFDictionaryCreate(NULL,keys,values,2,
+            &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+        if (!aspect) e = ENOMEM;
+    }
+    if (!e) {
+        CFDictionarySetValue(info,kCMFormatDescriptionExtension_PixelAspectRatio,aspect);
+        if (extensions) CFDictionarySetValue(extensions,kCMFormatDescriptionExtension_PixelAspectRatio,aspect);
+        *seen = 1;
+    }
+    if (aspect) CFRelease(aspect);
+    if (horizontal) CFRelease(horizontal);
+    if (vertical) CFRelease(vertical);
+    return e;
+}
 static int put_cicp(CFMutableDictionaryRef d, const uint32_t codes[3])
 {
     CFStringRef raw_keys[] = { CFSTR("X9ColorPrimariesCodePoint"),CFSTR("X9TransferCodePoint"),CFSTR("X9MatrixCodePoint") };
@@ -117,7 +152,7 @@ int x9_heif_copy_item_info(const struct x9_heif_document *document,
     CFMutableArrayRef derived = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
     CFMutableArrayRef item_offsets = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
     CFMutableArrayRef prem = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
-    uint32_t color_seen = 0, hdr_seen = 0;
+    uint32_t color_seen = 0, hdr_seen = 0, aspect_seen = 0;
     int e = !info || !properties || !aux || !derived || !item_offsets || !prem ? ENOMEM : 0;
     if (!e) e = put_number(info,CFSTR("ItemID"),image->id);
     if (!e) e = put_number(info,CFSTR("Width"),image->width);
@@ -167,6 +202,7 @@ int x9_heif_copy_item_info(const struct x9_heif_document *document,
         }
         if (!e) { CFArrayAppendValue(properties,record); if (extensions) e = color_extension(document,p,extensions,&color_seen); }
         if (!e) e = hdr_extension(document,p,info,extensions,&hdr_seen);
+        if (!e) e = aspect_extension(document,p,info,extensions,&aspect_seen);
         if (record) CFRelease(record);
         if (type) CFRelease(type);
         if (raw) CFRelease(raw);

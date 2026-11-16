@@ -577,6 +577,16 @@ static int property_parse(const struct x9_heif_document *d,
         if (!e && (c.at == c.end || !d->data[c.at] ||
             !memchr(d->data+c.at,0,(size_t)(c.end-c.at)))) e = EBADMSG;
         break;
+    case T('p','a','s','p'):
+        /* Descriptive ordinary Box: two unsigned32 sample spacings. Never
+         * treat the first word as a FullBox prefix or a raster resize. */
+        bit = 128;
+        if (p->payload.bytes != 8) e = EBADMSG;
+        if (!e) e = u32(&c,4,&out->pixel_aspect_h);
+        if (!e) e = u32(&c,4,&out->pixel_aspect_v);
+        if (!e && (!out->pixel_aspect_h || !out->pixel_aspect_v)) e = EBADMSG;
+        if (!e) e = finish(&c);
+        break;
     case T('m','d','c','v'):
         bit = 16; if (p->payload.bytes != 24) e = EBADMSG;
         break;

@@ -11,6 +11,10 @@
  * selected BitstreamVUI, ResolvedColr, actual IRAPNALUnitType and raw
  * NoOutputOfPriorPicsFlag (not inferred NoRaslOutputFlag). Container CICP2 or
  * missing fields use the picture's actual PPS->SPS, never CM defaults.
+ * This item's descriptive pasp uses the standard CM/CV sample-aspect keys,
+ * preserving unsigned32 raw spacings in info and verifying the CM ratio.
+ * It describes the coded sample, not a square-pixel conversion or a claim
+ * that this untransformed sample is the fully rendered item.
  * Transform/clap/auxiliary properties are NOT applied by VT;
  * the caller must process them to deliver a complete image. Metadata is not
  * silently discarded to make a color tile look like a finished HEIF file.

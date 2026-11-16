@@ -103,6 +103,13 @@ static int visit(struct x9_heif_plan *p, uint32_t id, unsigned depth, uint32_t *
     if (!image) return ENOMEM;
     int e = x9_heif_get_image(p->document,id,image);
     if (!e && (image->width > X9_HEIF_MAX_DIMENSION || image->height > X9_HEIF_MAX_DIMENSION)) e = EMSGSIZE;
+    /* Coded-sample CM/CV forwarding supports non-square pasp. This packed
+     * renderer does not yet carry a physical sample metric through ordered
+     * crops/rotations/derived placements. Reject before ANY source callback,
+     * rather than silently lose even a nonessential descriptive property or
+     * pretend Normal pixel transfer has made the samples square. Equal raw
+     * spacings (not only 1,1) need no aspect correction. */
+    if (!e && image->pixel_aspect_h != image->pixel_aspect_v) e = ENOTSUP;
     if (!e) {
         node->type = image->type; node->rows = image->rows; node->columns = image->columns;
         node->premultiplied = image->premultiplied_reference_count;

@@ -27,7 +27,11 @@ struct x9_heif_geometry {
  * This original entrypoint uses EXACT_SAMPLES: fractional clean-aperture
  * sizes/origins return ENOTSUP, never unannounced rounding/resampling. The
  * with_policy entrypoint can explicitly plan LINEAR_CEIL rasterization.
- * Arbitrary aux types remain in the graph. */
+ * Arbitrary aux types remain in the graph. Non-square pasp is rejected before
+ * callbacks: this packed plan does not yet implement aspect-aware transform/
+ * derived metric propagation. Square pasp (any equal positive spacings) is
+ * retained and needs no correction. Coded CM sample forwarding independently
+ * supports non-square pasp. */
 int x9_heif_plan_create(
     const struct x9_heif_document *, uint32_t item_id, struct x9_heif_plan **);
 int x9_heif_plan_create_with_policy(const struct x9_heif_document *, uint32_t item_id,

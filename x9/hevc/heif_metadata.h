@@ -7,6 +7,9 @@
  * Raw ordered properties, dimg, auxiliary and item-offset IDs survive. Optional
  * extensions receives both ICC and nclx without inventing their precedence,
  * and this item's original mdcv/clli/amve as exact big-endian CM data.
+ * Descriptive pasp creates an owned standard CM sample-aspect dictionary
+ * with exact unsigned32 horizontal/vertical values, including in info alone.
+ * It is not colr/inherited color, a resize, or a transform-metric inference.
  * amve is nominal source environment, never a derived display condition. */
 int x9_heif_copy_item_info(const struct x9_heif_document *,
     const struct x9_heif_image *, CFDictionaryRef *info, CFMutableDictionaryRef extensions);

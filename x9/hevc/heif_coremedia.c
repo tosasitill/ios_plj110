@@ -2,6 +2,7 @@
 #include "heif_items.h"
 #include "heif_metadata.h"
 #include "hevc_bitstream.h"
+#include "vt_image_metadata.h"
 #include <CoreVideo/CoreVideo.h>
 #include <VideoToolbox/VideoToolbox.h>
 #include <errno.h>
@@ -66,6 +67,17 @@ static int format_hdr(CMVideoFormatDescriptionRef format, CFDictionaryRef reques
             (n && CFNumberIsFloatType(actual)))) return EBADMSG;
     }
     return 0;
+}
+static int format_aspect(CMVideoFormatDescriptionRef format, CFDictionaryRef requested)
+{
+    CFTypeRef aspect = CFDictionaryGetValue(requested,kCMFormatDescriptionExtension_PixelAspectRatio);
+    if (!aspect) return 0; /* Do not invent container provenance for CM/SPS defaults. */
+    uint32_t eh, ev, ah, av;
+    int e = x9_hevc_read_pixel_aspect(aspect,&eh,&ev);
+    if (!e) e = x9_hevc_read_pixel_aspect(CMFormatDescriptionGetExtension(format,
+        kCMFormatDescriptionExtension_PixelAspectRatio),&ah,&av);
+    if (!e && (!ah || (uint64_t)eh*av != (uint64_t)ah*ev)) e = EBADMSG;
+    return e;
 }
 OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
     CMSampleBufferRef *out, CFDictionaryRef *info_out, struct x9_hevc_vui *vui_out, struct x9_hevc_hdr *hdr_out)
@@ -182,6 +194,7 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
     }
     result = parse_error(format_catalog(format,data+image->hvcc.offset,&config));
     if (!result) result = parse_error(format_hdr(format,extensions));
+    if (!result) result = parse_error(format_aspect(format,extensions));
     if (result) goto done;
     result = CMBlockBufferCreateWithMemoryBlock(NULL,NULL,bytes,NULL,NULL,0,bytes,0,&block);
     if (!result) result = CMBlockBufferReplaceDataBytes(au,block,0,bytes);

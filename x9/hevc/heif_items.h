@@ -35,6 +35,7 @@ struct x9_heif_image {
     uint32_t id, type, width, height, hidden;
     uint32_t location_present, construction_method;
     uint32_t channels, bit_depth[4]; /* raw pixi; absent remains0 */
+    uint32_t pixel_aspect_h, pixel_aspect_v; /* raw pasp u32; absent remains0 */
     uint32_t rows, columns, derived_count;
     uint32_t derived[X9_HEIF_MAX_ITEMS]; /* ordered dimg, no dedup/sorting */
     uint16_t canvas_fill_rgba[4]; /* iovl: unmodified unsigned16 RGB+alpha */
