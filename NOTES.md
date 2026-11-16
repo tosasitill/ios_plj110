@@ -158,6 +158,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 NFC / iMessage / App Store：只读验证门槛评估（未实现）
+
+- **范围/提交**：用户续问接入/验证修复门槛；单代理 `feat/apple-services-assessment`，初始main/origin **`ff9e900f`**，不操作同期其它工作树。报告提交 **`aff607fe`**，`docs/2026-11-16_reverse-nfc-apple-services-report.md`。无ADB/fastboot、RF/APDU发送、登录/激活、短信、购买、账户凭据读取、根盘/分区/共享输入修改、构建/CI/设备启动；CI run ID：无。
+- **NFC观察**：已有实机DT板级SN220T；I2C14@162c0000、0x28、400kHz，IRQ/VEN/CLKREQ/VBAT GPIO213/19/18/15；eSE SPI5@161b0000、19.2MHz上限。对应OPPO sn_nci源码提供IRQ/NCI收发与eSE冷复位回复隔离，不是已验证XNU会话。330持久化归档最新nfcd `_loadHW` 于06:06:12.859Z **Failed to open session; hwState=3**，枚举/精确失败点未命名。先NCI真初始化/标签响应→CoreNFC；HCE/eSE applet/Wallet/ApplePay另层，读卡≠复制卡或支付资格。
+- **Apple服务观察/纠偏**：根盘克隆AppStore.app与原商店daemons在，归档appstored有实际运行，旧sweet README“没有AppStore”不代表当前。itunesstored/amsaccountsd有 **NSURLError -1009**；但同boot akd06:06:56出现 **End provisioning HTTP200→ADIProvisioningEnd -42410→AKAnisetteError -8004**，另有BAA签名 **devicecheck.baa -10001→MobileActivation -1**，不能以200称身份验证成功或把所有请求判成断网。apsd06:06:38 **No identity in keychain→Copy activation identity→_APSCopyActivationIdentity失败**；IDS有keychain/protection identity错误和madrid registrationError -1，内部状态不是已闭合的远端拒绝。
+- **关键门槛/推断**：本地Hactivation/Activated与有效activation identity、APNs/IDS注册不同。330 AKS wrap sel10还unsupported；当前源码已含后续软件wrap修复，**未用新启动验证这些Apple服务**，也不会自动签发身份/实现BAA。fairplay.H2默认禁用的源码及330两个disabled DB状态已复核，是避免等待环不是DRM修复；AppSync Signing.m明确拒绝非零cryptid，安装/重签≠解密/商店许可/receipt。不能从串名判所有流程强制SEP，也不能承诺用常量标识/头修复服务端信任。
+- **产物/下一步**：私有证据 `x9/out/apple-services-assessment-20261116/`（scope/timeline/hash18输入/launch+app库存/脱敏console/service-proof/current-boot-anisette/字符串leads/field-journal；最终归档到主checkout同名out）。优先新AKS非敏感持久化验证→按请求闭合-1009与ADI -42410/BAA下层依赖→activation identity/APNs→邮箱IDS双向收发；手机号验证SMS另排。NFC独立NCI到已知标签闭环，再CoreNFC。未宣称实际NFC、iMessage、原AppStore登录/下载/运行成功；本轮只完成评估。
+
 #### 2026-11-16 SMS 同 ID 退休 / ACK（入口 checkpoint；下游仍未闭合）
 
 - **真实ACK入口**：原已读registrar1004b9764..1004b977c供应 **10123c366=kSmsAcknowledgeMessage → handler1004bad6c，w3=3**，不猜flags语义。完整原FS1004bad6c..1004baf70/516B从上轮保留NEW原字节promote，actual exit0、没有新读原text。经Registry::getServiceMap与旧getter1000a95fc得到service；kSmsMessageID按unsigned转换，default **-1**（retrieve为0），另取尚未资格key10123c5e5，import1010817b4的default为0。service非空时，只有 `((ID == -1) OR 第二转换值)` 的bit0为0才在1004bae74实际调service virtual **+e0**，x1保原ID；否则以w0=0进入reply包装。第二字段、包装import101085084和reply key10123c603均未补猜测名字；不能把该virtual调用/回复认作map删除、Messages COMMIT或物理ACK。
