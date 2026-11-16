@@ -1326,12 +1326,60 @@ vtable`+a0`取得队列并交driver factory；block capture保留新driver强pai
 **caller强controller → driver弱pair → 成功weak lock的临时强lifetime → 原MT
 details/同capture ACK callback → 同controller+20 dispatch**。
 
-**首缺仍是supplied/loaded controller的concrete vtable+20实现，以及它生产
-Model/status到通知uint ID的同源关联**。本轮不再扩server或该实现；原件可达接线不等于
+**该轮首缺是supplied/loaded controller的concrete vtable+20实现，以及它生产
+Model/status到通知uint ID的同源关联**。该轮没有扩server或该实现；原件可达接线不等于
 当前设备已执行、Messages成功record/COMMIT/重开显示或WMS37物理ACK成功。
 新原code按每段≤1KiB只读，原件/解码/provenance/命令与exit记录在
 `x9/out/sms-notification-owner/owner-boundary.{txt,json}`及相邻`*.reads.json`；
 未改生产、未读短信数据库、未运行测试/构建或操作设备。
+
+#### Concrete sms::Controller+68 → parser异步response owner（2026-11-16）
+
+本轮只推进上节的supplied controller边。原root executable indirect/nlist与12B stub
+确认`CSISMSCommandDriver::create` import **`10107e928`**；单target direct-BL机械库存
+仅命中`1003ca1a4`。原`LC_FUNCTION_STARTS`限定wrapper
+**`1003ca098..1003ca2d8 /576B`**，它retain/copy入参`x2`强pair后原样交create，
+不是concrete constructor。仅再对这个新wrapper做一次single-target库存，两个命中
+`1007eb1cc/2e4`均属于原函数 **`1007ea650..1007eb9f0 /5024B`**；库存仍仅为lead。
+
+该原creator分配`0xa80`字节object，`1007ea6d4..6e8`把主AP **`10159e758`**和
+secondary AP **`10159e958`**安装到同object与其 **`+68`**。原output pair保存同object，
+其own `+48/+50`弱pair经lock取得强control后，`1007eb188..194`与`2b0..2bc`
+分别将**同object+68**及同control交给上述wrapper的`x2`（driver type分别为1/0）。
+原root format6 pagechain确认两个AP共享RTTI **`10159edd8`**，原name
+**`N3sms10ControllerE`**；secondary offset-to-top为 **`-0x68`**。
+这把typed `SmsControllerInterface`参数接到原concrete **`sms::Controller+68`**，
+不是按附近符号或shared-cache slide mask猜root磁盘指针。
+
+该secondary AP的 **`+20`**槽`10159e978`经原format6实际chain membership指向
+**`1007f898c`**；原8B thunk先`sub x0,x0,#0x68`，再跳到
+**`1007f7918..1007f8500 /3048B`**。这静态闭合真正concrete+20实现；
+没有据原disk rebase宣称当前设备已加载或调用它。
+
+该实现保留原details与原callback入参，按details `+8`的原format分支。
+普通解析路径经`100813488..134e0 /88B`构造strong **`CTParserXPCRequest`**，
+再经`1007f85a0..88cc /812B`以同一owned-copy details强pair调用`MTSmsDetailsSerialized`并填请求。
+上述constructor/serialization、`MTSmsDetails` copy及lock均由必要原root named imports
+确认；它们不是`sms::Model` constructor。controller原 **`+a70/+a78`**在creator中
+保存CTParserClient strong pair；`1007f8140..14c`把同请求及parser callback function
+交原import **`10107e250`**，签名为`CTParserClient::sendXPCMessage`接收request强pair与
+`function<void(shared_ptr<CTParserXPCResponse>)>`。这里是parser异步入口，不是数据库保存。
+
+parser callback AP **`1015a0d30`**的`+30`槽`1015a0d60`经原format6链指向
+**`100813f14..100814254 /832B`**。operator于`100813f40..44`move入参response
+ptr/control到本地并清原pair，再lock同capture弱controller；原named
+`CTParserXPCResponse::hasError`调用返回w0=0且owner有效时，`100813fb0..10081400c`保留同response
+强pair、同details强pair及原callback输入，交controller方法 **`1007f622c`**消费。
+**到此收束，未读该消费者或server，也未证明它生产Model/status4→通知uint ID。**
+另一路`1007f7ccc..ce4`调用原callback时传 **raw6/null strong pair**；此raw enum语义
+没有新资格，不命名为某类失败、更不当保存或物理ACK结果。
+
+新原text按每段≤1KiB读；七个完整函数合 **10388B**，另八个named stub共96B。
+所有r1采样/库存实际exit0，准确命令、stdout/stderr/数值exit、原bytes/offset、复用原
+function/fixup metadata与窄合同保存在`x9/out/sms-controller-dispatch/`。前置wildcard
+失败保留exit1，最终reader guards维护后未重采。尚缺`1007f622c`的response→Model/status
+producer及通知关联；GUID→成功record、当前Messages COMMIT/重开/物理ACK/MO验收仍另缺。
+未改生产SMS行为、未测试/编译、未操作设备/mount或读取数据库。
 
 ### WMS37物理ACK completion：实际host receipt后退休
 
