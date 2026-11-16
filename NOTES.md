@@ -160,10 +160,27 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 #### 2026-11-16 屏下超声波指纹：只读可行性评估（未 bring-up）
 
-- **范围/提交**：用户要求评估系统发现/注册、解锁和支付的真实难度；单代理隔离 `feat/fingerprint-assessment`，基线 main/origin `39a02fa8`；报告提交 **`2998514a`**，`docs/2026-11-16_reverse-fingerprint-bringup-report.md`。主checkout当时在SMS分支且有未提交交接，未切换或修改它。本轮无 ADB/fastboot、模板读取/录入、根盘/分区/共享输入修改、构建、CI或设备启动；CI run ID：无。
+- **范围/提交**：用户要求评估系统发现/注册、解锁和支付的真实难度；单代理隔离 `feat/fingerprint-assessment`，基线 main/origin `39a02fa8`；报告提交 **`2998514a`**、交接 **`da00836e`**，`docs/2026-11-16_reverse-fingerprint-bringup-report.md`。主checkout当时在SMS分支且有未提交交接，未切换或修改它。合并保留同期main **`d738222b`** 的完整SMS/电源交接；main当时由power-policy worktree占用，不操作该工作树。本轮无 ADB/fastboot、模板读取/录入、根盘/分区/共享输入修改、构建、CI或设备启动；CI run ID：无。
 - **观察**：已有实机DT为SPI7 `0x161f0000`、mode0、35MHz上限，GPIO IRQ/reset/CS=5/7/85，dvdd 3.2V；面板 `ofp-fp-type=0x1c0`，与OPPO bit6 ultrasonic定义吻合。Goodix仅通用binding/注释线索，**型号、闭源算法/TA、实际采集与匹配位置未确认**。20H392根盘launch plist为 `biometrickitd.pearl`，限制 `pearl-sep`、匹配 `ApplePearlSEPDriver`；已有330磁盘归档跨多boot，4条backboardd该provider匹配均none，最后命中06:06:12Z，不是本轮新上机。框架同时有TouchID/Mesa名字和Pearl/auth-token leads，未证明可达Mesa后端，不作“D22绝无TouchID代码”断言。
 - **关键门槛/推断**：当前SweetKeyStore固定unlocked(0x4)，lock/unlock/assert为无状态成功，wrap固定可逆混淆；不能把真指纹驱动SpringBoard UI解锁称为密码/keybag/支付安全已完成。分层L0外围→L1真识别→L2原生注册→L3解锁/keybag→L4 LA/ACL/密钥→L5最终支付；普通支付App逐策略实测，ApplePay另有SE/受保护平台/凭据provisioning/服务端约束，本轮不能承诺原生支付。TEE可研究自建可信后端，但Android HAT/MTK TEE不是Apple SEP授权，可改本地契约不等于Apple原生信任链。
 - **产物/下一步**：私有只读 `x9/out/fingerprint-assessment-20261116/`（scope/timeline/workitems/evidence.json/field-journal，原DT/Apple文件hash及限定日志摘要），最终归档回main同名out保持路径可找。推荐先限定只读定位原厂HAL/driver/TA，判断XNU下是否能完成真实新录/匹配/错指拒绝/删除/重启闭环；密码/keybag状态机独立调查。**尚未证明任何真实指纹录入、匹配、系统注册、解锁或支付成功**；用户只要求评估，未启动实现任务。
+
+
+
+#### 2026-11-16 CPU/GPU 原厂参考负载调频与显示空闲（编译候选，待实机）
+
+- **范围/基线**：单代理 `feat/power-policy`，功能树 `.worktrees/power-policy`，实际 main 基线 **39a02fa8**；不改主 checkout `feat/sms-retrieve-route` 的未提交 NOTES，不动其它工作树/设备。overlay 三源文件加 resident include，未改 XNU patches、GPU280 allowlist、设备配置或原厂固件。
+- **实证**：只读最新 `~/330.txt`：56–70s GPU平均4–18%，CPU请求104/135/162×26MHz，`ui_boost=39/39` 多次；GPUEB ceiling=7、actual idx7，旧 governor 仍请求idx0，71s restores约600。旧输入路径250ms touch/recent swaps→500ms lease→CPU所有簇top/GPUfastest，静态与实跑一致。旧显示路径 `sweetfb_stayon` 缺省1忽略off；X9没有Qualcomm fDsi，原off分支只在fDsi非空时关面板；VSync不停，正常亮度又将DBV0夹到2。
+- **原厂来源/边界**：`.local/references/oppo-modules-dt-mt6993`（4d505a42）`vendor/oplus/kernel/cpu/uad/touch_boost.c` 默认小核1300000kHz、大/超大核0，100ms lease/150ms输入间隔；`cpufreq_uag_main.c` 默认target load80（multi_tl sys95、hmbird90是不同策略，未混用）。GPU参考GED按工作量调频及a16w `mali_kbase_csf_firmware.c:3523–3572`/PM IN_SLEEP、register macros：host-power GLB_REQ_STATE12..14 SLEEP=2，MCU_STATUS HALT=2且MCU_CONTROL bit31，wake先ACTIVE=0再清bit31+doorbell。这些是公开源码默认/协议，不宣称已采到PLJ110当前ColorOS闭源PowerHAL实际参数。
+- **实现**：CPU使用XNU `processor_cpu_load_info`（recount累计user/system/idle，32bit tick差值可回绕），按每簇最忙核×当前请求/80选真实LUT OPP；500MHz以上最低OPP为idle，100ms降频滞回，touch只有短时小核托底，lease到期/灭屏即时去托底，不因换帧/按住手指拉全簇top。85–95°C渐进CPU cap，未知温度不超LK基线；电压仍交MCUPM。GPU按真实采样间隔与doorbell→fence累计时间缩放，不再touch→max；900MHz只是活跃渲染floor，idle降最低OPP；GPUEB ceiling/floor纳入目标，仅有真实工作时纠正stack drift，不循环对抗热限频，负回包/uncertain停GPU策略但CPU继续。
+- **休眠实现**：灭屏清两边旧touch lease、事件序列防lost wake；无运行owner/async队列完成后先走原CSG SUSPEND+flush+AS1 detach，再经原host-power接口进MCU retention SLEEP，必须state ACK+HALT+doorbell-disable三者成立。AS0/L2/GPUEB POWER/ACTIVE及全部buffer保留；每个RenderOwner访问先ACTIVE→doorbell→fresh PING，display timer仅非阻塞触发唤醒。错误保留全部资源、不reset/不新DMA。`x9_gpu_sleep=0`禁MCU sleep但保留队列退休。确认display-idle且CPU后台peak<5%时 governor50→1000ms，display/job事件及时唤醒；删除每2s绑三核跑依赖加法的测频，暗屏日志30s。
+- **显示**：X9缺省 `sweetfb_stayon=0`（其它板仍1，可显式1恢复），off由既有LK DCS DBV0真清屏、不走正常亮度最小值夹制，wake还原最新亮度；取消/排完已武装GUI后停软件VSync/通知，on重arm；不新增SLEEP_IN/共享rail电源写。触摸/SCP/无线/UFS原工作流保持，不冒称整SoC suspend；特别 `dv=1` INIT-only/DDR高票与`ug=5`安全floor不改，不能把本轮称为原厂整机待机功耗。
+- **构建里程碑**：`prepare-local.py --check` actual exit0。首轮完整 `build.py all --boot-config x9/build/boot-device.json --name x9-power-policy-20261116` actual exit0，103/103 overlay，已链接/打包；它早于显示修补，不推荐该中间镜像。未跑测试脚本/测试套件、未重解包校验成功产物；无CI run ID（本轮是本地overlay构建）。最终源码提交后用唯一v2名称重编，结果待下条补记。scratch/原始构建输出 `x9/out/power-policy-20261116/`，没有设备写/ADB/fastboot/mailbox。
+- **构建失败/修正**：源码 `15ec6524` 的最终v2编译 actual exit1，102/103：user client直接访问protected `AppleCLCD::fVsync` 两处报错；没有v2 boot，旧对象未用于链接。改为public `x9PowerTimerArm()`封装，并在亮屏重置deadline。最终改用唯一v3名称重编；不得推荐失败v2或首轮中间包。
+- **待验收**：用户手动boot最终v3，连续触摸/滚动不应全簇top，停止活动后降频；锁屏应DBV0、停止VSync、`X9 GPU PM: MCU retention sleep confirmed`，随后`X9 POWER: display-idle ...1000ms`（后台负载忙可维持50ms）；电源键/自动亮屏需MCU awake+fresh PING、画面/触摸/亮度恢复，多轮锁/解锁和后台音频/蜂窝必须验证。尚无该策略的实机帧率/温度/睡醒结果，GPU热度仅保守CPU温度代理，不等价全SoC温控。
+
+- **最终v3构建**：源码 **fb94992b**，`build.py all --boot-config x9/build/boot-device.json --name x9-power-policy-v3-20261116` actual exit0；103/103 overlay、Image **31821824 B**、boot **14929920 B**，沿用GPU280，未生成plugin-package，设备保持280时无需mailbox。随后吸收同期main **5f406973**（SMS源码报告+NOTES-only，生产源码未变），保留全部SMS交接；NOTES插入冲突按两边内容完整合并，不覆盖主checkout未提交记录。本轮无新CI/设备启动结果。最终可交付为v3，不是330/rootboot11的单变量整包，也未合其它活动实验分支。
+- **实际合并/发布**：功能提交 `15ec6524`、编译修正 `fb94992b`、同期SMS合并与最终构建交接 `d738222b`；main从 `5f406973` fast-forward至`d738222b`，`git push origin main` actual exit0（5f406973..d738222b），feature push亦exit0。四个输出目录已无覆盖迁到主checkout `x9/out/`，最终用户手动boot路径 **`x9/out/x9-power-policy-v3-20261116/boot.img`**；保留中间/失败日志，不推荐首轮/v2。未改变主checkout当前SMS分支的未提交记录。功能树ignored配置/生成头将归档于 `x9/out/power-policy-archive-20261116/` 后正常清理本轮worktree/local branch，不动`.local` target或其它会话。全部硬件验收仍待用户新日志，本条为交付源码与编译候选，不是已验证待机功耗。
 
 
 #### 2026-11-16 SMS retrieve 实际 route（静态收束；退休/物理ACK仍缺）
