@@ -39,7 +39,7 @@ struct x9_heif_geometry {
  * adjust spacing by exact extent/output sample counts. Cross-cancelled
  * output ratio must fit positive signed64 CFNumbers, else E2BIG, never rounded.
  * This is not square-pixel conversion or a HEIF mandated resampling policy.
- * grid/iden compare EVERY child's ordered OUTPUT ratio with the canvas's
+ * grid/iden/iovl compare EVERY child's ordered OUTPUT ratio with the canvas's
  * pre-transform input metric before callbacks and again on cached rasters
  * at the actual sample-copy path. Agreeing non-square lattices can be copied
  * without resizing; canvas crop/rotation then determines its output metric.
@@ -48,8 +48,13 @@ struct x9_heif_geometry {
  * Its present source origin is IDENTITY_OUTPUT, with the immediate child ID;
  * absent child remains absent. This does not rewrite raw container metadata.
  * Explicit mismatches or other non-square edges with an absent ratio reject.
- * Grid has no absent-metric inheritance, and no missing ratio becomes1:1.
- * Non-square iovl/auxiliary placement, mixed-lattice resampling and
+ * Grid/overlay have no absent-metric inheritance, and no missing ratio becomes1:1.
+ * iovl signed offsets are sample coordinates in an agreeing canvas lattice;
+ * clipping/source-over do not scale them or resize the child. All edges,
+ * including fully invisible placements, are preflighted; visible cached child
+ * metrics are rechecked immediately before blending. Only the canvas's own
+ * later transforms change its completed output metric.
+ * Non-square auxiliary placement, mixed-lattice resampling and
  * full normative derived metric/inheritance are not implemented. These
  * container-only entrypoints resolve no coded metric beyond pasp; the native preflight
  * variant below resolves actual coded-source SPS/CM sample aspect. */

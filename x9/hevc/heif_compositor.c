@@ -150,11 +150,11 @@ static int source_aspect(const struct x9_heif_image *image, const struct x9_heif
     } else if (aspect->origin == X9_HEIF_ASPECT_PASP) return EBADMSG;
     return 0;
 }
-/* grid/iden place child OUTPUT samples in the canvas INPUT lattice, before
+/* grid/iden/iovl place child OUTPUT samples in the canvas INPUT lattice, before
  * the canvas's own transforms. Explicit present ratios must agree on EVERY
  * dimg edge, not just tile0, raw pasp, shared config or the root declaration.
  * Absent-pasp identity preserves its unique child's completed output metric,
- * including presence. Grid still does not infer an absent canvas metric or
+ * including presence. Grid/overlay do not infer an absent canvas metric or
  * reinterpret a mismatched lattice. Preserve its legacy absent/square path
  * without filling in1:1; missing evidence never admits a non-square placement. */
 static int placement_metric(const struct x9_heif_geometry *canvas, uint64_t h, uint64_t v)
@@ -266,25 +266,20 @@ static int plan_create(const struct x9_heif_document *document, uint32_t id,
     if (!e) e = visit(p,id,0,&p->root);
     p->aspect_source = NULL; p->aspect_context = NULL;
     /* Validate the WHOLE reachable graph before any raster callback. Each
-     * grid/iden edge consumes transformed child samples in the declared
+     * grid/iden/iovl edge consumes transformed child samples in the declared
      * pre-transform canvas metric. DAG reuse never skips a new parent edge.
      * Only absent-pasp identity preserves a unique exact-size child's output;
-     * no grid inheritance, mixed-lattice resampling or square default.
-     * Non-square overlay/auxiliary placement remains unsupported. */
+     * no grid/overlay inheritance, mixed-lattice resampling or square default.
+     * Overlay offsets/clipping are sample coordinates, not physical lengths;
+     * matching non-square ratios need no offset scaling. Auxiliary placement
+     * remains unsupported. Check even fully clipped overlay edges here. */
     for (unsigned n = 0; n < p->count && !e; n++) {
         const struct node *node = &p->nodes[n];
-        if (node->type == X9_HEIF_GRID || node->type == X9_HEIF_IDEN) {
+        if (node->type == X9_HEIF_GRID || node->type == X9_HEIF_IDEN ||
+            node->type == X9_HEIF_IOVL) {
             for (unsigned k = 0; k < node->geometry.derived_count && !e; k++) {
                 const struct x9_heif_geometry *child = &p->nodes[node->derived[k]].geometry;
                 e = placement_metric(&node->geometry,child->pixel_aspect_h,child->pixel_aspect_v);
-            }
-        } else if (node->type != X9_HEIF_HVC1) {
-            if (node->geometry.source_aspect.horizontal != node->geometry.source_aspect.vertical ||
-                node->geometry.pixel_aspect_h != node->geometry.pixel_aspect_v) e = ENOTSUP;
-            for (unsigned k = 0; k < node->geometry.derived_count && !e; k++) {
-                const struct x9_heif_geometry *child = &p->nodes[node->derived[k]].geometry;
-                if (child->source_aspect.horizontal != child->source_aspect.vertical ||
-                    child->pixel_aspect_h != child->pixel_aspect_v) e = ENOTSUP;
             }
         }
         for (unsigned k = 0; k < node->geometry.auxiliary_count && !e; k++) {
@@ -487,6 +482,12 @@ static int render(struct composition *c, uint32_t at)
                 e = render(c,n->derived[k]);
                 if (e) break;
                 const struct x9_heif_raster *tile = &c->cache[n->derived[k]];
+                /* Reused child rasters carry their completed OUTPUT metric.
+                 * Compare with THIS canvas's pre-transform INPUT immediately
+                 * before source-over; never use the child's raw pasp or the
+                 * canvas's later crop/rotation metric to admit a placement. */
+                e = placement_metric(&n->geometry,tile->pixel_aspect_h,tile->pixel_aspect_v);
+                if (e) break;
                 for (int64_t y = top; y < bottom && !e; y++)
                     for (int64_t x = left; x < right && !e; x++) {
                         const uint8_t *src = tile->data+(size_t)(y-oy)*tile->stride+(size_t)(x-ox)*16;
