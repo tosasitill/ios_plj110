@@ -47,6 +47,8 @@ HERE = Path(__file__).resolve().parent
 X9 = HERE.parent
 ROOT = X9.parent
 KERNEL = X9 / 'kernel'
+sys.path.insert(0, str(X9 / 'tools'))
+import x9_boot_defaults  # noqa: E402
 REQUIRED = ['developer_dir', 'dxb']
 
 
@@ -87,18 +89,53 @@ def boot_options(path, extra_args=()):
 
 
 def radio_arg(args, name):
-    # These three kernel entrypoints default to zero. PE_parse_boot_argn
-    # selects the first exact name; do not use substring matching here.
+    # Explicit token, else the kernel board default (sweet_x9_arg table in
+    # pe_serial.c), so firmware embedding matches what the kernel enables.
+    return x9_boot_defaults.value(args, name)
+
+
+def bluetooth_init_enabled(args):
+    # BT is a complete-session candidate, never a guessed transport mode.
+    # Reject duplicate selectors even when their values agree: packaging and
+    # PE_parse_boot_argn must not select different occurrences.
+    selectors = {}
     for arg in args:
         key, sep, value = arg.partition('=')
-        if key == name:
-            if not sep:
-                sys.exit(f'{name} needs an integer value for radio input selection')
-            try:
-                return int(value, 0)
-            except ValueError:
-                sys.exit(f'invalid radio boot arg: {arg!r}')
-    return 0
+        if key not in ('x9_bt', 'x9_bt_init', 'x9_bt_fc'):
+            continue
+        if key in selectors:
+            sys.exit(f'duplicate Bluetooth boot selector: {key}')
+        if not sep:
+            sys.exit(f'{key} requires an explicit integer value')
+        try:
+            number = int(value, 0)
+        except ValueError:
+            sys.exit(f'invalid Bluetooth boot arg: {arg!r}')
+        if number not in (0, 1) and key != 'x9_bt_fc':
+            sys.exit(f'{key} requires 0 or 1')
+        if key == 'x9_bt_fc' and number not in range(4):
+            sys.exit('x9_bt_fc requires the explicit Android UART_FC enum 0..3')
+        selectors[key] = number
+    active = selectors.get('x9_bt_init', 0) == 1
+    if active and (selectors.get('x9_bt') != 1 or selectors.get('x9_bt_fc') != 1):
+        sys.exit('x9_bt_init=1 requires x9_bt=1 and captured Android x9_bt_fc=1; no default/NONE/Linux/HW candidate')
+    return active
+
+
+def bluetooth_input_paths(cfg):
+    directory = Path(cfg.get('bluetooth_firmware') or cfg.get('wifi_firmware') or ROOT / '.local/x9/wifi-fw')
+    return (directory / 'BT_RAM_CODE_MT6653_dx5_2g2a_1_hdr.bin',
+            ROOT / '.local/x9/wifi-nvram/connfem.dts',
+            *(ROOT / '.local/x9/bluetooth/android-mt6653' / name for name in
+              ('libbluetooth_mtk.so', 'btinit.bin', 'properties.txt', 'BT_FW.cfg')))
+
+
+def require_bluetooth_inputs(cfg, args):
+    if not bluetooth_init_enabled(args):
+        return
+    for path in bluetooth_input_paths(cfg):
+        if not path.is_file() or path.stat().st_size == 0:
+            sys.exit(f'complete Bluetooth candidate requires nonempty original input: {path.name}')
 
 
 def gps_enabled(args):
@@ -224,6 +261,8 @@ class Builder:
         return True
 
     def compile(self, boot_args=()):
+        real_bt = bluetooth_init_enabled(boot_args)
+        require_bluetooth_inputs(self.cfg, boot_args)
         # AppSync is opt-in. Its seed is built/staged separately; never embed
         # executable bytes or silently publish a candidate without hash metadata.
         appsync = 0
@@ -249,11 +288,19 @@ class Builder:
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/wifi_firmware.py'), '--src', str(fw)] +
                          (['--required'] if real_wifi or self.cfg.get('wifi_firmware') else []), ROOT,
                          label='wifi_firmware.py')
-        # MT6653 BT uses a separate little-endian container. Metadata only in
-        # this bring-up stage; never reuse the Wi-Fi patch parser/download path.
+        # MT6653 BT has its own LE firmware container and WMT connfem format;
+        # never reuse the Wi-Fi patch parser or swapped/padded PHY tag.
         bt = Path(self.cfg.get('bluetooth_firmware') or fw).expanduser()
-        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/bluetooth_firmware.py'), '--src', str(bt)], ROOT,
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/bluetooth_firmware.py'), '--src', str(bt)] +
+                         (['--required'] if real_bt else []), ROOT,
                          label='bluetooth_firmware.py')
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/bluetooth_board.py'),
+                          '--connfem', str(ROOT / '.local/x9/wifi-nvram/connfem.dts')] +
+                         (['--required'] if real_bt else []), ROOT,
+                         label='bluetooth_board.py')
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/bluetooth_vendor.py')] +
+                         (['--required'] if real_bt else []), ROOT,
+                         label='bluetooth_vendor.py')
         # Match sweet_x9_gps.c: explicit x9_gps overrides compact x9s bit4.
         # This is a firmware identity, not an automatic download/boot lease.
         real_gps = gps_enabled(boot_args)
@@ -393,6 +440,7 @@ class Builder:
     # ---- boot.img --------------------------------------------------------------
     def boot(self, kernel, boot_config, extra_args=()):
         opts = boot_options(boot_config, extra_args)
+        require_bluetooth_inputs(self.cfg, opts['boot_args'])
         self.log(f'boot configuration: {boot_config}')
         for arg in extra_args:
             self.log(f'extra boot arg: {arg}')
@@ -460,7 +508,8 @@ def main():
     b = Builder(cfg, out, a.dry_run, a.jobs)
     # Validate source requirements against the very same argument list that
     # will be packaged, before compiling an apparently successful stub image.
-    radio_args = boot_options(a.boot_config, a.boot_arg)['boot_args'] if a.step in ('all', 'kernel') else ()
+    radio_args = boot_options(a.boot_config, a.boot_arg)['boot_args'] if a.step in ('all', 'kernel', 'boot') else ()
+    require_bluetooth_inputs(cfg, radio_args)
     if a.step == 'plugins' and a.revision is None:
         sys.exit('plugins needs --revision N')
     if a.revision is not None and a.step in ('plugins', 'all'):

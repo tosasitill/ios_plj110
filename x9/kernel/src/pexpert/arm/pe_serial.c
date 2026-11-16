@@ -738,6 +738,35 @@ static uint8_t fbcon_char_grid[FBCON_GRID_MAX_ROWS][FBCON_GRID_MAX_COLS];
  */
 extern int sweet_early_is_x9(void);
 int sweet_x9_arg(const char *name, int def);
+/*
+ * Board defaults that beat the call site default. These features used to be
+ * opt-in at every call site (def 0) yet every device image switched them on
+ * from the boot line; image 307 dropped the audio tokens and booted mute.
+ * Absent from boot-args -> the value here; "name=0" still turns one off.
+ * x9/tools/x9_boot_defaults.py parses this table between the markers so the
+ * image packager (ADT nodes, firmware embedding) agrees with the kernel.
+ */
+static const struct {
+	const char *name;
+	int value;
+} sweet_x9_board_defaults[] = {
+	/* X9_BOARD_DEFAULTS_BEGIN */
+	{ "x9_audio", 2 },          /* speaker + mic backend (audio47, log 305) */
+	{ "x9_dsp_boot", 10 },      /* one ADSP boot 10 s after X9Audio start */
+	{ "x9_mic_boot", 1000 },    /* mic test 1 s after the speaker */
+	{ "x9_wifi_power", 6 },
+	{ "x9_wifi_real", 1 },
+	{ "x9_modem", 4 },
+	{ "x9_bb", 1 },
+	{ "x9_dual_sim", 1 },
+	{ "x9_bt", 1 },
+	{ "x9_torch", 3 },
+	{ "x9_camera", 1 },
+	{ "x9pl", 1 },
+	{ "x9sl", 1 },
+	/* X9_BOARD_DEFAULTS_END */
+};
+
 int
 sweet_x9_arg(const char *name, int def)
 {
@@ -745,7 +774,15 @@ sweet_x9_arg(const char *name, int def)
 	if (PE_parse_boot_argn(name, &v, sizeof(v))) {
 		return v;
 	}
-	return sweet_early_is_x9() ? def : 0;
+	if (!sweet_early_is_x9()) {
+		return 0;
+	}
+	for (unsigned i = 0; i < sizeof(sweet_x9_board_defaults) / sizeof(sweet_x9_board_defaults[0]); i++) {
+		if (!strcmp(name, sweet_x9_board_defaults[i].name)) {
+			return sweet_x9_board_defaults[i].value;
+		}
+	}
+	return def;
 }
 
 /*

@@ -230,19 +230,47 @@ static int hcfg_raw(uint8_t reg,uint8_t value)
 {uint8_t tx[]={reg,value};return htransfer(tx,2,NULL);} /* TMCFG lock/unlock */
 static int hcommand(uint8_t value)
 {uint8_t tx[]={9,value};return htransfer(tx,2,NULL); /* command bits self-clear */}
+/* SYSST (0x01) is live status. OPPO's play path (haptic_hv.c rtp_work_routine
+ * / rtp_play, aw8693xs_stop) never gates on its protection bits; protections
+ * arrive only as latched SYSINT in the IRQ handler, which the OPLUS build just
+ * logs. Log 324: a transient protection bit during the first RTP start was
+ * made fatal here (EIO), then the 25 ms stop wait expired during auto-brake.
+ * Record and log the bits; only I2C transfer errors fail. */
+static unsigned hfault_logs;
+static void hnote_fault(uint8_t sysst,const char *where)
+{
+    hs.hw_fault=sysst&0xe6;
+    if(hs.hw_fault && hfault_logs<8)
+        printf("X9 HAPTIC: SYSST=%02x at %s state=%02x (status only, as OPPO)\n",
+            sysst,where,hs.hw_state),++hfault_logs;
+}
 static int hstate(void)
 {
     uint8_t state,fault;int e=hget(0x3f,&state);if(!e)e=hget(1,&fault);
-    if(!e){hs.hw_state=state;hs.hw_fault=fault&0xe6;}
-    return e?e:hs.hw_fault?EIO:0;
+    if(!e){hs.hw_state=state;hnote_fault(fault,"state");}
+    return e;
+}
+/* aw8693xs_wait_enter_standby: whole GLBRD5 == 0, 100 polls x 2-2.5 ms. */
+static int hwait_standby(void)
+{
+    uint64_t end=now_ns()+250000000ULL;int e;
+    do {e=hstate();if(e || !hs.hw_state)return e;delay(2000);}while(now_ns()<end);
+    return ETIMEDOUT;
 }
 static int hoff(void)
 {
     if(!hb.configured && !hb.active)return 0;
     int e=hb.stuck?EIO:hcommand(2);
-    uint64_t end=now_ns()+25000000;
-    if(!e)do {e=hstate();if(e || !hs.hw_state)break;delay(100);}while(now_ns()<end);
-    if(!e && hs.hw_state)e=ETIMEDOUT;
+    if(!e)e=hwait_standby();
+    if(e==ETIMEDOUT) {
+        /* aw8693xs_stop fallback: play_mode(STANDBY) pulses SYSCTRL3 bit5
+         * (i2c_w_bits, no readback gate), then require standby again. */
+        uint8_t v;printf("X9 HAPTIC: no standby after STOP state=%02x; forcing SYSCTRL3 standby as OPPO\n",hs.hw_state);
+        e=hget(0x45,&v);
+        if(!e){uint8_t tx[]={0x45,(uint8_t)(v|0x20)};e=htransfer(tx,2,NULL);}
+        if(!e){uint8_t tx[]={0x45,(uint8_t)(v&~0x20)};e=htransfer(tx,2,NULL);}
+        if(!e)e=hwait_standby();
+    }
     if(e) {
         /* An uncertain I2C operation cannot prevent electrical shutdown.
          * Pull only our confirmed dedicated GPIO reset low, not bus reset.
@@ -260,8 +288,8 @@ static int hfeed(const int8_t *data,unsigned count)
 {
     if(!count || count>15)return EINVAL;
     uint8_t flags;int e=hget(1,&flags);if(e)return e;
-    hs.hw_fault=flags&0xe6;if(hs.hw_fault)return EIO;
-    if(flags&8)return EAGAIN;
+    hnote_fault(flags,"feed");
+    if(flags&8)return EAGAIN; /* FF_AFS, as aw8693xs_rtp_get_fifo_afs */
     uint8_t tx[16];tx[0]=0x32;memcpy(tx+1,data,count);
     return htransfer(tx,count+1,NULL); /* only COMP proves bus submission */
 }
@@ -270,9 +298,15 @@ static int hgo(void)
     int e=hstate();if(e)return e;
     if(hs.hw_state)return EBUSY;
     hb.active=true; /* BEFORE a possibly landed GO */
-    e=hcommand(1);uint64_t end=now_ns()+5000000;
-    if(!e)do {e=hstate();if(e || hs.hw_state==8)break;delay(50);}while(now_ns()<end);
-    return e?e:hs.hw_state==8?0:ETIMEDOUT;
+    /* rtp_work_routine: GO, sleep 2 ms, then up to 200 polls x 2-2.5 ms for
+     * (GLBRD5 & 0x0f) == RTP_GO. Boost startup routinely exceeds 5 ms.
+     * Poll faster than OPPO but give the same total budget. */
+    e=hcommand(1);if(e)return e;
+    delay(2000);uint64_t end=now_ns()+400000000ULL;
+    do {e=hstate();if(e || (hs.hw_state&15)==8)break;delay(500);}while(now_ns()<end);
+    if(!e && (hs.hw_state&15)!=8)
+        printf("X9 HAPTIC: no RTP_GO after GO state=%02x\n",hs.hw_state);
+    return e?e:(hs.hw_state&15)==8?0:ETIMEDOUT;
 }
 static int hconfigure(void)
 {
@@ -293,10 +327,10 @@ static int hconfigure(void)
      * NOT its oscillator calibration and must not be blindly copied. */
     const uint8_t regs[]={3,7,0x2d,0x2e,0x2f,0x30,0x31,0x33,0x34,0x35,0x36,0x37,0x38,0x47,
         0x4a,0x1a,0x21,0x55,0x56,0x5a,0x5b};
-    const uint8_t vals[]={255,0x60,8,0,0x46,0,0,0,0,0,0,0,0,0x5a,
+    const uint8_t vals[]={255,0x80,8,0,0x46,0,0,0,0,0,0,0,0,0x5a,
         0xbf,8,6,0x4a,0x24,0xa7,0x44};
     /* pro1=7V/4A, pro2=6V/2.5A; UVLO=2.9/2.6/2.3V;
-     * DT vmax0x11, software signed peak96, hardware gain0x60. */
+     * DT vmax0x11 and gain0x80 = OPPO vmax_map level 2400 (its maximum). */
     if((e=hcfg_bits(0x45,4,4)))return e;delay(600); /* RAMINIT while programming FIFO */
     for(unsigned i=0;i<sizeof(regs);i++)if((e=hcfg(regs[i],vals[i])))return e;
     if((e=hcfg(0x4b,0x32)) || (e=hcfg_bits(0x48,0x80,0)) ||
@@ -314,8 +348,8 @@ static int hconfigure(void)
     e=hstate();if(e && e!=EIO)return e;if(hs.hw_state)return EBUSY;
     printf("X9 HAPTIC: config as OPPO: sysst before=%02x after=%02x readback diffs=%u%s\n",
         sysst_before,(unsigned)hs.hw_fault,hcfg_diffs,hcfg_log);
-    hb.configured=true;hs.gain=0x60;
-    printf("X9 HAPTIC: chip=%04x RTP=12000 fifo=2048 f0=%u mHz gain=60 native I2C5 ready\n",
+    hb.configured=true;hs.gain=0x80;
+    printf("X9 HAPTIC: chip=%04x RTP=12000 fifo=2048 f0=%u mHz gain=80 native I2C5 ready\n",
         hs.chip_id,hs.f0_millihz);
     return 0;
 }

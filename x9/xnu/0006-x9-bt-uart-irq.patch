@@ -1,0 +1,27 @@
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -36,6 +36,14 @@
+ #include <arm/trap.h> /* for IS_ARM_GDB_TRAP() et al */
+ #include <arm64/proc_reg.h>
+ #include <arm64/sweet_early.h>
++#if defined(SWEET)
++/* Standalone base-XNU builds lack the BSD overlay. The overlay supplies
++ * the strong implementation; no synthetic IRQ handling in the fallback. */
++__attribute__((weak, noinline)) bool x9_bluetooth_irq_filter(uint32_t intid)
++{
++	(void)intid; return false;
++}
++#endif
+ #include <arm64/machine_machdep.h>
+ #include <arm64/monotonic.h>
+ #include <arm64/instructions.h>
+@@ -2068,7 +2076,7 @@
+ 	} else {
+ 		sweet_irq_other++;
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
+-		if (cdp->interrupt_handler) {
++		if (!x9_bluetooth_irq_filter(intid) && cdp->interrupt_handler) {
+ 			cdp->interrupt_handler(cdp->interrupt_target,
+ 			    cdp->interrupt_refCon,
+ 			    cdp->interrupt_nub,

@@ -21,6 +21,7 @@ from shared import adt, load
 import mkadt
 import mkpayload
 import bootctl
+import x9_boot_defaults
 shim = load('x9_shim_build', 'x9/shim/build.py')
 
 
@@ -87,10 +88,13 @@ def main():
     out = a.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     bctl = bootctl.prepare(a.boot_control.read_bytes(), a.slot) if a.boot_control else None
+    bargs = a.boot_args.split()  # absent tokens take the kernel board defaults
     tree = mkadt.build(timebase=a.timebase, console_base=a.console_base, console_size=a.console_size, ram_window=a.ram_window,
-                       wlan=any(x in a.boot_args.split() for x in ('x9_wifi_fake=1', 'x9_wifi_real=1')),
-                       baseband='x9_bb=1' in a.boot_args.split(),
-                       torch='x9_torch=3' in a.boot_args.split(),
+                       wlan=x9_boot_defaults.value(bargs, 'x9_wifi_fake') == 1 or x9_boot_defaults.value(bargs, 'x9_wifi_real') == 1,
+                       baseband=x9_boot_defaults.value(bargs, 'x9_bb') == 1,
+                       torch=x9_boot_defaults.value(bargs, 'x9_torch') == 3,
+                       bluetooth=x9_boot_defaults.value(bargs, 'x9_bt_init') == 1,
+                       als=x9_boot_defaults.value(bargs, 'x9_als') == 3,
                        haptic=([t.split('=', 1)[1] for t in a.boot_args.split() if t.startswith('x9_haptic=')] or ['2'])[-1] == '2')  # kernel default 2
     if a.microphone_mode is not None:
         chosen = next(n for n in tree.children if n.prop('name') == b'chosen\0')

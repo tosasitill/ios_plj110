@@ -1,17 +1,25 @@
-/* Integer-only 48kHz Actuator -> 12kHz signed RTP conversion.
- * No allocation, float, packet-dependent carrier reset or hidden ID guessing.
- * Retuning preserves the time envelope while translating D22's carrier to
- * the actual LRA. Raw mode is available for already tuned custom waveforms.
+/* Integer-only 48kHz Actuator -> 12kHz signed RTP, OPPO RichTap stream
+ * style (haptic_hv.c aw_stream_mode): the PCM is the finished drive
+ * waveform and goes to RTP unchanged; strength is the chip gain/boost.
+ *
+ * iOS 20H392 D221 haptic engine (Library/Audio/Tunings/D221/Haptics):
+ * transients are pre-shaped full-scale drive pulses, MicroTap ~1/2 cycle
+ * (one-sided push), MiniTap ~1 cycle, FullTap ~2 cycles, at 80..300 Hz
+ * selected by sharpness; continuous events are enveloped sines. Logs
+ * 327..330 rebuilt everything as an envelope-retuned 173 Hz sine with
+ * 6 ms hold + kick/brake: a 7 ms MicroTap became a ~30 ms buzz, sharpness
+ * was discarded and x6 clipped every tap (log 330 in_peak 17695..32509)
+ * -- "late, loose, wrong for the scene". Now linear 32767 -> 127.
+ * No DC removal: MicroTaps are intentionally one-sided.
  */
 #ifndef X9_HAPTIC_CONVERT_H
 #define X9_HAPTIC_CONVERT_H
 #include "x9_haptic.h"
 struct x9_haptic_converter {
     uint32_t phase, step, conversion, intensity, sharpness, decimator;
-    int32_t dc, envelope, lowpass, sum;
+    int32_t lowpass, sum, in_peak;
 };
-/* Q15 sine approximation on a full unsigned 32-bit turn. Bhaskara's
- * approximation, bounded 64-bit intermediates, exact zero at half turns. */
+/* Q15 sine approximation on a full unsigned 32-bit turn (scene synthesis). */
 static inline int32_t x9_haptic_sine(uint32_t phase)
 {
     uint32_t x=(phase&0x7fffffff)>>16;
@@ -28,35 +36,17 @@ static inline void x9_haptic_converter_init(struct x9_haptic_converter *c,
 }
 static inline int x9_haptic_convert_sample(struct x9_haptic_converter *c,int16_t pcm,int8_t *out)
 {
-    /* Remove DC before rectification. Attack ~0.25ms, release ~2ms;
-     * a zero input eventually yields exactly zero, not a vibrating noise floor. */
-    int32_t dc_delta=(int32_t)pcm-c->dc;
-    c->dc+=dc_delta/512;
-    if(!pcm && c->dc && c->dc<512 && c->dc> -512)c->dc+=c->dc>0?-1:1;
-    int32_t input=(int32_t)pcm-c->dc;
-    int32_t magnitude=input<0?-input:input;
-    int32_t delta=magnitude-c->envelope;
-    c->envelope+=delta/(delta>0?12:96);
-    if(magnitude<16 && c->envelope<96)c->envelope=0;
-    /* Two-state lowpass + four-sample average is the raw decimator, not a
-     * sufficient anti-alias filter for arbitrary audio. Actuator content is
-     * low-frequency haptic PCM; this is not a full-band audio transport. */
-    c->lowpass+=(input-c->lowpass)/4;c->sum+=c->lowpass;
+    {int32_t a=pcm<0?-(int32_t)pcm:pcm;if(a>c->in_peak)c->in_peak=a;}
+    /* One-pole lowpass (~2 kHz) + four-sample average: content is <=300 Hz
+     * drive, group delay ~0.1 ms. */
+    c->lowpass+=((int32_t)pcm-c->lowpass)/4;c->sum+=c->lowpass;
     if(++c->decimator<4)return 0;
     c->decimator=0;int32_t value=c->sum/4;c->sum=0;
-    if(c->conversion==X9_HAPTIC_RETUNE) {
-        /* Approximate sine peak from rectified sine mean, with a limiter.
-         * Sharpness adds a bounded 3rd harmonic, not a change in pattern time. */
-        int32_t env=c->envelope*157/100;if(env>32767)env=32767;
-        int32_t sine=x9_haptic_sine(c->phase);
-        int32_t harmonic=x9_haptic_sine(c->phase*3);
-        sine=(sine*(4000-(int32_t)c->sharpness)+harmonic*(int32_t)c->sharpness)/4000;
-        value=(int32_t)((int64_t)env*sine/32768);
-    }
-    c->phase+=c->step;
+    c->phase+=c->step; /* scene synthesis continues the same phase */
     value=(int32_t)((int64_t)value*c->intensity/1000);
-    value=value*96/32768; /* signed8 peak <=96, additional hardware gain cap */
-    if(value>96)value=96;if(value< -96)value= -96;
+    int32_t limit=c->conversion==X9_HAPTIC_RETUNE?127:96; /* raw: legacy <=96 */
+    value=(int32_t)(((int64_t)value*limit+(value<0?-16384:16384))/32768);
+    if(value>limit)value=limit;if(value< -limit)value= -limit;
     *out=(int8_t)value;return 1;
 }
 /* Scene synthesis shares the native converter's continuous phase. This

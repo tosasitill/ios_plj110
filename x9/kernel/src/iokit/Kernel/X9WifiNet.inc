@@ -45,6 +45,7 @@ extern "C" {
 #include <kern/clock.h>
 #include <mach/mach_time.h>
 #include <stdarg.h>
+#include "../../bsd/dev/x9_conn_power.h"
 
 /* the header declares it without C linkage; the symbol is the C one */
 extern "C" int x9_kev_post(struct kev_msg *) __asm__("_kev_post_msg");
@@ -777,8 +778,9 @@ static volatile uint32_t *x9_gpio;
 static void
 x9_gpio_rmw(unsigned off, uint32_t mask, uint32_t value)
 {
-    uint32_t v = x9_gpio[off / 4];
-    x9_gpio[off / 4] = (v & ~mask) | (value & mask);
+    /* GPIO SET/CLR, not a whole-word RMW racing BT_RST/PMIC_EN. */
+    x9_gpio[(off + 8) / 4] = mask;
+    x9_gpio[(off + 4) / 4] = value & mask;
     __asm__ volatile ("dsb sy" ::: "memory");
 }
 static void
@@ -824,22 +826,6 @@ x9_gpio_in(unsigned pin)
  * read and logged.
  */
 #define X9_IOCFG_LM0 0x13020000u
-static void
-x9_iocfg_bit(volatile uint32_t *io, unsigned off, unsigned bit, unsigned v)
-{
-    uint32_t r = io[off / 4];
-    io[off / 4] = v ? (r | (1u << bit)) : (r & ~(1u << bit));
-    __asm__ volatile ("dsb sy" ::: "memory");
-}
-static void
-x9_faultb_bias(volatile uint32_t *io, bool pullup)
-{
-    /* GPIO65: iocfg_lm0 bit 1 in IES/PUPD/R0/R1; R1R0 = 10 in both DT states */
-    x9_iocfg_bit(io, 0x50, 1, 1);
-    x9_iocfg_bit(io, 0x90, 1, pullup ? 0 : 1);
-    x9_iocfg_bit(io, 0xb0, 1, 0);
-    x9_iocfg_bit(io, 0xc0, 1, 1);
-}
 static uint64_t
 x9_ms_since(uint64_t t0)
 {
@@ -3606,6 +3592,13 @@ x9_wifi_stage6(volatile uint32_t *bar)
                 IOSleep(20);
             }
             if (e0) ml_io_unmap((vm_offset_t)e0, 0x4000);
+            if (fwready) {
+                int power_error = x9_conn_power_done(X9_CONN_WIFI);
+                if (power_error) {
+                    IOLog("X9 WIFI RAM: connv3 power-done errno=%d; not publishing ready\n", power_error);
+                    fwready = false;
+                }
+            }
             if (fwready && sweet_x9_arg("x9_wifi_cap", 1) == 1) {
                 x9_wifi_nic_cap(&d);
             }
@@ -4070,17 +4063,11 @@ x9_wifi_power_thread(void *arg, wait_result_t)
     uint64_t t0 = mach_absolute_time();
     x9_gpio_out(250, 1);                               /* wf_rst_on */
     IOLog("X9 WIFI POWER: WF_RST high (GPIO250 in=%u)\n", x9_gpio_in(250));
-    IOSleep(30);
-    x9_gpio_out(251, 1);                               /* connsys-pin-pmic-en-set */
-    IOLog("X9 WIFI POWER: PMIC_EN high (GPIO251 in=%u)\n", x9_gpio_in(251));
-    IOSleep(20);
-    if (stage >= 2) {
-        x9_gpio_rmw(0x300 + (65 / 4) * 0x10, 0x1fu << ((65 % 4) * 8), 0);   /* GPIO65 function 0 */
-        x9_gpio_rmw((65 / 32) * 0x10, 1u << (65 % 32), 0);                   /* input */
-        x9_faultb_bias(io, true);                      /* connsys-pin-pmic-faultb-enable */
-        IOSleep(1);
-        IOLog("X9 WIFI POWER: faultb pull-up on: faultb in=%u pupd=%08x r0=%08x r1=%08x\n",
-            x9_gpio_in(65), io[0x90 / 4], io[0xb0 / 4], io[0xc0 / 4]);
+    int power_error = x9_conn_power_acquire(X9_CONN_WIFI);
+    if (power_error) {
+        IOLog("X9 WIFI POWER: connv3 acquire errno=%d; no PCIe bring-up\n", power_error);
+        IOSleep(200); x9_gpio_out(250, 0);
+        thread_terminate(current_thread()); return;
     }
     IOSleep(10);
     if (stage >= 2 && pcieReadable) {
@@ -4098,11 +4085,10 @@ x9_wifi_power_thread(void *arg, wait_result_t)
         }
         IOSleep(50);
     }
-    if (stage >= 2) {
-        x9_faultb_bias(io, false);                     /* connsys-pin-pmic-faultb-default */
-    }
-    IOSleep(20);
-    x9_gpio_out(251, 0);                               /* connsys-pin-pmic-en-clr */
+    /* Native radio_loop never returns while up, so its lease stays held.
+     * A returning diagnostic/failed path releases ONLY Wi-Fi, never BT. */
+    power_error = x9_conn_power_release(X9_CONN_WIFI);
+    IOLog("X9 WIFI POWER: connv3 release errno=%d remaining=%u\n", power_error, x9_conn_power_radios());
     IOSleep(200);                                      /* gen4m RST_PIN_MIN_WAIT_TIME */
     x9_gpio_out(250, 0);                               /* wf_rst_off */
     IOLog("X9 WIFI POWER: off again: PMIC_EN in=%u WF_RST in=%u faultb in=%u\n",

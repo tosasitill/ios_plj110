@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Index the MT6653 BT firmware without committing or embedding firmware bytes.
+"""Index MT6653 BT firmware and emit private, gitignored download payload.
 
 The BT container is LITTLE endian, unlike the gen4m Wi-Fi patch descriptor.
 Layout and fields: OPPO linux_v2 btmtk_main.h (_Section_Map) and
 btmtk_main.c (btmtk_parsing_fw_rom_patch / btmtk_load_fw_by_bin_info).
 The board flavor is confirmed by captured Android startup and mt6993.dts.
-This stage deliberately does not download patches or claim calibration ready.
+Generating a payload does not download it or claim calibration/ HCI ready.
 """
 import argparse
 import hashlib
@@ -45,9 +45,10 @@ def index(blob):
     return rows
 
 
-def render(src):
+def render(src, blob=None):
     path = src / NAME
-    blob = path.read_bytes() if path.is_file() else b''
+    if blob is None:
+        blob = path.read_bytes() if path.is_file() else b''
     rows = index(blob) if blob else []
     out = ['/* Generated BT metadata only; no firmware or device identities. */',
            f'#define X9_BT_FW_PRESENT {int(bool(blob))}',
@@ -67,16 +68,35 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--src', type=Path, default=ROOT / '.local/x9/wifi-fw')
     ap.add_argument('--out', type=Path, default=ROOT / 'x9/kernel/generated/x9_bt_firmware.inc')
+    ap.add_argument('--payload-out', type=Path, default=ROOT / 'x9/kernel/generated/x9_bt_payload.inc')
+    ap.add_argument('--required', action='store_true',
+                    help='reject missing/empty real firmware instead of generating a passive stub')
     a = ap.parse_args()
     try:
-        text, rows = render(a.src)
+        path = a.src / NAME
+        blob = path.read_bytes() if path.is_file() else b''
+        if a.required and not blob:
+            raise ValueError('captured production firmware is required for complete initialization')
+        text, rows = render(a.src, blob)
         old = a.out.read_text() if a.out.is_file() else None
         a.out.parent.mkdir(parents=True, exist_ok=True)
         if old != text:
             a.out.write_text(text)
+        payload = ['/* Private firmware bytes. Generated; never commit. */',
+                   f'#define X9_BT_PAYLOAD_BYTES {len(blob)}u',
+                   'static const uint8_t x9_bt_payload[] = {']
+        for at in range(0, len(blob), 16):
+            payload.append('    ' + ','.join(f'0x{b:02x}' for b in blob[at:at + 16]) + ',')
+        if not blob:
+            payload.append('    0,')
+        payload.append('};')
+        payload_text = '\n'.join(payload) + '\n'
+        a.payload_out.parent.mkdir(parents=True, exist_ok=True)
+        if not a.payload_out.is_file() or a.payload_out.read_text() != payload_text:
+            a.payload_out.write_text(payload_text)
     except (OSError, ValueError) as e:
         sys.exit(f'bluetooth firmware: {e}')
-    print(f'bluetooth firmware: {len(rows)} indexed sections; no bytes embedded; '
+    print(f'bluetooth firmware: {len(rows)} indexed sections; {len(blob)} private payload bytes; '
           f'{"unchanged" if old == text else "written"}'
           + ('' if rows else ' (absent/stub)'))
 

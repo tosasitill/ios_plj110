@@ -2,6 +2,9 @@
 """Read-only Android preflight for an existing plaintext pinned-file root.
 No pin changes, file allocation, raw writes, partition writes, flash or reboot.
 Checks current mapping, pin, immutable, inode, extents and raw-image SHA256.
+Explicit --metadata-only mode requires a dedicated mutable root; it checks
+the same mapping guards and the current first64KiB HFS identity, but does not
+verify root or external firmware payload hashes.
 """
 import argparse
 import json
@@ -18,7 +21,11 @@ def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--manifest',type=Path,required=True)
     ap.add_argument('--serial')
+    ap.add_argument('--metadata-only',action='store_true',
+                    help='mutable root only: retain all mapping/identity guards; read only the first64KiB root header and no firmware payload')
     args=ap.parse_args();raw=json.loads(args.manifest.read_text());m=load(args.manifest,native=raw.get('runtime')=='native-ufs-root')
+    if args.metadata_only and not m.get('write_policy'):
+        raise ValueError('--metadata-only requires a dedicated mutable-root contract; readonly roots still require full SHA256 verification')
     serial=args.serial
     if not serial:
         p=subprocess.run(['adb','devices'],check=True,capture_output=True,text=True)
@@ -59,10 +66,13 @@ def main():
         from ufs_manifest import extents
         if extents(live,m['partition_blocks'])['extents']!=fw['extents']:
             raise ValueError('external firmware raw map does not match FIEMAP')
-        report=read(quote(tool)+' rawhash '+quote(fwpath)+' '+quote(device)+' '+str(fw['payload_bytes']),120)
-        if not any(line.startswith(fw['sha256']+'  ') and line.endswith('first '+str(fw['payload_bytes'])+' bytes') for line in report.splitlines()):
-            raise ValueError('external firmware raw payload hash mismatch')
-        print('EXTERNAL BBFW PREFLIGHT VERIFIED: separate pinned+immutable file, live FIEMAP and full payload SHA256; read-only.')
+        if args.metadata_only:
+            print('EXTERNAL BBFW METADATA PREFLIGHT VERIFIED: separate pinned+immutable file, inode/size and live FIEMAP; payload not read and SHA256 NOT VERIFIED (--metadata-only).')
+        else:
+            report=read(quote(tool)+' rawhash '+quote(fwpath)+' '+quote(device)+' '+str(fw['payload_bytes']),120)
+            if not any(line.startswith(fw['sha256']+'  ') and line.endswith('first '+str(fw['payload_bytes'])+' bytes') for line in report.splitlines()):
+                raise ValueError('external firmware raw payload hash mismatch')
+            print('EXTERNAL BBFW PREFLIGHT VERIFIED: separate pinned+immutable file, live FIEMAP and full payload SHA256; read-only.')
     if m.get('extension_policy'):
         ext=m['extension_policy'];extpath=ext['device_file']
         if list(map(int,read('stat -c "%i %s" '+quote(extpath)).split()))!=[ext['inode'],ext['bytes']]:
@@ -94,6 +104,8 @@ def main():
         if m.get('extension_policy'):
             print('HFS size:',fs,'bytes','(grown)' if fs!=m['bytes'] else '(not grown yet)')
         print('MUTABLE ROOT PREFLIGHT VERIFIED: device, pin+immutable, inode/map/partition, protected extents and current HFS UUID/geometry.')
+        if args.metadata_only:
+            print('METADATA-ONLY MODE: root raw reads limited to first64KiB; root and external firmware payload SHA256 NOT VERIFIED.')
         print('Original full-image SHA is provisioning provenance; XNU filesystem writes may change content. No device writes performed.')
         return
     # Upstream pinfile additionally checks single slave/size, extent bounds and

@@ -6507,8 +6507,33 @@
    "template": "bsd-c-9"
   },
   {
+   "name": "x9_conn_power.o",
+   "source": "bsd/dev/x9_conn_power.c",
+   "template": "bsd-c-11"
+  },
+  {
+   "name": "x9_bt_hardware.o",
+   "source": "bsd/dev/x9_bt_hardware.c",
+   "template": "bsd-c-11"
+  },
+  {
    "name": "x9_bluetooth.o",
    "source": "bsd/dev/x9_bluetooth.c",
+   "template": "bsd-c-11"
+  },
+  {
+   "name": "x9_bt_download.o",
+   "source": "bsd/dev/x9_bt_download.c",
+   "template": "bsd-c-11"
+  },
+  {
+   "name": "x9_bt_session.o",
+   "source": "bsd/dev/x9_bt_session.c",
+   "template": "bsd-c-11"
+  },
+  {
+   "name": "x9_bt_serial.o",
+   "source": "bsd/dev/x9_bt_serial.c",
    "template": "bsd-c-11"
   },
   {
