@@ -39,7 +39,7 @@ static const unsigned cam_i2c_saved_regs[] = {
 struct cam_probe_bus {
     vm_offset_t base, dma, gate, top, univpll, mainpll;
     uint32_t gate_bit, saved[CAM_I2C_SAVED_COUNT], last_status, clock_shift, clock_bit, clock_source;
-    uint32_t banks, dma_banks, timing_hz, clock_con1;
+    uint32_t banks, dma_banks, timing_hz, clock_con1, max_hz;
     uint32_t expected[CAM_I2C_SAVED_COUNT], prior[CAM_I2C_SAVED_COUNT];
     uint32_t dirty, uncertain;
     uint32_t group_gate_mask, parent_entry, parent_expected;
@@ -221,7 +221,12 @@ static int cam_bus_control_write(struct cam_probe_bus *b, unsigned reg, uint32_t
     b->prior[i]=before;b->expected[i]=value;
     b->dirty|=bit;b->uncertain|=bit; /* BEFORE even an ambiguous write */
     cam_rw(b->base,reg,value);
-    if(cam_rr(b->base,reg)!=value)return EIO;
+    uint32_t got=cam_rr(b->base,reg);
+    if(got!=value) {
+        printf("X9 CAMERA AP WRITE: gate=%x reg=%x before=%x want=%x got=%x\n",
+            b->gate_bit,reg,before,value,got);
+        return EIO;
+    }
     b->uncertain&=~bit;if(restoring)b->dirty&=~bit;
     return 0;
 }
@@ -257,6 +262,9 @@ static int cam_bus_take(struct cam_probe_bus *b)
     b->owned=true;
     if(!b->saved[6])return cam_bus_init_timing(b);
     if(!cam_bus_timing_check(b,false))return 0;
+    /* i2c12 (WL28681C/RT5133): Android runs it at DT 400 kHz with the
+     * timing LK/vendor programmed; borrow that instead of retiming. */
+    if(b->max_hz>100000 && !cam_bus_timing_borrow(b))return 0;
     /* Vendor init_hw always reprograms the whole timing set (TIMING/EXT/
      * LTIMING/HS/SDA/DIV/IO/MIS) on an idle bus; do the same with our
      * standard profile. The journal restores the inherited values. */
@@ -620,7 +628,8 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
         .gate=cam_board_map(uw?0x13a50000:0x12650000,0x1000),.gate_bit=tele?8:back?4:2,
         .top=j->top,.univpll=j->pll,.mainpll=j->mainpll,.clock_shift=uw?8:16,.clock_bit=uw?30:29,
         .group_gate_mask=uw?0x03:0x3f};
-    j->ldo=(struct cam_probe_bus){.base=cam_board_map(0x16200000,0x40000),
+    j->ldo=(struct cam_probe_bus){.max_hz=400000, /* live DT i2c12 clock-frequency */
+        .base=cam_board_map(0x16200000,0x40000),
         .dma=cam_board_map(0x164f0000,0x10000),.banks=4,.dma_banks=1,
         .gate=cam_board_map(0x16300000,0x1000),.gate_bit=1,
         .top=j->top,.univpll=j->pll,.mainpll=j->mainpll,.clock_shift=0,.clock_bit=31,

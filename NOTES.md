@@ -2794,3 +2794,13 @@ Model now (as Android, one shared AFE, one owner per shared bit):
   (regulator_late_cleanup equivalent).
 - New logs: X9 CAMERA MCLK ENTRY, AP ENTRY, WL ENTRY.
 - Image: x9/out/x9-camera-android-r11-20261116/boot.img (r10 superseded, not flashed).
+
+## Camera log 334 (r11) -> r12 (2026-11-16)
+- 334: MCLK passes (CAMTG4 fenc=1 borrowed, vote OK), I2C4 timing reinit OK (97.9 kHz).
+  Fail: PROBE stage=3 blockers=8 EIO on I2C12 (gate 1) timing reinit; entry timing=20
+  low=20 div=004 hs=8000 io=93 multi=4380 = LK ~378 kHz, DT clock-frequency 400 kHz.
+  One reprogram write did not read back (which one not logged).
+- Fix: WL/RT5133 bus borrows the inherited LS/FS timing when HS is off and rate <= DT
+  400 kHz (Android runs it at 400 kHz, never reads back). Failed CSR writes now log
+  X9 CAMERA AP WRITE; borrow logs X9 CAMERA AP TIMING BORROW.
+- Image: x9/out/x9-camera-i2c12-r12-20261116/boot.img

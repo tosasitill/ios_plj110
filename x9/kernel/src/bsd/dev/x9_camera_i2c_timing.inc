@@ -61,6 +61,28 @@ static int cam_bus_timing_check(struct cam_probe_bus *b, bool initialized)
         b->expected[7],b->expected[11],rate,e);
     return e;
 }
+/* Inherited LS/FS profile (log 334 i2c12: timing=20 low=20 div=004
+ * hs=8000 io=93 -> ~378 kHz on 124.8 MHz). HS transfer must be off
+ * (HS bits 0/1/7 clear; HS_HOLD_SEL alone is inert), so only the LS
+ * divider field [4:0] applies. Rate must not exceed the DT frequency. */
+static int cam_bus_timing_borrow(struct cam_probe_bus *b)
+{
+    uint64_t hz=0;
+    int e=cam_bus_controls(b,false);
+    if(!e)e=cam_bus_source_hz(b,&hz);
+    uint32_t timing=b->expected[6],low=b->expected[8],hs=b->expected[9],
+        divreg=b->expected[11],io=b->expected[12];
+    unsigned div=(divreg&31)+1;
+    unsigned high=(((timing>>8)&7)+1)*((timing&63)+1);
+    unsigned l=(((low>>6)&7)+1)*((low&63)+1);
+    uint64_t period=(uint64_t)div*(high+l);
+    uint32_t rate=period?(uint32_t)((hz+period-1)/period):0;
+    if(!e && ((hs&0x83) || (io&3)!=3 || high<2 || l<2 || !rate || rate>b->max_hz))e=ENOTSUP;
+    if(!e)b->timing_hz=rate;
+    printf("X9 CAMERA AP TIMING BORROW: gate=%x source_hz=%llu timing=%x low=%x hs=%x div=%x io=%x hz=%u max=%u errno=%d\n",
+        b->gate_bit,hz,timing,low,hs,divreg,io,rate,b->max_hz,e);
+    return e;
+}
 /* High/low products are sample(1..8)*step(1..64). Prefer 45% duty,
  * [41%,49%), <=98kHz. Check the actual encoded profile BEFORE any write. */
 static bool cam_timing_factor(unsigned n, unsigned *sample, unsigned *step)
