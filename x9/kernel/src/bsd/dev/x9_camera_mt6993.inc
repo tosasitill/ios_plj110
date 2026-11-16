@@ -685,7 +685,18 @@ static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
         if(!e)e=cam_wl_read(j,3,&j->wl_enable);
         r->wl_enable=j->wl_enable;
         if(!e && (j->wl_enable&j->board.wl_mask)) {
-            r->blockers|=X9_CAM_BLOCK_INHERITED;e=EBUSY;
+            /* Android regulator_late_cleanup turns off unclaimed LDOs long
+             * before camera open, so imgsensor power-on always starts from
+             * our channels off. Clear only our bits (vendor enable_mask is
+             * per channel), confirm, and let the vendor off settle. */
+            const uint8_t tx[2]={3,(uint8_t)(j->wl_enable&~j->board.wl_mask)};
+            printf("X9 CAMERA WL ENTRY: enable=%02x mask=%02x (inherited on, cleared like Android)\n",
+                j->wl_enable,j->board.wl_mask);
+            e=cam_bus_transfer(&j->ldo,0x35,tx,2,NULL);
+            if(!e)e=cam_wl_read(j,3,&j->wl_enable);
+            if(!e && (j->wl_enable&j->board.wl_mask))e=EIO;
+            if(!e)delay(150000);
+            r->wl_enable=j->wl_enable;
         }
         for(unsigned i=0;i<j->board.wl_count && !e;i++)
             e=cam_wl_read(j,(uint8_t)(3+j->board.wl_channel[i]),&j->wl_voltage[i]);

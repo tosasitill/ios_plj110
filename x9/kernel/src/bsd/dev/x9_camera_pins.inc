@@ -178,9 +178,11 @@ static int cam_wake_take(struct cam_probe_journal *j)
 {
     struct cam_probe_pin *p=&j->wake;
     int e=cam_pins_guard(j,false);if(!e)e=cam_pin_check(j,p,false);if(e)return e;
-    if(p->mode)return EBUSY;
-    if(!p->dir && cam_pin_get(j->gpio,0x200,p->pin))return EBUSY;
+    /* Vendor pinctrl state = GPIO mode0 output-high; an input that
+     * reads high via its pull is not a reason to refuse (log 333: GPIO171
+     * entry mode0 input). Mode is journaled and restored like DIR/DOUT. */
     p->taken=true;
+    if(p->mode){e=cam_pin_write(j,p,CAM_PIN_MODE,0,false);if(e)return e;}
     if(p->dir && p->dout)return 0; /* inherited high is never pulsed */
     e=cam_pin_write(j,p,CAM_PIN_DOUT,0,false);
     if(!e)e=cam_pins_guard(j,false);
@@ -196,10 +198,12 @@ static int cam_pins_take(struct cam_probe_journal *j)
     int e=cam_pins_guard(j,false);
     if(!e)e=cam_pin_check(j,&j->reset,false);if(!e)e=cam_pin_check(j,&j->mclk,false);
     if(!e)e=cam_drive_check(j,false);if(e)return e;
-    if(j->reset.mode || j->mclk.mode || (j->reset.dir?j->reset.dout:
-       cam_pin_get(j->gpio,0x200,j->reset.pin)))return EBUSY;
+    /* Vendor power-on starts from pinctrl rst-low / mclk-off (mode0);
+     * it selects those states unconditionally, so do the same. */
     j->reset.taken=j->mclk.taken=true;j->pins_owned=true;
-    e=cam_pin_write(j,&j->reset,CAM_PIN_DOUT,0,false);
+    if(j->mclk.mode)e=cam_pin_write(j,&j->mclk,CAM_PIN_MODE,0,false);
+    if(!e && j->reset.mode)e=cam_pin_write(j,&j->reset,CAM_PIN_MODE,0,false);
+    if(!e)e=cam_pin_write(j,&j->reset,CAM_PIN_DOUT,0,false);
     if(!e)e=cam_pins_guard(j,false);
     if(!e)e=cam_pin_write(j,&j->reset,CAM_PIN_DIR,1,false);
     if(!e)e=cam_pins_guard(j,false);
