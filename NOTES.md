@@ -162,6 +162,8 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 #### 2026-11-16 Wallet 交通卡目标：分门槛修复计划（未开卡）
 
+- **实际整合/发布**：报告 `4a42639`、初始交接 `b245f4d`；吸收同期 main **`74b12c98`** 时仅 NOTES 插入点冲突，保留完整 incoming 原文后只插本轮目标/交接，merge **`a1ee044`** actual exit0。feature push、GitHub **PR #4** merge actual exit0，`2026-11-16T12:13:27Z` 合入main，merge **`398870ba`**；报告祖先复核 actual exit0。仅2份文档，无本轮代码/构建/启动/资金结果；命令/退出码与离线依据核对结果在同out的 publication/finalization。停止前将私有证据无覆盖归档到主checkout同名out，清理自有worktree/ref；不操作其它会话。
+
 - **范围/报告提交**：用户把目标缩到原生 Wallet 开交通卡；单代理隔离 `feat/wallet-transit-plan`，main 基线 **`84e1aad5`**。报告 **`4a42639`**：`docs/2026-11-16_reverse-wallet-transit-plan-report.md`。仅被动库存/复用日志、规划及 Git 发布；不切换或改写主 checkout 的并发 SMS 工作，不操作其它工作树。无构建/CI run ID、新启动、ADB/fastboot、RF/APDU、登录/身份注册、开卡/充值/迁移/交易、SE/根盘/分区写入。
 - **观察/纠偏**：根盘克隆确有 `com.apple.Passbook` 主程序，位于 removable application bundle 根，不能仅查 `/Applications` 就断言 Wallet 缺失；原件 passd 发布 device-registration/payment/library/account/nf-events 等服务。330 已捕获 **06:06:16.484Z `Secure element available: NO` / broker未注册，以及 Needs Registration YES / Has Certificates NO**；本地 supported-device YES 不等于平台认可 X9。06:06:37.337Z 无iCloud账户、CloudStore **PKPassKitErrorDomain -4008**；没有目标卡 add-card、发行请求或远端拒绝证据。NFC 板级 SN220T/I²C14/eSE SPI5 及 nfcd 打开会话失败、ADI -42410/BAA/activation identity、固定已解锁软件 AKS 基线复用前轮，不重采身份/卡片材料或推测错误枚举。
 - **修复门槛/推断**：G0 选卡/地区/iOS16-D22资格/资金路线 → G1 原件UI/XPC/真密码keybag基线 → G2 目标路由实际账户/证明依赖 → G3 NCI/eSE/nfcd管理会话 → G4 平台接受SE签名/证书/安全域与发卡资格 → G5 同一次资金授权/个性化/激活 → G6 快捷交通/off-host routing/锁屏恢复 → G7 真终端交易扣费一致。**G4 必须早期调查，不等全UI/读卡做完；当前未知，既未承诺可行，也未证明必然失败。**完整 iMessage、App Store、指纹、CoreNFC reader API 和备用电量不是默认前置；若卡种需发行方App或已配置付款卡，再明确增加该依赖。
