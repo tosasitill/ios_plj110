@@ -3881,7 +3881,8 @@ def captured_rela(elf, section, offset, expected):
     """Resolve ONE relocation using ITS linked symtab, never a flattened index.
 
     expected = (type, symbol name, section name or None, symbol type/value,
-    addend). Call only after a full-file gate. This is link-time evidence, not
+    addend). Call only after a full-file or exact selected-range gate.
+    This is link-time evidence, not
     a relocated runtime pointer or permission to dereference any address.
     """
     sections = [(i, s) for i, s in enumerate(elf.sections) if s['name'] == section]
@@ -4210,6 +4211,119 @@ def vcp_ready_evidence(elf, bootstrap):
         ready_word_has_no_epoch_nonce_or_signature=True,
         xnu_must_validate_before_state_publication=True,
         registered_handler_is_not_event_receipt=True)
+    return result
+
+
+def pkvm_smmu_owner_evidence(elf):
+    """File-bound EL2 donation/ops installation, NOT native cold authority.
+
+    Unlike the AP profiles, this uses exact selected function/object bytes
+    and linked relocations, without repeating a whole-module qualification.
+    A match identifies these ranges only, not the rest of the module, its
+    current loaded text, registered handlers, or MMIO permission in XNU.
+    """
+    result = dict(profile_match=False, identity_scope='selected ranges and relocations only',
+        whole_module_identity_proven=False, loaded_module_pairing_proven=False,
+        runtime_hyp_ops_installed_proven=False, runtime_device_donation_proven=False,
+        runtime_pool_donation_proven=False, runtime_direct_register_bank_proven=False,
+        runtime_ns_authority_proven=False, native_cold_provider_implemented=False)
+    anchors = (
+        ('__kvm_nvhe_add_smmu_device', '.hyp.text', 2, 0x49c8, 0x190,
+         '062bdd27224d8ac9c691071e7c1044bbedd5b1be3175f9ed304c7d7c5995a3ef'),
+        ('__kvm_nvhe_mtk_iommu_init', '.hyp.text', 2, 0x4ea8, 0x56c,
+         'b9482d1a69ea23310dc7ef44fbfe0f79bdd88e9ab85e0578d4165a7674cf3c3d'),
+        ('__kvm_nvhe_smmu_hyp_init', '.hyp.text', 2, 0x5e88, 0x68,
+         'e8316fcb3703ce353a0efa6b71aeac52196c3a73fd6df6eb5ea26065c47a4d3f'),
+        ('mtk_kvm_arm_smmu_v3_init', '.text', 2, 0x1ed4, 0x118,
+         '97c8952d0035217c7ca8c9e912cb26b5b34a20c89e1550027a62fcebbfb78124'),
+        ('__kvm_nvhe_smmu_ops', '.hyp.data', 1, 0, 0xc8,
+         '6d9c54dee5660c46886f32d80e57e9dd0ffa57ee0cd2a762b036d9c8e0c3a33a'),
+    )
+    functions = {}
+    for name, section, typ, start, size, digest in anchors:
+        sections = [(i, s) for i, s in enumerate(elf.sections) if s['name'] == section]
+        if len(sections) != 1 or sections[0][1]['type'] != 1:
+            return result
+        index, sec = sections[0]
+        matches = [s for s in elf.symbols if s['name'] == name and
+                   (s['section'], s['type'], s['value'], s['bytes']) ==
+                   (index, typ, start, size)]
+        if len(matches) != 1:
+            return result
+        raw = span(elf.data(sec), start, size)
+        if hashlib.sha256(raw).hexdigest() != digest:
+            return result
+        functions[name] = dict(section=section, offset=start, bytes=size,
+            symbol_type=typ, file_offset=sec['offset'] + start,
+            selected_sha256=digest, raw_hex=raw.hex())
+    relocations = [
+        captured_rela(elf, '.hyp.data', 0x50,
+            (257, '__kvm_nvhe_mtk_smmu_dabt_handler', '.hyp.text', 2, 0x542c, 0)),
+        captured_rela(elf, '.text', 0x1f1c,
+            (275, '__kvm_nvhe_smmu_ops', '.hyp.data', 1, 0, 0)),
+        captured_rela(elf, '.text', 0x1f20,
+            (277, '__kvm_nvhe_smmu_ops', '.hyp.data', 1, 0, 0)),
+    ]
+    for section, offset, name, target in (
+            ('.text', 0x1f0c, 'topup_hyp_memcache', None),
+            ('.text', 0x1f50, 'kvm_iommu_init_hyp', None),
+            ('.hyp.text', 0x49e8, '__kvm_nvhe_malloc', 0xcb8),
+            ('.hyp.text', 0x4a00, '__kvm_nvhe_malloc', 0xcb8),
+            ('.hyp.text', 0x50ac, '__kvm_nvhe_memcpy', 0x2c20),
+            ('.hyp.text', 0x52a8, '__kvm_nvhe_smmu_map_mpool', 0x67a8),
+            ('.hyp.text', 0x5314, '__kvm_nvhe_add_mem_to_mpool', 0x67d8),
+            ('.hyp.text', 0x534c, '__kvm_nvhe_add_to_nomap_region', 0x7384),
+            ('.hyp.text', 0x5358, '__kvm_nvhe_malloc_init', 0xc24),
+            ('.hyp.text', 0x5398, '__kvm_nvhe_smmu_mem_init', 0x7878),
+            ('.hyp.text', 0x5ea0, '__kvm_nvhe_register_hyp_pmm_hal', 0x6618)):
+        relocations.append(captured_rela(elf, section, offset,
+            (283, name, None if target is None else '.hyp.text',
+             0 if target is None else 2, 0 if target is None else target, 0)))
+    spans = (
+        ('device_return_zero_and_two_allocations', '__kvm_nvhe_add_smmu_device', 0x49dc, 0x4a0c),
+        ('device_publish_before_donation', '__kvm_nvhe_add_smmu_device', 0x4a28, 0x4a50),
+        ('device_donation_call_and_failure_branch', '__kvm_nvhe_add_smmu_device', 0x4a50, 0x4a9c),
+        ('device_va_and_count_only_after_donation', '__kvm_nvhe_add_smmu_device', 0x4b10, 0x4b44),
+        ('pool_return_zero_and_page_list_share', '__kvm_nvhe_mtk_iommu_init', 0x4ed0, 0x4f0c),
+        ('pool_share_failure_returns_zero_pair', '__kvm_nvhe_mtk_iommu_init', 0x4f34, 0x4f68),
+        ('pool_copy_1608_bytes_and_block_count', '__kvm_nvhe_mtk_iommu_init', 0x509c, 0x50b8),
+        ('pool_record_only_after_donation', '__kvm_nvhe_mtk_iommu_init', 0x50d8, 0x50ec),
+        ('pool_donation_and_failure_continues', '__kvm_nvhe_mtk_iommu_init', 0x513c, 0x51a4),
+        ('pool_add_nomap_and_malloc_init', '__kvm_nvhe_mtk_iommu_init', 0x533c, 0x5364),
+        ('module_ops_store_and_pmm_registration', '__kvm_nvhe_smmu_hyp_init', 0x5e98, 0x5ea8),
+        ('host_translate_ops_and_install', 'mtk_kvm_arm_smmu_v3_init', 0x1f14, 0x1f58),
+        ('host_finalise_dynamic_hvc', 'mtk_kvm_arm_smmu_v3_init', 0x1f58, 0x1f78),
+    )
+    evidence = []
+    for label, name, start, end in spans:
+        f = functions[name]
+        if start % 4 or end % 4 or not f['offset'] <= start < end <= f['offset'] + f['bytes']:
+            raise ValueError('captured EL2 owner span outside aligned function')
+        raw = bytes.fromhex(f['raw_hex'])[start - f['offset']:end - f['offset']]
+        evidence.append(dict(name=label, function=name, section=f['section'], start=start,
+            end_exclusive=end, file_offset=f['file_offset'] + start - f['offset'], raw_hex=raw.hex()))
+    result.update(profile_match=True, profile='captured MT6993 EL2 SMMU owner installation ABI 1',
+        selected_anchors=functions, instruction_evidence=evidence, relocation_evidence=relocations,
+        ops=dict(object='__kvm_nvhe_smmu_ops', bytes=0xc8, dabt_handler_slot=0x50,
+            dabt_target_section='.hyp.text', dabt_target_offset=0x542c,
+            install_call_offset=0x1f50, module_ops_store_offset=0x5e9c),
+        device=dict(guest_result_zero_store=0x49e0, allocation_bytes=[128, 56],
+            register_pa_argument=1, register_bytes_argument=2, coherence_argument=3,
+            smmu_type_argument=4, argument_is_not_sid=True,
+            donation_call_offset=0x4a68, donation_ops_slot=0xe0,
+            donation_arg2=1, page_shift=12, private_va_store=0x4b38,
+            active_count_increment_store=0x4b40, guest_zero_is_not_donation_success=True),
+        pool=dict(guest_result_zero_store=0x4ed0, list_pfn_argument=1, page_shift=12,
+            list_copy_bytes=1608, donation_call_offset=0x5170, donation_ops_slot=0xe0,
+            donation_arg2=0, donation_failure_continues=True, record_store=0x50d8,
+            failed_share_can_return_zero_pair=True, nomap_call_offset=0x534c,
+            nomap_is_pool_protection_not_codec_dma_grant=True,
+            stock_4k_pool_is_not_xnu_16k_storage=True),
+        limitations=dict(indirect_ops_names_are_source_correlated=True,
+            external_kvm_iommu_init_hyp_body_not_captured=True,
+            finalise_handler_body_not_captured=True,
+            dynamic_hvc_not_an_ns_grant=True,
+            device_donation_is_to_el2_not_xnu=True))
     return result
 
 
@@ -4671,6 +4785,8 @@ def module(blob):
             elf, result['smmu_shutdown_evidence'])
     if result['modinfo'].get('name') == ['mtk_iommu_util']:
         result['iommu_util_rpm_evidence'] = iommu_util_rpm_evidence(elf, result['build_id'])
+    if result['modinfo'].get('name') == ['pkvm_smmu']:
+        result['pkvm_smmu_owner_evidence'] = pkvm_smmu_owner_evidence(elf)
     return result
 
 
