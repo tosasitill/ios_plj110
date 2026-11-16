@@ -160,6 +160,7 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 #### 2026-11-16 NFC / iMessage / App Store：只读验证门槛评估（未实现）
 
+- **发布/复核**：GitHub **PR #2** 于 `2026-11-16T11:53:33Z` 合入main，merge **`1ba69325`**；报告 **`aff607fe`**、初版交接 **`1a9f0521`** 均为published main祖先。复核为限定DT/launch库存、旧日志脱敏摘要和源码分支，非新账户/射频测试。停止前归档私有scratch至主checkout同名out，删除自有feature工作树/ref；不切换或覆盖主checkout及其它活跃分支。
 - **范围/提交**：用户续问接入/验证修复门槛；单代理 `feat/apple-services-assessment`，初始main/origin **`ff9e900f`**，不操作同期其它工作树。报告提交 **`aff607fe`**，`docs/2026-11-16_reverse-nfc-apple-services-report.md`。无ADB/fastboot、RF/APDU发送、登录/激活、短信、购买、账户凭据读取、根盘/分区/共享输入修改、构建/CI/设备启动；CI run ID：无。
 - **NFC观察**：已有实机DT板级SN220T；I2C14@162c0000、0x28、400kHz，IRQ/VEN/CLKREQ/VBAT GPIO213/19/18/15；eSE SPI5@161b0000、19.2MHz上限。对应OPPO sn_nci源码提供IRQ/NCI收发与eSE冷复位回复隔离，不是已验证XNU会话。330持久化归档最新nfcd `_loadHW` 于06:06:12.859Z **Failed to open session; hwState=3**，枚举/精确失败点未命名。先NCI真初始化/标签响应→CoreNFC；HCE/eSE applet/Wallet/ApplePay另层，读卡≠复制卡或支付资格。
 - **Apple服务观察/纠偏**：根盘克隆AppStore.app与原商店daemons在，归档appstored有实际运行，旧sweet README“没有AppStore”不代表当前。itunesstored/amsaccountsd有 **NSURLError -1009**；但同boot akd06:06:56出现 **End provisioning HTTP200→ADIProvisioningEnd -42410→AKAnisetteError -8004**，另有BAA签名 **devicecheck.baa -10001→MobileActivation -1**，不能以200称身份验证成功或把所有请求判成断网。apsd06:06:38 **No identity in keychain→Copy activation identity→_APSCopyActivationIdentity失败**；IDS有keychain/protection identity错误和madrid registrationError -1，内部状态不是已闭合的远端拒绝。
