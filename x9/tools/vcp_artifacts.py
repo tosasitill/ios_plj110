@@ -5022,6 +5022,167 @@ def common_mem_wait_evidence(elf, vp):
     return result
 
 
+def decoder_free_retirement_evidence(elf, common):
+    """Actual c006 missing-record suffix and get_param ring selection.
+
+    The earlier whole-file decoder gate is mandatory. A free request that
+    exhausts the ledger logs and joins d006 without replacing its status; a
+    matched request unlinks first, calls the common free import and always
+    destroys the ledger entry. Neither path proves an endpoint drain. The
+    exact original u16 jump table binds get_param IDs to shared/host rings;
+    this is selection evidence, not atomic publication or token lifetime.
+    """
+    result = dict(profile_match=False, runtime_free_request_proven=False,
+                  runtime_dma_retirement_proven=False,
+                  runtime_ring_producer_exclusion_proven=False,
+                  runtime_buffer_lifetime_proven=False,
+                  module_firmware_pairing_proven=False)
+    if not common['profile_match']:
+        return result
+    anchors = (('vcp_dec_ipi_handler', 0x21654, 0x17cc),
+               ('vdec_vcp_get_param', 0x25cb0, 0x948))
+    spans = (
+        ('c006_token_guard_lock_and_exhausted_list', 'vcp_dec_ipi_handler', 0x22638, 0x22680),
+        ('c006_four_qword_match_and_unlink', 'vcp_dec_ipi_handler', 0x22684, 0x226ec),
+        ('c006_common_free_result_and_unconditional_record_destroy', 'vcp_dec_ipi_handler', 0x226fc, 0x2272c),
+        ('c006_common_d006_send64_suffix', 'vcp_dec_ipi_handler', 0x2272c, 0x22750),
+        ('c006_missing_record_unlock_log_join_without_status_store', 'vcp_dec_ipi_handler', 0x22b04, 0x22b4c),
+        ('get_param_bound_u16_table_dispatch', 'vdec_vcp_get_param', 0x25cd8, 0x25d04),
+        ('get_free_fb_exact_async1_host_ring_and_lock', 'vdec_vcp_get_param', 0x25e24, 0x25e64),
+        ('get_free_bs_always_shared_vsi', 'vdec_vcp_get_param', 0x2630c, 0x26320),
+        ('get_display_fb_exact_async1_host_ring_and_lock', 'vdec_vcp_get_param', 0x26320, 0x26368),
+        ('get_fb_nonasync_shared_ring_selection', 'vdec_vcp_get_param', 0x26528, 0x26548),
+        ('get_fb_general_fd_marker_only', 'vdec_vcp_get_param', 0x26548, 0x26578),
+    )
+    functions, evidence = captured_function_spans(elf, anchors, spans)
+    relocations = [captured_rela(elf, '.text', offset,
+        (283, name, None, 0, 0, 0)) for offset, name in (
+            (0x22708, 'mtk_vcodec_free_mem'), (0x22714, 'kfree'),
+            (0x22b0c, 'mutex_unlock'), (0x22b3c, '_printk'),
+            (0x25e44, 'mutex_lock'), (0x26340, 'mutex_lock'),
+            (0x26360, 'mutex_unlock'))]
+    for offset, kind in ((0x25cec, 275), (0x25cf0, 277)):
+        relocations.append(captured_rela(elf, '.text', offset,
+            (kind, '', '.rodata', 3, 0, 0xeb24)))
+    sections = [(i, s) for i, s in enumerate(elf.sections) if s['name'] == '.rodata']
+    if len(sections) != 1:
+        raise ValueError('captured get_param requires unique .rodata')
+    index, sec = sections[0]
+    raw = span(elf.data(sec), 0xeb24, 46)
+    targets = [0x25d04 + word * 4 for word in struct.unpack('<23H', raw)]
+    expected = [0x25d04, 0x26000, 0x25e80, 0x25f7c, 0x26320, 0x25e24,
+                0x2630c, 0x26218, 0x263b4, 0x2641c, 0x25e04, 0x262f4,
+                0x2612c, 0x264e8, 0x2649c, 0x25e64, 0x264bc, 0x2614c,
+                0x26168, 0x26580, 0x26508, 0x2638c, 0x26368]
+    if targets != expected:
+        raise ValueError('captured get_param original jump table mismatch')
+    for rel in elf.sections:
+        if rel['type'] not in (4, 9) or rel['info'] != index:
+            continue
+        step = 24 if rel['type'] == 4 else 16
+        if rel['entry'] != step or rel['bytes'] % step:
+            raise ValueError('invalid get_param jump-table relocation section')
+        data = elf.data(rel)
+        for at in range(0, len(data), step):
+            offset = struct.unpack_from('<Q', data, at)[0]
+            if 0xeb24 <= offset < 0xeb24 + len(raw):
+                raise ValueError('cannot interpret relocated get_param jump table')
+    result.update(profile_match=True,
+        profile='MT6993 captured c006 and original ring dispatch boundary ABI 1',
+        function_anchors=functions, instruction_evidence=evidence,
+        relocation_evidence=relocations,
+        c006=dict(object_match_bytes=32, record_unlink_before_common_free=True,
+            common_free_call=0x22708, returned_status_store=0x2270c,
+            record_destroy_call=0x22714, record_destroy_even_on_free_error=True,
+            missing_record_target=0x22b04, missing_record_join=0x2272c,
+            missing_record_does_not_replace_request_status=True,
+            missing_record_can_reply_status0_without_release=True,
+            inner_invalid_instance_guard_joins_same_reply_suffix=True,
+            inner_guard_runtime_reachability_not_proven=True,
+            reply=0xd006, reply_payload_bytes=64,
+            common_free_import_not_a_verified_runtime_target=True,
+            no_dma_drain_authority_from_ack=True),
+        jump_table=dict(section='.rodata', offset=0xeb24, bytes=46,
+            file_offset=sec['offset'] + 0xeb24, raw_hex=raw.hex(),
+            entry_bytes=2, base=0x25d04, shift=2, max_id_inclusive=22,
+            targets=targets, runtime_indirect_target_selection_proven=False),
+        ring_selection=dict(display_param_id=4, free_fb_param_id=5,
+            free_bs_param_id=6, names_are_source_correlated_enum=True,
+            async_flag_instance_offset=0xb0, async_branch_value=1,
+            display=dict(host_ring_instance_offset=0xb8, host_lock_instance_offset=0x6c8,
+                         shared_vsi_offset=0x820),
+            free_fb=dict(host_ring_instance_offset=0x6f8, host_lock_instance_offset=0xd08,
+                         shared_vsi_offset=0x210),
+            free_bs=dict(shared_vsi_offset=0, no_async_host_ring_branch=True),
+            returned_fb_general_fd_offset=0x35c, negative_fd_unchanged=True,
+            nonnegative_fd_set_to_minus1=True,
+            fd_marker_is_not_dma_unmap_or_heap_free=True,
+            branch_selection_is_not_durable_dequeue_or_reference_retirement=True))
+    return result
+
+
+def common_free_retirement_evidence(elf, vp):
+    """File-bound free/unmap call chain, deliberately not a DMA drain proof.
+
+    Reuse the existing whole-file common VP identity gate. In this exact KO,
+    free_mem inlines optional unmap/detach and returns a literal zero after
+    heap_buffer_free; it does not test a completion result from those imports.
+    A d006 status0 therefore cannot establish per-buffer endpoint retirement.
+    The imported implementations and the firmware's release preconditions are
+    outside these function bodies, so absence here is not absence system-wide.
+    """
+    result = dict(profile_match=False, runtime_release_proven=False,
+                  runtime_dma_retirement_proven=False,
+                  external_dma_sync_semantics_proven=False,
+                  module_firmware_pairing_proven=False)
+    if not vp['profile_match']:
+        return result
+    anchors = (('mtk_vcodec_free_mem', 0x598c, 0x164),
+               ('mtk_vcodec_dma_unmap_detach', 0x5564, 0xac))
+    spans = (
+        ('free_token_and_type_guards', 'mtk_vcodec_free_mem', 0x59ac, 0x59cc),
+        ('free_optional_unmap_guards_and_call', 'mtk_vcodec_free_mem', 0x59cc, 0x59fc),
+        ('free_optional_detach_then_heap_free', 'mtk_vcodec_free_mem', 0x59fc, 0x5a1c),
+        ('free_success_literal_zero', 'mtk_vcodec_free_mem', 0x5a1c, 0x5a40),
+        ('free_bad_token_status_minus22', 'mtk_vcodec_free_mem', 0x5a60, 0x5a68),
+        ('free_bad_type_status_minus1', 'mtk_vcodec_free_mem', 0x5a80, 0x5a88),
+        ('unmap_helper_optional_sgt_attach_direction', 'mtk_vcodec_dma_unmap_detach', 0x5580, 0x55c4),
+        ('unmap_helper_optional_detach_and_clear', 'mtk_vcodec_dma_unmap_detach', 0x55c4, 0x55fc),
+    )
+    functions, evidence = captured_function_spans(elf, anchors, spans)
+    relocations = [captured_rela(elf, '.text', offset,
+        (283, name, None, 0, 0, 0)) for offset, name in (
+            (0x59f4, 'dma_buf_unmap_attachment_unlocked'),
+            (0x5a10, 'dma_buf_detach'),
+            (0x5a18, 'dma_heap_buffer_free'),
+            (0x55bc, 'dma_buf_unmap_attachment_unlocked'),
+            (0x55e4, 'dma_buf_detach'))]
+    result.update(profile_match=True,
+        profile='MT6993 captured common free call/retirement boundary ABI 1',
+        function_anchors=functions, instruction_evidence=evidence,
+        relocation_evidence=relocations,
+        free=dict(allocator_object_token_offset=24, mem_type_max_inclusive=7,
+            rejected_token_status=-22, rejected_type_status=-1,
+            unmap_call=0x59f4, unmap_direction=0,
+            unmap_direction_name='DMA_BIDIRECTIONAL, source-correlated enum',
+            null_or_error_sgt_or_attach_can_skip_unmap=True,
+            null_or_error_attach_can_skip_detach=True,
+            heap_free_call=0x5a18, success_status_instruction=0x5a28,
+            success_literal_status=0,
+            imported_return_status_not_checked_by_this_function=True,
+            no_explicit_wait_irq_fence_or_cache_call_in_this_function=True,
+            software_teardown_call_is_not_endpoint_drain=True,
+            imported_function_bodies_not_captured=True,
+            firmware_free_preconditions_not_proven=True,
+            input_mem_object_not_cleared_by_this_function=True),
+        standalone_unmap=dict(unmap_call=0x55bc, detach_call=0x55e4,
+            accepts_direction_codes=[0, 1, 2],
+            clears_supplied_attach_and_sgt_slots=True,
+            void_callback_chain_is_not_a_device_completion_receipt=True,
+            free_mem_uses_inlined_sequence_not_this_helper=True))
+    return result
+
+
 def common_vp_evidence(elf, build_id):
     """Captured common KO's allocation, pattern and cache call instructions."""
     result = dict(profile_match=False, runtime_vp_proven=False,
@@ -5146,8 +5307,12 @@ def module(blob):
             elf, result['decoder_common_evidence'])
         result['decoder_output_evidence'] = decoder_output_evidence(
             elf, result['decoder_common_evidence'])
+        result['decoder_free_retirement_evidence'] = decoder_free_retirement_evidence(
+            elf, result['decoder_common_evidence'])
     if result['modinfo'].get('name') == ['mtk_vcodec_common']:
         result['common_vp_evidence'] = common_vp_evidence(elf, result['build_id'])
+        result['common_free_retirement_evidence'] = common_free_retirement_evidence(
+            elf, result['common_vp_evidence'])
         result['common_mem_wait_evidence'] = common_mem_wait_evidence(
             elf, result['common_vp_evidence'])
         result['common_irq_owner_evidence'] = common_irq_owner_evidence(
