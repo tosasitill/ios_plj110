@@ -17,6 +17,8 @@
 - 用户目标（2026-11-12）：**Mac USB 配对、AppSync 安装 IPA、完整越狱（Procursus rootless /var/jb，SSH 只走 ue0）**；
   方法上**以 UniXNU 为主要参考，不闭门造车**。
 
+- 用户新增目标（2026-11-16）：**原生 Apple Wallet 新开交通卡并锁屏刷卡使用**；城市/卡种及资金渠道尚未指定，当前只完成修复规划，未开始开卡或资金/SE 操作。
+
 ## 2. 机器与目录
 
 - **Mac**（构建/反汇编/大工具全部在这）：`ssh -p 2222 tosasitill@localhost`（反向隧道，偶尔断，重试）。仓库 `~/ios_plj110`
@@ -172,6 +174,30 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **下一验收**：用户手动临时boot（无需GPU mailbox，前提设备仍GPU280）；新日志按 `X9 MOTION SCP: LIST name=icm456xy acc gain=1000` → `X9 MOTION: ENABLE ACK` → `accelerometer valid`/真实DATA → `X9 MOTION USER: ... adapter installed/subscriber started/orientation=` 检查，ACK不当DATA。打开**支持横屏的Safari页面**，关闭旋转锁后分别左/右转、恢复竖屏、打开旋转锁重复；平放观察5/6、故障/陈旧时不造默认portrait。D22桌面可只竖屏，不能以桌面不转判驱动失败；板级轴正负/旋转锁/实际UI自动旋转与故障回调仍未实机证明。源码入口`x9/motion/`/`X9Motion.h`/`sweet_x9_motion.c`，完整输入/argv/编译和失败原日志保留在主checkout `x9/out/orientation-20261116/`；只读SystemOS本轮mount已按本轮attach plist正常detach exit0，其它mount/窗口/备份不动。
 - **发布/收尾**：feature初次push exit0；停止前将完整out无覆盖APFS复制到主checkout（不追加hash检查），更新正式main合并/发布及清理状态。本轮整合时root main出现其它任务的未提交NOTES，故不覆盖/切换root、不更新它的index；以GitHub PR合main，精确结果随后记录。
 
+- **同期main更新/候选版本边界**：PR #5第一次merge实际exit1（远端main已由其它工作推进，NOTES冲突），未force push。fetch后确认 **`bfbc0e51`** 生产更新使display fill和SpringBoard island默认on；这不是仅文档更新。保留完整incoming NOTES并插入本轮段，生产代码自动合并；原`43396f2`候选仍单独保全、**仅中间版本，不推荐**。将按新集成源码打包唯一v2（不是对成功旧镜像的复建/二次检查）；原rootboot13完整参数仍605B，只新增motion，不额外强制关闭已默认on的显示功能。原旧候选UI/filloff说明仅属于旧源码，不能套给v2。
+
+
+#### 2026-11-16 Wallet 交通卡目标：分门槛修复计划（未开卡）
+
+- **实际整合/发布**：报告 `4a42639`、初始交接 `b245f4d`；吸收同期 main **`74b12c98`** 时仅 NOTES 插入点冲突，保留完整 incoming 原文后只插本轮目标/交接，merge **`a1ee044`** actual exit0。feature push、GitHub **PR #4** merge actual exit0，`2026-11-16T12:13:27Z` 合入main，merge **`398870ba`**；报告祖先复核 actual exit0。仅2份文档，无本轮代码/构建/启动/资金结果；命令/退出码与离线依据核对结果在同out的 publication/finalization。停止前将私有证据无覆盖归档到主checkout同名out，清理自有worktree/ref；不操作其它会话。
+
+- **范围/报告提交**：用户把目标缩到原生 Wallet 开交通卡；单代理隔离 `feat/wallet-transit-plan`，main 基线 **`84e1aad5`**。报告 **`4a42639`**：`docs/2026-11-16_reverse-wallet-transit-plan-report.md`。仅被动库存/复用日志、规划及 Git 发布；不切换或改写主 checkout 的并发 SMS 工作，不操作其它工作树。无构建/CI run ID、新启动、ADB/fastboot、RF/APDU、登录/身份注册、开卡/充值/迁移/交易、SE/根盘/分区写入。
+- **观察/纠偏**：根盘克隆确有 `com.apple.Passbook` 主程序，位于 removable application bundle 根，不能仅查 `/Applications` 就断言 Wallet 缺失；原件 passd 发布 device-registration/payment/library/account/nf-events 等服务。330 已捕获 **06:06:16.484Z `Secure element available: NO` / broker未注册，以及 Needs Registration YES / Has Certificates NO**；本地 supported-device YES 不等于平台认可 X9。06:06:37.337Z 无iCloud账户、CloudStore **PKPassKitErrorDomain -4008**；没有目标卡 add-card、发行请求或远端拒绝证据。NFC 板级 SN220T/I²C14/eSE SPI5 及 nfcd 打开会话失败、ADI -42410/BAA/activation identity、固定已解锁软件 AKS 基线复用前轮，不重采身份/卡片材料或推测错误枚举。
+- **修复门槛/推断**：G0 选卡/地区/iOS16-D22资格/资金路线 → G1 原件UI/XPC/真密码keybag基线 → G2 目标路由实际账户/证明依赖 → G3 NCI/eSE/nfcd管理会话 → G4 平台接受SE签名/证书/安全域与发卡资格 → G5 同一次资金授权/个性化/激活 → G6 快捷交通/off-host routing/锁屏恢复 → G7 真终端交易扣费一致。**G4 必须早期调查，不等全UI/读卡做完；当前未知，既未承诺可行，也未证明必然失败。**完整 iMessage、App Store、指纹、CoreNFC reader API 和备用电量不是默认前置；若卡种需发行方App或已配置付款卡，再明确增加该依赖。
+- **验收/回滚**：最终以发行方 active、SE有效卡应用、Wallet余额/状态及锁屏真实交易核对；卡面/UID/APDU成功/HTTP200/扣款单步不能代替完成。账户/平台注册、SE写入、开卡/充值/迁移/删卡/消费逐项确认；**分区备份不恢复eSE卡片/密钥/计数器**，不能以还原userdata或刷回Android冒充事务撤销。故障按同发行业务ID查询恢复，避免重复扣款。
+- **复核/下一步**：私有证据 `x9/out/wallet-transit-plan-20261116/`（scope/timeline/workitems/Wallet库存/脱敏passd证据/前轮限定证据/field-journal）；`verify-plan-evidence.py` 仅读已保留JSON，**actual exit0**，8项规划依据核对通过，不代表实机资格或交易通过。报告 staged diff检查/commit actual exit0。下一先问具体城市/卡名并锁资金路线，再按目标入口做不扣费的资格/SE契约调查；所有状态变更先确认。提交/合并/push确切结果另补，规划完成不等于交通卡目标完成。
+
+#### 2026-11-16 显示 / 灵动岛 / 状态栏：用户要求默认开启（已构建，未实机）
+
+- **基线/范围**：单代理隔离 `feat/display-default-on` / `.worktrees/display-default-on`，真实main/origin **`9233c1ac`**。用户“默认打开”按两开关执行：`pe_serial.c`共享board table `x9_fill=1`、`x9_ui=1`；FB/HID从裸`PE_parse_boot_argn`改用同`sweet_x9_arg`，打包器原`x9_boot_defaults`自动投影subtype2556，无需额外token、无bootargs膨胀。保留414x920pt@3x，scanout拉宽与触摸逆映射不变，非X9不启用此路径。
+- **关闭/恢复**：显式`x9_fill=0`仅关闭铺满；`x9_ui=0`禁用SpringBoard hook并打包ADT2436，但不保证清旧MG缓存。两项均关用`x9_fill=0 x9_ui=0`；完整缓存恢复另加单次`x9_mgwipe=1`，之后继续显式0镜像（不带mgwipe）。新默认镜像会再次启用UI，不能把“普通不传参数”当保持关闭。hook仍只覆盖SpringBoard竖屏主屏状态栏20px，不扩大应用注入/移动原生岛窗口。
+- **执行边界**：用户已要求默认开启，未来该镜像首次启动沿原自有dylib/epoch安装和MG缓存重建路径；本轮不操作手机、不写根盘/分区。按x9/AGENTS只编译/打包，不执行测试脚本、不额外解包/反汇编/重算成功镜像hash；原测试断言同步新默认但未执行。旧v2镜像未改且仍为旧默认off kernel。构建输入/原日志在 `x9/out/display-default-on-20261116/`，确切build/boot结果见下条；无CI run ID或实机验收。
+
+- **构建/交付实际结果**：生产提交 **`bfbc0e51`**；`prepare-local.py --check` actual exit0。`build.py all --boot-config x9/build/boot-device.json --name x9-display-default-on-20261116` actual exit0，**103/103 overlay（3 prebuilt）**、link/strip/shim/boot均成功，自有dylib签名86112B；日志Image **31903744B**、boot **14938112B**。同一kernel的两次boot-only关闭与rollback包装均exit0（相同Image/boot大小），保留所有既有warning原日志。默认输入546B且不含两开启token；off564B、rollback576B，均不改设备基础参数/不删no-op参数。没有额外解包/hash/反汇编检查，未跑测试/硬件场景。
+- **主目录镜像**：整目录无覆盖迁回主checkout：`x9/out/x9-display-default-on-20261116/boot.img`（新默认双开）、`x9/out/x9-display-off-20261116/boot.img`（显式两项0）、`x9/out/x9-display-default-rollback-20261116/boot.img`（两项0+单次mgwipe1）；输入及console/exit在主checkout `x9/out/display-default-on-20261116/`。旧fill-v2/UI镜像未改；GPU280 allowlist不变、无plugin-package，设备仍为280时无需mailbox。本轮无设备/root/cache写入，键盘/边缘/点击/岛/剪裁/性能仍未实机验收。合main/push与清理实际结果另记，不覆盖主checkout SMS工作或其他分支。
+
+- **同期main整合**：构建后其它窗口将SMS文档checkpoint合main/origin **`3c1ca34a`**并占用主checkout main；本轮不切换或更新该工作树。最初ff-only整合被安全拒绝；随后merge NOTES冲突actual exit1，保留完整incoming SMS交接，仅顶部插入本轮默认开启段。同期只3文档、无生产delta，`bfbc0e51`新镜像无需重编。功能分支经GitHub PR服务端合main，不force main、不操作其他工作树。确切发布/清理结果见下条。
+
 #### 2026-11-16 SMS ACK concrete owner（同 ID 内存退休静态收束；物理 ACK 仍缺）
 
 - **实际git整合**：原报告commit **fb62045a**；main同期由其它任务推进 **9233c1ac**，正常rebase仅NOTES冲突actual exit1，保留完整stage2 incoming原字节后只插入本轮SMS小节，continue exit0，报告变为 **3c1ca34a**。已ff合main并 **push actual exit0 `9233c1ac..3c1ca34a`**，只有3文档/177行，无生产delta/新kernel/CI/boot。最后交接并将报告Mach-O delete符号精确写为 `__ZdlPv`，继续同feature commit/ff/push，再仅正常删除本轮本地 `feat/sms-ack-owner`；没有本轮worktree/远端feature/代理、未决reader或build/device worker，保留主out/其它树/共享输入/成功kernel/备份。所有确切argv/stdout/stderr/数值exit与最终sha/清理状态见同out `finalization-commands.json` 及各 `*.exit.json`；完整通话短信继续active，不以静态退休/发布文档替功能验收。
@@ -181,6 +207,8 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **首资格里程碑**：bounded两key reader actual exit0：10123c5e5=`kSmsMessageIsMobileOriginated`，10123c603=`kSmsMessageWasAcknowledged`。精确旧proof1010817b4为bool dyn_cast_or_default、101085084为xpc_bool_create，只复用无新import读取；因此handler跳过MO=true或ID=-1分支，否则保ID调+e0。原format6保留page5/actual slot raw证明 **101528df0→1000c05b0**，无新slot/page遍历；原完整FS1000c05b0..1000c0694/228B从库存promote actual exit0，只构造捕同object/原u32 ID的block与返回byte。尚未展开invoke1000c7878/1000c7964/1000c7998，不称map退休或物理ACK。
 - **开始/范围**：上一轮checkpoint 2086b125/ff9e900f已合main/push，属progress，完整通话短信goal仍active。当前main/origin **ff9e900f** clean、旧句柄终态；本轮单代理 `feat/sms-ack-owner`、scratch `x9/out/sms-ack-owner-20261116/`。沿已资格handler1004bad6c的service+e0，先资格第二key10123c5e5/reply10123c603、精确imports1010817b4/101085084及同Model AP101528d10的slot101528df0，再追同u32 ID map mutation/下游ACK。两key保留data矿actual exit0/无覆盖，尚未读新原数据或资格名字；原text库存/80页chains只复用，不重扫、不重编/复检成功kernel、不测试/人工向量/设备/共享输入动作。
 
+
+- **实际发布/分支清理**：GitHub **PR #3** `https://github.com/tosasitill/ios_plj110/pull/3` 于 **2026-11-16T12:11:33Z** 服务端merge **`74b12c98`**，head **`253babac`**，source **`bfbc0e51`** 已资格为published main祖先。feature正常ff到origin/main后转本轮工作树为分离HEAD；带精确远端head253babac lease删除远端feature actual exit0，正常 `branch -d feat/display-default-on` actual exit0（没有-D）。主checkout由其它窗口自行转main/推进SMS，本轮未切换/写它；其它工作树不动。生成头/local配置/pycache **35项**已无覆盖迁到主checkout `x9/out/display-default-on-archive-20261116/`，仅保留本轮`.local`链接待最后unlink，target/备份不动。最后此notes-only交接沿published main分离HEAD commit/push，再正常remove本轮临时树；确切最终commit/push/remove/remote结果留同out原日志。无新生产delta/重编/CI/测试/设备结果，默认开启不等于硬件验收。
 
 #### 2026-11-16 display-fill：用户批准合 main / 删除分支（源码收尾，未实机）
 

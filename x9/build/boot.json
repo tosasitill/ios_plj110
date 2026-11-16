@@ -28,5 +28,6 @@
   "launchdsuffix=release",
   "-nobsdmgroot"
  ],
- "_comment_defaults": "X9 kernel feature switches proven on the device are default-on in the kernel (sweet_x9_arg in pe_serial.c); pass name=0 to turn one off. UFS defaults to the device-qualified G5 ceiling (ug=5), with DVFSRC INIT-only by default while ug=4/5 is enabled; ug=0 disables late scaling, and explicit x9_dvfsrc/dv settings override the dependency default. No ug/dv tokens are needed here. x9_metal_render=1 stays because the X9GeneralMetal plugin reads it from kern.bootargs."
+ "_comment_defaults": "X9 kernel feature switches proven on the device are default-on in the kernel (sweet_x9_arg in pe_serial.c); pass name=0 to turn one off. UFS defaults to the device-qualified G5 ceiling (ug=5), with DVFSRC INIT-only by default while ug=4/5 is enabled; ug=0 disables late scaling, and explicit x9_dvfsrc/dv settings override the dependency default. No ug/dv tokens are needed here. x9_metal_render=1 stays because the X9GeneralMetal plugin reads it from kern.bootargs.",
+ "_comment_display": "User-selected X9 defaults (2026-11-16): x9_fill=1 and x9_ui=1 without tokens; not yet hardware-qualified. Explicit x9_fill=0/x9_ui=0 disable. UI first boot installs own dylib and rebuilds MG cache once; rollback uses x9_ui=0 x9_mgwipe=1."
 }
