@@ -21,6 +21,8 @@ static uint32_t als_old_parent;
 static uint8_t als_prox_info[X9_PROX_INFO_BYTES];
 static int als_prox_present, als_list_complete;
 static uint32_t als_prox_pending, als_prox_enabled, als_prox_interval;
+static uint8_t als_motion_info[X9_MOTION_INFO_BYTES];
+static int als_motion_present;
 
 /* HID requests only enqueue. The one worker owns OUT29 and correlates ACKs;
  * no second mailbox user, clock reparent, coprocessor release or awake vote. */
@@ -61,6 +63,7 @@ static void als_fault(int error)
  valid = 0; status.control_enabled = 0;
  lck_mtx_unlock(&x9_als_lock);
  x9_prox_native_disconnect(error);
+ x9_motion_native_disconnect(error);
 }
 static uint32_t als_rr(volatile uint32_t *base, unsigned off) { return base[off/4]; }
 static void als_wr(volatile uint32_t *base, unsigned off, uint32_t value)
@@ -417,7 +420,7 @@ static int als_list(void)
  als_from_io(als_snapshot,als_rx,0,sizeof(als_snapshot));
  const uint8_t *p = als_snapshot, *h = p+8, *n = als_reply+8;
  uint32_t length = le32(h+8), capacity = le32(p+20), gain = 0;
- const uint8_t *prox_info = NULL;
+ const uint8_t *prox_info = NULL, *motion_info = NULL;
  /* The LIST writer 0x87bea -> 0x88ce6 writes only result records after
   * the copied header; finalizer 0x87c72 -> 0x88bb4 replaces rx_len/CRC,
   * leaving memory.sequence intact. Correlate this CRC-covered RX header
@@ -432,6 +435,10 @@ static int als_list(void)
    * light_1 = the same TCS3720; record every entry the SCP returns. */
   printf("X9 ALS SCP: LIST record type=%u gain=%u name=%.*s vendor=%.*s\n",
       info[0],le32(info+4),16,info+8,16,info+24);
+  if (info[0] == X9_MOTION_MTK_TYPE) {
+   if (motion_info || !le32(info+4)) return EBADMSG;
+   motion_info = info; continue;
+  }
   if (info[0] == X9_PROX_MTK_TYPE) {
    if (prox_info || !le32(info+4)) return EBADMSG;
    prox_info = info; continue;
@@ -441,7 +448,7 @@ static int als_list(void)
   gain = le32(info+4);
   printf("X9 ALS SCP: LIGHT name=%.*s vendor=%.*s gain=%u\n",16,info+8,16,info+24,gain);
  }
- if (!gain && !prox_info) return ENODEV;
+ if (!gain && !prox_info && !motion_info) return ENODEV;
  /* Install neither sensor from a partially validated LIST. Keep a complete
   * type8 info snapshot so a late proximity HID can attach without a new IPI. */
  if (prox_info) {
@@ -450,6 +457,9 @@ static int als_list(void)
       16,prox_info+24,le32(prox_info+4));
  }
  als_list_complete = 1;
+ if (motion_info) {
+  memcpy(als_motion_info,motion_info,sizeof(als_motion_info)); als_motion_present=1;
+ }
  lck_mtx_lock(&x9_als_lock);
  mtk_gain = status.gain = gain; last_scp_time = 0; valid = 0;
  lck_mtx_unlock(&x9_als_lock); return 0;
@@ -499,6 +509,8 @@ static int als_drain(volatile uint32_t *base, uint32_t wp, uint32_t bytes, unsig
  if (als_rr(base,8) != bytes || als_rr(base,12) != item_size || rp >= bytes || rp%item_size) return EBADMSG;
  for (unsigned i = 0; rp != wp && i < 128; i++) {
   uint8_t record[76]; als_from_io(record,base,16+rp,item_size);
+  if (record[0] == X9_MOTION_MTK_TYPE && record[1] == 0)
+   (void)x9_motion_native_data(record,X9_MOTION_DATA_BYTES);
   if (record[0] == X9_ALS_MTK_TYPE && record[1] == 0) {
    /* Super records share the header/value[0] prefix, but only the first
     * complete normal 36-byte record is passed to the existing decoder. */
@@ -524,6 +536,24 @@ static int als_drain(volatile uint32_t *base, uint32_t wp, uint32_t bytes, unsig
  }
  return 0;
 }
+static int als_motion_service(void)
+{
+ struct x9_motion_status st; x9_motion_copy_status(&st);
+ if (st.error) return 0; /* a local absent sensor does not kill ALS/PS */
+ if (als_list_complete && st.active && !st.configured) {
+  if (!als_motion_present) { x9_motion_native_disconnect(ENODEV);return 0; }
+  int e=x9_motion_native_configure(als_motion_info,sizeof(als_motion_info));
+  if (e) return e==ENXIO?0:e;
+  printf("X9 MOTION SCP: LIST name=%.*s gain=%u\n",16,als_motion_info+8,le32(als_motion_info+4));
+  x9_motion_copy_status(&st);
+ }
+ if (!st.configured || !st.pending) return 0;
+ uint8_t batch[16]={0};als_put64(batch,(uint64_t)st.requested_us*1000);
+ int e=als_control(X9_MOTION_MTK_TYPE,st.desired?1:0,
+     st.desired?batch:NULL,st.desired?sizeof(batch):0);
+ x9_motion_native_control(st.desired,st.requested_us,e);
+ return e;
+}
 static void als_worker(void *arg __unused, wait_result_t result __unused)
 {
  int error = als_prepare();
@@ -540,6 +570,7 @@ static void als_worker(void *arg __unused, wait_result_t result __unused)
  while (!error && als_alive()) {
   error = als_poll();
   if (!error) error = als_prox_service();
+  if (!error) error = als_motion_service();
   if (!error) error = als_drain(als_data,als_wp,als_data_bytes,36);
   if (!error) error = als_drain(als_super,als_super_wp,als_super_bytes,76);
   lck_mtx_lock(&x9_als_lock);
@@ -565,6 +596,8 @@ static void als_worker(void *arg __unused, wait_result_t result __unused)
   /* A matching ACK, not shutdown(), proves the remote accepted DISABLE. */
   error = als_control(X9_ALS_MTK_TYPE,0,NULL,0);
   if (!error && als_prox_present) error = als_control(X9_PROX_MTK_TYPE,0,NULL,0);
+  if (!error && als_motion_present) error = als_control(X9_MOTION_MTK_TYPE,0,NULL,0);
+  if (!error) x9_motion_native_disconnect(ECANCELED);
   if (!error) x9_prox_native_disconnect(ECANCELED);
   if (error) als_fault(error);
   else {

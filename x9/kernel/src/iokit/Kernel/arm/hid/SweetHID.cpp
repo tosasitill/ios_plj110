@@ -615,3 +615,4 @@ sweet_hid_touch(int finger, int down, int x, int y)
 #include "X9Barometer.inc"
 
 #include "X9Proximity.inc"
+#include "X9Accelerometer.inc"
