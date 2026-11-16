@@ -65,10 +65,18 @@ static int cam_rail_snapshot(struct cam_probe_journal *j, struct cam_probe_rail 
     *evidence=p->selector|((uint32_t)p->enable<<8)|((uint32_t)p->da<<16);
     if(!e)e=cam_rail_hw(j,p,&p->hw,&p->eint);
     if(e)return e;
+    printf("X9 CAMERA RAIL ENTRY: sid=%u sel=%02x en=%02x da=%02x hw_op=%02x eint=%02x\n",
+        p->sid,p->selector,p->enable,p->da,p->hw,p->eint);
     if((p->enable&2) || (p->da&4))return ENOTSUP;
     if(p->enable&1) {
         if(p->selector!=p->target || !(p->da&1))return ENOTSUP;
-    } else if((p->da&1) || p->hw || p->eint)return EBUSY;
+    } else if(p->da&1)return EBUSY;
+    /* Log 332: DOVDD LN60_7 was off (EN0/DA0) with HW_OP_EN0 nonzero.
+     * mt6661-regulator.c only uses HW_OP_EN0 bit1 as the HW1 normal-mode
+     * select (set_load), and the imgsensor power path enables the rail by
+     * RG EN alone over the inherited HW_OP/EINT configuration. Borrow that
+     * configuration: never write it, and cam_rail_check_locked still
+     * requires it unchanged for the whole session. */
     p->selector_expected=p->selector_prior=p->selector;
     p->enable_expected=p->enable_prior=p->enable;
     p->valid=true;
