@@ -157,6 +157,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 蓝牙分支振动透传：芯片接口支持，机械手感尚未认证
+
+- **范围/提交**：用户询问蓝牙分支最新 iOS 波形透传是否被本机马达支持。单代理核对树 `feat/haptic-pass-review-20261116`，创建时 main=`9e25175b`；报告提交 **`6fcd2138`**，`docs/2026-11-16_reverse-haptic-passthrough-report.md`。只检查本地蓝牙 `e3647484` 的功能提交 **`66dd5f8c`**；实际 origin 蓝牙 ref仍为11-15的 `f3332b89`，不是本地11-16透传实现，未改写/推送活动蓝牙分支。
+- **观察/结论**：已有330日志chip9381/RTP12000/FIFO2048、mediaserverd writer、state08及非零submitted证明旧版真实通路。原厂 IOCTL_STREAM_MODE→aw_stream_mode→opbuf->data→aw8693xs_set_rtp_data确为直接RTP；支持该输入方式，**不等于OPPO LRA原样还原Taptic Engine触感**。原厂非0816的f0_pre=1700；蓝牙NOTES此前记Android f0=1729，但本轮未独立重采该原输出；XNU log f0=173000是默认/参数，不能当实测。新converter保留80/173/230/300Hz，改f0=190或sharpness=0输出不变；没有自动机械共振适配。D221配置本身有按频率增益（Default Sine Lookup在172.44Hz=-5.3521、230Hz=-10.8338），不能认作通用未调校波形。
+- **实际离线验证**：按66dd5f8c提取真实converter并编Mac C wrapper。首轮link **exit1**（默认CLT MacOSX27 tbd与旧linker不兼容），失败完整保留；明确项目Xcode15/MacOSX14后 **exit0、stderr空**。固定 `.local/apple/ios16-20H392/OS.dmg`新只读挂载，原MicroTap230/MiniTap150/FullTap80转换后非零跨度 **6.75/11.167/33.333ms**、峰值127、1/4 intensity峰值32。仅数字层观察，非物理强度/延迟验收。旧 `/private/tmp/os20H392` 确来自仓库外镜像，未作为本轮权威采样；root clone短暂辅助检查亦未作为最终分析输入。本次新mount已detach **exit0**，原有其它mount不动。
+- **边界/下一步**：保持透传作基线，再用少量明确事件验证力度、起振和余振，按本机响应决定有限频率相关增益/瞬态补偿；不盲目恢复×6削顶/增益下限/固定载频重合成。当前保留工厂OSC source，未复现原厂upload OSC校准；不抄F0 trim当OSC或机械均衡。20ms提前放包与200ms静音续流不保证整链1ms延迟或每次按键免GO（100ms无write、最后client StopIO仍会park/STOP）。私有分析/源码切片/实际argv/stdout/stderr/exit/attach-detach/field-journal归档 **`x9/out/haptic-pass-review-20261116/`**，原Apple资产不入git。本轮没有生产行为delta、kernel/boot/CI build或run ID、设备/Android/sysfs/mailbox/分区操作；未宣称rootboot13或全部振动场景通过。收尾仅合入本报告/交接、push main、归档并清理本核对树，活动蓝牙及其它树不动。
+
 #### 2026-11-16 SMS Controller+9c0 owner → Operation通知ID（静态证据收束）
 
 - **基线/范围**：单代理 `feat/sms-notification-consumer`，main/origin **ea32708b**；只复用原件与必要新静态采样，不新增代理/子树，不重采旧parser/creator或重编成功END kernel，不操作设备、共享`.local`或备份。完整通话短信goal继续active。
