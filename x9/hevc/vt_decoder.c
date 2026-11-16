@@ -1,6 +1,6 @@
 /* Own-code VideoToolbox decoder for native HEVC codec sessions.
  * 20H392 ABI: VCPHEVC base v1, decoder v2 (no native tile slots).
- * No constructor/interposition: registration is explicit and hardware-gated.
+ * Synchronous own-code constructor and explicit registration are hardware-gated.
  * Apple VCPHEVC, CMPhoto/ImageIO container handling and alpha are untouched.
  */
 #include <CoreFoundation/CoreFoundation.h>
@@ -55,7 +55,7 @@ static ClassID (*class_id)(void);
 static OSStatus (*emit)(void *, void *, OSStatus, VTDecodeInfoFlags, CVImageBufferRef);
 static OSStatus (*attributes)(void *, CFDictionaryRef);
 static OSStatus (*register_decoder)(CMVideoCodecType, CFDictionaryRef, void *);
-static CFStringRef hardware_key, required_key, using_hardware_key;
+static CFStringRef hardware_key, using_hardware_key;
 static pthread_mutex_t registration_lock = PTHREAD_MUTEX_INITIALIZER;
 static Boolean registered;
 struct pending_frame {
@@ -347,9 +347,9 @@ static OSStatus factory(void *identifier, CFAllocatorRef allocator, Base *out)
     s->lock_initialized = true;
     return noErr;
 }
-/* Explicit opt-in only. No dlopen constructor and no Apple library patch.
- * Registration affects the calling process, not remote mediaserverd.
- * Ordinary VT sessions are excluded by RequiredSpecificationEntries. */
+/* Registration affects only this process. Ordinary VT selection is permitted
+ * only after the actual native status and PEEK/ACK session capability checks.
+ * An absent/transient provider is not cached as a permanent registration. */
 __attribute__((visibility("default"))) OSStatus X9HEVCRegisterDecoder(void)
 {
     pthread_mutex_lock(&registration_lock);
@@ -366,23 +366,17 @@ __attribute__((visibility("default"))) OSStatus X9HEVCRegisterDecoder(void)
     attributes = dlsym(RTLD_DEFAULT, "VTDecoderSessionSetPixelBufferAttributes");
     register_decoder = dlsym(RTLD_DEFAULT, "VTRegisterVideoDecoderWithInfo");
     hardware_key = symbol_key("kVTVideoDecoder_IsHardwareAccelerated");
-    required_key = symbol_key("kVTVideoDecoderInfo_RequiredSpecificationEntries");
     /* Present in the observed 20H392 image, although newer SDKs annotate
      * the public iOS declaration as 17+. Resolve the actual runtime symbol. */
     using_hardware_key = symbol_key("kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder");
     if (!create_object || !storage || !class_id || !emit || !attributes ||
-        !register_decoder || !hardware_key || !required_key || !using_hardware_key) {
+        !register_decoder || !hardware_key || !using_hardware_key) {
         e = kVTVideoDecoderUnsupportedDataFormatErr; goto done;
     }
-    const void *key = CFSTR("X9NativeHEVC"), *value = kCFBooleanTrue;
-    CFDictionaryRef requirement = CFDictionaryCreate(NULL, &key, &value, 1,
+    const void *keys[] = { hardware_key, CFSTR("CMClassImplementationID") };
+    const void *values[] = { kCFBooleanTrue, CFSTR(X9_HEVC_IMPLEMENTATION) };
+    CFDictionaryRef info = CFDictionaryCreate(NULL, keys, values, 2,
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    if (!requirement) { e = kVTAllocationFailedErr; goto done; }
-    const void *keys[] = { hardware_key, required_key, CFSTR("CMClassImplementationID") };
-    const void *values[] = { kCFBooleanTrue, requirement, CFSTR(X9_HEVC_IMPLEMENTATION) };
-    CFDictionaryRef info = CFDictionaryCreate(NULL, keys, values, 3,
-        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFRelease(requirement);
     if (!info) { e = kVTAllocationFailedErr; goto done; }
     e = register_decoder(kCMVideoCodecType_HEVC, info, (void *)factory);
     CFRelease(info);
@@ -391,4 +385,11 @@ done:
     if (fd >= 0) close(fd);
     pthread_mutex_unlock(&registration_lock);
     return e;
+}
+/* Framework dependencies have been loaded before this initializer. Avoid an
+ * asynchronous worker racing the first VT session; registration failure leaves
+ * the stock route unchanged. This does not replace CMPhoto/ImageIO parsers. */
+__attribute__((constructor)) static void x9_hevc_load(void)
+{
+    (void)X9HEVCRegisterDecoder();
 }

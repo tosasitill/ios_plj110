@@ -159,6 +159,9 @@ struct x9_vdec_platform {
     const struct x9_vdec_session_ops *sessions;
 };
 int x9_vdec_register_platform(const struct x9_vdec_platform *);
+/* Advisory exec-loader gate; not an owner reservation or readiness producer.
+ * Userland must independently recheck GET_STATUS/GET_CAPABILITIES. */
+int x9_vdec_autoload_available(void);
 void sweet_x9_vdec_init(void);
 #endif
 #endif

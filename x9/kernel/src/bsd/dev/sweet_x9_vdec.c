@@ -48,6 +48,20 @@ int x9_vdec_register_platform(const struct x9_vdec_platform *p)
     lck_mtx_unlock(&vdec_lock);
     return e;
 }
+int x9_vdec_autoload_available(void)
+{
+    lck_mtx_lock(&vdec_lock);
+    int ready = status.mode == 2 && status.ready == 1 && status.generation &&
+        status.prerequisites == X9_VDEC_REQUIRED &&
+        (status.profiles & X9_VDEC_MAIN) &&
+        !(status.profiles & ~(X9_VDEC_MAIN | X9_VDEC_MAIN10)) &&
+        status.max_width && status.max_height &&
+        status.max_width <= X9_HEVC_MAX_DIM && status.max_height <= X9_HEVC_MAX_DIM &&
+        platform.sessions && session_ops.capabilities == X9_VDEC_SESSION_REQUIRED &&
+        session_ops.max_pending && session_ops.max_pending <= X9_VDEC_MAX_PENDING;
+    lck_mtx_unlock(&vdec_lock);
+    return ready;
+}
 static int span(uint64_t address, uint32_t bytes)
 {
     return address && bytes && address <= UINT64_MAX - bytes;

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Cross-compile the explicit iOS VT client/decoder. No injection/device IO.
+"""Build/sign the iOS VT bridge, optionally embed its own bytes. No device IO.
 
-The MT6993 VCP physical provider is not implemented; hardware registration is
-runtime-gated and ordinary VT sessions are excluded. Own binaries only.
+Embedding does not grant hardware readiness or enable boot-time installation.
+The opt-in kernel loader and VT registration both require real capabilities.
 """
 import argparse
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -15,6 +16,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--developer-dir', required=True, type=Path)
     ap.add_argument('--out', required=True, type=Path)
+    ap.add_argument('--embed', action='store_true')
     a = ap.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     clang = a.developer_dir / 'Toolchains/XcodeDefault.xctoolchain/usr/bin/clang'
@@ -42,12 +44,38 @@ def main():
                             str(library), *frameworks, '-Wl,-rpath,@executable_path', '-o', str(ctl)], check=True)
     for p in (library, ctl):
         subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(p)], check=True)
+    installed_path = None
+    if a.embed:
+        # Producing the embedding is part of this build, not a second artifact
+        # verification pass. Only the signed own-code library is read here.
+        data = library.read_bytes()
+        if not data or len(data) > 2 * 1024 * 1024:
+            raise ValueError('HEVC bridge outside the 2 MiB embedding budget')
+        digest = hashlib.sha256(data).digest()
+        installed_path = f'/private/var/x9/hevc/libx9-hevc-{digest.hex()[:16]}.dylib'
+        header = HERE.parent / 'kernel/generated/x9_hevc_bridge.inc'
+        lines = ['/* Generated signed own-code bridge. Do not commit. */',
+                 f'#define X9_HEVC_BRIDGE_PATH "{installed_path}"',
+                 'static const uint8_t x9_hevc_bridge_sha[32] = {' +
+                 ','.join(f'0x{b:02x}' for b in digest) + '};',
+                 'static const uint8_t x9_hevc_bridge_data[] = {']
+        lines += [','.join(f'0x{b:02x}' for b in data[i:i+16]) + ','
+                  for i in range(0, len(data), 16)]
+        text = '\n'.join(lines) + '\n};\n'
+        if not header.exists() or header.read_text() != text:
+            header.parent.mkdir(parents=True, exist_ok=True)
+            header.write_text(text)
     (a.out / 'hevc-bridge.json').write_text(json.dumps({
         'profile': '20H392 VT base v1/decoder v2; native base-layer hvc1 sessions',
         'physical_provider': False, 'hardware_tested': False,
         'hevc_session_output_delivery': 'native PEEK retains CPU-owned frame/token across payload and ioctl result copyout; exact input-only ACK before VT token/output-order mutation',
         'hevc_session_output_delivery_runtime_verified': False,
-        'automatic_injection': False, 'required_specification': {'X9NativeHEVC': True},
+        'automatic_injection': False,
+        'automatic_injection_code': True,
+        'automatic_injection_policy': 'opt-in x9_hevc=1, installed exact own-code file and live native capabilities; selected processes only',
+        'automatic_injection_runtime_verified': False,
+        'embedded': a.embed, 'ios_path': installed_path,
+        'required_specification': None,
         'decoder_id': 'org.ios-sweet.x9.vcp.hvc1',
         'heif_coded_item_input': True, 'heif_complete_image_compositor': False,
         'heif_standalone_picture_gate': 'Main/Main10 base-layer BLA/IDR/CRA; Main-compatible Main Still Picture IDR-only',
@@ -129,7 +157,7 @@ def main():
         'heif_explicit_raster_heap_budget': True,
         'library': str(library), 'client': str(ctl),
     }, indent=2) + '\n')
-    print('X9 HEVC: iOS decoder/client compiled; physical VCP provider absent, no auto-injection', flush=True)
+    print('X9 HEVC: iOS bridge compiled; native capabilities required, no device installation performed', flush=True)
 
 if __name__ == '__main__':
     main()
