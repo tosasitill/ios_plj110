@@ -698,6 +698,7 @@ static int vcontrol_stage_output_planes(struct x9_vdec_control *c,
      * Normal-NC MAIR/pmap attributes and every backing PA before this store. */
     if (!e) e = vshared_live_window(s,X9_VCP_GLOBAL_VDEC_OFFSET+c->slot.offset,
         X9_VCP_INSTANCE_SLOT_BYTES,&p);
+    if (!e) e = vmem_deadline(end);
     if (!e) {
         o->journal.ap_plane_count_store_attempted = 1;
         vcontrol_store32(p,0xf28,r->plane_count);
