@@ -158,6 +158,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 远端仅保留本地同名分支（实际删除完成）
+
+- **用户范围/基线**：单代理 `feat/remote-local-prune-20261116`，main输入 **3e4d50e7**。真实ls-remote的26条远端heads与本地10条heads按名称比较（排除本轮临时分支）；用户明确要求删除远端独有分支，不自动push本地独有分支，也不合入未知旧生产delta。根活动SMS的未提交NOTES从未由本轮切换/写入/恢复。
+- **恢复证据**：删除名单22条及原始hash保留 `x9/out/remote-local-prune-20261116/{plan,retired-remote-heads}.json`。与全部保留本地/远端tips相比，只有 **fix/sms-startup-registration / 2db0d507** 有1个独立历史commit；删除前生成增量 **remote-only-unique.bundle**，bundle create/verify/list-heads均实际exit0，原始ref和可恢复依赖保留。其它被删head仍在保留历史中。没有为清理名称而将该旧delta盲合main。
+- **实际删除/校验**：首atomic push因SSH连接关闭实际exit128（外层prune.py exit1），日志完整保留；重新ls-remote核原hash、再核本地没有同名branch后，仅重试仍存在的原名单。重试 **atomic push + 每ref旧hash lease实际exit0**，删除22条远端独有分支；fetch --prune、真实ls-remote/本地集合复核exit0。远端当前 **4条**：main、feat/camera-integration、feat/camera-native、feat/hevc-hw；**remote-minus-local为空**，本地当时10条，无本轮本地分支删除。同期camera-integration已更新发布，保留当前head，不回滚。
+- **交付/边界**：本轮只有本交接的tracked修改，无生产delta、新kernel/boot/CI run ID或设备动作。正常commit/rebase同期main、ff/push后，仅归档本轮out并清理临时worktree/branch；最后sha/argv/stdout/stderr/exit及分支集合保留同out的finalization.json。恢复命令见同out的README.md，私有输入/原件/备份未动。
+
 #### 2026-11-16 一天无新提交分支清理（实际删除完成）
 
 - **用户范围/快照**：单代理 `feat/stale-branch-cleanup-20261116`，初始main/origin **e0e7815c**；后续ff吸收同期SMS的已推送 **2c34c540**，保留其全部报告/交接。按筛选时刻 **2026-11-16 18:47:04 +0800** 的固定24小时窗口（截止11-15 18:47:04）检查本地/真实远端同名分支的所有head，使用全部可达commit的最新committer时间，避免merge/非单调时间误选。只有 **feat/audio-dsp-boot**（最新11-13 18:04:09，1a76d62c）、**feat/audio-ipi**（11-14 23:18:18，6717e8af）符合。两者均为published main祖先、未合提交0，两次ff merge均Already up to date、tree未变，main push为Everything up-to-date；无需重新制造生产merge。
