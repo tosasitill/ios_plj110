@@ -169,6 +169,8 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 - **完整目标尚待/下一真实边**：goal继续 **active**。VOICE09关闭、VOICE20无production caller；CALL沿已资格driver record入口和同Model+118 dial接点，补实际updater队列与逐动作强record/Client/CallInfo UUID及更新退休/native epoch，不能拿Model lifetime或44成功当版本。SMS下一新范围从现已闭parser callback传同response/details的 **1007f622c** 消费者开始，追同Controller的Model/status→通知uint ID；此body本轮未读，不重采七函数/旧取件/SQL。returned BlastDoor GUID→实际成功record、当前Messages COMMIT/重开/物理ACK/MO对端，以及CallList/handover/独立双向DSP仍缺。精确vendor默认CLIR jar仍须同版原件或用户允许的设备读动作；本轮不自行ADB/boot/mailbox/mount/写分区，不标complete或blocked。
 
+- **实际合main/push与最后交接**：生产 **ec47c9db**、SMS **27d83047**、CALL维护 **039f917a** 与完整build/归档交接 **86bf9711** 已ff合main，**push实际exit0 `a8729e20..86bf9711`**；当时main/origin clean同步。完整kernel输入仍039f917a，不将后续notes-only commit重命名为构建source。三子树/本地分支已清理，所有build/push句柄已终态，无测试/设备worker。本条最后交接仍走同feature正常commit/ff/push后仅删root本地`feat/sms-controller-owner`，实际命令/exit记录`x9/out/call-sms-owner-integration-20261116/{merge-push-commands.json,finalization-commands.json}`；其它活动硬件树、长期输入与旧镜像/分区备份不动。完整目标继续active，不交付完整通话短信验收镜像。
+
 #### 2026-11-16 同 txn 重复请求终态 owner 修复与当前接线（本轮收束，完整目标未完成）
 
 - **基线/分工**：root `feat/call-context-capture`基于main/origin **`252f3003`**；按用户要求复用三个代理与新树`call-context-capture/call-terminal-audit/sms-notification-owner`，分别追loaded manager factory/同queue owner、现行03/21终态代码、强SMS Model到通知ID。scratch仅各树`x9/out`，不动其它硬件树或共享`.local`。完整通话短信goal仍active。
