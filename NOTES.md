@@ -157,6 +157,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 VOICE44 receipt后提交换绑（本轮生产修复，编译待记）
+
+- **本轮基线/分工**：root分支`feat/call-bind-receipt`基于main/origin **`0029d93f`**；按用户要求复用三个代理与新树`call-bind-review/contract/lifecycle`，分别核实际patch、既有原件wire/guard、旧terminal及mutation owner生命周期。没有重采旧证据/运行测试或设备动作，不动共享`.local`和其它硬件树。完整通话短信goal仍active。
+- **实际代码**：44原路径在best-effort回复前改变binding，另可吞掉已answered注册waiter尚未receipt的旧terminal03。现在新44先在现有32项response pool保存exact11B原req/txn、localgen、actual QMUXgen、旧binding snapshot（initial unbound独立live）、预留unique nonwrapping未来lease；active route/lease/registration只在`bb_x9_call_result`实际14B44 queue receipt后同QMI线程commit。queue/OOM重试不重分lease/不重发MD；same-SIM/同allocation no-op不清reg/handover。changing admission挡旧live非bind response/未answeredwait/同slot-localgen end和stagingdial used owner；pending changing-success挡新03/21/staging20。DEL/identity失效清本地pending/cache但保原MD token/epoch。
+- **guard/cache证据**：call代理确认既有`ios-bind.asm`实际仅cleanup尾部，保留25000ms constructor明确属于Dial/已核03/21，**44原timer未闭**。本轮明确local25s admission policy，超时error不commit；完成缓存pin commit后binding，same live exact repeat只回原Result，唯一completed replay用UINT64_MAX（无新mutation）；changed txn保留首owner/result，new44 admission退休per-client旧cache，不称永续去重。BB仍只放行14B44，03/20/21原guard/shape限制保留。
+- **静态里程碑/待编译**：三代理已apply exact `x9/out/call-bind-receipt/production-r1.patch`独立review，均无合入阻碍；报告分别本树`x9/out/call-bind-{review,contract,lifecycle}/`，root待无覆盖归档。review提醒generic guard措辞已改owned admission guard（不外推44原timer）；existing host fixture仅改queued bind基线/shape断言和旧route event先flush预期，**未执行**。正常root单对象compile与宿主`-c`结果随后记录，尚无CI/kernel/boot结果，不把静态review称runtime验收。
+- **未完成边界**：VOICE09仍不公告、20无生产caller；record/config不是revision observer/nativeepoch。typed caller/owned record→profile/binding/epoch→matched terminal、CallList/handover后身份、双向DSP及当前Messages同token COMMIT/重开/物理ACK/MO对端验收仍缺；不造ready/ACK，不称通话短信修好。精确vendor CLIR jar仍需同版原件/用户允许设备动作，不为本修复自行ADB/boot/mailbox/写分区。上一完整kernel仍`3c4a49a0`对应`x9/out/x9-call-terminal-receipt-20261116/kernel.development.sweet`（未boot pack/上机）。
+
 #### 2026-11-16 model+58 原件类型纠偏与短信释放 fence（新窄接线前置）
 
 - **基线/实际前轮收尾**：CLIR生产 **`b7b4301b`** 后，最终r2交接 **`401a92c7`** 已ff合main且 **push成功 `b7b4301b..401a92c7`**，旧 `feat/call-profile-producer` 已删除。root新分支 **`feat/call-record-config`** 基于401a92c7；复用用户授权的call代理窄追新增ctor/config，不重新扫描旧getter/queue/CallList，另用profile代理静态review维护reader。完整通话短信goal仍active，不把原件资格当功能完成。

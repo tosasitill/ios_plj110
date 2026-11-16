@@ -70,6 +70,9 @@ static void IOFreeData(void *p,unsigned){assert(!lock_depth);call_frees++;free(p
 static bool bb_x9_call_result(uint32_t local,uint32_t node,uint64_t generation,const uint8_t *sdu,
                               unsigned size,uint8_t *owned,unsigned room,uint64_t deadline){
  assert(!lock_depth&&owned&&room==CBQ_HDR+size&&(size==14||size==18));
+ const unsigned id=x9cw_u16(sdu+3);
+ assert(id==3||id==0x20||id==0x21||id==0x44);
+ assert(size!=18||id==0x20);
  if(call_bb_expire)fake_ms=deadline;
  if(!call_batch_accept||generation!=bb_x9_call_identity(local,node)||
     (!x9cw_u16(sdu+10)&&fake_ms>=deadline))return false;
@@ -729,9 +732,11 @@ static void voice_bind_codec(){
 }
 static void bind_voice(){
  uint8_t q[]={0,77,0,0x44,0,4,0,1,1,0,1};
- assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q))&&qmi_error==0);
+ assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q))&&!qmi_replies);
+ assert(!x9c_clients[0].bound&&x9c_bind_pending(0,true));
+ x9c_response_poll();assert(qmi_replies==1&&!qmi_error&&!x9c_bind_pending(0));
  assert(x9c_clients[0].bound&&x9c_clients[0].sim==1&&!x9q_clients[0].sim_slot&&!writes);
- qmi_replies=0;
+ qmi_replies=0;call_allocs=call_frees=0;
 }
 static void end_request(){
  uint8_t q[]={0,78,0,0x21,0,4,0,1,1,0,7};
@@ -1148,7 +1153,7 @@ static void handover_live_alloc_poison(){
 static void handover_live_generation_sim(){
  handover_live_setup();uint8_t p[32];call_batch_accept=false;
  handover_frame(p,0);x9mi_rx(p,32);x9c_poll();assert(x9c_clients[0].pending.count==1);
- x9c_del(0);x9q_clients[0].generation++;bind_voice();call_batch_accept=true;
+ x9c_del(0);x9q_clients[0].generation++;call_batch_accept=true;bind_voice();
  handover_begin(0,1,92);x9c_poll();assert(!qmi_indications&&!x9c_clients[0].pending.count);
  handover_frame(p,1,1);x9mi_rx(p,32);x9c_poll();assert(!qmi_indications); // other SIM
  handover_frame(p,1);x9mi_rx(p,32);x9c_poll();assert(qmi_indications==1&&qmi_indication_states[0]==3);
@@ -1156,8 +1161,10 @@ static void handover_live_generation_sim(){
  call_batch_accept=false;handover_frame(p,0);x9mi_rx(p,32);x9c_poll();
  uint8_t bind[]={0,93,0,0x44,0,4,0,1,1,0,0};
  x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,bind,sizeof(bind));
- assert(x9c_clients[0].sim==0&&!x9c_clients[0].pending.count&&!x9c_clients[0].handover);
- call_batch_accept=true;x9c_poll();assert(qmi_indications==1&&!writes);
+ assert(x9c_clients[0].sim==1&&x9c_clients[0].pending.count==1&&x9c_clients[0].handover&&x9c_bind_pending(0,true));
+ call_batch_accept=true;x9c_poll();
+ assert(x9c_clients[0].sim==0&&!x9c_clients[0].pending.count&&!x9c_clients[0].handover&&!x9c_bind_pending(0));
+ assert(qmi_indications==2&&!writes); // old-route event flushed before44 receipt
 }
 static void handover_live_overflow_disable(){
  handover_live_setup();uint8_t p[32];call_batch_accept=false;

@@ -10,7 +10,7 @@
 | Android 请求形状 | 新增本机卡2实测 `0901` 的六个 TLV；接听 `0907 {}`；挂断 `0905 {MODE100/u32=0, ID101/u32}` |
 | 拨出状态生产者 | 完整 `4901` 的真实 ID / ECPI reducer；已实现、单对象可编译；未有完整真机 wire 重放或 iOS 运行验收 |
 | 空快照与异步确认 | 完整 owned `090a` 数组解析、号码与原始presentation有界owner；`0902 + 新 MO epoch` 汇合生成 VOICE20/tag10/u8；DIAL 仍无生产 profile/admission 调用者 |
-| 单通话挂断 / SIM 绑定 | VOICE44/tag01/u8 独立绑定；显式 VOICE21 → owned current query → 同 MO epoch/真实 ID/完整单通话 snapshot → guarded0905 → 同token0906 → 原iOS txn 的 result；已接请求分发，未设备验收 |
+| 单通话挂断 / SIM 绑定 | VOICE44/tag01/u8 独立绑定，实际host queue receipt后提交路由；显式 VOICE21 → owned current query → 同 MO epoch/真实 ID/完整单通话 snapshot → guarded0905 → 同token0906 → 原iOS txn 的 result；未设备验收 |
 | 初始化 / 事件注册 | 明确绑定后的 VOICE03：13=0 与14=0/1 可独立并发 → 全局 CMD8901 → 逐 SIM IND4901/4902 → owned0909/090a；逐token确认，13=1仍拒绝；仅编译、未运行 |
 | NAS 本地订阅注册 | NAS03保存原txn/localgen/QMUXgen，真实host queue receipt后才原子提交tag13/18/19订阅patch；FIFO、重复结果缓存及旧background IND gate；不是网络注册/IMS-ready |
 | handover 通知 | 严格 MD4902/EVENT3 → Android SRVCC → Apple54/tag1/u8；订阅cursor/generation/SIM隔离、注册与live事件均整批queue receipt后释放，queue/OOM保序等待；未设备验收，未迁移handover后的ID/RAT/profile |
@@ -26,6 +26,40 @@
 `x9cw_action()` 仅生成报文，生产 VOICE21 调用它后还必须过 MD 锁内 / writer 的 target guard；VOICE22 接听尚未准入，CallList 尚未发布。
 `x9cw_dial()` 同样仅编码：必须显式提供已验证的卡2 profile、无现存通话；当前没有 profile provider。
 原 transport 已允许这一严格 DIAL 子集；上一版宿主测试闭合发送/CNF。新增异步 join / 空快照 / 发送前 guard 目前只有编译结果，没有执行验证，也没有 iOS 自动拨号调用者。
+
+### VOICE44 的 owned receipt 与换绑边界（2026-11-16）
+
+旧44成功路径先清client/registration waiters、轮转binding并写SIM，再用void/best-effort
+`x9q_packet::send`回复。queue-full/OOM可使host未收到结果却已换路由；旧注册waiter已answered、
+但其terminal03尚在response pool时，换绑还可能使旧response-live失效而静默丢失结果。
+这是源码确认的窗口，不是本轮设备复现。
+
+现在exact11B44/tag01/u8在共享32项terminal pool中先保存原请求/txn、原本地generation、
+真实QMUX allocation generation、**旧binding完整身份snapshot（允许initial unbound）**，
+以及预留的nonwrapping新lease。预留消耗全局allocator但不激活route；跨client不共用lease，
+queue/OOM仅重试本地结果，不重新分配lease、不发送或取消MD请求。
+`bb_x9_call_result`只新增exact14B44 Result，仍在bb锁内核实际allocation、service9、node、
+non-release_pending、完整queue容量及deadline；成功转交buffer才算receipt。
+仅此receipt之后，唯一QMI线程同步commit新binding；不设会产生“已发success却不commit”的
+post-receipt fallible gate。same-SIM/同allocation是no-op，不清registration/handover或轮转lease。
+
+changing-bind admission拒绝本slot/local-generation尚在drain的end/dial mutation owner、
+未answered注册waiter及任何live非bind response（包括已决定尚未receipt的错误）。
+pending changing-success再挡新03/21和future staging20 admission，旧owner继续持原scope。
+DEL清44 pool/cache，不取消或改写物理token/epoch；binding identity失效自动退休本地pending，
+没有脱离pool的悬挂busy handle。
+
+首次44使用明确的**local25s admission policy**；保留原件不足以闭合44的SendProxy timer，
+不称原Apple44 timeout。新success跨guard转NOT_READY且不commit，已决定error保持首结果。
+每client仅缓存最后一项实际receipt的44；成功缓存pin **commit后的lease**，live exact repeat
+仅重发原Result，不再commit。只有这种completed replay以`UINT64_MAX`传递已有结果，
+不因原guard到期改写已commit的success；新44及03/20/21没有此bypass。
+changed txn复用保留first owner/result，不为changed输入造第二结果；新44成功admission退休旧cache，
+不宣称跨后续binding事务永久去重。非法新请求、容量/BUSY等未admit拒绝仍best-effort。
+
+这只闭logical binding/receipt前置，不给44添加record/revision/native epoch语义；
+typed caller/profile/CallList/media及当前SMS最终验收仍未完成，VOICE09仍关闭、20无生产caller。
+三路静态review和只编译记录见NOTES及`x9/out/call-bind-{receipt,review,contract,lifecycle}/`。
 
 ## 原件证据（2026-11-15）
 
@@ -117,7 +151,7 @@ generation仍是独立层；上述源码资格不提供native epoch、MD receipt
 | --- | --- |
 | +0 | 借用稳定地址的 `qmi::Client*`；wrapper同步dispatch期间不能失效 |
 | +8 | owned `QMIServiceMsg*`；不是裸7-byte QMI SDU |
-| +10 | u32 timeout；VOICE wrapper明确初始化25000ms |
+| +10 | u32 timeout；已核VOICE03/20/21的25000ms，不能外推为44原件timer |
 | +18 | 可空的借用 `uint16_t*` transaction输出地址；`19ecd2ed4/2ed8`同步写入u16 |
 | +20 | response block；`19ecd2db8/2dc0`读取并调用真实 `_Block_copy` |
 

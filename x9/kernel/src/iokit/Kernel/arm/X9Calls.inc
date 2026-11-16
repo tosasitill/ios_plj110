@@ -47,18 +47,48 @@ static bool x9c_bound_live(unsigned slot,unsigned sim,uint64_t generation,uint64
  * Lease IDs never alias a reused pool entry; no digits are retained here. */
 #define X9_C_RESPONSES 32u
 struct x9c_response {
- bool used,ready;unsigned slot,sim,len;
+ bool used,ready,bind,change,was_bound;unsigned slot,sim,len,route;
  uint64_t lease,generation,bridge_generation,deadline,binding;uint8_t sdu[18];
+ // Bind44 owns the OLD binding snapshot until queue receipt, including an
+ // initial unbound client. Its future lease is reserved, never made active.
+ uint64_t baseline_generation,baseline_bridge,next_binding;uint8_t req[11];
 };
 static struct x9c_response x9c_responses[X9_C_RESPONSES];
+static struct {bool replay;struct x9c_response result;} x9c_bind_completed[CBQ_MAX_CLIENTS];
 static uint64_t x9c_response_next;
 static struct x9c_response *x9c_response_find(uint64_t lease){
  if(lease)for(struct x9c_response &r:x9c_responses)if(r.used&&r.lease==lease)return &r;
  return nullptr;
 }
 static bool x9c_response_live(const struct x9c_response &r){
+ if(r.bind){
+  if(r.slot>=CBQ_MAX_CLIENTS||x9q_clients[r.slot].generation!=r.generation||!r.bridge_generation||
+     bb_x9_call_identity(CBQ_PORT_BASE+r.slot,X9BB_NODE)!=r.bridge_generation)return false;
+  const struct x9c_client &c=x9c_clients[r.slot];
+  return c.bound==r.was_bound&&c.sim==r.sim&&c.binding==r.binding&&
+   c.generation==r.baseline_generation&&c.bridge_generation==r.baseline_bridge;
+ }
  return x9c_bound_live(r.slot,r.sim,r.generation,r.binding)&&
   x9c_clients[r.slot].bridge_generation==r.bridge_generation;
+}
+static bool x9c_bind_pending(unsigned slot,bool changing_only=false){
+ for(const struct x9c_response &r:x9c_responses)if(r.used&&r.bind&&r.slot==slot&&
+    (!changing_only||(r.change&&!x9cw_u16(r.sdu+10)))&&x9c_response_live(r))return true;
+ return false;
+}
+/* Only an existing44 owner/cache may bypass generic validation for a repeat.
+ * A changed/malformed request under its txn cannot replace its first result.
+ * Message identity is explicit; a03/20/21 txn never consumes a44 response. */
+static bool x9c_bind_repeated(uint32_t local,uint32_t node,uint32_t port,const uint8_t *req,unsigned len){
+ const unsigned slot=local-CBQ_PORT_BASE;
+ if(node!=X9BB_NODE||port!=X9BB_PORT_BASE+9||local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS||
+    !req||len<7||req[0]!=0||x9cw_u16(req+3)!=0x44)return false;
+ for(const struct x9c_response &r:x9c_responses)if(r.used&&r.bind&&r.slot==slot&&
+    x9c_response_live(r)&&x9cw_u16(r.req+1)==x9cw_u16(req+1))return true;
+ auto &cache=x9c_bind_completed[slot];const struct x9c_response &r=cache.result;
+ if(!r.used||!x9c_response_live(r)||x9cw_u16(r.req+1)!=x9cw_u16(req+1))return false;
+ if(len==sizeof(r.req)&&!memcmp(r.req,req,sizeof(r.req)))cache.replay=true;
+ return true; // changed completed reuse retains the first result, no mutation
 }
 static uint64_t x9c_response_reserve(unsigned slot,const uint8_t *req,uint64_t deadline){
  if(slot>=CBQ_MAX_CLIENTS||!req||!deadline||x9c_response_next==UINT64_MAX)return 0;
@@ -76,7 +106,7 @@ static void x9c_response_release(uint64_t lease){
 }
 static bool x9c_response_pending(unsigned slot,const uint8_t *req){
  for(const struct x9c_response &r:x9c_responses)if(r.used&&r.ready&&r.slot==slot&&
-    x9c_response_live(r)&&x9cw_u16(r.sdu+1)==x9cw_u16(req+1))
+    x9c_response_live(r)&&!memcmp(r.sdu+1,req+1,4))
   return true; // original txn/result retained, including changed request reuse
  return false;
 }
@@ -93,19 +123,36 @@ static void x9c_response_dial(uint64_t lease,const uint8_t *sdu,unsigned n){
  if(!sdu||n!=18||memcmp(r->sdu+1,sdu+1,4)){x9c_response_decide(lease,X9Q_INTERNAL);return;}
  memcpy(r->sdu,sdu,n);r->len=n;r->ready=true;
 }
+static void x9c_bind_commit(struct x9c_response &r);
+static bool x9c_response_transfer(const struct x9c_response &r,uint64_t deadline){
+ const unsigned room=CBQ_HDR+r.len;
+ uint8_t *owned=static_cast<uint8_t *>(IOMallocData(room));
+ const bool admitted=owned&&x9c_response_live(r)&&bb_x9_call_result(CBQ_PORT_BASE+r.slot,X9BB_NODE,
+  r.bridge_generation,r.sdu,r.len,owned,room,deadline);
+ if(!admitted&&owned){bzero(owned,room);IOFreeData(owned,room);}
+ return admitted;
+}
 static void x9c_response_poll(){
+ for(auto &cache:x9c_bind_completed){
+  if(cache.result.used&&!x9c_response_live(cache.result)){bzero(&cache,sizeof(cache));continue;}
+  // This result ALREADY received a queue receipt. Replay is not a fresh
+  // admission grant: never rebind or turn its committed success into timeout.
+  // Only this completed44 replay uses the unbounded transfer deadline.
+  if(cache.result.used&&cache.replay&&x9c_response_transfer(cache.result,UINT64_MAX))cache.replay=false;
+ }
  for(struct x9c_response &r:x9c_responses)if(r.used){
   if(!x9c_response_live(r)){bzero(&r,sizeof(r));continue;}
   if(!r.ready)continue;
-  // Use the original guard, including time spent waiting for a queue slot.
+  // Use the owned admission guard, including time waiting for a queue slot:
+  // original03/20/21 guard, local policy for44 (see bind_begin).
   // An error already decided is immutable; no late success resurrection.
   if(!x9cw_u16(r.sdu+10)&&x9q_ms()>=r.deadline)x9c_response_error(r,X9Q_NOT_READY);
-  const unsigned room=CBQ_HDR+r.len;
-  uint8_t *owned=static_cast<uint8_t *>(IOMallocData(room));
-  bool admitted=owned&&x9c_response_live(r)&&bb_x9_call_result(CBQ_PORT_BASE+r.slot,X9BB_NODE,
-   r.bridge_generation,r.sdu,r.len,owned,room,r.deadline);
-  if(!admitted&&owned){bzero(owned,room);IOFreeData(owned,room);}
-  if(admitted)bzero(&r,sizeof(r));
+  if(!x9c_response_transfer(r,r.deadline))continue;
+  if(r.bind){
+   if(!x9cw_u16(r.sdu+10))x9c_bind_commit(r);
+   auto &cache=x9c_bind_completed[r.slot];cache.result=r;cache.replay=false;
+  }
+  bzero(&r,sizeof(r));
  }
 }
 struct x9c_end_job {
@@ -142,6 +189,53 @@ struct x9c_reg_wait {
  * valid concurrent bootstrap into BUSY; overlapping options are BUSY. */
 #define X9_C_REG_WAITS 2u
 static struct x9c_reg_wait x9c_reg_wait[CBQ_MAX_CLIENTS][X9_C_REG_WAITS];
+static void x9c_bind_commit(struct x9c_response &r){
+ struct x9c_client &c=x9c_clients[r.slot];
+ // send/del/poll run on the sole QMI thread. The bridge checked allocation
+ // and deadline under its mutex before receipt. No fallible post-receipt
+ // gate may emit success without committing; no MD owner is touched here.
+ if(r.change){
+  bzero(&c,sizeof(c));bzero(x9c_reg_wait[r.slot],sizeof(x9c_reg_wait[r.slot]));
+  c.binding=r.next_binding;
+ }
+ c.bound=true;c.sim=r.route;c.generation=r.generation;c.bridge_generation=r.bridge_generation;
+ // Completed replay must pin the COMMITTED snapshot, not the old lease.
+ r.was_bound=c.bound;r.sim=c.sim;r.binding=c.binding;
+ r.baseline_generation=c.generation;r.baseline_bridge=c.bridge_generation;
+}
+static uint16_t x9c_bind_begin(unsigned slot,const uint8_t *req,unsigned sim,uint64_t bridge){
+ if(x9c_bind_pending(slot))return X9Q_BUSY;
+ const struct x9c_client &c=x9c_clients[slot];const uint64_t generation=x9q_clients[slot].generation;
+ const bool change=!c.bound||c.sim!=sim||c.generation!=generation||c.bridge_generation!=bridge;
+ if(change){
+  // Even an answered job/waiter may still have an undelivered old terminal.
+  // Refuse a new changing bind until these owners receive their results;
+  // pool index order is not a proof that the old response drained first.
+  if((x9c_end_job.used&&x9c_end_job.slot==slot&&x9c_end_job.generation==generation)||
+     (x9c_dial_job.used&&x9c_dial_job.slot==slot&&x9c_dial_job.generation==generation))return X9Q_BUSY;
+  for(const struct x9c_reg_wait &w:x9c_reg_wait[slot])
+   if(w.used&&!w.answered&&w.generation==generation)return X9Q_BUSY;
+  for(const struct x9c_response &r:x9c_responses)
+   if(r.used&&!r.bind&&r.slot==slot&&x9c_response_live(r))return X9Q_BUSY;
+ }
+ const uint64_t now=x9q_ms();
+ // Local25s admission guard. Existing evidence does NOT establish the
+ // original44 SendProxy timeout; do not mislabel this as an Apple timer.
+ if(!bridge||now>UINT64_MAX-25000||x9c_response_next==UINT64_MAX||
+    (change&&x9c_binding_next==UINT64_MAX))return X9Q_BUSY;
+ for(struct x9c_response &r:x9c_responses)if(!r.used){
+  bzero(&r,sizeof(r));r.used=r.ready=r.bind=true;r.change=change;r.slot=slot;
+  r.sim=c.sim;r.was_bound=c.bound;r.binding=c.binding;r.baseline_generation=c.generation;
+  r.baseline_bridge=c.bridge_generation;r.generation=generation;r.bridge_generation=bridge;
+  r.route=sim;r.deadline=now+25000;r.lease=++x9c_response_next;
+  // Allocate unique leases across clients before admission. Timeout may
+  // consume a lease, but retry never advances it or activates the new route.
+  r.next_binding=change?++x9c_binding_next:c.binding;
+  memcpy(r.req,req,sizeof(r.req));r.sdu[0]=2;memcpy(r.sdu+1,req+1,4);x9c_response_error(r,0);
+  bzero(&x9c_bind_completed[slot],sizeof(x9c_bind_completed[slot]));return 0;
+ }
+ return X9Q_BUSY;
+}
 static struct x9cw_call_init x9c_init[2];
 static struct {uint64_t token,deadline;bool confirmed,held;} x9c_cmd_init;
 static bool x9c_reg_live(unsigned slot,const struct x9c_reg_wait &w){
@@ -460,7 +554,7 @@ static bool x9c_dial_submit(unsigned slot,const uint8_t *req,unsigned len,
                             const struct x9cw_dial_profile &profile){
  if(slot>=CBQ_MAX_CLIENTS||!x9c_clients[slot].bound||x9c_clients[slot].sim!=profile.sim||
     !x9c_clients[slot].registered||x9c_clients[slot].generation!=x9q_clients[slot].generation||
-    x9c_dial_job.used||len>sizeof(x9c_dial_job.req))return false;
+    x9c_bind_pending(slot,true)||x9c_dial_job.used||len>sizeof(x9c_dial_job.req))return false;
  struct x9cw_outbound_state state;struct x9cw_dial_join join={};
  if(x9_md_mipc_call_snapshot(&state)!=1||!x9cw_dial_join_begin(&join,&state,&profile))return false;
  uint8_t frame[104];unsigned n=x9cw_dial(req,len,frame,sizeof(frame),&profile,state.native_count);
@@ -483,6 +577,7 @@ static bool x9c_dial_submit(unsigned slot,const uint8_t *req,unsigned len,
 }
 static void x9c_del(unsigned slot){
  for(struct x9c_response &r:x9c_responses)if(r.used&&r.slot==slot)bzero(&r,sizeof(r));
+ if(slot<CBQ_MAX_CLIENTS)bzero(&x9c_bind_completed[slot],sizeof(x9c_bind_completed[slot]));
  if(slot<CBQ_MAX_CLIENTS)bzero(x9c_reg_wait[slot],sizeof(x9c_reg_wait[slot]));
  if(x9c_end_job.used&&x9c_end_job.slot==slot){
   if(x9c_end_job.stage==2)x9_md_mipc_call_end_abandon(x9c_end_job.token);
@@ -552,6 +647,7 @@ static void x9c_dial_poll(uint8_t *frame){
 static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned len){
  if(port!=X9BB_PORT_BASE+9)return false;
  if(!req||len<7)return true;
+ if(x9c_bind_repeated(local,X9BB_NODE,port,req,len))return true;
  unsigned slot=local-CBQ_PORT_BASE;
  uint16_t err=X9Q_UNSUPPORTED;
  if(local>=CBQ_PORT_BASE&&slot<CBQ_MAX_CLIENTS&&req[0]==0){
@@ -561,25 +657,8 @@ static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    const uint64_t bridge=bb_x9_call_identity(local,X9BB_NODE);
    if(!x9cw_qmi_bind(req,len,&sim)||sim>=x9_md_sim_count())err=X9Q_ARG;
    else if(!bridge)err=X9Q_NOT_READY;
-   else if(x9c_end_job.used&&x9c_end_job.slot==slot&&
-           x9c_end_job.generation==x9q_clients[slot].generation&&x9c_end_job.sim!=sim)err=X9Q_BUSY;
    else{
-    bool busy=false;
-    for(unsigned index=0;index<X9_C_REG_WAITS;index++){
-     const struct x9c_reg_wait &w=x9c_reg_wait[slot][index];
-     if(w.used&&!w.answered&&w.generation==x9q_clients[slot].generation&&w.sim!=sim)busy=true;
-    }
-    if(busy){x9q_packet p(req,X9Q_BUSY);p.send(local,port);return true;}
-    if(!x9c_clients[slot].bound||x9c_clients[slot].sim!=sim||x9c_clients[slot].bridge_generation!=bridge||
-       x9c_clients[slot].generation!=x9q_clients[slot].generation){
-     if(x9c_binding_next==UINT64_MAX){x9q_packet p(req,X9Q_BUSY);p.send(local,port);return true;}
-     bzero(&x9c_clients[slot],sizeof(x9c_clients[slot]));
-     bzero(x9c_reg_wait[slot],sizeof(x9c_reg_wait[slot]));
-     x9c_clients[slot].binding=++x9c_binding_next;
-    }
-    x9c_clients[slot].bound=true;x9c_clients[slot].sim=sim;
-    x9c_clients[slot].generation=x9q_clients[slot].generation;
-    x9c_clients[slot].bridge_generation=bridge;err=0;
+    err=x9c_bind_begin(slot,req,sim,bridge);if(!err)return true;
    }
   }else if(x9cw_u16(req+3)==3){
    struct x9cw_voice_register options;
@@ -595,7 +674,7 @@ static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
      return true;
     }
    }
-   err=x9c_reg_begin(slot,req,len);if(!err)return true;
+   err=x9c_bind_pending(slot,true)?X9Q_BUSY:x9c_reg_begin(slot,req,len);if(!err)return true;
   }else if(x9cw_u16(req+3)==0x21){
    unsigned op,id;
    /* Same validated host transaction while its epoch is still owned is
@@ -604,7 +683,7 @@ static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    if(x9cw_qmi_action(req,len,&op,&id)&&x9c_end_job.used&&
       x9c_end_job.slot==slot&&x9c_end_job.generation==x9q_clients[slot].generation&&
       x9c_end_job.transaction==x9cw_u16(req+1)&&x9c_end_job.id==id)return true;
-   err=x9c_end_begin(slot,req,len);if(!err)return true; /* asynchronous owned reply */
+   err=x9c_bind_pending(slot,true)?X9Q_BUSY:x9c_end_begin(slot,req,len);if(!err)return true; /* asynchronous owned reply */
   }
  }
  x9q_packet p(req,err);p.send(local,port);return true;

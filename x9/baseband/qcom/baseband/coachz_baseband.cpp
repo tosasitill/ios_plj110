@@ -1523,7 +1523,7 @@ static uint64_t bb_x9_call_identity(uint32_t dst_port,uint32_t src_node)
     generation=c.generation;
   IOLockUnlock(bb_lock);return generation;
 }
-// Only retained terminal03/20/21 replies. No MD callback or allocation
+// Only retained terminal03/20/21 and exact14B Bind44 replies. No MD callback or allocation
 // under this mutex; admission transfers owned, failure transfers nothing.
 static bool bb_x9_call_result(uint32_t dst_port,uint32_t src_node,uint64_t generation,
                              const uint8_t *sdu,uint32_t size,uint8_t *owned,uint32_t room,
@@ -1535,7 +1535,7 @@ static bool bb_x9_call_result(uint32_t dst_port,uint32_t src_node,uint64_t gener
      cbq_rd16(sdu+5)!=size-7||sdu[7]!=2||cbq_rd16(sdu+8)!=4||cbq_rd16(sdu+10)>1||
      (!!cbq_rd16(sdu+10))!=(!!cbq_rd16(sdu+12)))return false;
   const unsigned id=cbq_rd16(sdu+3);
-  if(id!=3&&id!=0x20&&id!=0x21)return false;
+  if(id!=3&&id!=0x20&&id!=0x21&&id!=0x44)return false;
   if(size==18&&(id!=0x20||cbq_rd16(sdu+10)||sdu[14]!=0x10||cbq_rd16(sdu+15)!=1||!sdu[17]))return false;
   if(size==14&&id==0x20&&!cbq_rd16(sdu+10))return false; // success requires the real call ID
   bool admitted=false;IOLockLock(bb_lock);
@@ -1545,7 +1545,7 @@ static bool bb_x9_call_result(uint32_t dst_port,uint32_t src_node,uint64_t gener
     bb_channel *ch=&bb_ch[c.channel==0?CBH_QMUX1:CBH_QMUX2];
     if(ch->count<BB_QUEUE){
       uint64_t ticks,ns;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);
-      // A success must not cross the original host request guard while
+      // A success must not cross its owned host admission guard while
       // sleeping on bb_lock. Terminal errors retain their first result.
       if(!cbq_rd16(sdu+10)&&(!deadline_ms||ns/1000000>=deadline_ms)){
         IOLockUnlock(bb_lock);return false;
