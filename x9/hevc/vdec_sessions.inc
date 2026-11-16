@@ -125,6 +125,7 @@ static void session_release_output(struct host_session *s, unsigned index)
 }
 static int session_ack(struct host_session *s, const struct x9_vdec_output_ack *r)
 {
+    unsigned index = 0;
     if (r->version != X9_VDEC_VERSION || r->reserved || !r->token || !r->completion)
         return EINVAL;
     /* An ACK cannot release an unobserved/failed payload, a different held
@@ -132,7 +133,6 @@ static int session_ack(struct host_session *s, const struct x9_vdec_output_ack *
      * admission already checks clone ownership and the current generation. */
     if (!s->held || !s->peek_ready || r->token != s->held_token ||
         r->completion != s->frame.completion) return ESTALE;
-    unsigned index = 0;
     while (index < s->pending && s->tokens[index] != r->token) index++;
     if (index == s->pending || !s->frame.cookie) return EIO;
     session_release_output(s, index);
@@ -212,7 +212,11 @@ static int session_ioctl(dev_t d, u_long cmd, caddr_t data)
             status.requests++; e = session_submit(s, (const struct x9_vdec_submit *)data);
         } else if (cmd == X9_VDEC_SESSION_RECEIVE || cmd == X9_VDEC_SESSION_PEEK)
             e = session_receive(s, (struct x9_vdec_output *)data, cmd == X9_VDEC_SESSION_PEEK);
-        else if (cmd == X9_VDEC_SESSION_ACK) e = session_ack(s, (const struct x9_vdec_output_ack *)data);
+        else if (cmd == X9_VDEC_SESSION_ACK) {
+            struct x9_vdec_output_ack ack;
+            memcpy(&ack, data, sizeof(ack));
+            e = session_ack(s, &ack);
+        }
         else if (cmd == X9_VDEC_SESSION_DRAIN) {
             if (r->config_bytes || r->config_address) return EINVAL;
             if (!s->draining) {
