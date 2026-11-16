@@ -399,7 +399,7 @@ format(int sensor_width, int sensor_height, int max_fps, bool binned, double fov
 	if (fd != NULL) {
 		put(f, "FormatDescription", fd);
 	}
-	put(f, "VideoMinFrameRate", number_f(2));
+	put(f, "VideoMinFrameRate", number_f(X9_CAMERA_MIN_FRAME_RATE));
 	put(f, "VideoMaxFrameRate", number_f(max_fps));
 	put(f, "VideoIsBinned", CFRetain(binned ? kCFBooleanTrue : kCFBooleanFalse));
 	put(f, "VideoBinningFactorHorizontal", number_i(binned ? 2 : 1));
@@ -1047,7 +1047,7 @@ stream_set_property(CMBaseObjectRef o, CFStringRef key, CFTypeRef value)
 		    !CFNumberGetValue(value, kCFNumberDoubleType, &fps) || !isfinite(fps)) return ERR_PARAM;
 		bool minimum = key_is(key, "MinimumFrameRate"), allowed = key_is(key, "MaximumAllowedFrameRate");
 		if (allowed && fps == 0) fps = 30; /* remove extra ceiling, not the physical 30fps cap */
-		if (fps < 2 || fps > 30) return ERR_UNSUPPORTED;
+		if (fps < X9_CAMERA_MIN_FRAME_RATE || fps > X9_CAMERA_MAX_FRAME_RATE) return ERR_UNSUPPORTED;
 		pthread_mutex_lock(&s->lock);
 		/* These scalars do not replace/retire graph storage. Reconfiguration
 		 * after Stop (before the next Begin) and callback reentry are safe. */
@@ -2510,7 +2510,7 @@ stream_create(CFAllocatorRef allocator, const struct camera *camera, CFStringRef
 	atomic_init(&s->stop_errno, 0);
 	atomic_init(&s->close_errno, 0);
 	atomic_init(&s->format_index, 0);
-	atomic_init(&s->min_fps, 2);
+	atomic_init(&s->min_fps, X9_CAMERA_MIN_FRAME_RATE);
 	atomic_init(&s->max_fps, 30);
 	atomic_init(&s->allowed_fps, 30);
 	atomic_init(&s->recording, false);
@@ -2518,7 +2518,7 @@ stream_create(CFAllocatorRef allocator, const struct camera *camera, CFStringRef
 	pthread_mutex_init(&s->lock, NULL);
 	s->torch = -1;
     s->camera_fd = -1;
-	s->min_fps = 2;
+	s->min_fps = X9_CAMERA_MIN_FRAME_RATE;
 	s->zoom = 1;
 	s->af_window[0] = s->af_window[1] = 0.3f;
 	s->af_window[2] = s->af_window[3] = 0.7f;

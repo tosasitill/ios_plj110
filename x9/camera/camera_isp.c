@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include "camera_isp.h"
+#include "camera_profile.h"
 
 #define WHITE           959             /* 1023 less the black level of 64 */
 #define LUT_WHITE       3836            /* WHITE in the gamma table's steps */
@@ -230,7 +231,8 @@ uint32_t isp_exposure_minimum(uint32_t sensor)
 bool
 isp_frame_rate(struct isp *isp, const struct hakios_camera_frame *f, double minimum, double maximum)
 {
-	if (!isfinite(minimum) || !isfinite(maximum) || minimum < 2 || maximum > 30 || minimum > maximum ||
+	if (!isfinite(minimum) || !isfinite(maximum) || minimum < X9_CAMERA_MIN_FRAME_RATE ||
+	    maximum > X9_CAMERA_MAX_FRAME_RATE || minimum > maximum ||
 	    !f->line_ns || f->frame_lines_min <= f->margin || f->frame_lines_max < f->frame_lines_min) return false;
 	uint32_t step = isp_exposure_step(f->sensor);
 	uint32_t fastest = (uint32_t)ceil(1e9 / maximum / f->line_ns);

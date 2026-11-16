@@ -12,7 +12,7 @@
 | 切镜 | 目标稳定120ms、驻留至少450ms；先真实 STOP/close，再启动新镜头；保持 graph/输出池/host clock，曝光 seed 等待实际控制记录，8个真实新帧作有限亮度过渡。**仍有冷启动采集缺口，不是 iPhone 双路预热的无间断切换** |
 | 视频配置 | 精确20H392 UUID/IMP 守卫，原 D22 plist 读入后仅在内存适配单源 Photo、1080p30/720p30/640×480；保留原音频节点，禁用未实现的 HDR/防抖/depth/AF/闪光等能力；不改 Apple 磁盘资产 |
 | 视频编码 | 注册原 Apple `VCPHEVC` 软件 `hvc1` 工厂，并记录真实工厂创建结果；注册失败只公告 Photo。没有可用 AVC 软件工厂证据，不把 HEVC 冒充 H264；**没有硬件编码或持续实时吞吐证明** |
-| 帧率 | `MinimumFrameRate` / `MaximumFrameRate` / `MaximumAllowedFrameRate` 控制真实 frame length（2..30fps）；录像时固定到有效上限。按各传感器 line/step 量化，metadata 报告实际时长，不 sleep/改 PTS/重放帧；各输出拒绝重复/倒序 PTS |
+| 帧率 | `MinimumFrameRate` / `MaximumFrameRate` / `MaximumAllowedFrameRate` 控制真实 frame length（四镜头共同可实现的4..30fps，广角/前置的帧长上限不足以固定2fps）；录像时固定到有效上限。按各传感器 line/step 量化，metadata 报告实际时长，不 sleep/改 PTS/重放帧；各输出拒绝重复/倒序 PTS |
 | 切镜预算 | 独立只读32B `GET_SWITCH_CAPACITY`，为当前流退休预留 history slot；耗尽时在 STOP 前拒绝新目标、保留旧流。八个 exported epoch pin 上限不解除，不复用未退休映射 |
 
 **尚未闭合的验收**：Camera.app 图标与视频模式是否出现、四 ID/close→真实 RAW→handler→移动画面、编码器真实选中/编码、视频 start/stop、QuickTime 音视频封装、Photos 保存/重开播放、切镜 `source_gap` 和画面。保持同 graph 或软件工厂 `result=0` 都不是录像完成证明。真正同步预热/无采集中断需要底层多路采集及 iOS 同步源合同；硬件 VENC、镜头标定、AF/OIS 与原生三摄 UI 仍未完成。

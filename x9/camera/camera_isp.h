@@ -100,7 +100,8 @@ bool isp_ae(struct isp *isp, const struct hakios_camera_frame *f, const struct i
 uint32_t isp_exposure_step(uint32_t sensor);
 uint32_t isp_exposure_minimum(uint32_t sensor);
 /* Frame duration is implemented through physical frame-length controls, not
- * fake timestamps, sleeps or repeated frames. Requested rates are 2..30fps.
+ * fake timestamps, sleeps or repeated frames. Requested rates are 4..30fps
+ * across all lenses; 2fps exceeds wide/front's physical frame-length limits.
  * One-line quantization can put the actual rate slightly below the target;
  * metadata still reports the actual sensor duration. */
 bool isp_frame_rate(struct isp *isp, const struct hakios_camera_frame *f, double minimum, double maximum);

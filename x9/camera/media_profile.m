@@ -127,7 +127,7 @@ static NSDictionary *device_profile(NSDictionary *original, bool front, bool vid
         for (NSArray *size in sizes) {
             formats[size[0]] = @{@"CaptureStreamFormat": @"X9-Video-30", @"Width": size[1],
                                 @"Height": size[2], @"MaxFrameRateOverride": @30,
-                                @"MinFrameRateOverride": @2};
+                                @"MinFrameRateOverride": @(X9_CAMERA_MIN_FRAME_RATE)};
             presets[size[3]] = @{@"DeviceFormat": size[0], @"MinFrameRate": @30, @"MaxFrameRate": @30,
                                  @"VideoCodec": @"hvc1"};
         }
