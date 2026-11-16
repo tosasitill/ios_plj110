@@ -219,6 +219,18 @@ static void dial_golden(){
  struct x9cw_dial_profile wrong=measured_route;wrong.domain=5;
  assert(!x9cw_dial(q,n,p,sizeof(p),&wrong,0));
  wrong=measured_route;wrong.sim=0;assert(!x9cw_dial(q,n,p,sizeof(p),&wrong,0));
+ /* Preserve already-owned explicit Android CLIR, without interpreting an
+  * Apple privacy byte or choosing a vendor/network default. Only108 changes. */
+ for(unsigned clir=1;clir<=2;clir++){
+  struct x9cw_dial_profile explicit_route=measured_route;explicit_route.clir=clir;
+  assert(x9cw_dial(q,n,p,sizeof(p),&explicit_route,0)==72&&p[36]==clir);
+  assert(!memcmp(p,golden,36)&&!memcmp(p+37,golden+37,72-37));
+  assert(x9cw_native_dial(p,72,2)&&x9cw_request(p,72,0x901,2));
+ }
+ wrong=measured_route;wrong.clir=3;
+ assert(!x9cw_dial(q,n,p,sizeof(p),&wrong,0));
+ wrong.clir=0x100;assert(!x9cw_dial(q,n,p,sizeof(p),&wrong,0));
+ p[36]=3;assert(!x9cw_native_dial(p,72,2));
  /* QMI's string has no NUL; MIPC adds one. Optional type can be omitted. */
  n=dial_qmi(q,5,false);assert(x9cw_dial(q,n,p,sizeof(p),&measured_route,0)==72);
  n=dial_qmi(q,40);assert(x9cw_dial(q,n,p,sizeof(p),&measured_route,0)==104);

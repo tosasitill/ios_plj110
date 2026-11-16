@@ -1330,7 +1330,8 @@ RIL `RmmCallControlCommonRequestHandler::requestDial` `0x381410..0x3817a0`：
 `onHandleRequest` `0x380ebc..0x380ed8` 传入的第三个 `requestDial` bool/w4决定 IMS 请求分支；
 这不是“所有 domain0 都依赖网络状态”。`getEccPreferredDomain` `0x387a30` 仍查询运行状态；测得0
 **不代表所有卡/网络/拨号类型默认0，也不证明 iOS 已有 IMS 请求上下文**。本阶段 `x9cw_dial_profile` 由调用者显式提供，
-只接受 `{sim=1,address_type=2,call_type=1,domain=0,ecc_domain=0,clir=0}`；还没有生产策略选择器。
+初始实现只接受 `{sim=1,address_type=2,call_type=1,domain=0,ecc_domain=0,clir=0}`；
+本文件末节记录后续已明确raw CLIR1/2的codec扩展，仍没有生产策略选择器。
 不把 QMI CallType 数值直接当 MIPC type，也不把 CNF result当通话状态或ID。
 
 iOS20H392 `sendDialReq` `0x1f1ac1f8c` 构造 VOICE20/tag1；CallingNumber writer
@@ -2195,3 +2196,46 @@ python3 x9/tools/call_context_evidence.py --mode client --out x9/out/<另一个�
 record→logical binding/MD epoch→profile/admission→匹配typed终态；不能新增空loader或
 默认profile绕过。**VOICE09仍关闭，VOICE20仍无生产caller**；CallList/handover、独立
 双向DSP和当前Messages同token COMMIT/重开/物理ACK/MO对端验收仍未完成。
+
+## 2026-11-16 显式 Android CLIR 的现有 codec 保真修复
+
+上一轮matching Java producer已补齐一个过去不具备的输入子集：temporary SC31的
+明确raw CLIR1/2，由非空extracted dialingNumber与同一DialArgs owner携带；它不是
+查询vendor/default结果，也不是把Apple CLIR/CT枚举直接作为Android raw值。
+复用 `dial-java-producer/matching-java-producer-final.json` 与
+`call-privacy-policy/privacy-policy-original-proof.json` 的已有原件/selected证据，
+本轮不再反汇编这些范围或查询旧wrapper。
+在**non-ECC、普通十进制号码、raw CLIR已明确为1/2**的子集，原Rtm `265500`
+不经key124覆盖，Rmm `387fb0` 的`*82`与ECC分支也不适用，原值进入108/u8。
+selected vendor factory/default仍缺失，但不能把这个独立缺口扩大成“显式1/2也只能丢弃”。
+
+当前代码的陈旧限制是 `x9cw_dial_profile_valid` 要求clir==0，且encoder无条件写108=0。
+现修复**既有函数**，没有新增unused profile API或生产caller：
+
+- profile validator接受已由调用者明确拥有的Android raw0/1/2；0仅保留已有capture子集，
+  **不增加missing/vendor/network-default选择规则**。
+- `x9cw_dial` 在改写output前先copy scalar profile，验证同一个local snapshot后逐字段序列化，108取真实
+  `route.clir`，不硬编码0。原号码own-copy/同buffer规则、route/type/domain/ecc-domain约束保持。
+- 物理writer上游既有 `x9cw_native_dial` 同步接纳mandatory108/u8的0/1/2，仍要求
+  相同tag/order/width/decimal/NUL/padding和其余四个measured字段；大于2失败，不截断成byte0。
+- QMI号码parser仍拒绝额外CLIR/未知字段；**并未从QMI的缺字段或者Call+08/+09猜raw值**。
+  默认/Apple typed privacy转换、完整owned route与binding仍须真实producer。
+
+这是现有encoder与native validator的功能扩展，**不是已接通iOS显式隐藏/显示号码**。
+其0分支保持原包；1/2分支在现有40byte scalar tail中只改变108的value，号码不插入prefix。
+无新通话类型、SIM0或domain选择，没有改registration、lease、token、epoch、terminal或SMS路径。
+`X9Calls.inc::x9c_dial_submit` 仍无生产caller，VOICE09未公告，不能由codec成功授予REGISTERED。
+
+测试源只补上显式1/2与无效3/0x100的期望，**本轮未执行任何测试脚本/套件或人工向量**。
+固定输入 `prepare-local.py --check` exit0；仅按正常recipe编译实际消费者
+`X9Baseband.cpp.o` 与 `sweet_x9_gpu_dependencies.o`。首次源码与review后先copy再验证的最终r2源码
+分别编译，均为 **exit0，两项True，34/251 warnings**；第二次对应真实源码变化，不是产物复检。
+输入为 `aad2b3ab`＋各次codec diff，首次记录
+`x9/out/call-profile-producer/{source-head.txt,source-input.diff,compile-command.txt,
+compile-recipe.py,single-compile.log,compile-exit.txt,compile/recipe-results.json}`。
+最终r2记录为同目录 `source-input-r2.diff/compile-recipe-r2.py/single-compile-r2.log/
+compile-exit-r2.txt/compile-r2/recipe-results.json`，原session29457已实际取得exit0。
+scalar local snapshot防止验证后再次读取caller字段，不代表跨并发record/revision的原子性。
+没有link、boot pack、CI或设备操作，也没有构建后二次hash/解包/反汇编检查。
+完整typed/backend/profile/epoch/state/media和当前Messages最终验收仍未完成；后续应连接真实
+owned producer，而不是为此小修复开放默认profile或重复收集已闭合的CLIR原件。
