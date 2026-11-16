@@ -130,7 +130,10 @@ static inline int x9cw_qmi_dial(const uint8_t *p,unsigned n,struct x9cw_dial_num
  * route is implemented. CLIR0 is the captured value; explicit Android CLIR1/2
  * also survive the matching Rtm/Rmm ordinary decimal path unchanged into108.
  * Matching Java temporary SC31 supplies those explicit values independently
- * of the still-unqualified vendor default. This is NOT an Apple-enum cast,
+ * of the still-unqualified vendor default. The matching MD normal-number
+ * consumer, after its special-case gate, uses raw1 for "#31#" and raw2 for
+ * "*31#"; raw0 can consult existing CLIR and is not an explicit show request.
+ * This is NOT an Apple-enum cast,
  * prefix parser, default selector or permission to discard typed privacy.
  * Non-emergency getDomain returns0 on the IMS request branch;
  * getEccPreferredDomain still reads runtime state. No production provider yet

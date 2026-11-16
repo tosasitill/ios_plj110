@@ -2428,3 +2428,58 @@ controller/model 的独立 PBI 原件资格另见
 完整窄契约/执行命令在 `x9/out/call-context-join/typed-context-join-contract.{json,txt}`
 与 `commands.txt`。本次没有生产行为改动、编译、测试/人工向量、CI、设备操作或 boot pack；
 **VOICE09仍关闭，完整通话短信目标未完成**。
+
+## 2026-11-16 MD 显式 CLIR 的实际受门控消费者
+
+本轮只新增读取十个有具体符号边界的 nanoMIPS 函数（共2802B），以及 prefix24B、
+selected dispatch entry2B、format5B；复用旧 Apple privacy/CT、Android Java producer、
+Rtm/Rmm 与 `mipc_call_dial_req` 切片，**不重采旧范围，也不扩大到其它 CLIR 控制**。
+源为固定 `.local/x9/modem/parts/modem_a.img`，ROM VA90000000对应文件offset200。
+原件切片与派生asm分开保存，十个函数的 decoder 均为 **exit0**；不是设备执行或通话成功。
+
+### 从原108到真实 handler，而非凭函数名选消费者
+
+- 旧 parser `9131cf5e..7c`检查存在的108长度为1B，u8原值写入独立request `+d0`；明确
+  非零跳过106 fallback，missing/zero仍有fallback。`9131d02a..03a`向
+  `l5mipc_ilm_send` 提交message **db19**，原request为a6。
+- 新 `l5ucc_main9139fe3a..913a0070` 对db19落入common hook；新
+  `bespoke_common_l5ucc_main_handler91302c3c..64`只接75a9/db53/db54，对db19返回0。
+  因此 main `913a006a`调用真实 `l5ucc_enque_req9139fcee..9139fe3a`，并非直接无条件dial。
+- enqueue `9139fd2c..56` retain原local_para并copy到新ILM `+8`，原message id从`+6`
+  保留到新ILM `+6`；node pending byte先置0。队列长度/控制队列及系统状态决定何时进入
+  `l5ucc_process_req_ilm9139fae6..9139fcee`，相关短trigger切片也保留。不能绕过这些门。
+- process `9139fb6a..86`用`message-db19`索引table **92992744**。本轮只读它的db19
+  entry，原signed halfword为0，选中next-PC **9139fb8a**，该块`9139fb8e`真实调用
+  **l5ucc_dial_hdlr91390b76..91390dee**。还须通过pending、控制状态和真实request验证；
+  这闭合的是受门控静态consumer路由，不是对当前运行状态或网络结果的证明。
+
+### raw1/2的实际效果边界
+
+上述dial handler `91390c76..88`按真实process分类调用normal或ECC wrapper。本轮只读
+normal **913a1510..152a**：request`+c0==2`时，原号码`+9`、原raw CLIR`+d0`
+与limit b4传到 **l5ucc_add_clir_prefix_origin913a1388..1496**。首先必须由
+**l5ucc_clir_special_case_handler913a1284..1388**返回0，才进入以下普通prefix分支：
+
+| 已拥有的MD raw值 | 新原件决定门 |
+| --- | --- |
+| 1 | `913a13de/e2`选择原literal **924325ec=`#31#`** |
+| 2 | `913a13da/ea`选择原literal **924325f4=`*31#`** |
+| 0 | `913a13c8/cc`先调用 **l5ucc_get_clir_status913a120e..1238**，取得existing CLIR；不是显式允许显示 |
+
+`913a1440..4c`真实调用snprintf，新增原format **92378658=`%s%s\0`**，参数是selected
+prefix和原号码；正常长度门后`913a145c..60`将结果交给 `l5_strncpy`，destination仍是
+原owned号码buffer。encoder本身仍只序列化mandatory108/u8，**没有向AP号码自行插prefix**。
+special-case拦截、ECC支路、default getter的下游策略与当前网络效果不在本轮新增scope内；
+不把这条受门控prefix分支描述为所有拨号均无条件执行。
+
+现行 `x9_call_wire.h` 对明确raw1/2保值、非Apple枚举cast的注释没有可证错误，只补上
+上述实际MD prefix与zero/default边界；**没有行为变更、映射API、生产provider或默认值**。
+Apple `Call+9/+8`的(1,1)/(1,0)/(0,0) SIP效果已由前节证明，但不能把它们按字节互抄成
+Android raw，也不能从prefix观测反推完整Apple策略/route准入或隐藏/显示的网络验收。
+
+原件及紧凑契约为主checkout `x9/out/call-profile-input-next/` 的
+`privacy-input-contract.json`、`new-md-*-ranges.json`、`*.original.bin`、`*.numbered.asm`
+及四个 `read-md-*-ranges.py`。这些scratch reader按显式新范围读取；已有旧原件身份仅引用，
+本轮未重新hash全ROM。matching Java `ImsCallProfile` 的附带ASC结果仅作为未opcode-qualified
+的namespace线索，不参与该消费者结论。未运行测试、编译、CI、boot pack或操作设备；
+**VOICE09未公告、VOICE20无生产caller**，完整通话/媒体与当前Messages最终验收仍未完成。
