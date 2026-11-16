@@ -158,13 +158,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
-#### 2026-11-16 相机恢复工作：最新日志与 NS GIC 确定阻断
+#### 2026-11-16 相机恢复工作：NS GIC 阻断已修，正常 mode2 r2 已构建
 
 - **范围/基线**：单代理进入现有 `.worktrees/camera-integration` / `feat/camera-integration`，起点 `4d6e4c5b`；合入当前 main `2c34c540`，只 NOTES 尾部并行追加冲突，保留完整双方交接；相机 native/source/repeat/AE/cancel 与 bounded shim handoff 全部保留，其他工作树和共享输入不改。合入带回已落地 board-default 音频/麦克风与蓝牙/AKS/振动修复。
 - **最新观察**：`~/330.txt:481` 相机仍 `mode=1 / platform=0`，`:3006` boot args 为 `x9_camera=1`，不是 r1 mode2 镜像验收；目前没有当次 physical ID/RAW/PixelBufferHandler/屏幕预览证据。`~/324.txt:629` 相同 GICD 实读 `ctlr=12 / typer=a07f051e / group=0`；对应 pe_fiq 当前 NS 两安全态配置，与已实跑 BT IRQ 修复相符。
 - **确定源码阻断/下一动作**：native source→`cam_irq_prepare_locked`→`cam_irq_controller_impl` 仍要求 `(ctl&0x11)==0x11` 和可见 IGROUPR bit；0x12 必然 EBUSY。按 NS view 修为 ARE_NS+EnableGrp1A(0x12)，不把读为0的不可见 group 当拒绝依据；保留实际 topology/line count/level trigger/RWP、route/priority/enable/pending/active、真实 IAR/EOI 与 DMA/退休守卫，不改 GIC 全局或安全组寄存器。随后单对象交编及正常完整 mode2 功能候选，不跑测试套件/构建后二次检查，不自行 boot/ADB/mailbox/写分区。完整相机目标未完成，后续以新 mode2 日志和真实预览/拍摄效果验收。
 - **合入/单对象终态**：merge 为 `430fcfbc`；原 merge diff-check 因 main 原有 `0006-x9-bt-uart-irq.patch` 的 unified-diff context 空格+tab 报警（未改该继承补丁），本轮 camera diff-check exit0。上述 NS 守卫与 thread-only prepare 拒绝快照已实现；正常 Builder `compile_one(sweet_x9_camera.o)` **True/exit0、153 warnings**（与 r1 最后联合编译数量相同），原 session99090 已终态。没有执行测试套件/额外产物检查。`prepare-local.py --check` exit0，gh 当前相机分支 run list `[]/exit0`，没有 CI run ID。
-- **原始记录/下一步**：本树 gitignored `x9/out/camera-resume-20261116/` 保留基线、merge 原日志、日志摘录、single-compile.log/exit/result 与输入校验/gh 输出。下一以已提交代码正常 `build.py all` 构建 mode2 r2；boot-device 其他 token 不变，不启用额外 BT root 安装/MG 清缓存。尚无 r2 boot/实际 RAW/handler/屏幕结果，不能称相机完成。
+- **完整构建/源码终态**：固定源码 **`c85ece2db3b8c1ea70389c57f010e1d9cd6aa49a` / tracked clean** 执行 `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --name x9-camera-native-preview-r2-20261116`，原 session31556 已终态 **exit0**；**103/103 overlay、3 prebuilt、完整 kernel link/strip、相机 iOS bridge、bounded camera IRQ/CSI shim 和 boot pack 成功**。内置日志 **Image31911936 B / shim-boot14991360 B**。boot-device 仍 camera2、其他 token 不变，继承 main 音频默认值；不额外启用 BT root 安装/MG 清缓存。没有测试套件、构建后二次解包/hash/反汇编/复建对比、CI run ID 或设备操作。
+- **产物/提交**：权威候选本树 **`x9/out/x9-camera-native-preview-r2-20261116/boot.img`**，同目录 `source-head.txt`、`source-status.txt`、`boot-input.json`、`full-build.log`、`full-build.exit`、`build.log` 保留确切输入/原结果；source-status 空。基线/单对象/输入校验/gh/摘录在 `x9/out/camera-resume-20261116/`；旧 r1 原件不改。源码与 merge 已 **push exit0 `4d6e4c5b..c85ece2d`** 到 origin/feat/camera-integration，本条最后 notes-only 正常提交/push，不以事后交接 SHA 替换构建输入。不合 main 宣称完成，不删除现有相机树/辅助树，不碰其他工作树或共享 `.local`。
+- **下一最小权威验证**：用户在主 checkout 执行 `fastboot boot .worktrees/camera-integration/x9/out/x9-camera-native-preview-r2-20261116/boot.img`；GPU 仍280，无新 plugin-package，设备保持280则无需 mailbox。进入原生相机先观察后置随镜头移动的连续真实预览，成功后切前置、关闭重开一次；记录新 `~/N.txt` 与屏幕现象，预览成功后再核拍照、照片保存/重开与录像。先看本次 `X9 CAMERA FDT/IRQ/CAL`→mode2 native register/两真实ID与physicalclose→MM/CSI/CAM/MMPC/SMMU→SOF/DONE/RAW→graph/handler→真实屏幕，失败从最早阶段修，不拿成功注册/编译代最终效果。**当前仍无 r2 上机、真实 RAW/handler/预览或拍摄验收，完整相机未完成**；8 exported epoch pin 上限、partial/uncertain startup 保守 retain 仍在。此前 11-15 等待审计为历史状态，本轮已通过新 GIC 证据推进源码与候选，但尚不能替代新 mode2 运行结果。
 
 #### 2026-11-16 SMS fanout / 同 Model factory 分流（静态收束；retrieve/retirement仍缺）
 
