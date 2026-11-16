@@ -9,8 +9,7 @@ static int cam_bus_other_idle(struct cam_probe_bus *b)
 {
     for(unsigned channel=1;channel<b->banks;channel++) {
         vm_offset_t c=b->base+channel*0x10000;
-        if(cam_rr(c,CAM_I2C_START) || cam_rr(c,CAM_I2C_MASK) ||
-           cam_rr(c,CAM_I2C_STAT) || (cam_rr(c,CAM_I2C_FIFO)&31))return EBUSY;
+        if(cam_rr(c,CAM_I2C_START)&1)return EBUSY; /* other host actually running */
     }
     for(unsigned channel=0;channel<b->dma_banks;channel++)
         if(cam_rr(b->dma,channel*0x10000+0x08)&1)return EBUSY;
@@ -63,7 +62,7 @@ static int cam_bus_transfer_n(struct cam_probe_bus *b,uint8_t slave,
     for(unsigned i=0;i<count;i++)*(volatile uint8_t *)(b->base+CAM_I2C_DATA)=tx[i];
     __asm__ volatile("dsb sy" ::: "memory");
     e=cam_bus_controls(b,false);if(!e)e=cam_bus_other_idle(b);
-    if(!e && (cam_rr(b->base,CAM_I2C_START) || cam_rr(b->base,CAM_I2C_STAT)))e=EBUSY;
+    if(!e && ((cam_rr(b->base,CAM_I2C_START)&1) || cam_rr(b->base,CAM_I2C_STAT)))e=EBUSY;
     if(!e && (cam_rr(b->base,CAM_I2C_FIFO)&31)!=count)e=EIO;
     if(e)return cam_bus_request_fault(b,e,UINT32_MAX,UINT32_MAX);
     uint64_t interval;nanoseconds_to_absolutetime(5000000ULL,&interval);

@@ -46,6 +46,7 @@ struct cam_probe_bus {
     bool parent_seen, parent_owned, parent_conflict;
     bool owned, gate_owned, clock_saved, wedged, failed_status, conflict;
     bool fifo_owned, request_owned; /* attempted operations, NOT hardware leases */
+    uint32_t multi_entry; /* vendor init_hw SHADOW_REG_MODE etc.: borrowed, unchanged */
 };
 struct cam_probe_board {
     uint32_t reset, mclk, scl, sda, wl_mask, wl_count, sensor;
@@ -163,8 +164,10 @@ static int cam_bus_idle(struct cam_probe_bus *b)
      * Refuse inherited requests on the other exposed channel banks too. */
     for(unsigned channel=0;channel<b->banks;channel++) {
         vm_offset_t c=b->base+channel*0x10000;
-        if(cam_rr(c,CAM_I2C_START) || cam_rr(c,CAM_I2C_MASK) ||
-           cam_rr(c,CAM_I2C_STAT) || (cam_rr(c,CAM_I2C_FIFO)&31))return EBUSY;
+        /* Vendor i2c-mt65xx: INTR_MASK is per-transfer configuration and
+         * stale STAT/FIFO are cleared by init_hw/each transfer; only a
+         * running START (bit0) or an enabled APDMA is real activity. */
+        if(cam_rr(c,CAM_I2C_START)&1)return EBUSY;
     }
     for(unsigned channel=0;channel<b->dma_banks;channel++)
         if(cam_rr(b->dma,channel*0x10000+0x08)&1)return EBUSY;
@@ -193,7 +196,7 @@ static int cam_bus_controls(struct cam_probe_bus *b, bool restoring)
     e=cam_bus_clock(b);if(e)return e;
     if(cam_rr(b->gate,0xe00)&b->gate_bit)return EBUSY;
     uint32_t multi=cam_rr(b->base,CAM_I2C_MULTI);
-    if(multi)return cam_bus_conflict(b,CAM_I2C_MULTI,0,multi);
+    if(multi!=b->multi_entry)return cam_bus_conflict(b,CAM_I2C_MULTI,b->multi_entry,multi);
     for(unsigned i=0;i<CAM_I2C_SAVED_COUNT;i++) {
         uint32_t v=cam_rr(b->base,cam_i2c_saved_regs[i]);
         if(v==b->expected[i] || (restoring && (b->uncertain&(1u<<i)) && v==b->prior[i]))continue;
@@ -236,15 +239,28 @@ static int cam_bus_take(struct cam_probe_bus *b)
         e=cam_wait_bits(b->gate,0xe00,b->gate_bit,0,1000);if(e)return e;
     }
     e=cam_bus_idle(b);if(e)return e;
+    /* Like vendor mtk_i2c_init_hw: W1C whatever INTR_STAT a previous
+     * owner (LK RT5133/WL28681C) left, and clear the FIFO pointers. */
+    uint32_t stale=cam_rr(b->base,CAM_I2C_STAT);
+    if(stale)cam_rw(b->base,CAM_I2C_STAT,stale);
+    cam_rw(b->base,CAM_I2C_FIFO_CLR,1);
+    if(cam_rr(b->base,CAM_I2C_STAT) || (cam_rr(b->base,CAM_I2C_FIFO)&31))return EBUSY;
+    b->multi_entry=cam_rr(b->base,CAM_I2C_MULTI);
     for(unsigned i=0;i<CAM_I2C_SAVED_COUNT;i++)b->saved[i]=cam_rr(b->base,cam_i2c_saved_regs[i]);
     memcpy(b->expected,b->saved,sizeof(b->saved));
+    printf("X9 CAMERA AP ENTRY: gate=%x stale_stat=%x multi=%x ctrl=%x mask=%x timing=%x ext=%x ltiming=%x hs=%x sda=%x div=%x io=%x mis=%x\n",
+        b->gate_bit,stale,b->multi_entry,b->saved[1],b->saved[0],b->saved[6],b->saved[7],
+        b->saved[8],b->saved[9],b->saved[10],b->saved[11],b->saved[12],b->saved[13]);
     e=cam_bus_controls(b,false);if(e)return e; /* reject an incoherent snapshot */
-    /* DMA, IRQ routing and wrapper state are not inherited silently. */
-    if(b->saved[1]&((1u<<2)|(1u<<7)|(1u<<8)|(1u<<9)|1u))return ENOTSUP;
-    if(cam_rr(b->base,CAM_I2C_MULTI))return ENOTSUP; /* no shared shadow/DMA mode */
+    /* CONTROL is rewritten per transfer exactly like vendor (keep bits
+     * 0/6/7, clear RS/DMA/DIR/DMAACK/ASYNC); MULTI shadow mode is borrowed. */
     b->owned=true;
     if(!b->saved[6])return cam_bus_init_timing(b);
-    return cam_bus_timing_check(b,false); /* nonzero is not a qualified timing profile */
+    if(!cam_bus_timing_check(b,false))return 0;
+    /* Vendor init_hw always reprograms the whole timing set (TIMING/EXT/
+     * LTIMING/HS/SDA/DIV/IO/MIS) on an idle bus; do the same with our
+     * standard profile. The journal restores the inherited values. */
+    return cam_bus_init_timing(b);
 }
 static bool cam_bus_unretired(const struct cam_probe_bus *b)
 {
@@ -582,8 +598,11 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
         .wl_code={uw?104u:tele?179u:back?179u:191u,tele?137u:back?54u:137u,144},
         .wl_delay={uw?1000u:tele?3000u:back?3000u:1000u,tele?4000u:back?3000u:1000u,4000},
         /* Captured mclk ID23/pin208 is CAMTG4, not CAMTG7. */
-        .clk_off=back?0x70:0x60, .clk_shift=uw?24:tele?16:back?0:8,
-        .clk_status_bit=uw?8:tele?9:back?7:10, .clk_update_bit=uw?23:tele?22:back?24:21,
+        /* Live DT mclk: back 23=CAMTG4, tele 21=CAMTG2, UW 22=CAMTG3,
+         * front 19=CAMTG0 (GPIO72 CMMCLK0), not CAMTG1. clk-mt6993.c:
+         * CAMTG0 lsb0/pdn7, cksta/fenc 11, update shift 20. */
+        .clk_off=back?0x70:0x60, .clk_shift=uw?24:tele?16:back?0:0,
+        .clk_status_bit=uw?8:tele?9:back?7:11, .clk_update_bit=uw?23:tele?22:back?24:20,
         .clk_group=back?6:5,.drive_shift=uw?3:0
     };
     j->gpio=cam_board_map(0x1002d000,0x1000);

@@ -99,7 +99,6 @@ static int cam_bus_init_timing(struct cam_probe_bus *b)
     }
     if(!found)return ENOTSUP;
     e=cam_bus_controls(b,false);if(!e)e=cam_bus_idle(b);if(e)return e;
-    if(b->expected[6])return EBUSY;
     /* Journal was captured/owned before writes. Do not softreset, change
      * MCU interrupt routing, APDMA or shared shadow mode to get admission. */
     const unsigned regs[]={CAM_I2C_TIMING,CAM_I2C_EXT,CAM_I2C_LTIMING,
