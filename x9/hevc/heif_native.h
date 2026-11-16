@@ -36,8 +36,13 @@ enum x9_heif_graph_color_policy {
  * recheck the immutable plan's ratio/presence read-only. Raw pasp provenance
  * remains separate from SourcePixelAspectRatio/Origin (absent0, pasp1,
  * selected-SPS2, observed-CM3).
- * Any derived/child non-square source OR output still rejects BEFORE hardware;
- * full derived metric/inheritance remains unimplemented. Explicit LINEAR_CEIL
+ * grid/iden require each child's transformed output ratio to agree with the
+ * canvas's explicit pre-transform pasp BEFORE hardware. The actual sample-copy
+ * path rechecks completed cached raster ratios; agreeing non-square samples
+ * preserve that lattice, followed by the canvas's ordered transforms. Absent
+ * canvas/child ratio cannot admit a non-square placement and never inherits.
+ * Non-square overlay/auxiliary placement, mixed-lattice resampling and full
+ * normative derived metric/inheritance remain unimplemented. Explicit LINEAR_CEIL
  * uses exact aperture/output-sample counts, not double-derived ratios.
  * Aux/alpha, fractional crop, Rext and ordinary ImageIO/CMPhoto routing are
  * still unsupported by THIS exact-samples entrypoint: any aux rejects before

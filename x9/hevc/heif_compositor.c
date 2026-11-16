@@ -13,7 +13,7 @@ struct transform {
 struct node {
     struct x9_heif_geometry geometry;
     uint32_t type, rows, columns, state, subtree_height, transform_count;
-    uint32_t premultiplied, non_square_source;
+    uint32_t premultiplied;
     uint32_t derived[X9_HEIF_MAX_ITEMS], auxiliary[X9_HEIF_MAX_ITEMS];
     int32_t overlay_x[X9_HEIF_MAX_ITEMS], overlay_y[X9_HEIF_MAX_ITEMS];
     struct transform transforms[X9_HEIF_MAX_ASSOCIATIONS];
@@ -148,6 +148,19 @@ static int source_aspect(const struct x9_heif_image *image, const struct x9_heif
     } else if (aspect->origin == X9_HEIF_ASPECT_PASP) return EBADMSG;
     return 0;
 }
+/* grid/iden place child OUTPUT samples in the canvas INPUT lattice, before
+ * the canvas's own transforms. Explicit present ratios must agree on EVERY
+ * dimg edge, not just tile0, raw pasp, shared config or the root declaration.
+ * This exact-copy subset does not infer inherited spacings or reinterpret a
+ * mismatched lattice. Preserve the legacy absent/square path without filling
+ * in1:1; missing evidence never admits a non-square placement. */
+static int placement_metric(const struct x9_heif_geometry *canvas, uint64_t h, uint64_t v)
+{
+    uint64_t ch = canvas->source_aspect.horizontal, cv = canvas->source_aspect.vertical;
+    if ((!h != !v) || h > INT64_MAX || v > INT64_MAX) return EBADMSG;
+    if (ch && h) return (__uint128_t)ch*v == (__uint128_t)cv*h ? 0 : ENOTSUP;
+    return ch != cv || h != v ? ENOTSUP : 0;
+}
 static int visit(struct x9_heif_plan *p, uint32_t id, unsigned depth, uint32_t *index)
 {
     /* Check active state first. Cached subtrees still contribute their full
@@ -185,7 +198,6 @@ static int visit(struct x9_heif_plan *p, uint32_t id, unsigned depth, uint32_t *
         if (!e) e = source_aspect(image,&aspect);
         if (!e) {
             node->geometry.source_aspect = aspect;
-            node->non_square_source = aspect.horizontal != aspect.vertical;
             e = transforms(p,image,node);
         }
     }
@@ -236,16 +248,32 @@ static int plan_create(const struct x9_heif_document *document, uint32_t id,
     int e = id ? 0 : x9_heif_primary(document,&id);
     if (!e) e = visit(p,id,0,&p->root);
     p->aspect_source = NULL; p->aspect_context = NULL;
-    /* Validate the WHOLE reachable graph before any raster callback. The
-     * coded root has a known source lattice and ordered output metric. No
-     * derived/child inheritance or mixed placement metric is inferred. Check
-     * BOTH resolved source and output ratios: square input may become non-square
-     * under anisotropic LINEAR_CEIL, and non-square may become square. */
+    /* Validate the WHOLE reachable graph before any raster callback. Each
+     * grid/iden edge consumes transformed child samples in the declared
+     * pre-transform canvas metric. DAG reuse never skips a new parent edge.
+     * No absent inheritance, mixed-lattice resampling or square default.
+     * Non-square overlay/auxiliary placement remains unsupported. */
     for (unsigned n = 0; n < p->count && !e; n++) {
         const struct node *node = &p->nodes[n];
-        if ((node->non_square_source ||
-            node->geometry.pixel_aspect_h != node->geometry.pixel_aspect_v) &&
-            (n != p->root || node->type != X9_HEIF_HVC1)) e = ENOTSUP;
+        if (node->type == X9_HEIF_GRID || node->type == X9_HEIF_IDEN) {
+            for (unsigned k = 0; k < node->geometry.derived_count && !e; k++) {
+                const struct x9_heif_geometry *child = &p->nodes[node->derived[k]].geometry;
+                e = placement_metric(&node->geometry,child->pixel_aspect_h,child->pixel_aspect_v);
+            }
+        } else if (node->type != X9_HEIF_HVC1) {
+            if (node->geometry.source_aspect.horizontal != node->geometry.source_aspect.vertical ||
+                node->geometry.pixel_aspect_h != node->geometry.pixel_aspect_v) e = ENOTSUP;
+            for (unsigned k = 0; k < node->geometry.derived_count && !e; k++) {
+                const struct x9_heif_geometry *child = &p->nodes[node->derived[k]].geometry;
+                if (child->source_aspect.horizontal != child->source_aspect.vertical ||
+                    child->pixel_aspect_h != child->pixel_aspect_v) e = ENOTSUP;
+            }
+        }
+        for (unsigned k = 0; k < node->geometry.auxiliary_count && !e; k++) {
+            const struct x9_heif_geometry *aux = &p->nodes[node->auxiliary[k]].geometry;
+            if (aux->source_aspect.horizontal != aux->source_aspect.vertical ||
+                aux->pixel_aspect_h != aux->pixel_aspect_v) e = ENOTSUP;
+        }
     }
     if (e) free(p); else *out = p;
     return e;
@@ -458,6 +486,8 @@ static int render(struct composition *c, uint32_t at)
             e = render(c,n->derived[k]);
             if (e) break;
             const struct x9_heif_raster *tile = &c->cache[n->derived[k]];
+            e = placement_metric(&n->geometry,tile->pixel_aspect_h,tile->pixel_aspect_v);
+            if (e) break;
             uint32_t x = n->type == X9_HEIF_GRID ? (k%n->columns)*tile->width : 0;
             uint32_t y = n->type == X9_HEIF_GRID ? (k/n->columns)*tile->height : 0;
             if (x >= r->width || y >= r->height) { e = EBADMSG; break; }
@@ -470,6 +500,14 @@ static int render(struct composition *c, uint32_t at)
     }
     for (unsigned k = 0; k < n->transform_count && !e; k++) e = apply(c,&n->transforms[k],r);
     if (!e && c->linear) e = validate_linear(r);
+    if (!e && (r->width != n->geometry.width || r->height != n->geometry.height)) e = EBADMSG;
+    if (!e) {
+        /* Publish every completed cached raster's OUTPUT metric, not just
+         * root metadata. A parent's real sample-copy path consumes it above;
+         * the canvas's own ordered transforms have already executed here. */
+        r->pixel_aspect_h = n->geometry.pixel_aspect_h;
+        r->pixel_aspect_v = n->geometry.pixel_aspect_v;
+    }
     return e;
 }
 static int compose(const struct x9_heif_plan *plan, enum x9_heif_raster_format format,
@@ -490,8 +528,6 @@ static int compose(const struct x9_heif_plan *plan, enum x9_heif_raster_format f
     int e = render(c,plan->root);
     if (!e) {
         *out = c->cache[plan->root];
-        out->pixel_aspect_h = plan->nodes[plan->root].geometry.pixel_aspect_h;
-        out->pixel_aspect_v = plan->nodes[plan->root].geometry.pixel_aspect_v;
         memset(&c->cache[plan->root],0,sizeof(*out));
     }
     for (unsigned n = 0; n < plan->count; n++) x9_heif_raster_close(&c->cache[n]);

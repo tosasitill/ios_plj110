@@ -19,7 +19,8 @@ struct x9_heif_geometry {
     uint32_t id, width, height; /* after this item's ordered transforms */
     uint32_t coded_width, coded_height; /* ispe, before item transforms */
     uint32_t derived_count, auxiliary_count;
-    struct x9_heif_sample_aspect source_aspect; /* pre-item-transform, separate provenance */
+    struct x9_heif_sample_aspect source_aspect; /* pre-item-transform, separate provenance;
+        * derived canvas uses only its own pasp, never a guessed child inheritance */
     uint64_t pixel_aspect_h, pixel_aspect_v; /* output ratio, 1..INT64_MAX;
         * absent resolved source remains0, never an inferred square default */
 };
@@ -36,8 +37,14 @@ struct x9_heif_geometry {
  * adjust spacing by exact extent/output sample counts. Cross-cancelled
  * output ratio must fit positive signed64 CFNumbers, else E2BIG, never rounded.
  * This is not square-pixel conversion or a HEIF mandated resampling policy.
- * Derived/child non-square SOURCE OR OUTPUT ratios still reject before any
- * callbacks; full derived metric/inheritance is not implemented. These
+ * grid/iden compare EVERY child's ordered OUTPUT ratio with the canvas's
+ * pre-transform declared pasp before callbacks and again on cached rasters
+ * at the actual sample-copy path. Agreeing non-square lattices can be copied
+ * without resizing; canvas crop/rotation then determines its output metric.
+ * Present mismatches or a non-square edge with an absent ratio reject. No
+ * absent ratio inherits or becomes1:1; legacy absent/square paths retain their
+ * metadata. Non-square iovl/auxiliary placement, mixed-lattice resampling and
+ * full normative derived metric/inheritance are not implemented. These
  * container-only entrypoints preserve absent pasp; the native preflight
  * variant below resolves actual coded-source SPS/CM sample aspect. */
 int x9_heif_plan_create(
