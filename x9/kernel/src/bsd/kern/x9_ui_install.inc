@@ -1,4 +1,4 @@
-/* Own-code installer only, explicitly enabled by x9_ui=1. No Apple binary or
+/* Own-code installer only, X9 board default on; x9_ui=0 disables. No Apple binary or
  * preference rewrite here. x9_bbfw_write refuses different files and symlinks.
  */
 #include "../../../generated/x9_ui_bridge.inc"

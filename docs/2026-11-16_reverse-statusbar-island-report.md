@@ -31,6 +31,14 @@
 提取文件的部分共享 selector/stub 指针不完整，因此不把 `llvm-objdump` 的越界最近符号
 当作真实被调函数。上表的 CFString 内容、具名函数、编码与比较指令分开记录。
 
+## 默认开启更新（2026-11-16）
+
+用户随后要求“默认打开”：X9 board table 将 `x9_ui` 和 `x9_fill` 都设为1，
+打包器从该表投影 artwork subtype2556，SpringBoard 注入与一次MG cache重建沿原路径。
+下文初版/v2的“默认off”是历史结果，旧镜像不变。显式 `x9_ui=0` 仍关闭hook/选择ADT2436；
+完整缓存恢复另加单次 `x9_mgwipe=1`，随后继续显式 `x9_ui=0` 镜像，不能启动新默认镜像
+来保持关闭。全局App状态栏及原生岛窗口偏移没有扩大，仍无实机启用证明。
+
 ## GitHub 参考
 
 1. [DynamicCowTS](https://github.com/matteozappia/DynamicCowTS)，

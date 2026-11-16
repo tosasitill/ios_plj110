@@ -158,6 +158,17 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 显示 / 灵动岛 / 状态栏：用户要求默认开启（已构建，未实机）
+
+- **基线/范围**：单代理隔离 `feat/display-default-on` / `.worktrees/display-default-on`，真实main/origin **`9233c1ac`**。用户“默认打开”按两开关执行：`pe_serial.c`共享board table `x9_fill=1`、`x9_ui=1`；FB/HID从裸`PE_parse_boot_argn`改用同`sweet_x9_arg`，打包器原`x9_boot_defaults`自动投影subtype2556，无需额外token、无bootargs膨胀。保留414x920pt@3x，scanout拉宽与触摸逆映射不变，非X9不启用此路径。
+- **关闭/恢复**：显式`x9_fill=0`仅关闭铺满；`x9_ui=0`禁用SpringBoard hook并打包ADT2436，但不保证清旧MG缓存。两项均关用`x9_fill=0 x9_ui=0`；完整缓存恢复另加单次`x9_mgwipe=1`，之后继续显式0镜像（不带mgwipe）。新默认镜像会再次启用UI，不能把“普通不传参数”当保持关闭。hook仍只覆盖SpringBoard竖屏主屏状态栏20px，不扩大应用注入/移动原生岛窗口。
+- **执行边界**：用户已要求默认开启，未来该镜像首次启动沿原自有dylib/epoch安装和MG缓存重建路径；本轮不操作手机、不写根盘/分区。按x9/AGENTS只编译/打包，不执行测试脚本、不额外解包/反汇编/重算成功镜像hash；原测试断言同步新默认但未执行。旧v2镜像未改且仍为旧默认off kernel。构建输入/原日志在 `x9/out/display-default-on-20261116/`，确切build/boot结果见下条；无CI run ID或实机验收。
+
+- **构建/交付实际结果**：生产提交 **`bfbc0e51`**；`prepare-local.py --check` actual exit0。`build.py all --boot-config x9/build/boot-device.json --name x9-display-default-on-20261116` actual exit0，**103/103 overlay（3 prebuilt）**、link/strip/shim/boot均成功，自有dylib签名86112B；日志Image **31903744B**、boot **14938112B**。同一kernel的两次boot-only关闭与rollback包装均exit0（相同Image/boot大小），保留所有既有warning原日志。默认输入546B且不含两开启token；off564B、rollback576B，均不改设备基础参数/不删no-op参数。没有额外解包/hash/反汇编检查，未跑测试/硬件场景。
+- **主目录镜像**：整目录无覆盖迁回主checkout：`x9/out/x9-display-default-on-20261116/boot.img`（新默认双开）、`x9/out/x9-display-off-20261116/boot.img`（显式两项0）、`x9/out/x9-display-default-rollback-20261116/boot.img`（两项0+单次mgwipe1）；输入及console/exit在主checkout `x9/out/display-default-on-20261116/`。旧fill-v2/UI镜像未改；GPU280 allowlist不变、无plugin-package，设备仍为280时无需mailbox。本轮无设备/root/cache写入，键盘/边缘/点击/岛/剪裁/性能仍未实机验收。合main/push与清理实际结果另记，不覆盖主checkout SMS工作或其他分支。
+
+- **同期main整合**：构建后其它窗口将SMS文档checkpoint合main/origin **`3c1ca34a`**并占用主checkout main；本轮不切换或更新该工作树。最初ff-only整合被安全拒绝；随后merge NOTES冲突actual exit1，保留完整incoming SMS交接，仅顶部插入本轮默认开启段。同期只3文档、无生产delta，`bfbc0e51`新镜像无需重编。功能分支经GitHub PR服务端合main，不force main、不操作其他工作树。确切发布/清理结果完成后记录。
+
 #### 2026-11-16 SMS ACK concrete owner（同 ID 内存退休静态收束；物理 ACK 仍缺）
 
 - **实际git整合**：原报告commit **fb62045a**；main同期由其它任务推进 **9233c1ac**，正常rebase仅NOTES冲突actual exit1，保留完整stage2 incoming原字节后只插入本轮SMS小节，continue exit0，报告变为 **3c1ca34a**。已ff合main并 **push actual exit0 `9233c1ac..3c1ca34a`**，只有3文档/177行，无生产delta/新kernel/CI/boot。最后交接并将报告Mach-O delete符号精确写为 `__ZdlPv`，继续同feature commit/ff/push，再仅正常删除本轮本地 `feat/sms-ack-owner`；没有本轮worktree/远端feature/代理、未决reader或build/device worker，保留主out/其它树/共享输入/成功kernel/备份。所有确切argv/stdout/stderr/数值exit与最终sha/清理状态见同out `finalization-commands.json` 及各 `*.exit.json`；完整通话短信继续active，不以静态退休/发布文档替功能验收。

@@ -731,7 +731,7 @@ static uint8_t fbcon_char_grid[FBCON_GRID_MAX_ROWS][FBCON_GRID_MAX_COLS];
 #include "x9_lk_console.h"
 
 /*
- * X9 feature switches that are proven on the device are on by default:
+ * X9 feature switches selected as board defaults are on by default:
  * absent -> def on X9 (0 on every other board), "name=N" -> N, so each one
  * can still be turned off with name=0. Keeps the 607-byte boot line free.
  * Lives here, not in sweet_early.c: that object is prebuilt (kernel/README).
@@ -764,6 +764,10 @@ static const struct {
 	{ "x9_camera", 1 },
 	{ "x9pl", 1 },
 	{ "x9sl", 1 },
+	/* User-selected defaults (2026-11-16), not yet hardware-qualified.
+	 * Keep ADT artwork, framebuffer and HID on the same selector path. */
+	{ "x9_fill", 1 },
+	{ "x9_ui", 1 },
 	/* X9_BOARD_DEFAULTS_END */
 };
 
