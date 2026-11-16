@@ -1288,6 +1288,51 @@ SQL RowID与MD物理ACK token仍须分别关联；同步取件成功不能充当
 `incoming-*.{asm,reads.json,original.bin}`；不读短信数据库、不扩server daemon，
 未改生产行为、未运行测试/构建或操作设备。
 
+#### 原MT入口 → 同源弱controller与ACK callback dispatch（2026-11-16）
+
+本轮停在真实controller dispatch边，不把MD token、通知ID、Model字段或SQL RowID
+按数值等同。原Base export trie确认`sms::Model::setMessageID(unsigned short)`
+**`1f033e584`**仅写`Model+34/u16`，getter **`1f033e58c`**仅读该字段；
+这两个accessor没有证明谁把它生产成通知的`uint messageID`。
+
+callback地址点 **`20dd22a10`**的7个slot经当前root cache实际slide-v2 chain资格确认，
+`+30`指向既有MT ACK callback operator **`1f197891c`**；原clone
+`1f19787f8..8874`也构造同地址点。只在既有SMS范围的local slice机械定位其
+ADRP+ADD：class-method窗口0 hit，lambda窗口找到 **`1f197272c/2730`**。
+这些inventory仅作lead，0 hit不等于系统不存在producer。原`LC_FUNCTION_STARTS`
+将该命中限定为 **`1f1971f78..1f1972d1c`**，不是附近猜测的函数边界。
+
+该原函数是`registerIndications_sync()::$_1`经`ClientRouter::setIndHandler`注册的
+实际`operator()(SubscriptionType&&, QMIServiceMsg const&)`。其普通TransferRoute MT
+路径于`1f197230c..2338`选择TLV11、解析到`sp+40`；`1f1972544..256c`从同driver
+`+88`弱control调用`__shared_weak_count::lock`，成功才取`driver+80`的controller
+指针。原12B支岛 **`1f2f99d70→194712078`**已由原libc++ export确认该lock，
+null control、lock失败或null pointer均走失败路径，不伪造ready。
+
+`1f19726c4..26d8`把原SIM、transport1、映射format、原PDU及ack_indicator门交给
+`sms::MTSmsDetails`；支岛 **`1f2f99524→1f03871a4`**由原Base constructor export确认。
+`1f197272c..2768`分配`0x48`字节callback并写同地址点，capture保留原driver/SIM、
+TLV transaction/u32（**callback+1c**，来自原`sp+44`）、format、PDU和两个bool门。
+`1f197276c..2784`随后以**同controller**的vtable **`+20`**调用，传入该details与该
+callback function；lock取得的临时强control覆盖这次调用的lifetime。
+TLV transaction的同源保留连接到既有ACK callback，不等于已证明MD物理token或通知ID。
+
+原CommandDrivers export确认`CSISMSCommandDriver::create` **`1f40fde44..1f40fe0a4`**，
+原function-starts同时确认其named block **`1f40fe0a4..1f40fe0e0`**。
+create的原`x2`是caller提供的`shared_ptr<SmsControllerInterface>`，先通过同controller
+vtable`+a0`取得队列并交driver factory；block capture保留新driver强pair与原controller
+强pair。该block于`1f40fe0b0..d0`增加原controller的weak count，再将**原ptr/control**
+写入`driver+80/+88`，不是新Model或native epoch。因此静态闭合的是
+**caller强controller → driver弱pair → 成功weak lock的临时强lifetime → 原MT
+details/同capture ACK callback → 同controller+20 dispatch**。
+
+**首缺仍是supplied/loaded controller的concrete vtable+20实现，以及它生产
+Model/status到通知uint ID的同源关联**。本轮不再扩server或该实现；原件可达接线不等于
+当前设备已执行、Messages成功record/COMMIT/重开显示或WMS37物理ACK成功。
+新原code按每段≤1KiB只读，原件/解码/provenance/命令与exit记录在
+`x9/out/sms-notification-owner/owner-boundary.{txt,json}`及相邻`*.reads.json`；
+未改生产、未读短信数据库、未运行测试/构建或操作设备。
+
 ### WMS37物理ACK completion：实际host receipt后退休
 
 原物理token ACK结果已take后，legacy void-send仍可在OOM/queue-full时丢WMS37回复并清owner。
