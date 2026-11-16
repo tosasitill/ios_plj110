@@ -3825,6 +3825,138 @@ def decoder_decode_evidence(elf, common):
     return result
 
 
+def decoder_reset_evidence(elf, common):
+    """File-bound NULL decode/RESET selection, never a native drain provider.
+
+    The host's selector and its wire position are now proven by this KO. That
+    does not decode the RV55 vendor gates, establish the selected runtime
+    vtable, or turn a b003 waiter wakeup into reference/DMA retirement.
+    Use the existing whole-file/build-id gate; do not qualify by names alone.
+    """
+    result = dict(profile_match=False, runtime_interface_selection_proven=False,
+        runtime_firmware_reset_route_proven=False, runtime_dpb_preservation_proven=False,
+        runtime_producer_exclusion_proven=False, runtime_dma_retirement_proven=False,
+        module_firmware_pairing_proven=False)
+    if not common['profile_match']:
+        return result
+    anchors = (
+        ('vdec_vcp_decode', 0x25558, 0x754),
+        ('vdec_vcp_reset', 0x24b94, 0x1a4),
+        ('vdec_vcp_ipi_send', 0x230e0, 0x97c),
+        ('get_dec_vcp_if', 0x24d3c, 0xc),
+        ('vdec_if_flush', 0x16460, 0x12c),
+        ('vdec_if_decode', 0x15e9c, 0x1f0),
+        ('vdec_flush', 0x1e6f0, 0x128),
+        ('vcp_dec_ipi_handler', 0x21654, 0x17cc),
+    )
+    spans = (
+        ('decode_fb_argument_saved', 'vdec_vcp_decode', 0x25580, 0x25588),
+        ('null_bs_branch', 'vdec_vcp_decode', 0x255d0, 0x255d4),
+        ('null_fb_and_status_selection', 'vdec_vcp_decode', 0x25624, 0x2563c),
+        ('null_fb_selects_flush0', 'vdec_vcp_decode', 0x2584c, 0x25858),
+        ('status0_selects_drain1_and_common_reset_call', 'vdec_vcp_decode', 0x259f4, 0x25a08),
+        ('decode_returns_original_reset_result', 'vdec_vcp_decode', 0x25bcc, 0x25c08),
+        ('reset_selector_saved', 'vdec_vcp_reset', 0x24bb4, 0x24bc4),
+        ('reset_context_alias_selector_and_zero_word20', 'vdec_vcp_reset', 0x24bd0, 0x24bf8),
+        ('reset_send24_and_original_result', 'vdec_vcp_reset', 0x24c1c, 0x24c5c),
+        ('reset_reads_modes_even_after_send_result', 'vdec_vcp_reset', 0x24c68, 0x24cdc),
+        ('reset_debug_preserves_result', 'vdec_vcp_reset', 0x24d04, 0x24d34),
+        ('vcp_interface_getter', 'get_dec_vcp_if', 0x24d3c, 0x24d48),
+        ('flush_indirect_callback_or_null_fallback', 'vdec_if_flush', 0x164e8, 0x16534),
+        ('decode_interface_handle_and_callback', 'vdec_if_decode', 0x15f28, 0x15f54),
+        ('other_interface_flush_calls_vcu_not_vcp', 'vdec_flush', 0x1e718, 0x1e740),
+        ('b003_b004_share_waiter_wakeup_branch', 'vcp_dec_ipi_handler', 0x21d24, 0x21d4c),
+        ('ack_waiter_flag_and_wakeup', 'vcp_dec_ipi_handler', 0x229bc, 0x229d8),
+    )
+    functions, evidence = captured_function_spans(elf, anchors, spans)
+    relocations = [captured_rela(elf, '.text', offset,
+        (283, name, '.text', 2, target, 0))
+        for offset, name, target in ((0x259fc, 'vdec_vcp_reset', 0x24b94),
+                                    (0x16530, 'vdec_if_decode', 0x15e9c),
+                                    (0x1e73c, 'vcu_dec_reset', 0x20960))]
+    relocations.append(captured_rela(elf, '.text', 0x229d4,
+        (283, '__wake_up', None, 0, 0, 0)))
+    relocations += [captured_rela(elf, '.text', offset,
+        (kind, '', '.data', 3, 0, 0x3a0))
+        for offset, kind in ((0x24d3c, 275), (0x24d40, 277))]
+    # The VCP table has five relocatable callbacks and a genuinely absent
+    # sixth member. Raw zero placeholders in the first five are NOT NULL.
+    table_index, table_sec = next((i, s) for i, s in enumerate(elf.sections)
+                                 if s['name'] == '.data')
+    table = [s for s in elf.symbols if s['name'] == 'vdec_vcp_if' and
+             s['section'] == table_index and s['type'] == 1 and
+             s['value'] == 0x3a0 and s['bytes'] == 48]
+    if len(table) != 1:
+        raise ValueError('captured VCP interface object anchor mismatch')
+    raw_table = span(elf.data(table_sec), 0x3a0, 48)
+    if raw_table[40:] != bytes(8):
+        raise ValueError('captured VCP flush member is not zero')
+    for rel in elf.sections:
+        if rel['type'] not in (4, 9) or rel['info'] != table_index:
+            continue
+        step = 24 if rel['type'] == 4 else 16
+        if rel['entry'] != step or rel['bytes'] % step:
+            raise ValueError('invalid VCP interface relocation table')
+        for at in range(0, rel['bytes'], step):
+            offset = struct.unpack_from('<Q', elf.data(rel), at)[0]
+            if 0x3c8 <= offset < 0x3d0:
+                raise ValueError('captured VCP flush member is relocated')
+    callbacks = (
+        ('init', 0x25150), ('decode', 0x25558), ('get_param', 0x25cb0),
+        ('set_param', 0x265fc), ('deinit', 0x26e88),
+    )
+    relocations += [captured_rela(elf, '.data', 0x3a0 + i * 8,
+        (257, '', '.text', 3, 0, target))
+        for i, (_, target) in enumerate(callbacks)]
+    # The send is resolved inside .text, not a zero CALL26 placeholder.
+    text = elf.data(next(s for s in elf.sections if s['name'] == '.text'))
+    call_word = struct.unpack_from('<I', text, 0x24c34)[0]
+    if call_word & 0xfc000000 != 0x94000000:
+        raise ValueError('captured RESET send is not a direct BL')
+    immediate = call_word & 0x03ffffff
+    if immediate & (1 << 25):
+        immediate -= 1 << 26
+    target = 0x24c34 + immediate * 4
+    if target != functions['vdec_vcp_ipi_send']['offset']:
+        raise ValueError('captured RESET direct send target mismatch')
+    result.update(profile_match=True, profile='MT6993 captured NULL-decode RESET selection',
+        function_anchors=functions, instruction_evidence=evidence,
+        relocation_evidence=relocations,
+        conditional_vcp_interface=dict(section='.data', offset=0x3a0, bytes=48,
+            file_offset=table_sec['offset'] + 0x3a0, raw_hex=raw_table.hex(),
+            callbacks=[dict(name=name, member_offset=i * 8, target=address)
+                       for i, (name, address) in enumerate(callbacks)],
+            flush_member_offset=40, flush_member_unrelocated_zero=True,
+            selected_interface_would_use_decode_fallback=True,
+            fallback_keeps_original_bs_fb_arguments=True,
+            fallback_does_not_consume_flush_type_argument=True,
+            table_presence_is_not_runtime_selection=True),
+        host_selection=dict(bs_argument_register='x1', fb_argument_register='x2',
+            requires_null_bs=True, fb_status_offset=0x340,
+            selectors=[dict(value=0, condition='fb == NULL', source_name='VDEC_FLUSH'),
+                       dict(value=1, condition='fb != NULL && fb.status == 0', source_name='VDEC_DRAIN'),
+                       dict(value=2, condition='fb != NULL && fb.status != 0', source_name='VDEC_DRAIN_EOS')],
+            source_names_do_not_prove_firmware_semantics=True,
+            nonnull_bs_uses_start_not_reset=True,
+            returned_reset_result_is_not_drain_or_retirement=True),
+        request=dict(message=0xa003, bytes=24, service_id=1,
+            context_offset=4, firmware_instance_alias_offset=8, firmware_alias_width=8,
+            drain_type_offset=16, drain_type_width=4, zero_reserved_offset=20,
+            has_status_field=False, alias_is_not_ap_token=True,
+            instance_alias_source_offset=0x58, incoming_selector_register='w1',
+            send_flags=[0, 1, 0], direct_send_instruction=0x24c34,
+            direct_send_target=target),
+        ack=dict(message=0xb003, b004_shares_wakeup=True,
+            wake_flag_offset_in_vcu=0x50, wake_flag_value=1,
+            observation_is_not_pixels_or_per_buffer_release=True,
+            complete_ack_layout_proven=False),
+        post_send_modes=[dict(vsi_offset=offset, ctx_offset=dest, bool_conversion=boolean)
+            for offset, dest, boolean in ((4096, 0xfe8, False),
+                                          (4097, 0xfec, True), (4099, 0xffc, True))],
+        post_send_mode_reads_are_not_success_proof=True)
+    return result
+
+
 def decoder_bs_route_evidence(elf, common):
     """File-bound BS route selection, not two aliases of an owned allocation.
 
@@ -5001,6 +5133,8 @@ def module(blob):
         result['decoder_init_evidence'] = decoder_init_evidence(
             elf, result['decoder_common_evidence'])
         result['decoder_decode_evidence'] = decoder_decode_evidence(
+            elf, result['decoder_common_evidence'])
+        result['decoder_reset_evidence'] = decoder_reset_evidence(
             elf, result['decoder_common_evidence'])
         result['decoder_bs_route_evidence'] = decoder_bs_route_evidence(
             elf, result['decoder_common_evidence'])
