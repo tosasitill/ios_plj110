@@ -12,6 +12,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -391,5 +392,7 @@ done:
  * the stock route unchanged. This does not replace CMPhoto/ImageIO parsers. */
 __attribute__((constructor)) static void x9_hevc_load(void)
 {
-    (void)X9HEVCRegisterDecoder();
+    OSStatus e = X9HEVCRegisterDecoder();
+    fprintf(stderr, "X9 HEVC: local VT registration status=%d (native capabilities required)\n",
+            (int)e);
 }

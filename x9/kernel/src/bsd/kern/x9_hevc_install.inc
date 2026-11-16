@@ -112,6 +112,7 @@ x9_hevc_exec_env(struct image_params *imgp)
     static const char key[] = "DYLD_INSERT_LIBRARIES=";
     static const char path[] = X9_HEVC_BRIDGE_PATH;
     static const char env[] = "DYLD_INSERT_LIBRARIES=" X9_HEVC_BRIDGE_PATH;
+    if (imgp->ip_envc < 0 || imgp->ip_strspace < 0 || imgp->ip_argspace < 0) return;
     char *entry = NULL, *s = imgp->ip_endargv;
     unsigned keys = 0;
     /* Bound every scan by the already copied environment, not caller memory. */
@@ -167,7 +168,8 @@ x9_hevc_exec_env(struct image_params *imgp)
     memset(s + growth, 0, pad);
     imgp->ip_strendp = s + growth + pad;
     imgp->ip_endenvv = imgp->ip_strendp;
-    imgp->ip_strspace -= bytes;
-    imgp->ip_argspace -= charge;
+    /* Each delta is <= its nonnegative int budget above, hence representable. */
+    imgp->ip_strspace -= (int)bytes;
+    imgp->ip_argspace -= (int)charge;
     printf("X9 HEVC: verified native-capability bridge environment merged for %s\n", requested);
 }
