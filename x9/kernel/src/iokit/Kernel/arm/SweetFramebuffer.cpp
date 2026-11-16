@@ -291,6 +291,11 @@ class AppleCLCD : public IOMobileFramebuffer {
 	void x9GpuWaitSetup(void);
 public:
 	void x9GpuTimerArm(void) { if (fX9GpuTimer != NULL) fX9GpuTimer->setTimeoutUS(1); }
+	/* RequestPowerChange caller holds fLock; keep timer internals private. */
+	void x9PowerTimerArm(void) {
+		if (!fPowerOff) fTickDeadline = mach_absolute_time();
+		if (fVsync != NULL) fVsync->setTimeoutUS(1);
+	}
 private:
 
 public:
@@ -1114,6 +1119,17 @@ void
 AppleCLCD::scheduleVsync(IOTimerEventSource *sender)
 {
 	if (!sweet_board_x9()) { sender->setTimeoutUS(SWEET_FB_VSYNC_US); return; }
+	IOLockLock(fLock);
+	if (fPowerOff) {
+		/* Finish/cancel an already armed transfer, then stop software VSync.
+		 * RequestPowerChange(on) re-arms under this same lock, so a racing
+		 * off callback cannot cancel the new wakeup. */
+		if (!fX9SubmitPending && x9_lk_gui_busy() == 0) sender->cancelTimeout();
+		else sender->setTimeoutUS(1000);
+		IOLockUnlock(fLock);
+		return;
+	}
+	IOLockUnlock(fLock);
 	uint64_t now = mach_absolute_time(), elapsedNs = 0;
 	fTickDeadline += fTickPeriod;
 	if (now >= fTickDeadline) {
@@ -1535,6 +1551,19 @@ void
 AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 {
 	AppleCLCD *fb = (AppleCLCD *)owner;
+	if (sweet_board_x9()) {
+		IOLockLock(fb->fLock);
+		bool off = fb->fPowerOff;
+		if (off) {
+			fb->fX9ComposeValid = false;
+			if (fb->fX9SubmitPending && x9_lk_gui_cancel()) {
+				fb->fX9SubmitPending = false;
+				fb->fX9PresentTimer->cancelTimeout();
+			}
+		}
+		IOLockUnlock(fb->fLock);
+		if (off) { fb->scheduleVsync(sender); return; }
+	}
 	uint64_t now = mach_absolute_time();
 	if (sweet_board_x9()) {
 		fb->fCadenceTicks++;
@@ -1965,7 +1994,17 @@ AppleCLCD::blWork(thread_call_param_t p0, __unused thread_call_param_t p1)
 		uint32_t level = fb->fBlLevel, fadeMs = fb->fX9BlFadeMs, gen = fb->fX9BlGen;
 		bool off = fb->fPowerOff;
 		IOLockUnlock(fb->fLock);
-		if (off || level == fb->fBlSent) {
+		if (off) {
+			/* X9 has no Qualcomm fDsi. Blank through the already proven
+			 * LK DBV path; bypass the lit-screen minimum clamp of 2.
+			 * Do not send unqualified panel SLEEP_IN or cut shared rails. */
+			if (fb->fX9Bl && fb->fBlSent != 0) {
+				fb->setPanelLevel(0);
+				fb->fBlSent = 0;
+			}
+			return;
+		}
+		if (level == fb->fBlSent) {
 			return;
 		}
 		uint32_t from = fb->fBlSent == ~0u ? level : fb->fBlSent;
@@ -2921,7 +2960,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 			 * while there are no buttons or touch to wake the panel again.
 			 */
 			int stayon = 0;
-			if (off && (stayon = sweet_x9_arg("sweetfb_stayon", 1)) != 0) {
+			if (off && (stayon = sweet_x9_arg("sweetfb_stayon", sweet_board_x9() ? 0 : 1)) != 0) {
 				IOLog("SWEET FB: display off ignored (sweetfb_stayon)\n");
 				break;
 			}
@@ -2931,6 +2970,15 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 				fFB->fPowerOff = off;
 				fFB->fFadeStep = 0;
 				fFB->fDirty = true;     /* on: redraw the latest frame */
+				if (sweet_board_x9()) {
+					/* on: fresh cadence, no catch-up burst for time asleep.
+					 * off: one callback drains GUI and parks this timer. */
+					fFB->x9PowerTimerArm();
+				}
+				if (fFB->fX9Bl && fFB->fBlCall != NULL) {
+					fFB->fX9BlGen++; /* interrupt an old brightness fade */
+					thread_call_enter(fFB->fBlCall); /* DBV0 on off; restore latest level on on */
+				}
 			}
 			uint32_t level = fFB->fBlLevel;
 			IOLockUnlock(fFB->fLock);

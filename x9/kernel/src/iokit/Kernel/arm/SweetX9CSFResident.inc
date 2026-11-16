@@ -11,13 +11,13 @@ struct ResidentSession {
  uint64_t saved_cfg,saved_attr,l2_owned,epoch;
  uint32_t gpu_mask,job_mask;
  unsigned slot_count;
- bool masked,installed,mcu_started,ready,uncertain;
+ bool masked,installed,mcu_started,ready,uncertain,sleeping;
  /* Opt-in only. Native panthor performs no cache maintenance for IO_COHERENT
   * BOs; matching that here skips the per-submit CPU CIVAC fallback. */
  bool coherent;
  ResidentSession():gpu(0),smmu(0),doorbell(0),saved_cfg(0),saved_attr(0),l2_owned(0),epoch(0),
   gpu_mask(0),job_mask(0),slot_count(0),masked(false),installed(false),mcu_started(false),ready(false),uncertain(false),
-  coherent(false) {
+  sleeping(false),coherent(false) {
   bzero(slots,sizeof(slots));bzero(&caps,sizeof(caps));
  }
 };
@@ -248,6 +248,63 @@ clean_failure:
  delete s;resident=nullptr;return 0;
 }
 static bool render_retire_parked(const char *why); /* SweetX9RenderEngine.inc */
+/* a16w mali_kbase_csf_firmware.c trigger_mcu_sleep / PM IN_SLEEP:
+ * MT6993 uses the host-power GLB_REQ_STATE field (12..14), not the legacy
+ * toggle bit12. Keep AS0, L2, image and GPUEB POWER/ACTIVE references. This is
+ * MCU retention sleep, NOT SoC suspend or an unqualified rail-off path.
+ * Every GPU user enters through the shared owner lock and wakes first. */
+static bool resident_wake() {
+ if(!resident||!resident->sleeping)return true;
+ auto &s=*resident;if(s.uncertain)return false;
+ const auto &f=s.slots[0].access.interface;
+ uint32_t req=input_word(s.image,f.global_input);
+ if(!host_set(s.image,f.global_input,req&~0x7000u)||!clean_page(s.image,f.global_input))goto failed;
+ gw(s.gpu,0x700,gr(s.gpu,0x700)&~0x80000000u);
+ gw(s.doorbell,0,1);
+ {
+  uint64_t end=deadline_ms(1000);
+  do {
+   if(!no_faults(s.gpu))goto failed;
+   if(gr(s.gpu,0x704)==1&&(output_word(s.image,f.global_output)&0x7000u)==0) {
+    if(!ping(s.image,s.gpu,s.doorbell,f.global_input,f.global_output,3))goto failed;
+    s.sleeping=false;IOLog("X9 GPU PM: MCU awake + fresh PING;retained AS0/L2/GPUEB refs\n");return true;
+   }
+   sleep_ms();
+  }while(mach_absolute_time()<end);
+ }
+failed:
+ s.uncertain=true;
+ IOLog("X9 GPU PM: wake uncertain;retain all refs,no reset,no new DMA\n");return false;
+}
+static int resident_sleep() {
+ if(!resident||!resident->ready||resident->uncertain)return -1;
+ auto &s=*resident;if(s.sleeping)return 1;
+ /* This renderer already validated/delegated the host-power interface.
+  * Future GPUs lacking it must not receive the host-power state protocol. */
+ if(s.policy.delegated_domains!=s.policy.power_domains||!s.policy.power_domains||
+    gr64(s.gpu,0x2440)||!no_faults(s.gpu)||gr(s.gpu,0x704)!=1)return 0;
+ for(unsigned i=0;i<s.slot_count;i++) {
+  const auto &f=s.slots[i].access.interface;
+  uint32_t req=input_word(s.image,f.group_input)&7u,ack=output_word(s.image,f.group_output)&7u;
+  if(req!=ack||(ack!=0&&ack!=2))return 0; /* only STOP / acknowledged SUSPEND */
+ }
+ const auto &f=s.slots[0].access.interface;
+ uint32_t req=input_word(s.image,f.global_input),ack=output_word(s.image,f.global_output);
+ if((req|ack)&0x7000u)return 0; /* must start from ACTIVE */
+ if(!host_set(s.image,f.global_input,(req&~0x7000u)|0x2000u)||!clean_page(s.image,f.global_input)) {s.uncertain=true;return -1;}
+ gw(s.doorbell,0,1);
+ uint64_t end=deadline_ms(1000);
+ do {
+  if(!no_faults(s.gpu))break;
+  if(gr(s.gpu,0x704)==2&&(gr(s.gpu,0x700)&0x80000000u)&&
+     (output_word(s.image,f.global_output)&0x7000u)==0x2000u) {
+   s.sleeping=true;IOLog("X9 GPU PM: MCU retention sleep confirmed;queues suspended,AS1 detached,GPUEB refs retained\n");return 1;
+  }
+  sleep_ms();
+ }while(mach_absolute_time()<end);
+ s.uncertain=true;
+ IOLog("X9 GPU PM: sleep uncertain;retain all refs,no reset\n");return -1;
+}
 static int resident_end() {
  if(!resident||!resident->ready||resident->uncertain)return -1;
  if(!render_retire_parked("resident end"))return -1;
