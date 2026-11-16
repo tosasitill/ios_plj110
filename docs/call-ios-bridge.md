@@ -2923,3 +2923,27 @@ commit callback不调用任何MD/bridge API或heap allocator。共享allocator/s
 该修复只将**actual-QMUX owner与既有native END epoch/ID**联系到同一提交token。
 逐动作强record/Client/CallInfo UUID、record更新退休/native epoch、DIAL typed backend/profile、
 CallList/handover、双向DSP及Messages同token COMMIT/重开/物理ACK/MO验收仍另缺。
+
+### 2026-11-16：SMS 同 envelope 的条件 XPC send 与 factory 分流
+
+新原FS19完整函数7848B、7exact undefined imports，所有新function readers实际exit0；
+详见[fanout/factory报告](2026-11-16_reverse-sms-fanout-and-factory-report.md)，私有raw/合同在
+`x9/out/sms-retrieve-retirement-20261116/`。不重采上一轮Model/Operation ID或当前app取件/SQL。
+
+- envelope100b73080的原keys为kEvent/kNotificationEvent/kNotificationDict/kNotificationAdditional。
+  kEvent先true；真实innerinvoke100b742e8改同envelope的kEvent为signed事件code，再进broadcast。
+  **事件code0x1d≠嵌套kCTMessageIdKey的Operation通知u32**，也不等同SIM/PDU/GUID/RowID/nativeepoch。
+- 真temporary predicate槽1015d3018→100b75ac0实际返回1。code0x1d的broadcast100b74464
+  按node+50/+58 vector的同code或-1通配过滤，在100b74570..578带node+20连接与同envelope到
+  真xpc_connection_send_message；它只是条件发送调用，不是Messages receipt/同步reply/COMMIT。
+- helper100a3a604成功weak lock同service+48 supplied pair后dispatch_async；outerinvoke12B
+  加载inner block再tail-branch inner+10。innercopy显式retain envelope/servicepair；outercopy36B
+  只见成功lock pair retain，不见显式inner block retain，generic descriptor/lifetime尚未资格。
+  不从此报UAF或造新adapter。
+- 同Model pair的installed factory+18/+20两条实际边分别资格为TerminalRegistrationController
+  （own+a0/+a8）与PhoneNumberRegistrationController（条件getter+174非零、own+58/+60）。
+  不是已资格retrieve server；不按槽序继续猜业务。下一从真实kSmsRetrieveMessage注册/handler闭
+  同Operation通知ID→同Model+60取件/退休，再到GUID成功record/COMMIT与物理ACK/MO。
+- 失败保留：误猜100a38cec的库存guard实际exit1、未读原text；后续control RTTI tagged name
+  guard亦exit1。前两Controller RTTI仅从保存byte/chain离线恢复exit0，原reader仍exit1，不掩tag。
+  本轮无生产delta/编译/测试/CI/设备动作，完整通话短信目标仍active。
