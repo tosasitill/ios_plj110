@@ -327,10 +327,10 @@ static int hconfigure(void)
      * NOT its oscillator calibration and must not be blindly copied. */
     const uint8_t regs[]={3,7,0x2d,0x2e,0x2f,0x30,0x31,0x33,0x34,0x35,0x36,0x37,0x38,0x47,
         0x4a,0x1a,0x21,0x55,0x56,0x5a,0x5b};
-    const uint8_t vals[]={255,0x60,8,0,0x46,0,0,0,0,0,0,0,0,0x5a,
+    const uint8_t vals[]={255,0x80,8,0,0x46,0,0,0,0,0,0,0,0,0x5a,
         0xbf,8,6,0x4a,0x24,0xa7,0x44};
     /* pro1=7V/4A, pro2=6V/2.5A; UVLO=2.9/2.6/2.3V;
-     * DT vmax0x11, software signed peak96, hardware gain0x60. */
+     * DT vmax0x11 and gain0x80 = OPPO vmax_map level 2400 (its maximum). */
     if((e=hcfg_bits(0x45,4,4)))return e;delay(600); /* RAMINIT while programming FIFO */
     for(unsigned i=0;i<sizeof(regs);i++)if((e=hcfg(regs[i],vals[i])))return e;
     if((e=hcfg(0x4b,0x32)) || (e=hcfg_bits(0x48,0x80,0)) ||
@@ -348,8 +348,8 @@ static int hconfigure(void)
     e=hstate();if(e && e!=EIO)return e;if(hs.hw_state)return EBUSY;
     printf("X9 HAPTIC: config as OPPO: sysst before=%02x after=%02x readback diffs=%u%s\n",
         sysst_before,(unsigned)hs.hw_fault,hcfg_diffs,hcfg_log);
-    hb.configured=true;hs.gain=0x60;
-    printf("X9 HAPTIC: chip=%04x RTP=12000 fifo=2048 f0=%u mHz gain=60 native I2C5 ready\n",
+    hb.configured=true;hs.gain=0x80;
+    printf("X9 HAPTIC: chip=%04x RTP=12000 fifo=2048 f0=%u mHz gain=80 native I2C5 ready\n",
         hs.chip_id,hs.f0_millihz);
     return 0;
 }

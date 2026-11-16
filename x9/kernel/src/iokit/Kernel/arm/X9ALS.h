@@ -7,6 +7,12 @@
 
 #define X9_ALS_MTK_INFO_BYTES 40u
 #define X9_ALS_MTK_DATA_BYTES 36u
+/* Log 326/327 LIST has no SENSOR_TYPE_LIGHT(5). The front TCS3720 reports
+ * through OPLUS SENSOR_TYPE_PWM_RGB (116, "tcs3720 pwm_rgby", gain 1):
+ * value[0] is the driver lux (Android dumpsys 427 beside fusion lux 474),
+ * value[3..6] are R/G/B/C counts. Android's fusion HAL adds closed panel
+ * compensation on top; iOS gets the sensor's own lux. */
+#define X9_ALS_MTK_TYPE 116u
 #define X9_ALS_MAX_LUX 200000u
 /* Receipt-age bound. Native measurement age needs a qualified clock mapper. */
 #define X9_ALS_MAX_AGE_NS 5000000000ULL

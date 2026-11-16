@@ -205,7 +205,9 @@ static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
         if(hs.flags&X9_HAPTIC_RUNNING) {
             /* An explicit client must not hold the chip running forever.
              * Changes of amplitude/sequence do not renew continuous-on time. */
-            if(on_at && now-on_at>=1000000000ULL) {
+            /* Scenes only: OPPO plays RTP streams (ringtones) without a cap, and
+             * log 327 patterns were cut into restarts by this 1 s limit. */
+            if(scene_active && on_at && now-on_at>=1000000000ULL) {
                 hs.flags|=X9_HAPTIC_THROTTLED;cool_until=now+1000000000ULL;
                 hs.throttled_rtp_frames+=count;head=count=0;
                 int e=hoff();on_at=0;quiet_stop=true;
@@ -242,7 +244,10 @@ static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
                     head=count=0;quiet_stop=true;
                 }
                 if(!hb.active) {
-                    if(count>=120 || (draining && count)) {
+                    /* 30 ms prefill: log 327 started at 10 ms and the FIFO ran dry
+                     * between mediaserverd writes (go=28 for one pattern),
+                     * so each pulse braked and restarted. */
+                    if(count>=360 || (draining && count)) {
                         e=hgo();st_state_or|=(uint8_t)hs.hw_state;
                         if(!e){on_at=now_ns();quiet_stop=false;++st_gos;}
                     }

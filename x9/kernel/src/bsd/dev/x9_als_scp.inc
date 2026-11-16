@@ -436,7 +436,7 @@ static int als_list(void)
    if (prox_info || !le32(info+4)) return EBADMSG;
    prox_info = info; continue;
   }
-  if (info[0] != 5) continue; /* LIGHT, not LUX_AOD / rear proximity */
+  if (info[0] != X9_ALS_MTK_TYPE) continue; /* front TCS3720 lux, not rear/AOD/CCT */
   if (gain || !le32(info+4)) return EBADMSG;
   gain = le32(info+4);
   printf("X9 ALS SCP: LIGHT name=%.*s vendor=%.*s gain=%u\n",16,info+8,16,info+24,gain);
@@ -459,7 +459,7 @@ static int als_enable(uint32_t interval_us)
  als_stage(X9_ALS_ENABLE);
  uint8_t batch[16] = {0}; als_put64(batch,(uint64_t)interval_us*1000);
  lck_mtx_lock(&x9_als_lock); status.control_enabled = valid = 0; lck_mtx_unlock(&x9_als_lock);
- int error = als_control(5,1,batch,sizeof(batch));
+ int error = als_control(X9_ALS_MTK_TYPE,1,batch,sizeof(batch));
  if (!error) {
   lck_mtx_lock(&x9_als_lock);
   status.control_enabled = 1; status.report_interval_us = interval_us;
@@ -499,7 +499,7 @@ static int als_drain(volatile uint32_t *base, uint32_t wp, uint32_t bytes, unsig
  if (als_rr(base,8) != bytes || als_rr(base,12) != item_size || rp >= bytes || rp%item_size) return EBADMSG;
  for (unsigned i = 0; rp != wp && i < 128; i++) {
   uint8_t record[76]; als_from_io(record,base,16+rp,item_size);
-  if (record[0] == 5 && record[1] == 0) {
+  if (record[0] == X9_ALS_MTK_TYPE && record[1] == 0) {
    /* Super records share the header/value[0] prefix, but only the first
     * complete normal 36-byte record is passed to the existing decoder. */
    int error = x9_als_receive_mtk(record,36);
@@ -548,7 +548,7 @@ static void als_worker(void *arg __unused, wait_result_t result __unused)
   lck_mtx_unlock(&x9_als_lock);
   if (!error && want_light && (!light_enabled || wanted != applied)) error = als_enable(wanted);
   if (!error && !want_light && light_enabled) {
-   error = als_control(5,0,NULL,0);
+   error = als_control(X9_ALS_MTK_TYPE,0,NULL,0);
    if (!error) {
     lck_mtx_lock(&x9_als_lock); status.control_enabled = valid = 0;
     lck_mtx_unlock(&x9_als_lock);
@@ -563,7 +563,7 @@ static void als_worker(void *arg __unused, wait_result_t result __unused)
  else {
   als_stage(X9_ALS_DISABLE);
   /* A matching ACK, not shutdown(), proves the remote accepted DISABLE. */
-  error = als_control(5,0,NULL,0);
+  error = als_control(X9_ALS_MTK_TYPE,0,NULL,0);
   if (!error && als_prox_present) error = als_control(X9_PROX_MTK_TYPE,0,NULL,0);
   if (!error) x9_prox_native_disconnect(ECANCELED);
   if (error) als_fault(error);

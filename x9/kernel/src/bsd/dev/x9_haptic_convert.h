@@ -8,7 +8,7 @@
 #include "x9_haptic.h"
 struct x9_haptic_converter {
     uint32_t phase, step, conversion, intensity, sharpness, decimator;
-    int32_t dc, envelope, lowpass, sum;
+    int32_t dc, envelope, lowpass, sum, hold;
 };
 /* Q15 sine approximation on a full unsigned 32-bit turn. Bhaskara's
  * approximation, bounded 64-bit intermediates, exact zero at half turns. */
@@ -35,9 +35,13 @@ static inline int x9_haptic_convert_sample(struct x9_haptic_converter *c,int16_t
     if(!pcm && c->dc && c->dc<512 && c->dc> -512)c->dc+=c->dc>0?-1:1;
     int32_t input=(int32_t)pcm-c->dc;
     int32_t magnitude=input<0?-input:input;
-    int32_t delta=magnitude-c->envelope;
-    c->envelope+=delta/(delta>0?12:96);
-    if(magnitude<16 && c->envelope<96)c->envelope=0;
+    /* Peak hold over one D22 carrier half period (6 ms covers >=84 Hz),
+     * then ~2 ms release: a smooth envelope instead of a rectified ripple
+     * at twice iOS's carrier, which beat against the LRA sine (log 327). */
+    if(magnitude>=c->envelope){c->envelope=magnitude;c->hold=288;}
+    else if(c->hold)c->hold--;
+    else c->envelope-=(c->envelope-magnitude)/96+1;
+    if(c->envelope<0 || (magnitude<16 && c->envelope<96))c->envelope=0;
     /* Two-state lowpass + four-sample average is the raw decimator, not a
      * sufficient anti-alias filter for arbitrary audio. Actuator content is
      * low-frequency haptic PCM; this is not a full-band audio transport. */
@@ -45,23 +49,16 @@ static inline int x9_haptic_convert_sample(struct x9_haptic_converter *c,int16_t
     if(++c->decimator<4)return 0;
     c->decimator=0;int32_t value=c->sum/4;c->sum=0;
     if(c->conversion==X9_HAPTIC_RETUNE) {
-        /* HakiOS hakios.haptic.c gain_for(), tested on the same D22 Actuator
-         * stream: iOS tap peaks span 1000..33000 of 32768, and following them
-         * proportionally left most feedback "at a tenth of Android's gain or
-         * less: not felt at all" (log 326: weak buzz). Full drive from a third
-         * of full scale up, 5/8 for the softest, silence at or below 256.
-         * Sharpness adds a bounded 3rd harmonic, not a change in pattern time. */
-        int32_t env=c->envelope,third=32767/3,amp;
-        if(env<=256)amp=0;
-        else if(env>=third)amp=32767;
-        else amp=32767*5/8+(int32_t)((int64_t)(32767*3/8)*env/third);
-        int32_t sine=x9_haptic_sine(c->phase);
-        int32_t harmonic=x9_haptic_sine(c->phase*3);
-        sine=(sine*(4000-(int32_t)c->sharpness)+harmonic*(int32_t)c->sharpness)/4000;
-        value=(int32_t)((int64_t)amp*sine/32768);
+        /* As OPPO aw8693xs drives this LRA: a pure f0 sine whose strength is
+         * LINEAR in the requested level (vmax_map: level 0..2400 -> gain
+         * 0..0x80 at fixed vmax 0x11). No per-sample floor (log 327: the
+         * 5/8 floor stretched every tap's tail, "loose, not linear") and no
+         * 3rd harmonic, which an LRA turns into audible buzz. iOS taps peak
+         * at 1000..33000 (HakiOS), so a third of full scale is full drive. */
+        int32_t amp=c->envelope*3;if(amp>32767)amp=32767;
+        value=(int32_t)((int64_t)amp*x9_haptic_sine(c->phase)/32768);
         c->phase+=c->step;
         value=(int32_t)((int64_t)value*c->intensity/1000);
-        /* Full signed8 swing; chip gain PLAYCFG2 0x60 stays below OPPO's 0x80. */
         value=value*127/32768;
         if(value>127)value=127;if(value< -127)value= -127;
         *out=(int8_t)value;return 1;
