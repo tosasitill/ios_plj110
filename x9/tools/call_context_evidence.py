@@ -2,7 +2,8 @@
 """Read fixed 20H392 call-context ranges from an existing root/cache, without probes.
 
 Modes qualify the personality producer, its dispatch targets, the typed Client
-input path, or the model's concrete config owner. Requires capstone. Creates only
+input path, the model's concrete config owner, the controller's bound-instance
+owner, or its concrete root factory's shared record inputs. Requires capstone. Creates only
 a NEW x9/out directory; original cache, root, extracted images and older evidence
 are never changed. A successful exit
 qualifies static bytes/exports, not a loaded backend, native epoch or call/SMS result.
@@ -16,7 +17,7 @@ from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM
 
 MAIN = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--mode', required=True, choices=('producer', 'queue', 'client', 'config'))
+parser.add_argument('--mode', required=True, choices=('producer', 'queue', 'client', 'config', 'instance', 'factory'))
 parser.add_argument('--root-mount', type=Path, default=Path('/private/tmp/x9root'),
                     help='existing current root mount; this tool never attaches or changes it')
 parser.add_argument('--out', required=True, type=Path, help='NEW directory under repository x9/out')
@@ -24,6 +25,8 @@ args = parser.parse_args()
 QUEUE_ONLY = args.mode == 'queue'
 CLIENT_ONLY = args.mode == 'client'
 CONFIG_ONLY = args.mode == 'config'
+INSTANCE_ONLY = args.mode == 'instance'
+FACTORY_ONLY = args.mode == 'factory'
 OUT = args.out.resolve()
 if not OUT.is_relative_to((MAIN / 'x9/out').resolve()):
     parser.error('--out must be under repository x9/out')
@@ -89,7 +92,7 @@ paths = {'system': support / 'libSystemDetermination.dylib', 'base': support / '
          'cxx': MAIN / '.local/apple/dsc-20H392/usr/lib/libc++.1.dylib',
          'dispatch': MAIN / '.local/apple/dsc-20H392/usr/lib/system/libdispatch.dylib',
          'root': args.root_mount / 'System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter'}
-image_names = ('system',) if CONFIG_ONLY else ('cxx', 'dispatch') if QUEUE_ONLY else tuple(paths)
+image_names = ('root',) if FACTORY_ONLY else ('system',) if CONFIG_ONLY or INSTANCE_ONLY else ('cxx', 'dispatch') if QUEUE_ONLY else tuple(paths)
 images = {k: Macho(paths[k]) for k in image_names}
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
 md.detail = True
@@ -118,6 +121,18 @@ slices = [
 ]
 if QUEUE_ONLY:
     slices = []
+elif FACTORY_ONLY:
+    # Original LC_FUNCTION_STARTS delimits this concrete creator. It calls
+    # the three named imports below; do not infer it from a nearby symbol.
+    slices = [('root-shared-record-factory', 'root', 0x100315488, 0x49c)]
+elif INSTANCE_ONLY:
+    # This is the controller's real C1/C2, not PersonalitySpecificImpl or
+    # the previously read model/config ctors. The instance is mutable: its
+    # ownership alone is not a record snapshot, generation, or registration.
+    slices = [
+        ('controller-C1-forward', 'system', 0x1f2e66b4c, 4),
+        ('controller-C2-instance-owner', 'system', 0x1f2e66b6c, 0x5b8),
+    ]
 elif CONFIG_ONLY:
     # Only newly qualified ctor/config ranges, not the old model update,
     # manager getters, tracker or queue slices. +58 is a config strong pair.
@@ -165,7 +180,7 @@ data_ranges = [('model-vtable-context', 'system', 0x20e058f38, 0x28),
                ('manager-secondary-personality-slots', 'system', 0x20e057718, 0x18),
                ('manager-secondary-addresspoint', 'system', 0x20e0575e0, 0x18),
                ('root-personality-event-jump-table', 'root', 0x10114d135, 8)]
-if QUEUE_ONLY:
+if QUEUE_ONLY or INSTANCE_ONLY or FACTORY_ONLY:
     data_ranges = []
 elif CONFIG_ONLY:
     data_ranges = [('config-personality-update-vtable-slot', 'system', 0x20e056830, 8)]
@@ -190,7 +205,7 @@ for name, image, va, n in data_ranges:
 
 # Read current-cache export tries, not reconstructed nlist, to name new ABI/queue targets.
 exports = []
-export_images = ('system',) if CONFIG_ONLY else ('cxx', 'dispatch') if QUEUE_ONLY else ('system', 'base', 'cxx', 'dispatch')
+export_images = () if FACTORY_ONLY else ('system',) if CONFIG_ONLY or INSTANCE_ONLY else ('cxx', 'dispatch') if QUEUE_ONLY else ('system', 'base', 'cxx', 'dispatch')
 for image in export_images:
     obj = images[image]
     base = next(s[1] for s in obj.segs if s[0] == '__TEXT')
@@ -318,7 +333,7 @@ stub_specs = ((0x1f03c19b8, '_dispatch_async_f'), (0x1f03c1a0c, '_dispatch_group
 if CLIENT_ONLY:
     stub_specs = ((0x1f2fb16cc, '__Z9isPresentRKNSt3__110shared_ptrIK8RegistryEERK13PersonalityID'),
                   (0x1f2e82fe8, '_dispatch_async_and_wait'), (0x1f2e83084, '_dispatch_sync'))
-elif CONFIG_ONLY:
+elif CONFIG_ONLY or INSTANCE_ONLY or FACTORY_ONLY:
     stub_specs = ()
 for va, expected in stub_specs:
     data = read(va, 12); ins = list(md.disasm(data, va)); regs = {}; target = None; got_proof = None
@@ -357,8 +372,106 @@ if CONFIG_ONLY:
     if not any(e['symbol'] == '__ZTVN2sd19IMSSubscriberConfigE' and
                int(e['va'], 16) == 0x20e056810 for e in exports):
         raise ValueError('config addresspoint lacks the concrete original vtable export')
+root_imports = []
+if INSTANCE_ONLY:
+    for va, prefix in ((0x1f2e66b4c, '__ZN2sd23IMSSubscriberControllerC1E'),
+                       (0x1f2e66b6c, '__ZN2sd23IMSSubscriberControllerC2E')):
+        if not any(e['image'] == 'system' and int(e['va'], 16) == va and
+                   e['flags'] == '0x0' and e['symbol'].startswith(prefix) and
+                   e['symbol'].endswith('37IMSSubscriberPersonalityBoundInstanceEEE')
+                   for e in exports):
+            raise ValueError('controller constructor lacks exact regular original export')
+    forward = images['system'].read(0x1f2e66b4c, 4)
+    instruction = list(md.disasm(forward, 0x1f2e66b4c))
+    if len(instruction) != 1 or instruction[0].mnemonic != 'b' or len(instruction[0].operands) != 1 or \
+            instruction[0].operands[0].type != ARM64_OP_IMM or instruction[0].operands[0].imm != 0x1f2e66b6c:
+        raise ValueError('controller C1 does not directly forward to the qualified C2')
+if FACTORY_ONLY:
+    # Root imports use the executable's original indirect symbol table.
+    # On-disk lazy/fixup words are not live pointers and are not decoded
+    # with a shared-cache slide mask. Save only the named stub bytes here.
+    obj = images['root']
+    p = 32
+    sym = indirect = function_starts = None
+    sections = []
+    for _ in range(struct.unpack_from('<I', obj.d, 16)[0]):
+        cmd, size = struct.unpack_from('<II', obj.d, p)
+        if cmd == 2:
+            sym = struct.unpack_from('<4I', obj.d, p+8)
+        elif cmd == 0xb:
+            indirect = struct.unpack_from('<II', obj.d, p+56)
+        elif cmd == 0x26:
+            function_starts = struct.unpack_from('<II', obj.d, p+8)
+        elif cmd == 0x19:
+            for j in range(struct.unpack_from('<I', obj.d, p+64)[0]):
+                s = p + 72 + j*80
+                if (struct.unpack_from('<I', obj.d, s+64)[0] & 0xff) == 8:
+                    a, n = struct.unpack_from('<QQ', obj.d, s+32)
+                    first, stride = struct.unpack_from('<II', obj.d, s+68)
+                    sections.append((a, n, first, stride))
+        p += size
+    if not sym or not indirect:
+        raise ValueError('missing original root import metadata')
+    if not function_starts:
+        raise ValueError('missing original root function-start metadata')
+    off, size = function_starts
+    if off+size > len(obj.d):
+        raise ValueError('root function-start metadata exceeds file')
+    address = next(s[1] for s in obj.segs if s[0] == '__TEXT')
+    starts = []
+    value = shift = 0
+    for byte in obj.d[off:off+size]:
+        value |= (byte & 127) << shift
+        if byte & 128:
+            shift += 7
+            if shift > 63:
+                raise ValueError('root function-start ULEB overflow')
+        else:
+            if value == 0:
+                break
+            address += value
+            starts.append(address)
+            value = shift = 0
+    if 0x100315488 not in starts or starts[starts.index(0x100315488)+1:][:1] != [0x100315924]:
+        raise ValueError('root shared-record creator boundaries differ from original metadata')
+    so, sn, strings, strings_n = sym
+    io, count = indirect
+    if so+16*sn > len(obj.d) or strings+strings_n > len(obj.d) or io+4*count > len(obj.d):
+        raise ValueError('original root import tables exceed file')
+    for va, expected in ((0x10107f990, '__ZN2sd18IMSSubscriberModel6create'),
+                         (0x10107f99c, '__ZN2sd19IMSSubscriberConfig6create'),
+                         (0x10107f9a8, '__ZN2sd23IMSSubscriberController6create')):
+        matches = [(a, n, first, stride) for a, n, first, stride in sections
+                   if stride == 12 and a <= va and va+stride <= a+n and (va-a) % stride == 0]
+        if len(matches) != 1:
+            raise ValueError('root import is not one bounded original stub')
+        a, _, first, stride = matches[0]
+        index = first + (va-a)//stride
+        if index >= count:
+            raise ValueError('original root indirect index overflow')
+        symbol_index = struct.unpack_from('<I', obj.d, io+4*index)[0]
+        if symbol_index >= sn:
+            raise ValueError('original root import is not a named symbol')
+        string_index, kind = struct.unpack_from('<IB', obj.d, so+16*symbol_index)
+        if string_index >= strings_n or (kind & 0x0e) != 0:
+            raise ValueError('original root import is not undefined')
+        end = obj.d.index(0, strings+string_index, strings+strings_n)
+        name = obj.d[strings+string_index:end].decode()
+        if not name.startswith(expected+'E'):
+            raise ValueError('original root import name mismatch')
+        data = obj.read(va, stride)
+        instructions = list(md.disasm(data, va))
+        if sum(i.size for i in instructions) != stride:
+            raise ValueError('incomplete original root stub instructions')
+        (OUT/f'root-import-{va:x}.original-code.bin').write_bytes(data)
+        root_imports.append({'va': hex(va), 'symbol': name, 'hex': data.hex(),
+            'indirect_index': index, 'symbol_index': symbol_index,
+            'indirect_file_offset': hex(io+4*index), 'nlist_file_offset': hex(so+16*symbol_index),
+            'string_file_offset': hex(strings+string_index),
+            'instructions': [f'{i.mnemonic} {i.op_str}' for i in instructions],
+            'scope': 'original named import; not a live GOT pointer or a loaded call backend'})
 proof_name = 'original-' + args.mode + '-proof.json'
 (OUT/proof_name).write_text(json.dumps({'scope':'Original static context ABI; not loaded backend or live call/SMS verification',
     'sources': {k:str(p) for k,p in paths.items()}, 'slices':proof, 'data':data_proof, 'exports':exports,
-    'optimized_queue_stubs':stubs, 'original_reads':reads}, indent=2)+'\n')
-print(f'{len(proof)} text ranges; {len(data_proof)} data ranges; {len(exports)} exports; qualified ABI targets={len(stubs)}')
+    'optimized_queue_stubs':stubs, 'root_imports':root_imports, 'original_reads':reads}, indent=2)+'\n')
+print(f'{len(proof)} text ranges; {len(data_proof)} data ranges; {len(exports)} exports; qualified ABI targets={len(stubs)}; root imports={len(root_imports)}')

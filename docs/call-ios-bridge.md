@@ -2483,3 +2483,65 @@ Android raw，也不能从prefix观测反推完整Apple策略/route准入或隐�
 本轮未重新hash全ROM。matching Java `ImsCallProfile` 的附带ASC结果仅作为未opcode-qualified
 的namespace线索，不参与该消费者结论。未运行测试、编译、CI、boot pack或操作设备；
 **VOICE09未公告、VOICE20无生产caller**，完整通话/媒体与当前Messages最终验收仍未完成。
+
+## 2026-11-16 同 record 的构造关联与可变 PBI：不是原子 action snapshot
+
+本次新增 controller 的 C1/C2 和一个真正调用三个 create import 的 root 函数，
+不重采 model/config getter、manager queue 或旧 Call action。维护 reader 的
+`instance`、`factory` 两模式分别实际 **exit0**：前者2个新text/2个真export，
+后者1个新text/3个当前root原indirect-symbol import。原件证据与命令在
+`x9/out/call-record-snapshot/`；这不是已安装的provider或运行准入。
+
+### Controller 独立拥有 PBI 与 Model
+
+真export **C1 `1f2e66b4c`** 单B到 **C2 `1f2e66b6c`**，本类不插入VTT参数。
+C2的x6为PBI pair引用，`1f2e66dcc..df4`保存pointer/control至
+**controller+68/+70**并retain；x5为Model pair引用，`1f2e66e3c..e64`保存至
+**+a0/+a8**并retain。同一PBI实参又在`1f2e66f10`以x3传入factory virtual+20，
+不能把controller的强Client+d8/e0解释成这两个不同对象的owner。
+
+`1f2e66f24..f3c`对全局`214b894a0`原子递增，并将**旧counter值**存controller+d0。
+它是controller identifier来源，不是record revision、physical SIM、MD epoch或Call UUID。
+counter存在不能证明移除/re-add会重建controller，更不能替代旧Client的退休fence。
+
+### 三个 create 使用同一个强 record 与同一个 PBI
+
+对三个既有root import的exact branch inventory仅用于定位：它们均在
+**`100315488..100315924`**，边界由当前root `LC_FUNCTION_STARTS`给出。
+随后只读该新函数；原import table确认`10107f99c/10107f990/10107f9a8`分别为
+Config/Model/Controller的create，不用shared-cache slide mask解码root磁盘fixup。
+
+该函数先取得强PersonalityInfo pair于sp+60/+68；其pointer为x24。原
+`100315510..520`从**同一x24**读取record+31/u8与+38/u32，写入新8B PBI对象
+的+0与+4；新32B control/object allocation的PBI强pair保存于sp+50/+58。
+这两个字段不是整个PersonalityInfo的复制，不把原+38命名成新增版本号。
+
+- `100315530..53c`将sp+60的record和sp+50的PBI交给Config create。
+- `100315550..560`将Config强pair、**同sp+60 record/同sp+50 PBI**交给Model create。
+- `10031564c..65c`将刚建立的Model强pair及**仍为同sp+50的PBI**交给Controller create。
+- 返回controller强pair前后按原control清理临时Model/PBI/record；下游ctor已各retain其owner。
+
+结合前节已闭的ctor，Config+38/+40与Model+28/+30是同一初始record的强pair，
+Config+48/+50、Model+48/+50和Controller+68/+70各own同一个初始PBI。
+这闭合的是**一次构造内部的同owner关联**，并未新核manager所持factory+30的
+loaded指针/安装选择，也没有把此创建动作与后续每个CallFactory action原子join。
+
+### PBI强owner不冻结后续record或生成epoch
+
+复用旧原model update：`1f2e77c34..40`先把新record+38/u32普通store到
+**原PBI+4**，之后`1f2e77d00..1c`才替换Model强record、同步替换Config强record。
+没有该范围内的revision通知、原子snapshot或独立queue receipt。
+因而PBI可保留相同pointer/control而+4改变；同PBI或同controller identifier
+不证明当前record没变化，异步消费者也不能混用旧record和最新PBI+4。
+
+维护重放需已有只读root/cache、capstone与NEW输出目录：
+
+```sh
+python3 x9/tools/call_context_evidence.py --mode instance --out x9/out/<新目录一>
+python3 x9/tools/call_context_evidence.py --mode factory --out x9/out/<新目录二>
+```
+
+本轮实际执行的是维护reader的新增模式，未为旧producer/queue/client/config模式重采；
+未测试、编译kernel、CI、boot pack或操作设备。下一仍需在真实同controller/queue边界
+own-copy当前record和Client，联结本次CallInfo/UUID并跨实际record更新/native epoch复核，
+而不是以PBI+4、44成功或Client寿命充当snapshot。**VOICE09仍关闭，20无生产caller**。
