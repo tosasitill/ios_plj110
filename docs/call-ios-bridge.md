@@ -2333,3 +2333,62 @@ record变更通知。**VOICE09保持关闭，VOICE20无生产caller**，完整�
 `x9m_del`清旧订阅/local generation更新，再清pending2；MT enqueue亦拒绝pending/unused。
 所以没有显式generation形参本身不足以证明跨client发布，不补无据API/ACK/ready。
 精确链记录在 `x9/out/sms-owned-next/owner-boundary.txt`；没有短信production delta或新实机结果。
+
+## 2026-11-16 普通 factory 的 Client 基类与逐动作强 pair 关联
+
+本次只新增两个原件 RTTI，共 **40B**，以及 exact typeinfo name、必要 libc++abi
+export/slide 元数据；复用已有 ctor、factory、Client lookup 与 action caller raw，
+不重采 getter/queue/Config/CallList。实际原件资格 **exit0，0旧text/0新text**，见
+`x9/out/call-context-join/qualified-r1/original-client-adjustment-proof.json`。
+
+### 原 Client → ClientHandle 的实际 adjustment 为 0
+
+Client RTTI **`1d90b8838`** 的原 slide-v2 chain vptr 指向
+`__si_class_type_info` addresspoint **`1dab5a588`**，exact name为
+`N3ims6ClientE`，直接非虚基类 RTTI 为 **`1d90b8948`**。
+后者为 `__class_type_info` addresspoint **`1dab5a520`**，exact name为
+`N3ims12ClientHandleE`，没有直接基类。两 RTTI 与两 ABI vtable 的 selected
+真 export 均为 **flags0 / REGULAR**，不靠手工 mask 猜目标。
+
+既有 Client ctor `1b7c3eb80/1b7c3eb9c` 在**同一个 this**先装 ClientHandle
+addresspoint `1d90b8860`，再装 Client addresspoint `1d90b86d8`。
+普通 factory **`10019c298`** 直接取输入强 pair 的 Client pointer，
+**`10019c2c0`** 原样以 x2 传给 Call ctor，没有 cast 或指针 adjustment。
+因此闭合的是原 `ims::Client → ims::ClientHandle` adjustment0；
+**不能把该 strong Client pair/control reinterpret 为 PersonalitySpecificImpl、
+PersonalityBoundInstance 或 record owner，更不能把 Client+10 的 clientId string
+当 record pointer。** 这不排除另一个独立证明的 derived ClientHandle 携带额外 context。
+
+### 普通 factory action 的本次临时 Client 与本次新 Call
+
+helper **`100dcf174`** 从 driver+328 取 factory，再在 **`100dcf1a0`** 针对
+本次原 CallInfo 调 `100dd1168 → normal 100dd3498` 获取真实 strong Client。
+**`100dcf1ac`** 传 x2=helper栈上的 pair，**`100dcf1b8`** 传同一 CallInfo，
+**`100dcf1c0`** dispatch factory+40；**`100dcf1c4..1f8`** 随即释放临时
+Client control。该 pair 的栈地址不能跨返回/异步逃逸。
+
+普通 `10019c234` 分支没有从 factory this 获取 PBI/record；每次成功创建独立
+0x60 Call/control，返回 allocation+18 的 object 与新 control。复用原 Call ctor 证据，
+Call 只 own-copy UUID+10、ClientHandle+10 的 clientId→Call+28，
+没有保存 strong Client、Client pointer、PBI/record 或 native identity。
+strong Client 成功只证明本次对象寿命；相同 UUID/clientId 不证明跨动作的同 record。
+
+第三真实 caller **`100dd484c..4930`** 只有 driver/原 CallInfo 输入；
+`4860/4868` 保存同一 CallInfo并取+b8，`4880..4888` 调同一 helper新建 Call，
+`4894..48a4` 对**本次返回 Call**调用 virtual+30=`setRelayCall(b8==1)`，
+`48e8..4920` 释放本次 Call control。这闭合了 **CallInfo+b8→本次新 Call**，
+没有独立 PBI/record 输入、owner copy 或 same-record/native 检查。
+第二 caller `100dcf9b4` 同样重新创建；其 `9d4` dynamic_cast 与 `9dc..9fc` retain
+只 adjustment/own 返回 Call，不恢复 Client 或之前动作的 record。
+
+所以真实同步接线输入是 **原 UUID/CallInfo + 本次 ClientHandle strong pair +
+本次返回 CallHandle strong pair**；仍不能从 strong Client 恢复另有 owner 的 PBI。
+controller/model 的独立 PBI 原件资格另见
+`x9/out/call-record-snapshot/qualified-instance-r1/original-instance-proof.json`，
+不把两个强 pair 或 clientId 相等当作同动作 record 的原子快照/退休 fence。
+逐动作同 owned record 与真实状态更新/退休顺序仍须接实证 producer，
+不新增假 revision/native epoch、默认 profile 或 unused API。
+
+完整窄契约/执行命令在 `x9/out/call-context-join/typed-context-join-contract.{json,txt}`
+与 `commands.txt`。本次没有生产行为改动、编译、测试/人工向量、CI、设备操作或 boot pack；
+**VOICE09仍关闭，完整通话短信目标未完成**。
