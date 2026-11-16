@@ -158,6 +158,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 显示 / 灵动岛 / 状态栏：用户要求默认开启（编译中，未实机）
+
+- **基线/范围**：单代理隔离 `feat/display-default-on` / `.worktrees/display-default-on`，真实main/origin **`9233c1ac`**。用户“默认打开”按两开关执行：`pe_serial.c`共享board table `x9_fill=1`、`x9_ui=1`；FB/HID从裸`PE_parse_boot_argn`改用同`sweet_x9_arg`，打包器原`x9_boot_defaults`自动投影subtype2556，无需额外token、无bootargs膨胀。保留414x920pt@3x，scanout拉宽与触摸逆映射不变，非X9不启用此路径。
+- **关闭/恢复**：显式`x9_fill=0`仅关闭铺满；`x9_ui=0`禁用SpringBoard hook并打包ADT2436，但不保证清旧MG缓存。两项均关用`x9_fill=0 x9_ui=0`；完整缓存恢复另加单次`x9_mgwipe=1`，之后继续显式0镜像（不带mgwipe）。新默认镜像会再次启用UI，不能把“普通不传参数”当保持关闭。hook仍只覆盖SpringBoard竖屏主屏状态栏20px，不扩大应用注入/移动原生岛窗口。
+- **执行边界**：用户已要求默认开启，未来该镜像首次启动沿原自有dylib/epoch安装和MG缓存重建路径；本轮不操作手机、不写根盘/分区。按x9/AGENTS只编译/打包，不执行测试脚本、不额外解包/反汇编/重算成功镜像hash；原测试断言同步新默认但未执行。旧v2镜像未改且仍为旧默认off kernel。构建输入/原日志在 `x9/out/display-default-on-20261116/`，确切build/boot结果完成后记录；无CI run ID或实机验收。
+
 #### 2026-11-16 display-fill：用户批准合 main / 删除分支（源码收尾，未实机）
 
 - **范围/基线**：仅整合 `feat/display-fill`（head **`51fbd533`**，包含UI **`5af3d156`**）并清理该树/本地及远端分支；原UI与其它活跃分支不动。独立 `.worktrees/display-fill-main` 使用main，先ff到真实origin/main **`7ca335c5`**；NOTES合并actual exit1，保留完整最新main Apple服务/SMS交接后插入原fill/UI段，无生产代码冲突，相对feature生产delta为空。主checkout仍在SMS分支，未切换、未改其未提交NOTES。

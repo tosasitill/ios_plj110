@@ -48,11 +48,12 @@ def main():
     (a.out / 'display-build.json').write_text(json.dumps({
         'schema': 1, 'ios_build': '20H392', 'bytes': len(data),
         'sha256': digest.hex(), 'ios_path': path, 'boot_arg': 'x9_ui=1',
+        'disable_boot_arg': 'x9_ui=0',
         'artwork_subtype': 2556, 'offset_native_pixels': 20,
         'portrait_main_display_only': True, 'runtime_verified': False,
         'device_installation_executed': False, 'argv': command,
     }, indent=2) + '\n')
-    print(f'X9 UI: signed {len(data)} bytes; opt-in x9_ui=1; no device IO')
+    print(f'X9 UI: signed {len(data)} bytes; x9_ui=0 disables injection; no device IO')
 
 
 if __name__ == '__main__':

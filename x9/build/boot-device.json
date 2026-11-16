@@ -53,5 +53,6 @@
     "x9_dual_sim=1",
     "ug=5"
   ],
-  "_comment_defaults": "Proven kernel feature switches are default-on (sweet_x9_arg); pass name=0 to disable. x9_submit_async/x9_gpu_park became default-on 2026-11-13 (freed 32 B for per-image tokens). x9_metal_render=1 stays because X9GeneralMetal reads kern.bootargs. dv=1 is the x9_dvfsrc=1 alias; ug=5 negotiates UFS max<=G5."
+  "_comment_defaults": "Proven kernel feature switches are default-on (sweet_x9_arg); pass name=0 to disable. x9_submit_async/x9_gpu_park became default-on 2026-11-13 (freed 32 B for per-image tokens). x9_metal_render=1 stays because X9GeneralMetal reads kern.bootargs. dv=1 is the x9_dvfsrc=1 alias; ug=5 negotiates UFS max<=G5.",
+  "_comment_display": "User-selected X9 defaults (2026-11-16): x9_fill=1 and x9_ui=1 without tokens; not yet hardware-qualified. Explicit x9_fill=0/x9_ui=0 disable. UI first boot installs own dylib and rebuilds MG cache once; rollback uses x9_ui=0 x9_mgwipe=1."
 }

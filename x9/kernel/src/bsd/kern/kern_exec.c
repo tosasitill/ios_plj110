@@ -8630,7 +8630,7 @@ sweet_x9_wipe_gestalt_cache(proc_t p, user_addr_t scratch, user_addr_t end)
 	    "x9 MobileGestalt cache rebuilt for ADT artwork subtype 2556 and AOP ALS\n" :
 	    "x9 MobileGestalt cache rebuilt for ADT AOP ambient light sensor\n";
 	uint8_t epoch_sha[32];
-	/* Opt-in x9_ui=1 requires regenerated artwork answers exactly once.
+	/* Enabled UI (X9 board default or x9_ui=1) regenerates artwork once.
 	 * Explicit x9_mgwipe=0 still suppresses ALL cache writes for diagnostics. */
 	int mode = sweet_x9_arg("x9_mgwipe", island ? 2 : 0);
 	if (mode != 1 && mode != 2) {

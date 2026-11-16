@@ -27,11 +27,14 @@ class FillTests(unittest.TestCase):
         # This switch is deliberately not part of the ADT/MG identity.
         self.assertNotIn('x9_fill', (HERE.parent / 'tools/product_identity.py').read_text())
 
-    def test_default_off_and_independent_ui(self):
-        self.assertEqual(x9_boot_defaults.value([], 'x9_fill'), 0)
+    def test_default_on_and_independent_ui(self):
+        self.assertEqual(x9_boot_defaults.value([], 'x9_fill'), 1)
         self.assertEqual(x9_boot_defaults.value(['x9_fill=1'], 'x9_fill'), 1)
+        self.assertEqual(x9_boot_defaults.value(['x9_fill=0'], 'x9_fill'), 0)
         self.assertEqual(x9_boot_defaults.value(['x9_fill=0', 'x9_fill=1'], 'x9_fill'), 0)
-        self.assertEqual(x9_boot_defaults.value(['x9_fill=1'], 'x9_ui'), 0)
+        self.assertEqual(x9_boot_defaults.value(['x9_fill=0'], 'x9_ui'), 1)
+        self.assertEqual(x9_boot_defaults.value(['x9_ui=0'], 'x9_fill'), 1)
+        self.assertEqual(x9_boot_defaults.value(['x9_fill=1', 'x9_ui=0'], 'x9_ui'), 0)
 
     def test_real_cpp_helpers(self):
         compiler = os.environ.get('CXX', shutil.which('c++'))

@@ -643,19 +643,17 @@ AppleCLCD::start(IOService *provider)
 		fLogicalW = SWEET_FB_LOGICAL_W;
 		fLogicalH = SWEET_FB_LOGICAL_H;
 	}
-	/* X9: present a real iPhone size (414x896 pt @3x) centred on the 1256x2760
+	/* X9: present a logical iPhone size (414x920 pt @3x) on the 1256x2760
 	 * panel; must equal the ADT disp0 canvas (x9/tools/mkadt.py CANVAS_*) and
 	 * SweetHID's mapping. 107.txt: at 1256 px (418.67 pt) the keyboard frame was
 	 * 414 pt but its planes 418.67 pt, so switching to the number plane looked
 	 * like a resize and UIKit reloaded the keyboard back to letters. Offsets
-	 * are negative here (logical smaller than the panel): the border strips are
-	 * blanked every frame in present(). */
+	 * are negative in legacy mode (logical smaller than the panel): the border
+	 * strips are blanked in present(). Default fill stretches only scanout. */
 	if (sweet_board_x9()) {
 		fLogicalW = X9_CANVAS_W;   /* 414 pt: the keyboard layout width (the 123 fix) */
 		fLogicalH = X9_CANVAS_H;   /* full panel height (414x920 pt) */
-		int fill = 0;
-		PE_parse_boot_argn("x9_fill", &fill, sizeof(fill));
-		fX9Fill = fill == 1;
+		fX9Fill = sweet_x9_arg("x9_fill", 0) == 1;
 		if (fX9Fill) {
 			fX9FillCanvas = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
 			    kIODirectionInOut, (vm_size_t)fRowBytes * fLogicalH, page_size);
