@@ -4,7 +4,8 @@
 Modes qualify the personality producer, its dispatch targets, the typed Client
 input path, the model's concrete config owner, the controller's bound-instance
 owner, its concrete root factory's shared record inputs, or that factory's
-manager selection/queue ownership. Requires capstone. Creates only
+manager selection/queue ownership, or the concrete Call driver's incoming-record
+action. Requires capstone. Creates only
 a NEW x9/out directory; original cache, root, extracted images and older evidence
 are never changed. A successful exit
 qualifies static bytes/exports, not a loaded backend, native epoch or call/SMS result.
@@ -18,7 +19,9 @@ from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM
 
 MAIN = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--mode', required=True, choices=('producer', 'queue', 'client', 'config', 'instance', 'factory', 'selection'))
+parser.add_argument('--mode', required=True, choices=(
+    'producer', 'queue', 'client', 'config', 'instance', 'factory', 'selection',
+    'action', 'action-owner', 'action-update', 'action-assignment', 'action-driver'))
 parser.add_argument('--root-mount', type=Path, default=Path('/private/tmp/x9root'),
                     help='existing current root mount; this tool never attaches or changes it')
 parser.add_argument('--out', required=True, type=Path, help='NEW directory under repository x9/out')
@@ -29,6 +32,11 @@ CONFIG_ONLY = args.mode == 'config'
 INSTANCE_ONLY = args.mode == 'instance'
 FACTORY_ONLY = args.mode == 'factory'
 SELECTION_ONLY = args.mode == 'selection'
+ACTION_ONLY = args.mode in ('action', 'action-owner', 'action-update', 'action-assignment', 'action-driver')
+ACTION_OWNER_ONLY = args.mode == 'action-owner'
+ACTION_UPDATE_ONLY = args.mode == 'action-update'
+ACTION_ASSIGNMENT_ONLY = args.mode == 'action-assignment'
+ACTION_DRIVER_ONLY = args.mode == 'action-driver'
 OUT = args.out.resolve()
 if not OUT.is_relative_to((MAIN / 'x9/out').resolve()):
     parser.error('--out must be under repository x9/out')
@@ -94,7 +102,7 @@ paths = {'system': support / 'libSystemDetermination.dylib', 'base': support / '
          'cxx': MAIN / '.local/apple/dsc-20H392/usr/lib/libc++.1.dylib',
          'dispatch': MAIN / '.local/apple/dsc-20H392/usr/lib/system/libdispatch.dylib',
          'root': args.root_mount / 'System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter'}
-image_names = ('root', 'system') if SELECTION_ONLY else ('root',) if FACTORY_ONLY else ('system',) if CONFIG_ONLY or INSTANCE_ONLY else ('cxx', 'dispatch') if QUEUE_ONLY else tuple(paths)
+image_names = ('root', 'system') if SELECTION_ONLY else ('root',) if FACTORY_ONLY or ACTION_ONLY else ('system',) if CONFIG_ONLY or INSTANCE_ONLY else ('cxx', 'dispatch') if QUEUE_ONLY else tuple(paths)
 images = {k: Macho(paths[k]) for k in image_names}
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
 md.detail = True
@@ -123,6 +131,20 @@ slices = [
 ]
 if QUEUE_ONLY:
     slices = []
+elif ACTION_ONLY:
+    # Exact literal-reference lead delimited by original LC_FUNCTION_STARTS.
+    # Do not repeat old factory/getter/controller/subscriber-update ranges.
+    if ACTION_DRIVER_ONLY:
+        slices = []
+    elif ACTION_ASSIGNMENT_ONLY:
+        slices = [('root-call-model-record-assignment', 'root', 0x1001348a4, 0x78)]
+    elif ACTION_UPDATE_ONLY:
+        slices = [('root-call-model-record-update', 'root', 0x1007cc880, 0x4c)]
+    elif ACTION_OWNER_ONLY:
+        slices = [('root-call-record-model-lookup', 'root', 0x100dcbdac, 0x168),
+                  ('root-call-model-record-ctor', 'root', 0x1007c276c, 0x4f0)]
+    else:
+        slices = [('root-call-driver-incoming-record', 'root', 0x100dd6508, 0x9c4)]
 elif SELECTION_ONLY:
     # New manager-selection dependencies only. Do not repeat the old root
     # creator, manager added/getter, controller or model/config ranges.
@@ -191,7 +213,7 @@ data_ranges = [('model-vtable-context', 'system', 0x20e058f38, 0x28),
                ('manager-secondary-personality-slots', 'system', 0x20e057718, 0x18),
                ('manager-secondary-addresspoint', 'system', 0x20e0575e0, 0x18),
                ('root-personality-event-jump-table', 'root', 0x10114d135, 8)]
-if QUEUE_ONLY or INSTANCE_ONLY or FACTORY_ONLY or SELECTION_ONLY:
+if QUEUE_ONLY or INSTANCE_ONLY or FACTORY_ONLY or SELECTION_ONLY or ACTION_ONLY:
     data_ranges = []
 elif CONFIG_ONLY:
     data_ranges = [('config-personality-update-vtable-slot', 'system', 0x20e056830, 8)]
@@ -216,7 +238,7 @@ for name, image, va, n in data_ranges:
 
 # Read current-cache export tries, not reconstructed nlist, to name new ABI/queue targets.
 exports = []
-export_images = () if FACTORY_ONLY else ('system',) if CONFIG_ONLY or INSTANCE_ONLY or SELECTION_ONLY else ('cxx', 'dispatch') if QUEUE_ONLY else ('system', 'base', 'cxx', 'dispatch')
+export_images = () if FACTORY_ONLY or ACTION_ONLY else ('system',) if CONFIG_ONLY or INSTANCE_ONLY or SELECTION_ONLY else ('cxx', 'dispatch') if QUEUE_ONLY else ('system', 'base', 'cxx', 'dispatch')
 original_headers = {}
 for image in export_images:
     obj = images[image]
@@ -346,7 +368,7 @@ stub_specs = ((0x1f03c19b8, '_dispatch_async_f'), (0x1f03c1a0c, '_dispatch_group
 if CLIENT_ONLY:
     stub_specs = ((0x1f2fb16cc, '__Z9isPresentRKNSt3__110shared_ptrIK8RegistryEERK13PersonalityID'),
                   (0x1f2e82fe8, '_dispatch_async_and_wait'), (0x1f2e83084, '_dispatch_sync'))
-elif CONFIG_ONLY or INSTANCE_ONLY or FACTORY_ONLY or SELECTION_ONLY:
+elif CONFIG_ONLY or INSTANCE_ONLY or FACTORY_ONLY or SELECTION_ONLY or ACTION_ONLY:
     stub_specs = ()
 for va, expected in stub_specs:
     data = read(va, 12); ins = list(md.disasm(data, va)); regs = {}; target = None; got_proof = None
@@ -388,6 +410,56 @@ if CONFIG_ONLY:
 root_imports = []
 function_boundaries = []
 root_fixups = []
+if ACTION_ONLY:
+    obj = images['root']
+    p = 32
+    end = 32 + struct.unpack_from('<I', obj.d, 20)[0]
+    if end > len(obj.d):
+        raise ValueError('root action load commands exceed file')
+    metadata = None
+    for _ in range(struct.unpack_from('<I', obj.d, 16)[0]):
+        if p+8 > end:
+            raise ValueError('truncated root action load command')
+        cmd, size = struct.unpack_from('<II', obj.d, p)
+        if size < 8 or p+size > end:
+            raise ValueError('invalid root action load command')
+        if cmd == 0x26:
+            if size < 16 or metadata is not None:
+                raise ValueError('invalid/duplicate root action function starts')
+            metadata = struct.unpack_from('<II', obj.d, p+8)
+        p += size
+    if p != end:
+        raise ValueError('root action load-command count/size mismatch')
+    if not metadata or not metadata[1] or sum(metadata) > len(obj.d):
+        raise ValueError('missing/bounded root action function starts')
+    off, size = metadata
+    data = obj.d[off:off+size]
+    (OUT/'root-action-function-starts.original-data.bin').write_bytes(data)
+    address = next(s[1] for s in obj.segs if s[0] == '__TEXT')
+    starts = []
+    value = shift = 0
+    terminated = False
+    for byte in data:
+        value |= (byte & 127) << shift
+        if byte & 128:
+            shift += 7
+            if shift > 63:
+                raise ValueError('root action function-start ULEB overflow')
+        else:
+            if value == 0:
+                terminated = True
+                break
+            address += value
+            starts.append(address)
+            value = shift = 0
+    if not terminated:
+        raise ValueError('unterminated root action function starts')
+    for _, _, first, size in slices:
+        last = first+size
+        if first not in starts or starts[starts.index(first)+1:][:1] != [last]:
+            raise ValueError('root action function boundary differs')
+        function_boundaries.append({'image': 'root', 'start': hex(first), 'end': hex(last),
+            'source': 'original LC_FUNCTION_STARTS in current root executable; literal name remains a lead'})
 if INSTANCE_ONLY:
     for va, prefix in ((0x1f2e66b4c, '__ZN2sd23IMSSubscriberControllerC1E'),
                        (0x1f2e66b6c, '__ZN2sd23IMSSubscriberControllerC2E')):
@@ -550,17 +622,29 @@ if SELECTION_ONLY:
             raise ValueError('original system selection function boundary differs')
         function_boundaries.append({'image': 'system', 'start': hex(first), 'end': hex(last),
             'source': 'current-cache original LC_FUNCTION_STARTS'})
+if SELECTION_ONLY or ACTION_UPDATE_ONLY or ACTION_ASSIGNMENT_ONLY or ACTION_DRIVER_ONLY:
     # Root pointer format comes from its own LC_DYLD_CHAINED_FIXUPS. A root
     # disk word is never decoded with the shared-cache slide-v2 mask.
     obj = images['root']
     p = 32
+    end = 32 + struct.unpack_from('<I', obj.d, 20)[0]
+    if end > len(obj.d):
+        raise ValueError('root fixup load commands exceed file')
     fix = None
-    while p < 32 + struct.unpack_from('<I', obj.d, 20)[0]:
+    for _ in range(struct.unpack_from('<I', obj.d, 16)[0]):
+        if p+8 > end:
+            raise ValueError('truncated root fixup load command')
         cmd, size = struct.unpack_from('<II', obj.d, p)
+        if size < 8 or p+size > end:
+            raise ValueError('invalid root fixup load command')
         if cmd == 0x80000034:
+            if size < 16 or fix is not None:
+                raise ValueError('invalid/duplicate root chained fixup command')
             fix = struct.unpack_from('<II', obj.d, p+8)
         p += size
-    if not fix or fix[0]+fix[1] > len(obj.d):
+    if p != end:
+        raise ValueError('root fixup load-command count/size mismatch')
+    if not fix or fix[1] < 28 or fix[0]+fix[1] > len(obj.d):
         raise ValueError('root chained fixup metadata unavailable')
     off, size = fix
     version, startoff, _, _, _, _, symbols_format = struct.unpack_from('<7I', obj.d, off)
@@ -571,24 +655,35 @@ if SELECTION_ONLY:
     if count != len(obj.segs) or startoff+4+4*count > size:
         raise ValueError('root chained fixup segment table mismatch')
     base = next(s[1] for s in obj.segs if s[0] == '__TEXT')
-    va = 0x1015494d8
+    if ACTION_DRIVER_ONLY:
+        va, expected_target, stem = 0x1015fa360, 0x100dd6508, 'root-call-driver-plus1e0'
+        metadata_stem = 'root-call-driver'
+    elif ACTION_ASSIGNMENT_ONLY:
+        va, expected_target, stem = 0x10159c830, 0x1007cb578, 'root-call-model-plus118'
+        metadata_stem = 'root-call-model'
+    elif ACTION_UPDATE_ONLY:
+        va, expected_target, stem = 0x10159c8f0, 0x1007cc880, 'root-call-model-plus1d8'
+        metadata_stem = 'root-call-model'
+    else:
+        va, expected_target, stem = 0x1015494d8, 0x100315488, 'root-factory-plus30'
+        metadata_stem = 'root-factory'
     matches = [(i, s) for i, s in enumerate(obj.segs) if s[1] <= va and va+8 <= s[1]+s[4]]
     if len(matches) != 1:
-        raise ValueError('root factory slot not one file-backed segment')
+        raise ValueError('selected root slot not one file-backed segment')
     index, (_, address, _, fo, file_size) = matches[0]
     relative = struct.unpack_from('<I', obj.d, start+4+4*index)[0]
     if not relative or startoff+relative+22 > size:
-        raise ValueError('root factory slot segment lacks chained starts')
+        raise ValueError('selected root slot segment lacks chained starts')
     meta = start+relative
     metasz, pagesz, fmt, segoff, maxptr, pages = struct.unpack_from('<IHHQIH', obj.d, meta)
     if fmt != 6 or pagesz != 0x4000 or maxptr or base+segoff != address or metasz < 22+2*pages or startoff+relative+metasz > size:
         raise ValueError('unsupported original root format6 segment metadata')
     page, offset = divmod(va-address, pagesz)
     if page >= pages:
-        raise ValueError('root factory slot page exceeds chained table')
+        raise ValueError('selected root slot page exceeds chained table')
     entry = struct.unpack_from('<H', obj.d, meta+22+2*page)[0]
     if entry == 0xffff or entry & 0x8000:
-        raise ValueError('root factory slot needs unsupported missing/multi chain')
+        raise ValueError('selected root slot needs unsupported missing/multi chain')
     cursor = entry
     chain = []
     found = False
@@ -606,16 +701,16 @@ if SELECTION_ONLY:
             raise ValueError('root chain leaves page')
         cursor += delta
     if not found:
-        raise ValueError('root factory slot is not an original format6 chain member')
+        raise ValueError('selected root slot is not an original format6 chain member')
     raw = struct.unpack('<Q', obj.read(va, 8))[0]
     if raw >> 63 or (raw >> 36) & 0x7fff:
-        raise ValueError('factory slot is not an untagged format6 rebase')
+        raise ValueError('selected root slot is not an untagged format6 rebase')
     target = base+(raw & ((1 << 36)-1))
-    if target != 0x100315488:
-        raise ValueError('root factory+30 target differs from retained creator')
-    (OUT/'root-factory-plus30.original-data.bin').write_bytes(obj.read(va, 8))
-    (OUT/'root-factory-fixup-header.original-data.bin').write_bytes(obj.d[off:off+28])
-    (OUT/'root-factory-segment-starts.original-data.bin').write_bytes(obj.d[meta:meta+metasz])
+    if target != expected_target:
+        raise ValueError('selected root slot target differs from retained target')
+    (OUT/(stem+'.original-data.bin')).write_bytes(obj.read(va, 8))
+    (OUT/(metadata_stem+'-fixup-header.original-data.bin')).write_bytes(obj.d[off:off+28])
+    (OUT/(metadata_stem+'-segment-starts.original-data.bin')).write_bytes(obj.d[meta:meta+metasz])
     root_fixups.append({'va': hex(va), 'raw': hex(raw), 'target': hex(target),
         'format': fmt, 'fixup_offset': hex(off), 'starts_offset': hex(startoff),
         'segment_index': index, 'segment_address': hex(address), 'segment_file_offset': hex(fo),

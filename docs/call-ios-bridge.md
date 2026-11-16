@@ -2790,3 +2790,68 @@ selector/class、callback x1→已资格retain_x1→returned x19和typed class g
 scratch reader r4仅修origin元数据及未来head范围，只作语法检查，未再次执行采样。
 下一真正缺口仍是returned **BlastDoorSMSMessage.GUID producer**与原dict g→成功record身份，
 以及另一端CTParser response→Model/status→通知ID；不绕过sanitizer、不伪造成功/ACK/ready。
+
+## 2026-11-16 Call driver 的 incoming record 与强 Model owner：仍非动作 snapshot
+
+本轮限定新增root **5个text范围4320B、3个独立槽24B**及必要原函数表/fixup元数据，
+`action`、`action-owner`、`action-update`、`action-assignment`、`action-driver`五次reader
+实际 **exit0**，stderr均为空；没有重采旧selection/getter/CallList/CLIR/dial原件。
+`0 data ranges`不排除独立资格化槽。下述对象是**IMSCallModel**，不能与前面的
+`sd::IMSSubscriberModel`（controller+a0、record+28/+30、可变PBI）混用。
+
+### 真实 callable record 入口、PID map 与 update owner
+
+旧driver ctor `100dc8cf8..8d04`实际安装AP **`1015fa180`**；新原format6槽
+**`1015fa360 = AP+1e0`**的word `0x10000000dd6508`解析为
+**`100dd6508..100dd6ecc /2500B`**。这是该已构造concrete driver的callable槽，
+不只依赖`handlePersonalityAdded: Invalid PersonalityInfo!`字符串名字；本轮没有再闭
+其upstream dispatchcaller、实机加载或queue属性。
+
+入口`100dd6538..6568`从x1取得incoming record强pair：null早退，record+31/u8须<2，
+从record+18复制PersonalityID，并读record+34/u32；后两个数值不命名为枚举状态或epoch。
+`100dd6570..657c`按同driver和PersonalityID调用新lookup
+**`100dcbdac..100dcbf14 /360B`**：在**driver+298**树中以node+20 key查找，命中时
+`100dcbe88/8c`返回并retain **node+38/+40**的Model强pair，miss返回null pair。
+已有Model分支`100dd6608..6618`将**同Model和原incoming record pair**交给virtual+1d8。
+
+缺Model分支`100dd69b8`从driver+328取得原强CallFactory，`100dd6a0c..6a2c`调用
+**virtual+48**，传原incoming record pair、两个delegate pair及driver+20 queue，
+x8=&sp28承接Model强pair；`100dd6bb4..6bd0`将返回pair retain至同map的node+38/+40。
+本轮**没有资格+48目标或其下游ctor**，不能把它写成普通newCall的+40路径，也不能
+单凭Factory相同就断言这个分支无条件构造下述concrete Model。
+
+旧普通Model factory caller `10019c678`直达新资格ctor
+**`1007c276c..1007c2c5c /1264B`**。该ctor `1007c29c0..29cc`实际安装
+AP **`10159c718`**，`1007c2a00..2a28`将输入record pair强copy至
+**model+70/+78**并retain control。新原format6槽
+**`10159c8f0 = AP+1d8`**指向 **`1007cc880..1007cc8cc /76B`**；它把同incoming
+pair赋给model+70，`1007cc894`调用新强赋值helper
+**`1001348a4..10013491c /120B`**。helper先retain incoming control，再在
+`1001348d4`存新pair，最后release旧control；这是**record owner mutation顺序**，
+不是action/queue/native retirement fence。随后update刷新model+2f0上下文，不返回
+record revision、native epoch或通知receipt。
+
+### 与真实 dial 的接点及尚未闭合的边
+
+新原format6槽 **`10159c830 = 同AP+118`**指向旧dial **`1007cb578`**，旧text仅复用。
+旧driver dial `100dcdf78`保留入口x3→x25的Model pair；`100dce268`以同driver/CallInfo
+创建新Call，`100dceb44..b68`向仍同Model的virtual+118传新Call强pair及本次owned
+CallInfo/config/号码。因此concrete AP同时具有真实record update和dial action接点，
+不再以subscriber PBI/count/clientId替代record owner。
+
+但incoming record入口没有本次CallInfo/CallUUID直接输入。**仍未闭current Model record
+与独立Manager Client resolver的同record、同queue原子capture，以及该record到本次
+UUID的强身份关联**；旧Call只own UUID/clientId、不pin强Client/record。updater实际
+dispatchcaller、queue interleaving、native epoch/retirement及设备loaded backend仍未资格。
+本轮不新增无caller capture/provider/installer API，不宣称完整snapshot或通话功能完成。
+
+原件、每次实际command/exit和窄合同位于`x9/out/call-action-owner/`的
+`action-record-owner-contract.{json,txt}`与五个`qualified-*-r1/`（保留原source-head及
+采集路径，整合时只归档、不重采）。维护入口为
+`python3 x9/tools/call_context_evidence.py --mode <上述五模式> --out x9/out/<新目录>`，
+依赖当前既有root mount及本仓库固定`.local`输入；每次必须用fresh out。
+收束仅做reader可读性清理、AST parse和diff检查，**没有重跑reader/旧模式、测试、编译、
+CI、设备、mount/数据库或构建后镜像二次检查**。
+Root整合另补action函数表与共用format6 reader的load-command count/size/end、
+duplicate fixup和最小28B header的fail-closed guard；这些最终维护改动仅AST parse及
+静态review，不冒称上述五次r1采样已执行新guard，也没有再次原件采样。
