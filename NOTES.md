@@ -157,6 +157,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 per-personality 强owner与真实路由 ABI（新caller前置，无生产补丁）
+
+- **续接分类/基线**：上一轮selected CLIR factory原DEX改变下一采集动作，属于progress，不以两条docs commit冒充修复。本轮先核main/origin **`396d74ea`** tracked clean，selected jar仍缺且没有新的设备确认；单代理分支 **`feat/call-personality-context`**。CallList第七byte/Call_Type现有证据未改变，未重扫旧parser/producer或给默认0；转向独立的**真实per-personality context producer**，不把缺CLIR jar当作所有离线工作的阻断。
+- **新可复用producer与枚举**：原cache真exports/text证实 `PersonalityIDToSimSlot1f0323a38` 经initialized Registry/强PersonalityShop按真实ID查强record；缺shop/record为0，但record+31==1且原配置owner+111 false时会**策略返回slot1**，不能把返回值无条件当物理卡。`sd::isSimPersonality1f03390cc`只接受非空record+31==0，两次query不是原子record/revision。`simSlotAsSubType1f1ab81f4`保留1/2/3其它转0；`simSlotAsInstance1f0322cc8`是1→0/2→1/其它−1；原VOICE44另把subscription2→wire1。当前native bridge仍限定sim0/1，未加SIM3/缺失fallback或09公告。
+- **强owned context ABI**：`PersonalitySpecificImpl::personalityInfo1f032651c`在x8返回实际this+8/+10强pair并increment control，不是借用pointer；同对象 `simSlot1f031f1fc`直接读owned record+34，不走Registry单slotfallback。原真export **C1 `1f0392bbc`** 的pair形参x1，**C2 `1f0392b84`** 的x1为construction/VTT、pair在x2，不能按相同demangled名混调。personalityId getter `1f0392cbc`有x8 sret，但本轮不替未新核的尾helper命名，也不认作callUUID/clientId。这闭的是可用强owner及路由枚举，**具体typed caller/object adjustment、原queue/rebind fence、native epoch与事件delegate接线仍缺**，未添加unused adapter/API或空loader。
+- **确切原件/操作**：`x9/out/call-personality-context/` 的两份original proof JSON分别覆盖5个routing与4个新owning ranges/exports，全部与当前根盘Cryptex cache text相符；第一次5项输出保留，第二次只读新增4项不覆盖前者。保留原bytes/decoded、`personality-context-contract.json`、source-head、原stdout/stderr和实际/重放command记录；最终 `read-original-context.py routing|owned <新out>`可在唯一scratch重放，不覆盖旧输出。14个exact `PersonalityIDToSimSlot` CommCenter stub callers和一个原caller切片已读，但**不宣称所选caller就是CallFactory/typed dial**。初次M库名字少`Drivers`导致objdump exit1，改到已有的真实文件后exit0；两个原cache qualification均exit0。无构建/测试/CI/boot/mount/ADB/mailbox/分区或产物复检，未触其它树/共享`.local`。
+- **完整目标/下一动作**：新证据使下一context接线能使用实际per-personality强owner并明确拒绝不具物理provenance的helperfallback，而非从临时Call*/clientId猜卡。仍须具体原caller/queue/fence、完整loaded typed backend/profile/terminal、CallList/handover、专用双向DSP及当前Messages同token COMMIT/重开/物理ACK/MO对端验收；**VOICE09仍关闭，无新生产补丁或最终镜像**。selected CLIR仍需用户确认Android/ADB并准许只读取得 **`/system_ext/framework/oplus-telephony-common.jar`**，或提供同版本地原件。完整goal保持active，本輪是新caller依赖证据，不标complete/blocked；实际提交/push另补。
+
 #### 2026-11-16 selected CLIR factory 原 DEX 续接（新依赖证据，无生产补丁）
 
 - **基线/范围**：干净 main/origin `bc91abb1`，本轮单代理、功能分支 `feat/call-clir-selected`。上一轮 `3c4a49a0` terminal ownership 修复/完整kernel已交付，本轮不重编它、不重复旧CallList/profile扫描、不操作设备/分区/mailbox或其它硬件树。typed caller/context/backend、媒体及当前短信最终验收仍缺，完整goal保持active，不把本条静态进展当功能完成。

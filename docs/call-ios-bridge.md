@@ -70,6 +70,42 @@ copied request并非实际send对象，requestToMcl仍接原引用，其owned CL
 当前encoder在该窄链无已证错误；字段来源、原日志及精确owned copy在
 `x9/out/call-md-profile-owner/`。本节没有生产行为修改、编译、测试、设备操作或最终镜像。
 
+### 真实 per-personality 路由与强 owner getter（2026-11-16）
+
+这是新的原件 ABI 前置，不是已接线 provider。当前根盘 Cryptex cache 的九个
+选定 text 范围及九个选定 export 已读取，text与对应 extracted dylib相符：
+`x9/out/call-personality-context/{original-context-proof.json,original-context-proof-v2.json}`。
+不重复 CallList第七byte的旧排除，也不凭这些 helper公告09或指定默认SIM。
+
+- 真导出 `PersonalityIDToSimSlot1f0323a38` 接 `x0` 强 Registry pair 的借用地址、
+  `x1` 实际 PersonalityID；要求 initialized Registry，经其 map取强 PersonalityShop，
+  shop virtual+0按该ID返回强 PersonalityInfo。缺shop/record返回0。
+  record `+31/u8!=1` 时读真实 `+34/u32`；`+31==1` 时还取Registry配置强owner，
+  配置 `+111/u8`为false则**返回slot1**，为true才读record+34。
+  因此 helper返回1不单独证明物理卡1，不能无条件把它用于native CALL route。
+- `sd::isSimPersonality1f03390cc` 对同一种shop查询，只接受非空record且
+  `+31==0`；缺对象返回false。两个独立查询不构成同一record/revision的原子快照。
+- `PersonalitySpecificImpl::personalityInfo1f032651c` 使用 `x8` sret，
+  复制真实 `this+8/+10` shared pair，并递增非空control的强引用。
+  **这是可复用的强owner producer，不是返回裸指针或借用pair。**
+  对同一qualified具体对象，`simSlot1f031f1fc`读取该owned record+34，
+  不执行前述Registry单slot策略fallback。仍须真实对象adjustment、原调用队列与
+  rebind/revocation fence，不能只从临时Call+28的clientId派生身份。
+- 完整构造 **C1 `1f0392bbc`** 的shared pair形参在x1；base构造
+  **C2 `1f0392b84`** 的x1是construction-table/VTT输入，shared pair在x2。
+  两者都强own pair；不能因demangled名称相同就按C1的两参数ABI调用C2。
+  `personalityId1f0392cbc`使用x8 sret、把record+18交原helper；本轮未重新实名该helper，
+  更不将personalityId等同call UUID/clientId。
+- `subscriber::simSlotAsSubType1f1ab81f4` 原值转换为
+  `uint32_t(slot-1)<3 ? slot : 0`；`simSlotAsInstance1f0322cc8` 则
+  slot1→0、slot2→1、其余→-1。先前原VOICE44 subscription2→wire1是第三层转换。
+  native桥仍只支持已限定的sim0/1，不接SIM3或无效/缺失fallback。
+
+下一接线应取**实际per-personality强owner**并证明其具体caller、queue及身份变更fence，
+而不是固定personality枚举、Call指针/clientId或盲用helper返回值。原broker的State/QMUX
+generation仍是独立层；上述源码资格不提供native epoch、MD receipt或media readiness。
+此项未改生产源码、未编译/测试/操作设备，selected CLIR jar及最终短信/通话验收仍待输入。
+
 ### 原 broker SendProxy、消息与回调的真实所有权（2026-11-16）
 
 本轮修正旧 `call-native-ingress/native-ingress-contract.json` 的
