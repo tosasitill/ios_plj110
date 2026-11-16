@@ -834,9 +834,10 @@ static void ios_end_presend(){
 }
 static void end_release_during_md_lock(){call_bridge_generation[0]=0;}
 static void end_expire_during_md_lock(){fake_ms=x9c_end_job.deadline;}
-/* Compile-only source vectors: the callback models loss while acquiring
- * take (first lock) or end_snapshot (second lock), without dispatching DEL.
- * No claim of a host identity guard inside end_submit or the MD writer. */
+/* Compile-only source vectors: model loss while acquiring take (first),
+ * end_snapshot (second), or end_submit (third MD lock), without DEL dispatch.
+ * Separate vectors below cover the native admission/selection BB guard;
+ * none of these source assertions has been executed in this change. */
 static void ios_end_postwait(unsigned wait,bool expire){
  bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();
  uint8_t p[704],out[X9_MIPC_FRAME_MAX];unsigned n=current_frame(p,1);
