@@ -31,6 +31,14 @@
 提取文件的部分共享 selector/stub 指针不完整，因此不把 `llvm-objdump` 的越界最近符号
 当作真实被调函数。上表的 CFString 内容、具名函数、编码与比较指令分开记录。
 
+## 默认开启更新（2026-11-16）
+
+用户随后要求“默认打开”：X9 board table 将 `x9_ui` 和 `x9_fill` 都设为1，
+打包器从该表投影 artwork subtype2556，SpringBoard 注入与一次MG cache重建沿原路径。
+下文初版/v2的“默认off”是历史结果，旧镜像不变。显式 `x9_ui=0` 仍关闭hook/选择ADT2436；
+完整缓存恢复另加单次 `x9_mgwipe=1`，随后继续显式 `x9_ui=0` 镜像，不能启动新默认镜像
+来保持关闭。全局App状态栏及原生岛窗口偏移没有扩大，仍无实机启用证明。
+
 ## GitHub 参考
 
 1. [DynamicCowTS](https://github.com/matteozappia/DynamicCowTS)，
@@ -105,6 +113,7 @@ baseline → enabled 的 cmdline 精确只增加 `x9_ui=1`。
 
 无 GitHub Actions run（本轮使用本机 Xcode/LLVM 编译），无设备启动结果。
 2026-11-16 用户批准通过继承此实现的 `feat/display-fill` 合入 main 并清理该分支。
+merge `84e1aad5` 已推送，display-fill 本地/远端分支及工作树已删除。
 这是默认关闭候选的源码整合，不是原生岛已开启或已实机验收；原 `feat/statusbar-island`
 分支/工作树不在此次清理范围。新电源策略已纳入 v2 联合镜像，见 display-fill 报告；
 以上三份初版 UI 镜像保留作历史证据，不冒称最新 main 整包。

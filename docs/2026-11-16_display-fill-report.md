@@ -1,5 +1,17 @@
 # X9：去左右黑边，保留 UIKit / 键盘逻辑尺寸
 
+## 当前默认值更新（2026-11-16）
+
+用户随后要求“默认打开”：新源码的 X9 board table 默认 `x9_fill=1`、`x9_ui=1`。
+FB 与 HID 共用 `sweet_x9_arg`，ADT 打包器从同一表选择 subtype2556；不扩大逻辑屏幕，
+不需要把两个开启 token 塞入 bootargs。本文以下的默认关闭/v2镜像结果属于此前候选，
+旧镜像不会因源码默认值改变而自动更新；新构建/交付结果见 NOTES 最新交接。
+
+显式 `x9_fill=0` 和 `x9_ui=0` 可独立关闭。完整关闭及缓存回退用
+`x9_fill=0 x9_ui=0 x9_mgwipe=1` 单次启动，之后继续使用显式两项0、不带mgwipe的镜像。
+新默认镜像会再次开启，不能把“不传参数”当作保持关闭。首次启用仍沿原自有dylib/epoch
+安装与MG缓存重建路径；状态栏20px仍仅覆盖SpringBoard。此次未操作手机，硬件验收仍待完成。
+
 ## 结果与范围
 
 已实现并离线打包一个**默认关闭**的 `x9_fill=1` 候选。源提交 `e8c5d2ec`，整合提交 `4cc05e25`（吸收 main `ff9e900f` 的CPU/GPU/显示休眠更新），分支
@@ -8,10 +20,13 @@
 
 **没有手机启动/触摸/键盘/灵动岛实测，没有设备操作，没有 CI run ID。**
 编译和 host 测试通过不代表原生 SystemAperture、应用 safe-area 或所有应用状态栏已通过。
-2026-11-16 用户批准将候选合入 main 并删除 `feat/display-fill`；此次为源码收尾，
+2026-11-16 用户批准将候选合入 main 并删除 `feat/display-fill`；merge `84e1aad5` 已推送，
+该功能工作树与本地/远端分支已删除，产物保留。此次为源码收尾，
 不代表已获实机验收或批准设备写入。主 checkout 的 SMS 分支/未提交 NOTES 未修改。
 合并时保留最新 main `7ca335c5` 的 Apple 服务交接；相对候选 `51fbd533` 无生产代码变化，
 既有 v2 镜像仍对应 `4cc05e25` 的已构建源码，不冒称重新构建了最新 main。
+收尾复跑4项UI测试与3项fill测试（LLVM22 ASan/UBSan）均exit0；归档和git结果在
+`x9/out/display-fill-retirement-20261116/`。
 
 ## 1. 黑边来自哪里（运行时优先）
 
@@ -118,7 +133,7 @@ v2吸收main时NOTES冲突亦记录，保留完整incoming后仅插入fill/UI交
 ### 复跑
 
 ```sh
-# 在仓库根执行；原 display-fill 工作树将在收尾后删除。
+# 在仓库根执行；原 display-fill 工作树已删除。
 cd /Users/tosasitill/ios_plj110
 DEVELOPER_DIR=$(python3 -c 'import json; print(json.load(open("x9/build/local.json"))["developer_dir"])')
 export DEVELOPER_DIR

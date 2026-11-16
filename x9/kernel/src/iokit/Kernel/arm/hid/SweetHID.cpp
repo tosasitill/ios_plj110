@@ -33,6 +33,7 @@
 
 extern "C" uint64_t mach_absolute_time(void);
 extern "C" int sweet_early_is_x9(void);
+extern "C" int sweet_x9_arg(const char *name, int def);
 
 /* One open client: the user client and its event callback. */
 class IOHIDEventServiceClient : public OSObject {
@@ -483,9 +484,9 @@ SweetHIDTouch::start(IOService *provider)
 	fOffY = (fLogicalH - 2400) / 2;
  fPanelW=1080;fPanelH=2400;
  if(sweet_early_is_x9()) {
-  /* Same geometry and opt-in as AppleCLCD; no change to UIKit dimensions. */
+  /* Same geometry and board default as AppleCLCD; x9_fill=0 disables both. */
   fPanelW=X9_PANEL_W;fPanelH=X9_PANEL_H;fLogicalW=X9_CANVAS_W;fLogicalH=X9_CANVAS_H;
-  int fill=0;PE_parse_boot_argn("x9_fill",&fill,sizeof(fill));fX9Fill=fill==1;
+  fX9Fill=sweet_x9_arg("x9_fill",0)==1;
   fOffX=((fLogicalW-fPanelW)/2)&~3;fOffY=(fLogicalH-fPanelH)/2;
   if(fX9Fill)fOffX=fOffY=0;
   IOLog("X9 HID: panel 1256x2760 -> display %dx%d offset %d,%d\n",fLogicalW,fLogicalH,fOffX,fOffY);

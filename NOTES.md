@@ -16,6 +16,7 @@
 - 显示：ADT canvas 1242x2760（414x920 pt @3x，左右各 7 px 黑边）；物理面板 1256x2760 stride 5120，fb 0xfc910000。
 - 用户目标（2026-11-12）：**Mac USB 配对、AppSync 安装 IPA、完整越狱（Procursus rootless /var/jb，SSH 只走 ue0）**；
   方法上**以 UniXNU 为主要参考，不闭门造车**。
+
 - 用户新增目标（2026-11-16）：**原生 Apple Wallet 新开交通卡并锁屏刷卡使用**；城市/卡种及资金渠道尚未指定，当前只完成修复规划，未开始开卡或资金/SE 操作。
 
 ## 2. 机器与目录
@@ -167,11 +168,34 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **验收/回滚**：最终以发行方 active、SE有效卡应用、Wallet余额/状态及锁屏真实交易核对；卡面/UID/APDU成功/HTTP200/扣款单步不能代替完成。账户/平台注册、SE写入、开卡/充值/迁移/删卡/消费逐项确认；**分区备份不恢复eSE卡片/密钥/计数器**，不能以还原userdata或刷回Android冒充事务撤销。故障按同发行业务ID查询恢复，避免重复扣款。
 - **复核/下一步**：私有证据 `x9/out/wallet-transit-plan-20261116/`（scope/timeline/workitems/Wallet库存/脱敏passd证据/前轮限定证据/field-journal）；`verify-plan-evidence.py` 仅读已保留JSON，**actual exit0**，8项规划依据核对通过，不代表实机资格或交易通过。报告 staged diff检查/commit actual exit0。下一先问具体城市/卡名并锁资金路线，再按目标入口做不扣费的资格/SE契约调查；所有状态变更先确认。提交/合并/push确切结果另补，规划完成不等于交通卡目标完成。
 
+#### 2026-11-16 显示 / 灵动岛 / 状态栏：用户要求默认开启（已构建，未实机）
+
+- **基线/范围**：单代理隔离 `feat/display-default-on` / `.worktrees/display-default-on`，真实main/origin **`9233c1ac`**。用户“默认打开”按两开关执行：`pe_serial.c`共享board table `x9_fill=1`、`x9_ui=1`；FB/HID从裸`PE_parse_boot_argn`改用同`sweet_x9_arg`，打包器原`x9_boot_defaults`自动投影subtype2556，无需额外token、无bootargs膨胀。保留414x920pt@3x，scanout拉宽与触摸逆映射不变，非X9不启用此路径。
+- **关闭/恢复**：显式`x9_fill=0`仅关闭铺满；`x9_ui=0`禁用SpringBoard hook并打包ADT2436，但不保证清旧MG缓存。两项均关用`x9_fill=0 x9_ui=0`；完整缓存恢复另加单次`x9_mgwipe=1`，之后继续显式0镜像（不带mgwipe）。新默认镜像会再次启用UI，不能把“普通不传参数”当保持关闭。hook仍只覆盖SpringBoard竖屏主屏状态栏20px，不扩大应用注入/移动原生岛窗口。
+- **执行边界**：用户已要求默认开启，未来该镜像首次启动沿原自有dylib/epoch安装和MG缓存重建路径；本轮不操作手机、不写根盘/分区。按x9/AGENTS只编译/打包，不执行测试脚本、不额外解包/反汇编/重算成功镜像hash；原测试断言同步新默认但未执行。旧v2镜像未改且仍为旧默认off kernel。构建输入/原日志在 `x9/out/display-default-on-20261116/`，确切build/boot结果见下条；无CI run ID或实机验收。
+
+- **构建/交付实际结果**：生产提交 **`bfbc0e51`**；`prepare-local.py --check` actual exit0。`build.py all --boot-config x9/build/boot-device.json --name x9-display-default-on-20261116` actual exit0，**103/103 overlay（3 prebuilt）**、link/strip/shim/boot均成功，自有dylib签名86112B；日志Image **31903744B**、boot **14938112B**。同一kernel的两次boot-only关闭与rollback包装均exit0（相同Image/boot大小），保留所有既有warning原日志。默认输入546B且不含两开启token；off564B、rollback576B，均不改设备基础参数/不删no-op参数。没有额外解包/hash/反汇编检查，未跑测试/硬件场景。
+- **主目录镜像**：整目录无覆盖迁回主checkout：`x9/out/x9-display-default-on-20261116/boot.img`（新默认双开）、`x9/out/x9-display-off-20261116/boot.img`（显式两项0）、`x9/out/x9-display-default-rollback-20261116/boot.img`（两项0+单次mgwipe1）；输入及console/exit在主checkout `x9/out/display-default-on-20261116/`。旧fill-v2/UI镜像未改；GPU280 allowlist不变、无plugin-package，设备仍为280时无需mailbox。本轮无设备/root/cache写入，键盘/边缘/点击/岛/剪裁/性能仍未实机验收。合main/push与清理实际结果另记，不覆盖主checkout SMS工作或其他分支。
+
+- **同期main整合**：构建后其它窗口将SMS文档checkpoint合main/origin **`3c1ca34a`**并占用主checkout main；本轮不切换或更新该工作树。最初ff-only整合被安全拒绝；随后merge NOTES冲突actual exit1，保留完整incoming SMS交接，仅顶部插入本轮默认开启段。同期只3文档、无生产delta，`bfbc0e51`新镜像无需重编。功能分支经GitHub PR服务端合main，不force main、不操作其他工作树。确切发布/清理结果完成后记录。
+
+#### 2026-11-16 SMS ACK concrete owner（同 ID 内存退休静态收束；物理 ACK 仍缺）
+
+- **实际git整合**：原报告commit **fb62045a**；main同期由其它任务推进 **9233c1ac**，正常rebase仅NOTES冲突actual exit1，保留完整stage2 incoming原字节后只插入本轮SMS小节，continue exit0，报告变为 **3c1ca34a**。已ff合main并 **push actual exit0 `9233c1ac..3c1ca34a`**，只有3文档/177行，无生产delta/新kernel/CI/boot。最后交接并将报告Mach-O delete符号精确写为 `__ZdlPv`，继续同feature commit/ff/push，再仅正常删除本轮本地 `feat/sms-ack-owner`；没有本轮worktree/远端feature/代理、未决reader或build/device worker，保留主out/其它树/共享输入/成功kernel/备份。所有确切argv/stdout/stderr/数值exit与最终sha/清理状态见同out `finalization-commands.json` 及各 `*.exit.json`；完整通话短信继续active，不以静态退休/发布文档替功能验收。
+- **交付/下一边**：正式报告 `docs/2026-11-16_reverse-sms-id-retirement-report.md`；合同 `x9/out/sms-ack-owner-20261116/ack-owner-contract.json`，保留exact FS、retained slot proof、真实argv/cwd/stdout/stderr/数值exit及scope/timeline。13函数2128B/1import从保留库存资格，reader/promote全exit0；报告离线命令仅读既有产物，`ack-offline-replay-r1` exit0，不是测试或设备验收。曾猜错旧constructor/report文件名，stderr/纠正顺序如实保留，不以失败命名猜测作资格。下一从旧parser结果helper1007f72bc在**1007f7720的ACK function virtual+30**追真实callback类型/安装及原token→driver WMS37，同时复用旧parser callback100813f14的supplied ACK copy consumer；不再把app map退休当物理ACK，不重采本轮13函数或前轮handler。server+128 Registry/current concrete选择、publisher原init entry、GUID/record/COMMIT重开、MO及CALL owner/媒体仍缺，goal保持active。git提交/合main/push终态随后补记。
+- **last-owner/观察面里程碑**：新control lastowner1000c6784..1000c679c/24B从control+18取原SmsOperation，tail调其virtual+8；原SmsOperation AP101561878+8真slot101561880→10042d120..10042d1a4/132B，析构只见string delete及Registry+58 pair-release10000f394..10000f3ec/88B，Registry最后owner副作用另未穷尽，不称物理ACK。count同Model+d8真slot101528de8→1000c0264..1000c0334/208B，core1000c6b40..50/16B确实读 **同Model+68**，两个52B queue invoke传回原u64结果。累计 **13新完整FS函数2128B、1新exact import**，promote/readers全actual exit0，原text/page零重采。当前production `X9Messages.inc`/`x9_mipc_messages.inc`/`coachz_baseband.cpp`只读核对：WMS37原command token/原QMI与QMUX owner→8602/8604 writer→physical TX result/host admission，与app Operation通知ID退休分开；没有证据支持把kSmsAcknowledgeMessage接到该kernel ACK API，故不加无caller adapter、不改生产行为。完整功能仍未验收。
+- **同ID map退休已闭（条件静态）**：+e0的两个queue invoke1000c7964/1000c7998各52B把core返回值写原result byte；core **1000c7878..1000c7964/236B**按原u32 ID对同Model+60树作unsigned lower-bound/等值确认，miss返回0；match更新需要的Model+58 begin、**Model+68 size减1**，调实际detach100006610..100006994/900B，再以node+28调pair-release1000c6834..1000c688c/88B、真operator delete，返回1。全部从原库存promote actual exit0；delete精确import新资格1处，queue imports复用旧proof。pair helper只在control+8原count为0的last-strong分支调control virtual+10；**map已移除不等于Operation必已析构**，另有retrieve owner可延迟释放。此前原admission1000bfc18写同Model+60/node+20 ID/+28/+30 pair并加Model+68；这里同结构退休，不称COMMIT/物理ACK。已定位原admitted SmsOperation control AP101529378的+10真slot101529388→1000c6784/24B，尚未展开；下一只追其实际Operation析构边界。
+- **首资格里程碑**：bounded两key reader actual exit0：10123c5e5=`kSmsMessageIsMobileOriginated`，10123c603=`kSmsMessageWasAcknowledged`。精确旧proof1010817b4为bool dyn_cast_or_default、101085084为xpc_bool_create，只复用无新import读取；因此handler跳过MO=true或ID=-1分支，否则保ID调+e0。原format6保留page5/actual slot raw证明 **101528df0→1000c05b0**，无新slot/page遍历；原完整FS1000c05b0..1000c0694/228B从库存promote actual exit0，只构造捕同object/原u32 ID的block与返回byte。尚未展开invoke1000c7878/1000c7964/1000c7998，不称map退休或物理ACK。
+- **开始/范围**：上一轮checkpoint 2086b125/ff9e900f已合main/push，属progress，完整通话短信goal仍active。当前main/origin **ff9e900f** clean、旧句柄终态；本轮单代理 `feat/sms-ack-owner`、scratch `x9/out/sms-ack-owner-20261116/`。沿已资格handler1004bad6c的service+e0，先资格第二key10123c5e5/reply10123c603、精确imports1010817b4/101085084及同Model AP101528d10的slot101528df0，再追同u32 ID map mutation/下游ACK。两key保留data矿actual exit0/无覆盖，尚未读新原数据或资格名字；原text库存/80页chains只复用，不重扫、不重编/复检成功kernel、不测试/人工向量/设备/共享输入动作。
+
+
 #### 2026-11-16 display-fill：用户批准合 main / 删除分支（源码收尾，未实机）
 
 - **范围/基线**：仅整合 `feat/display-fill`（head **`51fbd533`**，包含UI **`5af3d156`**）并清理该树/本地及远端分支；原UI与其它活跃分支不动。独立 `.worktrees/display-fill-main` 使用main，先ff到真实origin/main **`7ca335c5`**；NOTES合并actual exit1，保留完整最新main Apple服务/SMS交接后插入原fill/UI段，无生产代码冲突，相对feature生产delta为空。主checkout仍在SMS分支，未切换、未改其未提交NOTES。
 - **产物保全**：功能树 **1034项ignored文件/链接**（除共享`.local` symlink）无覆盖APFS复制并逐文件SHA-256一致；清单/原两方NOTES/确切命令测试及退出码在主checkout `x9/out/display-fill-retirement-20261116/`，完整副本 `archive/`。`.local` target和所有备份保留。已交付四份v2镜像仍在主checkout原路径；镜像绑定 **`4cc05e25`** 源码，不冒称重编了新main。
-- **验证/边界**：本轮复跑4项UI host测试、3项fill测试（LLVM22 ASan/UBSan）均actual exit0；四份主目录v2 boot SHA-256复核一致；无新kernel构建/CI run/设备启动/ADB/fastboot/mailbox/根盘写入。`x9_fill`、`x9_ui` 默认off；全局应用状态栏未覆盖，原生岛、键盘/触摸/边缘和性能仍待实机。用户批准的是git整合/清理，不是MG缓存/dylib持久写入许可。合并/push/删除实际结果完成后追加，不提前冒称成功。
+- **验证/边界**：本轮复跑4项UI host测试、3项fill测试（LLVM22 ASan/UBSan）均actual exit0；四份主目录v2 boot SHA-256复核一致；无新kernel构建/CI run/设备启动/ADB/fastboot/mailbox/根盘写入。`x9_fill`、`x9_ui` 默认off；全局应用状态栏未覆盖，原生岛、键盘/触摸/边缘和性能仍待实机。用户批准的是git整合/清理，不是MG缓存/dylib持久写入许可。实际git收尾见下条；测试通过不是实机验收。
+
+- **合并/清理实际完成**：merge **`84e1aad5`**，`git push origin main` actual exit0（`7ca335c5..84e1aad5`）；published main包含原feature **`51fbd533`**。归档后正常 `git worktree remove .worktrees/display-fill` exit0；最初从root SMS HEAD执行 `branch -d`被安全拒绝exit1，转到merged main工作树后正常 `branch -d feat/display-fill` exit0，没有 `-D`。以原head精确lease删除远端feature exit0；`ls-remote`复核该ref不存在。本地feature/工作树均不存在，root SMS HEAD、未提交NOTES SHA与起始状态一致；原UI和其它活跃树保留。此次收尾仅文档更新，无生产delta/重编/新CI/设备结果。最终交接提交与远端main确切SHA写 `x9/out/display-fill-retirement-20261116/finalization.json`，随后正常删除临时main工作树；不是手机功能完成。
 
 #### 2026-11-16 显示铺满 / 兼容逻辑尺寸（v2候选已打包，待实机）
 

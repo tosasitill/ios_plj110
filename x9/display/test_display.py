@@ -31,7 +31,7 @@ class DisplayTests(unittest.TestCase):
         self.assertEqual(adt.serialize(base), adt.serialize(island))
 
     def test_opt_in_projection(self):
-        self.assertEqual(x9_boot_defaults.value([], 'x9_ui'), 0)
+        self.assertEqual(x9_boot_defaults.value([], 'x9_ui'), 1)
         self.assertEqual(x9_boot_defaults.value(['x9_ui=1'], 'x9_ui'), 1)
         self.assertEqual(x9_boot_defaults.value(['x9_ui=0'], 'x9_ui'), 0)
         # Packaging and kernel both select the FIRST duplicate, not the last.
