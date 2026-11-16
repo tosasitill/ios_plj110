@@ -26,6 +26,13 @@ struct x9_vdec_control_start_resources {
      * Firmware may use an older registered buffer for its DPB/output. */
     struct x9_vcp_output_record output;
     uint32_t submission_index, registered_outputs; /* native journal identities */
+    /* Fresh reserved PIC for the actual qualify_start owner. checked means
+     * ONLY every retained output's aggregate actual capacity covers fb_sz0+1.
+     * NOT a per-plane/Y/C mapping, stride, scratch, sufficient layout contract,
+     * negotiated format or readiness. Zero/uninitialized means NOT checked. */
+    struct x9_vcp_picture_snapshot picture;
+    uint64_t picture_required_bytes;
+    uint32_t picture_capacity_checked;
 };
 struct x9_vdec_control_hardware {
     /* All hardware callbacks run within a bus reservation and control state

@@ -263,6 +263,21 @@ static int vcontrol_stage_start(struct x9_vdec_control *c, uint64_t end,
             vcontrol_load32(p,0xf28) != observed->plane_count ||
             vcontrol_load32(p,0x1228)) e = ESTALE;
     }
+    if (!e && r->picture_capacity_checked) {
+        const struct x9_vcp_picture_snapshot *pic = &r->picture;
+        /* Recheck consumed size/selector fields before AP publication. This
+         * is only stale-negotiation rejection, not producer exclusion or a
+         * promise that an equal picture describes a selected frame. */
+        if (vcontrol_load32(p,0xf50) != pic->pic_w ||
+            vcontrol_load32(p,0xf54) != pic->pic_h ||
+            vcontrol_load32(p,0xf58) != pic->buf_w ||
+            vcontrol_load32(p,0xf5c) != pic->buf_h ||
+            vcontrol_load32(p,0xf60) != pic->fb_bytes[0] ||
+            vcontrol_load32(p,0xf64) != pic->fb_bytes[1] ||
+            vcontrol_load32(p,0xf80) != pic->bitdepth ||
+            vcontrol_load32(p,0xf84) != pic->layout_mode ||
+            vcontrol_load32(p,0xf88) != pic->fourcc) e = ESTALE;
+    }
     if (!e) e = vmem_deadline(end);
     if (!e) {
         c->status.vsi_attempted = 1; /* retain before first live store */
@@ -489,6 +504,68 @@ static int vcontrol_service_recheck(void *cookie, uint64_t epoch, uint64_t end)
     if (!e && c->status.recheck_pending) e = vcontrol_recheck(c,end);
     return e;
 }
+/* Captured FW30ad94..ade2 publishes total or separate capacities into PIC
+ * fb_sz0/fb_sz1; vendor plane-selection/packing remains unresolved. Compare
+ * only their 64-bit SUM with each retained output's owned aggregate. Being
+ * large enough cannot prove Y/C partition, offsets, packing, stride, headers,
+ * DPB scratch or hardware write layout. This only rejects an insufficient
+ * candidate before exposing a new input or sending a001. */
+static int vcontrol_output_capacity(struct x9_vdec_control *c, uint64_t end)
+{
+    struct x9_vdec_control_start_resources *resources = &c->status.resources;
+    struct x9_vcp_common_snapshot common;
+    struct x9_vcp_picture_snapshot pic[2];
+    uint64_t required;
+    int e = vcontrol_snapshot(c,end,VCONTROL_DECODE_FIELDS,&common);
+    for (unsigned n = 0; n < 2 && !e; n++)
+        e = x9_vcp_parse_picture_snapshot(X9_VCP_PICTURE_ABI_MT6993_CAPTURE1,
+            c->scratch+n*X9_VCP_INSTANCE_SLOT_BYTES,X9_VCP_INSTANCE_SLOT_BYTES,&pic[n]);
+    resources->picture_capacity_checked = 0;
+    if (e) return e;
+    /* Only consumed fields need agree. Unused array entries/crop/DPB may be
+     * stale or update independently; do not infer a plane count from them. */
+    if (pic[0].pic_w != pic[1].pic_w || pic[0].pic_h != pic[1].pic_h ||
+        pic[0].buf_w != pic[1].buf_w || pic[0].buf_h != pic[1].buf_h ||
+        pic[0].fb_bytes[0] != pic[1].fb_bytes[0] ||
+        pic[0].fb_bytes[1] != pic[1].fb_bytes[1] ||
+        pic[0].bitdepth != pic[1].bitdepth ||
+        pic[0].layout_mode != pic[1].layout_mode ||
+        pic[0].fourcc != pic[1].fourcc) return EAGAIN;
+    resources->picture = pic[1];
+    required = (uint64_t)pic[1].fb_bytes[0]+pic[1].fb_bytes[1];
+    resources->picture_required_bytes = required;
+    vcontrol_journal_input(c);
+    /* Initial header: no published sizes and NO capacity assertion. The real
+     * owner still has to qualify START. Reject partial dimensions instead of
+     * treating them as valid zero-byte output or inventing sizes by fourcc. */
+    if (!pic[1].pic_w && !pic[1].pic_h && !pic[1].buf_w &&
+        !pic[1].buf_h && !required) return 0;
+    if (!pic[1].pic_w || !pic[1].pic_h || !pic[1].buf_w ||
+        !pic[1].buf_h || !required || pic[1].pic_w > pic[1].buf_w ||
+        pic[1].pic_h > pic[1].buf_h) return EINVAL;
+    /* RV32 producer MUL buf_w*buf_h: reject wrapped products, without claiming
+     * all further vendor packing/rounding operations are overflow-free. */
+    if ((uint64_t)pic[1].buf_w*pic[1].buf_h > UINT32_MAX) return EOVERFLOW;
+    if (!c->status.output_records) return ENXIO;
+    for (unsigned i = 0; i < c->status.output_records; i++) {
+        const struct x9_vcp_output_record *r = &c->outputs[i].journal.resources;
+        uint64_t total = 0;
+        if (!c->outputs[i].journal.prepared || !r->plane_count ||
+            r->plane_count > X9_VCP_OUTPUT_PLANES) return EBUSY;
+        for (unsigned n = 0; n < r->plane_count; n++) {
+            if (!r->plane[n].iova || !r->plane[n].bytes) return ESTALE;
+            if (r->plane[n].bytes > UINT64_MAX-total) return EOVERFLOW;
+            total += r->plane[n].bytes;
+        }
+        if (total < required) return ENOSPC;
+    }
+    e = vmem_deadline(end);
+    if (!e) {
+        resources->picture_capacity_checked = 1;
+        vcontrol_journal_input(c);
+    }
+    return e;
+}
 static int vcontrol_prepare_start(void *cookie, uint64_t epoch, uint64_t end,
     const struct x9_vcp_init *init, const struct x9_vcp_init_result *result,
     const struct x9_vcp_start *q)
@@ -529,6 +606,7 @@ static int vcontrol_prepare_start(void *cookie, uint64_t epoch, uint64_t end,
         e = x9_vdec_dma_slice_state(c->shared->codec,&c->inputs[i].slice,&state);
         if (!e && state != X9_VDEC_DMA_DEVICE) e = EBUSY;
     }
+    if (!e) e = vcontrol_output_capacity(c,end);
     if (!e) e = vmem_deadline(end);
     if (!e) {
         resources->input_token = vdma_take_token();
