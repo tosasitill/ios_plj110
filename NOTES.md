@@ -157,6 +157,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 提取与三路新证据收尾（已归档/push；仍无最终修复镜像）
+
+- **实际完成**：18个同版原件仍在 `x9/out/android-call-inputs-20261116-092442/`；追加五份当前日志/状态快照已无覆盖rename至主 `x9/out/call-owned-runtime/`。三个原代理因服务stream资源错误停写，复用其原功能树由三个短收尾代理消费既有产物，不重跑ASC/提取/反汇编/hash/设备。三组scratch均已无覆盖归档主 `x9/out/{dial-java-producer,voice-dsp-payload,init-sms-java}/`，原日志/源码head/失真摘录保留，原件与衍生不混写。
+- **CLIR新契约**：原 **`0240bb29`** 整合 **`27ce06db`**。matching ASC反编译闭显式SC31 action*=raw2、#=raw1、temporary非空actual number、per-sub preference key及MTK session/adapter→HAL clir原值。核心只有反编译、没有原DEX opcode复核；实际厂商default实现/运行值仍缺，interface0不是运行默认；phone index不等于iOS personality/subscription/native epoch。完整边界及现有命令产物索引为 `matching-java-producer-final.json`；replay是明确标记的重建recipe，不伪造历史命令执行。
+- **DSP新契约**：原 **`49f9b40f`** 整合 **`096bd861`**。真实audio_ipi section asm闭48×8B task-info producer及384B ioctl copy；scene0只在getcoretotal>1条件下派生dspid3→physical1/controller43，fallback1→2/0→4，不授予实跑8B。真实snd-soc-mtk-common USIP AD50生产两个u64 `{AP PA+0x30000,0x30000}`，非DSP receipt。DSP四段/cert容器候选与字符串不是loader/core/执行证；首缺独立主adsp loader/getcoretotal、scene0消费和实际通话路由/独立双向I/O。原依赖追取因ADB断连exit255未读分区，失败证据留存，不重试或用旧备份替matching。`final-dsp-contract.json`/`final-evidence-index.md`可只读复核。
+- **SMS新契约**：原 **`01bda47b`** 整合 **`683e20e6`**。matching Java/保留DEX摘录闭条件化CS普通接收：raw insert成功排事件2返回1，事件1随后ACK；duplicate5转1不排新事件2，result−1跳ACK。Android decimal RIL37不同于QMI WMS37，不等最终app保存/物理completion。长ctor摘录标题被method-name覆盖，真实长code_item **0x175c0c/512B**、短 **0x175e1c/26B**，原JSON资格及derived-ref/异常表缺失界限已记录，不重写原错标题。现有memory-full D3无新矛盾，不制造ACK/ready；`matching-sms-final-contract.json`保存精确offset/重读入口。此Android链仍不能替代当前iOS Messages COMMIT/重开/物理ACK和MO对端验收。
+- **实际整合**：只读快照工具 **`d0bd4695`**（正式Python语法编译exit0，新增snapshot action未重新上设备运行）及118行三组新契约已ff合main，`git push origin main`成功 **`ea18da65..683e20e6`**。两处append conflict逐一确认原commit仅尾追加，完整原小节在main各保留一次后才清理三个子worktree/分支；未操作其它硬件树或共享`.local`。无kernel生产delta/编译、CI run、boot pack或设备启动；最后本交接随root分支正常提交/ff/push后清理。
+- **下一真实边/完整目标**：不再重复“Java/DSP文件没有”旧阻断；matching意图及当前模块可继续用。ADB若重新连接，只读追取主adsp模块前应重核sole selected device/active slot和确切partition大小，沿已有vendor_boot ramdisk来源，不猜sysfs/ioctl/路由。完整typed caller/backend、per-sub owned profile/generation、CallList/handover与媒体、当前iOS短信端到端仍未落地/验收，**VOICE09仍关闭，没有修好通话短信的最终镜像**；此次输入/契约收束不算生产修复，不要求再拨10086或补来电。
+
 #### 2026-11-16 同版输入续接：追加当前只读日志快照并开始三代理静态分析
 
 - 原件采集提交 **`ea18da65`** 已实际ff合main并push成功，原`call-input-capture`树/分支已移除；18个原件保留在主checkout `x9/out/android-call-inputs-20261116-092442/`，没有重新提取/覆盖。复用用户授权的三个代理，新树分别为`dial-java-producer`、`voice-dsp-payload`、`init-sms-java`，root为`call-owned-runtime`；共享`.local`及其它硬件工作树不动。
