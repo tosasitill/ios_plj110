@@ -22,6 +22,9 @@
 #define X9_VDEC_DRAIN (1u << 2)
 #define X9_VDEC_FRAME_TOKENS (1u << 3)
 #define X9_VDEC_SESSION_REQUIRED 15u
+/* Host delivery capability, NOT a firmware/session_ops prerequisite. */
+#define X9_VDEC_OUTPUT_ACK (1u << 4)
+#define X9_VDEC_SESSION_DELIVERY_REQUIRED (X9_VDEC_SESSION_REQUIRED | X9_VDEC_OUTPUT_ACK)
 #define X9_VDEC_MAX_PENDING 32u
 #define X9_VDEC_MAX_SESSIONS 16u
 struct x9_vdec_status {
@@ -66,8 +69,9 @@ struct x9_vdec_submit {
  * Every submitted token returns exactly once, including non-output pictures
  * via X9_VDEC_OUTPUT_DROPPED. The token is the input identity, NEVER PTS/POC.
  * On pixel payload copyout failure the output remains retained for the next
- * receive. The caller must keep the ioctl STRUCTURE writable too: generic
- * BSD ioctl's final structure copyout is outside this driver's transaction. */
+ * receive. Legacy RECEIVE still requires the ioctl STRUCTURE to stay writable:
+ * generic BSD ioctl's final structure copyout is outside that transaction.
+ * New consumers must require OUTPUT_ACK and use PEEK/ACK below instead. */
 #define X9_VDEC_OUTPUT_DROPPED 1u
 struct x9_vdec_output {
     uint32_t version, deadline_ms;
@@ -76,16 +80,30 @@ struct x9_vdec_output {
     uint32_t format, flags, result_flags, reserved;
     uint64_t completion;
 };
+/* PEEK returns the same validated output without releasing the CPU-owned
+ * frame or removing its accepted token. Retry PEEK after either payload or
+ * generic ioctl structure copyout failure. ACK is input-only: it consumes
+ * exactly the held token/completion pair AFTER the caller has its result.
+ * ACK is host delivery, never a firmware free/retirement/fence operation.
+ * Legacy RECEIVE is rejected with EBUSY while a successful PEEK is retained.
+ * Close/DESTROY still releases a held frame, including after generation loss. */
+struct x9_vdec_output_ack {
+    uint32_t version, reserved;
+    uint64_t generation, session, token, completion;
+};
 #define X9_VDEC_GET_CAPABILITIES _IOR('V', 0x72, struct x9_vdec_capabilities)
 #define X9_VDEC_SESSION_CREATE _IOWR('V', 0x73, struct x9_vdec_session)
 #define X9_VDEC_SESSION_SUBMIT _IOW('V', 0x74, struct x9_vdec_submit)
 #define X9_VDEC_SESSION_RECEIVE _IOWR('V', 0x75, struct x9_vdec_output)
 #define X9_VDEC_SESSION_DRAIN _IOW('V', 0x76, struct x9_vdec_session)
 #define X9_VDEC_SESSION_DESTROY _IOW('V', 0x77, struct x9_vdec_session)
+#define X9_VDEC_SESSION_PEEK _IOWR('V', 0x78, struct x9_vdec_output)
+#define X9_VDEC_SESSION_ACK _IOW('V', 0x79, struct x9_vdec_output_ack)
 _Static_assert(sizeof(struct x9_vdec_capabilities) == 24, "vdec capabilities ABI");
 _Static_assert(sizeof(struct x9_vdec_session) == 32, "vdec session ABI");
 _Static_assert(sizeof(struct x9_vdec_submit) == 40, "vdec submit ABI");
 _Static_assert(sizeof(struct x9_vdec_output) == 80, "vdec output ABI");
+_Static_assert(sizeof(struct x9_vdec_output_ack) == 40, "vdec output ACK ABI");
 #ifdef KERNEL
 #include "../../../../hevc/hevc_bitstream.h"
 struct x9_vdec_plane {
@@ -103,8 +121,10 @@ struct x9_vdec_frame {
 /* A real codec instance retains its DPB and physical buffers across submit.
  * submit must consume/copy the host Annex B before returning; zero means the
  * token was accepted, errors mean NOT accepted. receive returns display-order
- * output and its original token; result_flags=DROPPED is a no-pixels retirement
- * but still requires a genuine completion/cookie. drain is bounded and must
+ * output and its original token; the CPU-owned frame/cookie and readable planes
+ * must stay immutable until platform.release, including across submit/drain
+ * and repeated host PEEKs. result_flags=DROPPED is a no-pixels retirement but
+ * still requires a genuine completion/cookie. drain is bounded and must
  * make every accepted token available before receive returns ENODATA. After
  * ENODATA the same session may submit again; reference state/parameter sets
  * remain valid. destroy drains/quarantines before freeing DMA, even on fault.

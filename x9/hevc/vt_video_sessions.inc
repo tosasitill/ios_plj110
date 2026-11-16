@@ -98,8 +98,9 @@ static void video_fault(struct state *s, OSStatus error)
         if (e) { video_cancel(s); break; }
     }
 }
-/* One RECEIVE always names its ORIGINAL token, even when a later input
- * caused display output. Attach that token's immutable CM description. */
+/* PEEK names its ORIGINAL token, even when a later input caused display
+ * output. Validate the returned result/order, then ACK host delivery BEFORE
+ * mutating VT pending/order state or emitting the immutable CM description. */
 static int video_receive(struct state *s, uint32_t wait_ms, OSStatus *error)
 {
     size_t bytes = (size_t)s->config.width * s->config.height * 3 /
@@ -109,7 +110,7 @@ static int video_receive(struct state *s, uint32_t wait_ms, OSStatus *error)
     struct x9_vdec_output r = { .version = X9_VDEC_VERSION, .deadline_ms = wait_ms,
         .generation = s->generation, .session = s->native_session,
         .output_address = (uint64_t)(uintptr_t)raw, .output_capacity = (uint32_t)bytes };
-    if (ioctl(s->fd, X9_VDEC_SESSION_RECEIVE, &r)) {
+    if (ioctl(s->fd, X9_VDEC_SESSION_PEEK, &r)) {
         int e = errno; free(raw); *error = codec_error(e); return e;
     }
     unsigned i = pending_index(s, r.token);
@@ -123,17 +124,29 @@ static int video_receive(struct state *s, uint32_t wait_ms, OSStatus *error)
     /* Correlated pixels, not accepted input, offered FB or DROPPED retirement,
      * supply the output-order observation. A derived PicOutputFlag0 (raw
      * output flag0 OR RASL with associated-IRAP NoRaslOutputFlag1) is suppressed
-     * only AFTER a real terminal RECEIVE; it never authorizes
+     * only AFTER a real terminal provider output; it never authorizes
      * slice freeing or fabrication of a dropped completion. A caller's
      * DoNotOutputFrame suppresses VT rendering, not this physical observation.
      * Within one CLVS, 8.3.1/C.5.2 require strictly increasing output POC;
      * old-CLVS pixels cannot follow a newer CLVS. No timestamp/PTS guessing. */
     const struct pending_frame *observed = &s->pending[i];
-    if (!(r.result_flags & X9_VDEC_OUTPUT_DROPPED) && observed->pic_output_flag) {
+    Boolean ordered = !(r.result_flags & X9_VDEC_OUTPUT_DROPPED) && observed->pic_output_flag;
+    if (ordered) {
         if (observed->hdr_clvs < s->last_output_clvs ||
             (observed->hdr_clvs == s->last_output_clvs && observed->poc <= s->last_output_poc)) {
             free(raw); *error = kVTVideoDecoderBadDataErr; return EIO;
         }
+    }
+    struct x9_vdec_output_ack ack = { .version = X9_VDEC_VERSION,
+        .generation = s->generation, .session = s->native_session,
+        .token = r.token, .completion = r.completion };
+    if (ioctl(s->fd, X9_VDEC_SESSION_ACK, &ack)) {
+        int e = errno; free(raw); *error = codec_error(e); return e;
+    }
+    /* ACK has no generic output copyout. A failed validation/ACK leaves VT
+     * token/order/HDR state unchanged; fault/close owns eventual cancellation.
+     * The kernel releases only its already CPU-owned frame, not physical DMA. */
+    if (ordered) {
         s->last_output_clvs = observed->hdr_clvs; s->last_output_poc = observed->poc;
     }
     struct pending_frame f = pending_take(s, i);

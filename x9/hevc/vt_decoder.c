@@ -110,7 +110,7 @@ static int hardware_sessions(int fd, const struct x9_vdec_status *s,
     memset(c, 0, sizeof(*c));
     return ioctl(fd, X9_VDEC_GET_CAPABILITIES, c) == 0 &&
         c->version == X9_VDEC_VERSION && !c->reserved && c->generation == s->generation &&
-        c->capabilities == X9_VDEC_SESSION_REQUIRED &&
+        c->capabilities == X9_VDEC_SESSION_DELIVERY_REQUIRED &&
         c->max_pending && c->max_pending <= X9_VDEC_MAX_PENDING;
 }
 static CFDataRef configuration(CMVideoFormatDescriptionRef format, struct x9_hevc_config *c)

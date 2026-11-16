@@ -3,7 +3,7 @@
 #define VDEC_OPEN_FILES 64u
 struct host_session {
     dev_t dev;
-    int opened, draining, held;
+    int opened, draining, held, peek_ready;
     uint64_t id, generation, tokens[X9_VDEC_MAX_PENDING], held_token;
     uint32_t pending, config_bytes, held_flags;
     uint8_t *config_data;
@@ -115,13 +115,37 @@ done:
     if (input) kfree_data(input, r->input_bytes);
     return e;
 }
-static int session_receive(struct host_session *s, struct x9_vdec_output *r)
+static void session_release_output(struct host_session *s, unsigned index)
+{
+    platform.release(&s->frame);
+    memset(&s->frame, 0, sizeof(s->frame));
+    s->held = 0; s->peek_ready = 0; s->held_token = 0; s->held_flags = 0;
+    s->tokens[index] = s->tokens[--s->pending];
+    s->tokens[s->pending] = 0; status.completed++;
+}
+static int session_ack(struct host_session *s, const struct x9_vdec_output_ack *r)
+{
+    if (r->version != X9_VDEC_VERSION || r->reserved || !r->token || !r->completion)
+        return EINVAL;
+    /* An ACK cannot release an unobserved/failed payload, a different held
+     * output or a token from another session/generation. The common ioctl
+     * admission already checks clone ownership and the current generation. */
+    if (!s->held || !s->peek_ready || r->token != s->held_token ||
+        r->completion != s->frame.completion) return ESTALE;
+    unsigned index = 0;
+    while (index < s->pending && s->tokens[index] != r->token) index++;
+    if (index == s->pending || !s->frame.cookie) return EIO;
+    session_release_output(s, index);
+    return 0;
+}
+static int session_receive(struct host_session *s, struct x9_vdec_output *r, bool peek)
 {
     struct x9_vdec_output in = { .version = X9_VDEC_VERSION, .deadline_ms = r->deadline_ms,
         .generation = r->generation, .session = r->session, .output_address = r->output_address,
         .output_capacity = r->output_capacity };
     if (memcmp(r, &in, sizeof(in)) || r->deadline_ms > 5000 ||
         !span(r->output_address, r->output_capacity) || r->output_capacity > X9_VDEC_MAX_OUTPUT) return EINVAL;
+    if (!peek && s->peek_ready) return EBUSY;
     uint32_t row = s->config.width * (s->config.bit_depth == 10 ? 2 : 1);
     uint32_t bytes = row * s->config.height * 3 / 2;
     if (r->output_capacity < bytes) return EMSGSIZE;
@@ -161,8 +185,10 @@ static int session_receive(struct host_session *s, struct x9_vdec_output *r)
         r->format = s->frame.format; r->flags = s->frame.flags;
     }
     r->token = s->held_token; r->completion = s->frame.completion; r->result_flags = s->held_flags;
-    platform.release(&s->frame); memset(&s->frame, 0, sizeof(s->frame)); s->held = 0;
-    s->tokens[index] = s->tokens[--s->pending]; status.completed++;
+    /* PEEK survives generic BSD ioctl's subsequent structure copyout. No
+     * provider receive/release is repeated on a retry of this held frame. */
+    if (peek) s->peek_ready = 1;
+    else session_release_output(s, index);
     return 0;
 }
 static int session_ioctl(dev_t d, u_long cmd, caddr_t data)
@@ -184,7 +210,9 @@ static int session_ioctl(dev_t d, u_long cmd, caddr_t data)
         if (r->generation != status.generation || r->generation != s->generation) return ESTALE;
         if (cmd == X9_VDEC_SESSION_SUBMIT) {
             status.requests++; e = session_submit(s, (const struct x9_vdec_submit *)data);
-        } else if (cmd == X9_VDEC_SESSION_RECEIVE) e = session_receive(s, (struct x9_vdec_output *)data);
+        } else if (cmd == X9_VDEC_SESSION_RECEIVE || cmd == X9_VDEC_SESSION_PEEK)
+            e = session_receive(s, (struct x9_vdec_output *)data, cmd == X9_VDEC_SESSION_PEEK);
+        else if (cmd == X9_VDEC_SESSION_ACK) e = session_ack(s, (const struct x9_vdec_output_ack *)data);
         else if (cmd == X9_VDEC_SESSION_DRAIN) {
             if (r->config_bytes || r->config_address) return EINVAL;
             if (!s->draining) {

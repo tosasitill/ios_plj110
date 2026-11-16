@@ -173,6 +173,7 @@ static int vdec_ioctl(dev_t d, u_long cmd, caddr_t data, int flags, __unused str
     if (cmd != X9_VDEC_GET_STATUS && cmd != X9_VDEC_GET_CAPABILITIES &&
         cmd != X9_VDEC_DECODE_IDR && cmd != X9_VDEC_SESSION_CREATE &&
         cmd != X9_VDEC_SESSION_SUBMIT && cmd != X9_VDEC_SESSION_RECEIVE &&
+        cmd != X9_VDEC_SESSION_PEEK && cmd != X9_VDEC_SESSION_ACK &&
         cmd != X9_VDEC_SESSION_DRAIN && cmd != X9_VDEC_SESSION_DESTROY) return ENOTTY;
     if (cmd != X9_VDEC_GET_STATUS && cmd != X9_VDEC_GET_CAPABILITIES) {
         uid_t uid = kauth_cred_getuid(kauth_cred_get());
@@ -187,7 +188,8 @@ static int vdec_ioctl(dev_t d, u_long cmd, caddr_t data, int flags, __unused str
         struct x9_vdec_capabilities c = { .version = X9_VDEC_VERSION,
             .generation = status.generation };
         if (status.ready && platform.sessions) {
-            c.capabilities = session_ops.capabilities; c.max_pending = session_ops.max_pending;
+            c.capabilities = session_ops.capabilities | X9_VDEC_OUTPUT_ACK;
+            c.max_pending = session_ops.max_pending;
         }
         memcpy(data, &c, sizeof(c));
     } else if (cmd == X9_VDEC_DECODE_IDR) {
