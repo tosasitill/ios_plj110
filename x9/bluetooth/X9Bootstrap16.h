@@ -10,4 +10,6 @@ int x9_bootstrap16_wait(uint32_t seconds);
  * sleep requires a closed/empty native transport, as enforced by the kernel. */
 int x9_bootstrap16_resume(void);
 int x9_bootstrap16_sleep(void);
+/* stderr plus kern.x9_bt_note (launchd jobs' stderr is /dev/null). */
+void x9_bt_note(const char *format, ...) __attribute__((format(printf, 1, 2)));
 #endif

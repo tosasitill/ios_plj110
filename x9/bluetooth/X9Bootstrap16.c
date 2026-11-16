@@ -5,6 +5,18 @@
 #include <errno.h>
 #include <sys/sysctl.h>
 #include <time.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+void x9_bt_note(const char *format, ...)
+{
+    char text[192]; va_list args; va_start(args, format);
+    vsnprintf(text, sizeof(text), format, args); va_end(args);
+    fputs(text, stderr);
+    size_t n = strlen(text); while (n && text[n-1] == '\n') text[--n] = 0;
+    (void)sysctlbyname("kern.x9_bt_note", NULL, NULL, text, n + 1);
+}
 
 enum { POWER_AWAKE = 0, POWER_ASLEEP = 1, POWER_TRANSITION = 2 };
 static int read_power(int *power)

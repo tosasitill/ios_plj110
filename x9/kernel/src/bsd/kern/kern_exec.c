@@ -8615,11 +8615,13 @@ sweet_x9_wipe_gestalt_cache(proc_t p, user_addr_t scratch, user_addr_t end)
 	 * Control Center flashlight module) and /product/haptics "closed-loop"
 	 * (DeviceSupportsClosedLoopHaptics, Actuator vs legacy vibrator), both
 	 * after the last cache rebuild (11-08). The marker is written only after
-	 * both unlinks succeed, so a failed boot retries; later boots skip. */
+	 * both unlinks succeed, so a failed boot retries; later boots skip.
+	 * Epoch 2026-11-16 (log 328): /arm-io/aop/iop-aop-nub/als for MG
+	 * ambient-light-sensor; the flash/haptics answers rebuild with it. */
 	static const char epoch_dir[] = "/private/var/x9/mg";
-	static const char epoch_path[] = "/private/var/x9/mg/refresh-flash-haptics-20261110";
+	static const char epoch_path[] = "/private/var/x9/mg/refresh-als-20261116";
 	static const uint8_t epoch_data[] =
-	    "x9 MobileGestalt cache rebuilt for ADT camera flash + closed-loop haptics\n";
+	    "x9 MobileGestalt cache rebuilt for ADT AOP ambient light sensor\n";
 	uint8_t epoch_sha[32];
 	int mode = sweet_x9_arg("x9_mgwipe", 0);
 	if (mode != 1 && mode != 2) {

@@ -6,6 +6,8 @@
 #include <sys/systm.h>
 #include <sys/errno.h>
 #include <sys/kauth.h>
+#include <sys/proc.h>
+#include <libkern/OSAtomic.h>
 #include <sys/sysctl.h>
 #include <kern/locks.h>
 #include <kern/thread.h>
@@ -556,6 +558,26 @@ static int power_sysctl SYSCTL_HANDLER_ARGS
     }
     lck_mtx_unlock(&bt_lock); return error;
 }
+/* launchd jobs' stderr is /dev/null (log 328: bluetoothd exits 1 with no
+ * trace). The H4 bridge, vendor adapter and launcher mirror their own
+ * messages here; bounded, sanitized, root/mobile only, no HCI access. */
+static SInt32 bt_notes;
+static int note_sysctl SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp,arg1,arg2)
+    if(!req->newptr) return 0;
+    uid_t uid=kauth_getuid(); if(uid!=0 && uid!=501) return EPERM;
+    char text[192]; size_t n=req->newlen; if(n>=sizeof(text)) n=sizeof(text)-1;
+    int error=SYSCTL_IN(req,text,n); if(error) return error;
+    text[n]=0;
+    for(size_t i=0;i<n && text[i];i++) if(text[i]<32 || text[i]>126) text[i]='?';
+    if(OSIncrementAtomic(&bt_notes)>=400) return 0;
+    char name[24]; proc_selfname(name,sizeof(name));
+    printf("X9 BT USER: %s[%d] %s\n",name,proc_selfpid(),text);
+    return 0;
+}
+SYSCTL_PROC(_kern,OID_AUTO,x9_bt_note,CTLTYPE_STRING|CTLFLAG_WR|CTLFLAG_ANYBODY|CTLFLAG_LOCKED,
+    NULL,0,note_sysctl,"A","X9 Bluetooth userland bridge messages (stderr is /dev/null)");
 SYSCTL_PROC(_kern,OID_AUTO,x9_bt_power,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY|CTLFLAG_LOCKED,
     NULL,0,power_sysctl,"I","Explicit closed-transport ownership: 0 awake, 1 asleep, 2 unavailable/transition");
 static void worker(void *unused,wait_result_t result)

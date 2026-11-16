@@ -11,6 +11,7 @@
 #include <mach-o/loader.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/sysctl.h>
@@ -53,7 +54,7 @@ static uint32_t serial_close(void)
         if(ioctl(fd,X9_SERIAL_CANCEL_READ)<0) {
             int error=errno;
             *u32(0x1008494e8)=stopped;
-            fprintf(stderr,"X9 H4: native RX cancellation failed errno=%d; close not entered\n",error);
+            x9_bt_note("X9 H4: native RX cancellation failed errno=%d; close not entered\n",error);
             return 0x4b5;
         }
     }
@@ -62,6 +63,7 @@ static uint32_t serial_close(void)
 static int serial_open(uint32_t mode,const char *configuration)
 {
     (void)configuration;
+    x9_bt_note("X9 H4: POSIX.open mode=%u\n",mode);
     /* The native H4 driver calls POSIX.open with mode0; do not silently
      * accept H4DS/H4BC callers with different flow-control semantics. */
     if(mode) return 0x65;
@@ -71,7 +73,7 @@ static int serial_open(uint32_t mode,const char *configuration)
      * initializer, and ownership errors remain native-open failures. */
     int result=x9_bootstrap16_resume();
     if(result) {
-        fprintf(stderr,"X9 H4: complete MT6653 initializer not ready (errno=%d)\n",result);
+        x9_bt_note("X9 H4: complete MT6653 initializer not ready (errno=%d)\n",result);
         return 0x4b1;
     }
     int fd=open("/dev/cu.bluetooth",O_RDWR|O_NOCTTY);
@@ -105,12 +107,13 @@ static int serial_open(uint32_t mode,const char *configuration)
         ((cond_fn)address(0x10009bc40))((void *)address(0x1008494f0));
         return 0x4b1;
     }
-    fprintf(stderr,"X9 H4: native RxLoop/TX on cu.bluetooth; board owns baud and initialization\n");
+    x9_bt_note("X9 H4: native RxLoop/TX on cu.bluetooth; board owns baud and initialization\n");
     return 0;
 }
 __attribute__((constructor)) static void install(void)
 {
     const struct mach_header_64 *h=(const struct mach_header_64 *)_dyld_get_image_header(0);
+    x9_bt_note("X9 H4: constructor entered (%s)\n",getprogname());
     if(!h || h->magic!=MH_MAGIC_64 || h->cputype!=CPU_TYPE_ARM64 || h->cpusubtype!=0 ||
        h->filetype!=MH_EXECUTE || h->sizeofcmds>65536) return;
     const uint8_t *at=(const uint8_t *)(h+1),*end=at+h->sizeofcmds;
@@ -123,12 +126,12 @@ __attribute__((constructor)) static void install(void)
             locked=!memcmp(((const struct uuid_command *)c)->uuid,original_uuid,sizeof(original_uuid));
         at+=c->cmdsize;
     }
-    if(!locked) { fprintf(stderr,"X9 H4: unsupported bluetoothd UUID; no table changed\n"); return; }
+    if(!locked) { x9_bt_note("X9 H4: unsupported bluetoothd UUID; no table changed\n"); return; }
     slide=_dyld_get_image_vmaddr_slide(0);
     if(*uptr(OPEN_SLOT)!=address(NATIVE_OPEN) ||
        *uptr(CLOSE_SLOT)!=address(NATIVE_CLOSE) ||
        *uptr(0x100844180)!=address(NATIVE_WRITE)) {
-        fprintf(stderr,"X9 H4: unexpected resolved transport slots; no table changed\n"); return;
+        x9_bt_note("X9 H4: unexpected resolved transport slots; no table changed\n"); return;
     }
     /* Close cancellation depends on the original stop/exit handshake, not
      * merely the symbol name. Check every instruction used by that contract
@@ -144,7 +147,7 @@ __attribute__((constructor)) static void install(void)
     for(size_t k=0;k<sizeof(close_contract)/sizeof(close_contract[0]);k++) {
         if(memcmp((void *)address(close_contract[k].va),close_contract[k].words,
                   close_contract[k].count*sizeof(uint32_t))) {
-            fprintf(stderr,"X9 H4: unexpected native close/RX handshake; no table changed\n");
+            x9_bt_note("X9 H4: unexpected native close/RX handshake; no table changed\n");
             return;
         }
     }
@@ -153,4 +156,5 @@ __attribute__((constructor)) static void install(void)
     if(x9_vendor16_install(slide)<0) return;
     *uptr(OPEN_SLOT)=(uintptr_t)serial_open;
     *uptr(CLOSE_SLOT)=(uintptr_t)serial_close;
+    x9_bt_note("X9 H4: POSIX open/close routed to cu.bluetooth\n");
 }

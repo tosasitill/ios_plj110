@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include "X9Bootstrap16.h"
 #include <string.h>
 
 static intptr_t image_slide;
@@ -118,7 +119,7 @@ static void publish_flags(void)
         ((uint64_t)caps.coded_phy<<8) | ((uint64_t)caps.phy_2m<<9) |
         ((uint64_t)caps.adv_sets<<16);
     atomic_store_explicit(&published, snapshot, memory_order_release);
-    fprintf(stderr, "X9 capabilities: HCI ext scan=%u adv=%u controller sets=%u native slots=%u periodic=%u/%u PAST=%u/%u coded=%u 2M=%u\n",
+    x9_bt_note("X9 capabilities: HCI ext scan=%u adv=%u controller sets=%u native slots=%u periodic=%u/%u PAST=%u/%u coded=%u 2M=%u\n",
             caps.ext_scan, caps.ext_adv, caps.controller_adv_sets, caps.adv_sets, caps.periodic_adv,
             caps.periodic_sync, caps.past_sender, caps.past_recipient, caps.coded_phy, caps.phy_2m);
 }

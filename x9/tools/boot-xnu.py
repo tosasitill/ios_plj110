@@ -94,6 +94,7 @@ def main():
                        baseband=x9_boot_defaults.value(bargs, 'x9_bb') == 1,
                        torch=x9_boot_defaults.value(bargs, 'x9_torch') == 3,
                        bluetooth=x9_boot_defaults.value(bargs, 'x9_bt_init') == 1,
+                       als=x9_boot_defaults.value(bargs, 'x9_als') == 3,
                        haptic=([t.split('=', 1)[1] for t in a.boot_args.split() if t.startswith('x9_haptic=')] or ['2'])[-1] == '2')  # kernel default 2
     if a.microphone_mode is not None:
         chosen = next(n for n in tree.children if n.prop('name') == b'chosen\0')

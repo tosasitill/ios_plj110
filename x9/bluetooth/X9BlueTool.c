@@ -43,7 +43,7 @@ static void handle(xpc_connection_t peer, xpc_object_t message)
         xpc_dictionary_set_string(reply, "output", "Unsupported controller command");
     /* Firmware/manufacturer fields are deliberately absent: they are not
      * supplied by this board ABI. Native HCI Read Local Version owns those. */
-    fprintf(stderr, "X9 BlueTool: request=%s script=%s errno=%d\n",
+    x9_bt_note("X9 BlueTool: request=%s script=%s errno=%d\n",
             id && (!strcmp(id, "RunBuiltinScript") || !strcmp(id, "RunCommand")) ? id : "unsupported",
             operation, error);
     xpc_connection_send_message(peer, reply);

@@ -12,12 +12,12 @@
 static int stock(const char *why, int error)
 {
     char *const args[] = {"/usr/sbin/bluetoothd", NULL};
-    fprintf(stderr, "X9 Bluetooth launch: %s errno=%d; executing stock bluetoothd without bridge\n", why, error);
+    x9_bt_note("X9 Bluetooth launch: %s errno=%d; executing stock bluetoothd without bridge\n", why, error);
     unsetenv("DYLD_INSERT_LIBRARIES");
     unsetenv("BT_HCI_TRANSPORT");
     unsetenv("X9_BT_VENDOR");
     execv(args[0], args);
-    fprintf(stderr, "X9 Bluetooth launch: stock exec errno=%d\n", errno);
+    x9_bt_note("X9 Bluetooth launch: stock exec errno=%d\n", errno);
     return 1;
 }
 
@@ -36,7 +36,7 @@ int main(void)
         setenv("DYLD_INSERT_LIBRARIES", "/usr/lib/X9H4Transport.dylib", 1))
         return stock("environment setup failed", errno);
     char *const args[] = {"/usr/sbin/bluetoothd", NULL};
-    fprintf(stderr, "X9 Bluetooth launch: board awake; executing stock bluetoothd with H4/vendor bridge\n");
+    x9_bt_note("X9 Bluetooth launch: board awake; executing stock bluetoothd with H4/vendor bridge\n");
     execv(args[0], args);
     return stock("bridge exec failed", errno);
 }

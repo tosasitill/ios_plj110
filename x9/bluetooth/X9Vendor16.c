@@ -9,6 +9,7 @@
  * A chipset enum is not HCI manufacturer ID or a controller capability.
  */
 #include <errno.h>
+#include "X9Bootstrap16.h"
 #include <mach/mach.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -55,7 +56,7 @@ static void credit_fatal(uint32_t status)
      * _abort_with_payload (NOT _os_fault_with_payload). Unlike the dedicated
      * timeout callback, it does not relabel enqueue/transport errors 0x26d.
      * Never resend a credit whose UART delivery might already have begun. */
-    fprintf(stderr, "X9 H4: host ACL credit failed status=0x%x; native fatal\n", status);
+    x9_bt_note("X9 H4: host ACL credit failed status=0x%x; native fatal\n", status);
     ((reset_fn)addr(0x1000902c0))(status);
 }
 
@@ -372,19 +373,19 @@ static int host_flow_contract(void)
     };
     for (size_t k = 0; k < sizeof(guards)/sizeof(guards[0]); k++) {
         if (memcmp((void *)addr(guards[k].va), guards[k].words, guards[k].count*4)) {
-            fprintf(stderr, "X9 vendor: unexpected host-flow contract at %llx; no text changed\n",
+            x9_bt_note("X9 vendor: unexpected host-flow contract at %llx; no text changed\n",
                     (unsigned long long)guards[k].va);
             return -1;
         }
     }
     if (*(uint32_t *)addr(0x100863b20) ||
         memcmp((void *)addr(0x10067684e), default_config, sizeof(default_config))) {
-        fprintf(stderr, "X9 vendor: unexpected host-flow config/lifetime; no text changed\n");
+        x9_bt_note("X9 vendor: unexpected host-flow config/lifetime; no text changed\n");
         return -1;
     }
     for (size_t k = 0; k < 3; k++) {
         if (memcmp((void *)addr(0x100845198 + k*24), descriptors[k], 8)) {
-            fprintf(stderr, "X9 vendor: unexpected host-flow descriptor; no text changed\n");
+            x9_bt_note("X9 vendor: unexpected host-flow descriptor; no text changed\n");
             return -1;
         }
     }
@@ -399,7 +400,7 @@ int x9_vendor16_install(intptr_t slide)
     if (!selection || strcmp(selection, "MT6653")) return 0;
     int boot = ENXIO; size_t n = sizeof(boot);
     if (sysctlbyname("kern.x9_bt_boot", &boot, &n, NULL, 0) || n != sizeof(boot) || boot) {
-        fprintf(stderr, "X9 vendor: complete board initialization required; no text changed\n");
+        x9_bt_note("X9 vendor: complete board initialization required; no text changed\n");
         return -1;
     }
     image_slide = slide;
@@ -484,7 +485,7 @@ int x9_vendor16_install(intptr_t slide)
     }
     for (unsigned k = 0; k < count; k++) {
         if (memcmp((void *)addr(edits[k].va), edits[k].before, edits[k].words*4)) {
-            fprintf(stderr, "X9 vendor: unexpected 20H392 instruction at %llx; no text changed\n",
+            x9_bt_note("X9 vendor: unexpected 20H392 instruction at %llx; no text changed\n",
                     (unsigned long long)edits[k].va);
             return -1;
         }
@@ -560,7 +561,7 @@ int x9_vendor16_install(intptr_t slide)
                 if (vm_protect(mach_task_self(), pages[j], page, FALSE,
                                     VM_PROT_READ|VM_PROT_EXECUTE)) abort();
             vm_deallocate(mach_task_self(), tramp, page);
-            fprintf(stderr, "X9 vendor: COW text protection failed (%d); no text changed\n", kr);
+            x9_bt_note("X9 vendor: COW text protection failed (%d); no text changed\n", kr);
             return -1;
         }
         pages[page_count++] = p;
@@ -572,6 +573,6 @@ int x9_vendor16_install(intptr_t slide)
     for (unsigned j = 0; j < page_count; j++)
         if (vm_protect(mach_task_self(), pages[j], page, FALSE,
                             VM_PROT_READ|VM_PROT_EXECUTE)) abort();
-    fprintf(stderr, "X9 vendor: native type0 routing and HCI capability publisher; unsupported vendor ops stay null\n");
+    x9_bt_note("X9 vendor: native type0 routing and HCI capability publisher; unsupported vendor ops stay null\n");
     return 1;
 }

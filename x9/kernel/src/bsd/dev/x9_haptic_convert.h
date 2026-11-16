@@ -8,7 +8,7 @@
 #include "x9_haptic.h"
 struct x9_haptic_converter {
     uint32_t phase, step, conversion, intensity, sharpness, decimator;
-    int32_t dc, envelope, lowpass, sum, hold;
+    int32_t dc, envelope, lowpass, sum, hold, event_peak;
 };
 /* Q15 sine approximation on a full unsigned 32-bit turn. Bhaskara's
  * approximation, bounded 64-bit intermediates, exact zero at half turns. */
@@ -49,13 +49,21 @@ static inline int x9_haptic_convert_sample(struct x9_haptic_converter *c,int16_t
     if(++c->decimator<4)return 0;
     c->decimator=0;int32_t value=c->sum/4;c->sum=0;
     if(c->conversion==X9_HAPTIC_RETUNE) {
-        /* As OPPO aw8693xs drives this LRA: a pure f0 sine whose strength is
-         * LINEAR in the requested level (vmax_map: level 0..2400 -> gain
-         * 0..0x80 at fixed vmax 0x11). No per-sample floor (log 327: the
-         * 5/8 floor stretched every tap's tail, "loose, not linear") and no
-         * 3rd harmonic, which an LRA turns into audible buzz. iOS taps peak
-         * at 1000..33000 (HakiOS), so a third of full scale is full drive. */
-        int32_t amp=c->envelope*3;if(amp>32767)amp=32767;
+        /* Pure f0 sine (an LRA turns a 3rd harmonic into buzz), chip gain
+         * 0x80 = OPPO vmax_map maximum. Strength per EVENT as HakiOS
+         * gain_for() chooses it: full from a third of full scale, 5/8 for
+         * the softest tap. Inside the event the drive follows iOS's envelope
+         * linearly, so tails decay crisply. Log 327 applied the floor per
+         * sample (smeared tails, "loose"); log 328 went fully proportional
+         * (iOS taps peak at 1000..33000, so most were "too light"). */
+        int32_t env=c->envelope,third=32767/3,amp=0;
+        if(env<=256)c->event_peak=0;
+        else {
+            if(env>c->event_peak)c->event_peak=env;
+            int32_t p=c->event_peak;
+            int32_t g=p>=third?32767:32767*5/8+(int32_t)((int64_t)(32767*3/8)*p/third);
+            amp=(int32_t)((int64_t)g*env/p);
+        }
         value=(int32_t)((int64_t)amp*x9_haptic_sine(c->phase)/32768);
         c->phase+=c->step;
         value=(int32_t)((int64_t)value*c->intensity/1000);
