@@ -16,6 +16,7 @@
 - 显示：ADT canvas 1242x2760（414x920 pt @3x，左右各 7 px 黑边）；物理面板 1256x2760 stride 5120，fb 0xfc910000。
 - 用户目标（2026-11-12）：**Mac USB 配对、AppSync 安装 IPA、完整越狱（Procursus rootless /var/jb，SSH 只走 ue0）**；
   方法上**以 UniXNU 为主要参考，不闭门造车**。
+- 用户新增目标（2026-11-16）：**原生 Apple Wallet 新开交通卡并锁屏刷卡使用**；城市/卡种及资金渠道尚未指定，当前只完成修复规划，未开始开卡或资金/SE 操作。
 
 ## 2. 机器与目录
 
@@ -157,6 +158,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - 交接写在本文件 §5，标明提交、run ID、确切构建/启动结果和观察 vs 推断。push 到 `origin`（GitHub tosasitill/ios_plj110）。
 
 ## 5. 当前状态与交接
+
+#### 2026-11-16 Wallet 交通卡目标：分门槛修复计划（未开卡）
+
+- **范围/报告提交**：用户把目标缩到原生 Wallet 开交通卡；单代理隔离 `feat/wallet-transit-plan`，main 基线 **`84e1aad5`**。报告 **`4a42639`**：`docs/2026-11-16_reverse-wallet-transit-plan-report.md`。仅被动库存/复用日志、规划及 Git 发布；不切换或改写主 checkout 的并发 SMS 工作，不操作其它工作树。无构建/CI run ID、新启动、ADB/fastboot、RF/APDU、登录/身份注册、开卡/充值/迁移/交易、SE/根盘/分区写入。
+- **观察/纠偏**：根盘克隆确有 `com.apple.Passbook` 主程序，位于 removable application bundle 根，不能仅查 `/Applications` 就断言 Wallet 缺失；原件 passd 发布 device-registration/payment/library/account/nf-events 等服务。330 已捕获 **06:06:16.484Z `Secure element available: NO` / broker未注册，以及 Needs Registration YES / Has Certificates NO**；本地 supported-device YES 不等于平台认可 X9。06:06:37.337Z 无iCloud账户、CloudStore **PKPassKitErrorDomain -4008**；没有目标卡 add-card、发行请求或远端拒绝证据。NFC 板级 SN220T/I²C14/eSE SPI5 及 nfcd 打开会话失败、ADI -42410/BAA/activation identity、固定已解锁软件 AKS 基线复用前轮，不重采身份/卡片材料或推测错误枚举。
+- **修复门槛/推断**：G0 选卡/地区/iOS16-D22资格/资金路线 → G1 原件UI/XPC/真密码keybag基线 → G2 目标路由实际账户/证明依赖 → G3 NCI/eSE/nfcd管理会话 → G4 平台接受SE签名/证书/安全域与发卡资格 → G5 同一次资金授权/个性化/激活 → G6 快捷交通/off-host routing/锁屏恢复 → G7 真终端交易扣费一致。**G4 必须早期调查，不等全UI/读卡做完；当前未知，既未承诺可行，也未证明必然失败。**完整 iMessage、App Store、指纹、CoreNFC reader API 和备用电量不是默认前置；若卡种需发行方App或已配置付款卡，再明确增加该依赖。
+- **验收/回滚**：最终以发行方 active、SE有效卡应用、Wallet余额/状态及锁屏真实交易核对；卡面/UID/APDU成功/HTTP200/扣款单步不能代替完成。账户/平台注册、SE写入、开卡/充值/迁移/删卡/消费逐项确认；**分区备份不恢复eSE卡片/密钥/计数器**，不能以还原userdata或刷回Android冒充事务撤销。故障按同发行业务ID查询恢复，避免重复扣款。
+- **复核/下一步**：私有证据 `x9/out/wallet-transit-plan-20261116/`（scope/timeline/workitems/Wallet库存/脱敏passd证据/前轮限定证据/field-journal）；`verify-plan-evidence.py` 仅读已保留JSON，**actual exit0**，8项规划依据核对通过，不代表实机资格或交易通过。报告 staged diff检查/commit actual exit0。下一先问具体城市/卡名并锁资金路线，再按目标入口做不扣费的资格/SE契约调查；所有状态变更先确认。提交/合并/push确切结果另补，规划完成不等于交通卡目标完成。
 
 #### 2026-11-16 display-fill：用户批准合 main / 删除分支（源码收尾，未实机）
 
