@@ -290,6 +290,11 @@ class AppleCLCD : public IOMobileFramebuffer {
 	void x9GpuWaitSetup(void);
 public:
 	void x9GpuTimerArm(void) { if (fX9GpuTimer != NULL) fX9GpuTimer->setTimeoutUS(1); }
+	/* RequestPowerChange caller holds fLock; keep timer internals private. */
+	void x9PowerTimerArm(void) {
+		if (!fPowerOff) fTickDeadline = mach_absolute_time();
+		if (fVsync != NULL) fVsync->setTimeoutUS(1);
+	}
 private:
 
 public:
@@ -2865,10 +2870,10 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 				fFB->fPowerOff = off;
 				fFB->fFadeStep = 0;
 				fFB->fDirty = true;     /* on: redraw the latest frame */
-				if (sweet_board_x9() && fFB->fVsync != NULL) {
+				if (sweet_board_x9()) {
 					/* on: fresh cadence, no catch-up burst for time asleep.
 					 * off: one callback drains GUI and parks this timer. */
-					fFB->fVsync->setTimeoutUS(1);
+					fFB->x9PowerTimerArm();
 				}
 				if (fFB->fX9Bl && fFB->fBlCall != NULL) {
 					fFB->fX9BlGen++; /* interrupt an old brightness fade */

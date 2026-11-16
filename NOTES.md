@@ -167,7 +167,8 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **休眠实现**：灭屏清两边旧touch lease、事件序列防lost wake；无运行owner/async队列完成后先走原CSG SUSPEND+flush+AS1 detach，再经原host-power接口进MCU retention SLEEP，必须state ACK+HALT+doorbell-disable三者成立。AS0/L2/GPUEB POWER/ACTIVE及全部buffer保留；每个RenderOwner访问先ACTIVE→doorbell→fresh PING，display timer仅非阻塞触发唤醒。错误保留全部资源、不reset/不新DMA。`x9_gpu_sleep=0`禁MCU sleep但保留队列退休。确认display-idle且CPU后台peak<5%时 governor50→1000ms，display/job事件及时唤醒；删除每2s绑三核跑依赖加法的测频，暗屏日志30s。
 - **显示**：X9缺省 `sweetfb_stayon=0`（其它板仍1，可显式1恢复），off由既有LK DCS DBV0真清屏、不走正常亮度最小值夹制，wake还原最新亮度；取消/排完已武装GUI后停软件VSync/通知，on重arm；不新增SLEEP_IN/共享rail电源写。触摸/SCP/无线/UFS原工作流保持，不冒称整SoC suspend；特别 `dv=1` INIT-only/DDR高票与`ug=5`安全floor不改，不能把本轮称为原厂整机待机功耗。
 - **构建里程碑**：`prepare-local.py --check` actual exit0。首轮完整 `build.py all --boot-config x9/build/boot-device.json --name x9-power-policy-20261116` actual exit0，103/103 overlay，已链接/打包；它早于显示修补，不推荐该中间镜像。未跑测试脚本/测试套件、未重解包校验成功产物；无CI run ID（本轮是本地overlay构建）。最终源码提交后用唯一v2名称重编，结果待下条补记。scratch/原始构建输出 `x9/out/power-policy-20261116/`，没有设备写/ADB/fastboot/mailbox。
-- **待验收**：用户手动boot最终v2，连续触摸/滚动不应全簇top，停止活动后降频；锁屏应DBV0、停止VSync、`X9 GPU PM: MCU retention sleep confirmed`，随后`X9 POWER: display-idle ...1000ms`（后台负载忙可维持50ms）；电源键/自动亮屏需MCU awake+fresh PING、画面/触摸/亮度恢复，多轮锁/解锁和后台音频/蜂窝必须验证。尚无该策略的实机帧率/温度/睡醒结果，GPU热度仅保守CPU温度代理，不等价全SoC温控。
+- **构建失败/修正**：源码 `15ec6524` 的最终v2编译 actual exit1，102/103：user client直接访问protected `AppleCLCD::fVsync` 两处报错；没有v2 boot，旧对象未用于链接。改为public `x9PowerTimerArm()`封装，并在亮屏重置deadline。最终改用唯一v3名称重编；不得推荐失败v2或首轮中间包。
+- **待验收**：用户手动boot最终v3，连续触摸/滚动不应全簇top，停止活动后降频；锁屏应DBV0、停止VSync、`X9 GPU PM: MCU retention sleep confirmed`，随后`X9 POWER: display-idle ...1000ms`（后台负载忙可维持50ms）；电源键/自动亮屏需MCU awake+fresh PING、画面/触摸/亮度恢复，多轮锁/解锁和后台音频/蜂窝必须验证。尚无该策略的实机帧率/温度/睡醒结果，GPU热度仅保守CPU温度代理，不等价全SoC温控。
 
 #### 2026-11-16 远端仅保留本地同名分支（实际删除完成）
 
