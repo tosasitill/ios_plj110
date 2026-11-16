@@ -52,7 +52,7 @@
 - match 分支计算 successor；若 node 是 Model+58 的 begin，则更新 begin；
   **1000c7930..1000c7938 将 Model+68 size减1**。
 - 1000c7940 调完整 tree detach/rebalance100006610；1000c7948 对 node+28
-  owning pair 调1000c6834；1000c7950 调精确 `_ZdlPv`，最后返回1。
+  owning pair 调1000c6834；1000c7950 调精确 Mach-O import `__ZdlPv`，最后返回1。
 - 旧 admission1000bfc18 以同 ID 写 node+20、同 Operation pair写+28/+30，
   入同 Model+60 树并加同 Model+68；旧 retrieve1000c6bb8在该树只 lookup/retain。
   本轮不能把这几个不同操作混为一次 lookup。
