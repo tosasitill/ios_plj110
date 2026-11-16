@@ -157,6 +157,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 selected CLIR factory 原 DEX 续接（新依赖证据，无生产补丁）
+
+- **基线/范围**：干净 main/origin `bc91abb1`，本轮单代理、功能分支 `feat/call-clir-selected`。上一轮 `3c4a49a0` terminal ownership 修复/完整kernel已交付，本轮不重编它、不重复旧CallList/profile扫描、不操作设备/分区/mailbox或其它硬件树。typed caller/context/backend、媒体及当前短信最终验收仍缺，完整goal保持active，不把本条静态进展当功能完成。
+- **新的确切依赖**：沿 `ImsPhoneCallTracker.mInterfaceImpl → OplusTelephonyFactory` 首次窄追 factory；matching `telephony-common.jar` 的真实 `getInstance` owner-user 分支指定 **`/system_ext/framework/oplus-telephony-common.jar`**、**`com.oplus.internal.telephony.OplusTelephonyFactoryImpl`**。该 jar 不在已抓 `files-manifest.json`，本树原件/备份 exact-basename 查找也未找到；已有 `oplus-framework.jar` 是 wrapper，不能代用。不是再次声称已抓的 Java/DSP 全部缺失，也不能把 Android user0 当 SIM0/personality。下一应取得同版这个精确 jar 后闭 `getFeature` 的 tracker 选择/default override；本轮未重新连接或采集ADB，设备操作仍先确认。
+- **原 bytes 与反编译冲突**：独立读取原 `classes.dex` 四个 code_item：factory getInstance **`0x12b348`** / newInstance **`0x12b4a4`**、tracker getClirMode **`0x20ed00`**、interface default **`0x329aec`**。ASC此次 Java 遗漏 `mLock` monitor 及反射 `Exception` fallback；原try/handler证实加载失败会构造 base factory、清 valid flag，catch-all exit monitor后rethrow。真实 per-sub `clir_sub_key+getSubId` 和 interface default0原指令已确认，但 vendor选择/实际default值仍无runtime证据，不能归零或开09/20。保留main/radio日志没有此窄factory/default检索的决定性输出，不据零命中推断fallback。
+- **工具/产物/重放**：`x9/out/call-clir-selected/` 保留 `selected-factory-dependency.json`、四份 `*.dex.asm`、`original-method-locations.json`、`read-original-methods.py`、ASC stdout/stderr与 `executed-commands.txt`。ASC getmanifest exit1（JAR没有AndroidManifest），list/findrefs/getclass exit0。初次 Androguard 原DEX读取因Android17 hidden-API enum4 exit1，decoder仅保留未知metadata numeric值后exit0；archive/DEX未改，每条指令与原offset/raw bytes相符。重放用同目录脚本＋manifest所列telephony-common原件，但选新的output目录，不覆盖本次原记录。不跑测试套件/编译/CI/boot或构建后产物复检；无新镜像、无新的短信COMMIT/重开/物理ACK/MO对端验收。
+
 #### 2026-11-16 CALL terminal reply 所有权续修（本轮生产代码，完整目标未完成）
 
 - **基线/范围**：main `e4f33dae`，`feat/call-terminal-receipt` / `.worktrees/call-terminal-receipt`。本轮单代理，不操作设备、分区、mailbox或其它硬件树。读取既有CallList原件契约后确认第七byte/Call_Type仍未闭合，不猜字段、不再重跑已排除producer路径。转而修复实际源码的独立缺口：END21终态、staging DIAL20汇合与注册03失败回复原来通过void/port-recognition发送后擦除owner，无法确认主机队列真正接收。

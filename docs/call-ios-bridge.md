@@ -1936,6 +1936,42 @@ fresh `x9/out/call-owned-runtime/` 的 CLIR/OIR 零命中亦不证明 raw0。仍
 完整可达 iOS owned producer/backend 与最终事件/媒体验收；无生产源码、测试、编译、CI/镜像，
 VOICE09 保持关闭，不新增 unused API、默认 profile 或开放拨号准入。
 
+### selected CLIR factory 的原 DEX 分支（2026-11-16）
+
+续查只沿上述 `OplusTelephonyFactory` 新 lead，不重扫已排除的 wrapper 类。
+matching `telephony-common.jar:classes.dex` 的四个原 `code_item` 已独立读取，
+以下 offset 是**原未压缩 DEX**内位置，不是 ASC 重建 DEX 或 Java 行号：
+
+- `getInstance`：`0x12b348`，instructions 从 `0x12b358` 开始。
+  `myUserId()==0` 时用 `newInstance` 加载
+  **`/system_ext/framework/oplus-telephony-common.jar`**，类名
+  **`com.oplus.internal.telephony.OplusTelephonyFactoryImpl`**；正常返回后保存 factory，
+  `sIsValidOplusFeature=true`。非 owner Android user 则构造 base factory、置 false。
+  **Android user ID 不是 SIM slot 或 iOS PersonalityID。**
+- ASC 此次 Java 输出遗漏了真实的 `mLock` monitor 和 `Exception` fallback。
+  原 DEX 的 `cu0x10..0x43` try 范围有 `Exception → cu0x24` handler：
+  反射失败会打印错误、构造 base factory并置 false；catch-all `cu0x22` 经
+  monitor-exit 再抛出。不能将“代码会尝试加载 vendor”写成实际选择成功。
+- `newInstance`：`0x12b4a4`，用实际 parent classloader 创建 `PathClassLoader`，
+  `Class.forName(...,true,loader)` 后取无参构造并 `newInstance`。
+- `ImsPhoneCallTracker::getClirMode`：`0x20ed00`，确认
+  `clir_sub_key + mPhone.getSubId()`，并把实际 `mInterfaceImpl` 的
+  `getClirDefaultSuppression()`返回值交给 `SharedPreferences.getInt`。
+  interface 默认方法 `0x329aec` 的原两条指令确为返回0；仍不证明 vendor override
+  或当前 preference/实际拨号值。
+
+新的首缺输入是上面**selected factory jar**，它不在现有 `files-manifest.json`
+采集清单，也未在本树原件/备份的 exact-basename 查找中找到；已留的
+`oplus-framework.jar` 是另一份 wrapper，不能代用。下一需要同版该 jar 的
+`getFeature`选择分支及 tracker implementation，再核其 default 方法和运行分支。
+保留的 main/radio log没有本次 factory/default 搜索的决定性输出，不能推断成功或失败。
+
+原件解码、位置 JSON、ASC输出和实际命令在 `x9/out/call-clir-selected/`。
+初次原 DEX parser 因 Android17 hidden-API metadata enum4 不受支持而 exit1；
+仅在 decoder 中保留未知注解的 numeric value 后 exit0，原 archive/DEX bytes未改变，
+每条输出指令均核对其原 offset/raw bytes。不将 metadata workaround 当 runtime 策略。
+本项无生产修改、构建、设备操作或功能验收，仍不开放 VOICE09/20 或赋予默认profile。
+
 ## 2026-11-16 同版 DSP 原件：task-info producer 与 USIP AD50 的窄契约
 
 新 capture `android-call-inputs-20261116-092442` 已保留 active `audio_dsp_b`
