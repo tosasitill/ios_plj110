@@ -54,6 +54,9 @@ struct x9_vdec_control_hardware {
      * Actual initialized mode must be INPUT_DRIVEN_PUT_FRM (2), with output
      * supplied via a005. The immutable decoded observation is NOT ownership
      * authority; the platform must check its real routing/layout/clock state.
+     * Its plane_count is AP-published f28, NOT firmware-derived1374. Still
+     * independently qualify the actual FW-derived count/selected layout and
+     * current generation; AP store/readback is not firmware negotiation.
      * Must NOT reenter control/shared/bus APIs, write VSI, mark pixels complete
      * or return a successful empty stub. Native code owns precise NC stores
      * AFTER this qualification, within the physical bus call reservation.
@@ -117,6 +120,10 @@ struct x9_vdec_control_output_journal {
     struct x9_vcp_output_notification notification;
     struct x9_vcp_bus_call_log call;
     uint32_t prepared, notified, last_errno;
+    /* APf28 store only: raw readback is retained even on mismatch; observed
+     * means it equalled this record's count, not FW1374 sync/layout or DMA. */
+    uint32_t ap_plane_count_store_attempted, ap_plane_count_readback;
+    uint32_t ap_plane_count_store_observed;
     uint32_t free_fb_observed, display_fb_observed; /* no read/count write or pixels */
     struct x9_vcp_ring_snapshot free_fb, display_fb;
 };
@@ -168,6 +175,9 @@ int x9_vdec_control_decode_reset(struct x9_vdec_control *, uint32_t drain_type,
  * PoC under the bus call reservation and send physical a005/service2. Size
  * arguments are capacities selected by the native layout owner, not caller
  * IOVAs or a declaration of NV12/P010. 1/2 planes; unused plane size must0.
+ * After all DEVICE handoffs, publishes only this record's AP f28 plane count
+ * through the unique claimed Normal-NC slot before a005. Its store journal
+ * is not FW-derived count refresh, first-a005 synchronization or layout.
  * Whole-domain retirement alone currently permits slice reuse/free. b005 is
  * an instance resource notification ONLY; no acceptance/pixel/retirement ACK.
  * Successful control calls permit subsequent fresh registrations, before or

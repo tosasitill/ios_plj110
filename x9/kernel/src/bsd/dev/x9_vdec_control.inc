@@ -640,6 +640,8 @@ static int vcontrol_prepare_start(void *cookie, uint64_t epoch, uint64_t end,
     if (!e) e = vcontrol_snapshot(c,end,VCONTROL_DECODE_FIELDS,&common);
     if (!e) e = x9_vcp_parse_decode_snapshot(X9_VCP_DECODE_ABI_MT6993_CAPTURE1,
         c->scratch,X9_VCP_INSTANCE_SLOT_BYTES,&decoded);
+    /* plane_count is AP-published f28: this only rejects an AP record
+     * mismatch. It does not qualify FW-derived1374 or its current layout. */
     if (!e && (decoded.input_driven != 2 || decoded.ipi_blocked ||
         decoded.plane_count != resources->output.plane_count ||
         (decoded.bitdepth != 8 && decoded.bitdepth != 10))) e = ENOTSUP;
@@ -648,6 +650,67 @@ static int vcontrol_prepare_start(void *cookie, uint64_t epoch, uint64_t end,
     if (!e) e = c->hardware.qualify_start(c->hardware.cookie,epoch,end,init,result,q,
         resources,&decoded);
     if (!e) e = vcontrol_stage_start(c,end,&decoded);
+    return e;
+}
+/* Called only by prepare_output within its physical whole-call reservation,
+ * after every actual output handoff has been journaled. Captured enum5's
+ * 26c00..26c18 case stores the AP input u32 to VSI+f28 (store at26c10).
+ * This is that AP producer, not a write to FW1364/1374/mode/depth or evidence
+ * that firmware has consumed/refreshed its derived count before a005. */
+static int vcontrol_stage_output_planes(struct x9_vdec_control *c,
+    uint64_t epoch, uint64_t end)
+{
+    struct x9_vdec_shared *s = c->shared;
+    struct x9_vcp_output_record *r = &c->status.output;
+    struct vcontrol_output_record *o = c->active_output;
+    volatile uint8_t *p = NULL;
+    int e;
+    if (epoch != c->status.epoch || !o || !c->status.output_attempted ||
+        c->status.output_prepared || o->journal.ap_plane_count_store_attempted ||
+        r->generation != epoch || r->instance_token != c->init.instance_token ||
+        r->context_id != c->init.context_id ||
+        r->firmware_vsi_address != c->status.init.firmware_vsi_address ||
+        r->buffer_index >= c->status.output_records ||
+        r->buffer_index >= X9_VDEC_CONTROL_MAX_RECORDS ||
+        o != &c->outputs[r->buffer_index] ||
+        !r->plane_count || r->plane_count > X9_VCP_OUTPUT_PLANES) return ESTALE;
+    for (unsigned n = 0; n < r->plane_count; n++) {
+        uint32_t state;
+        if (o->slice[n].epoch != epoch) return ESTALE;
+        e = x9_vdec_dma_slice_state(s->codec,&o->slice[n],&state);
+        if (e) return e;
+        if (state != X9_VDEC_DMA_DEVICE) return EBUSY;
+        if (!r->plane[n].iova || r->plane[n].bytes != o->slice[n].capacity)
+            return ESTALE;
+    }
+    lck_mtx_lock(&s->lock);
+    lck_mtx_lock(&s->arena->lock);
+    e = epoch != s->epoch || epoch != s->arena->request.epoch ? ESTALE : 0;
+    if (!e && (!c->status.bound || !c->status.slot_initialized ||
+        c->slot.index >= X9_VCP_INSTANCE_SLOT_COUNT)) e = EBUSY;
+    if (!e && (!(s->bound_slots & (1u << c->slot.index)) ||
+        c->slot.bytes != X9_VCP_INSTANCE_SLOT_BYTES ||
+        c->slot.offset != X9_VCP_COMMON_PREFIX_BYTES +
+            c->slot.index * X9_VCP_INSTANCE_SLOT_BYTES)) e = ESTALE;
+    if (!e && (c->slot.offset & 7)) e = EFAULT;
+    if (!e) e = vmem_deadline(end);
+    /* Revalidates the retained global DEVICE slice, live power pin,
+     * Normal-NC MAIR/pmap attributes and every backing PA before this store. */
+    if (!e) e = vshared_live_window(s,X9_VCP_GLOBAL_VDEC_OFFSET+c->slot.offset,
+        X9_VCP_INSTANCE_SLOT_BYTES,&p);
+    if (!e) {
+        o->journal.ap_plane_count_store_attempted = 1;
+        vcontrol_store32(p,0xf28,r->plane_count);
+        __asm__ volatile("dsb oshst" ::: "memory");
+        o->journal.ap_plane_count_readback = vcontrol_load32(p,0xf28);
+        if (o->journal.ap_plane_count_readback != r->plane_count) e = EIO;
+        else o->journal.ap_plane_count_store_observed = 1;
+        /* A later failure retains both this AP-store journal and all DEVICE
+         * handles. Never roll back a live store or grant FW/DMA readiness. */
+        if (!e) e = vmem_deadline(end);
+    }
+    lck_mtx_unlock(&s->arena->lock);
+    lck_mtx_unlock(&s->lock);
     return e;
 }
 static int vcontrol_prepare_output(void *cookie, uint64_t epoch, uint64_t end,
@@ -686,6 +749,7 @@ static int vcontrol_prepare_output(void *cookie, uint64_t epoch, uint64_t end,
         }
     }
     if (!e) e = vmem_deadline(end);
+    if (!e) e = vcontrol_stage_output_planes(c,epoch,end);
     if (!e) {
         c->status.output_prepared = 1;
         vcontrol_journal_output(c);
