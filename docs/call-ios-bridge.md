@@ -2085,3 +2085,113 @@ fresh 日志现位于主 `x9/out/call-owned-runtime/`；既有窄筛初始化/SM
 COMMIT、重开持久化、相关物理 ACK/WMS完成，以及 MO 对端收到；本次没有 production delta 或镜像。
 原偏移、标签边界与逐条只读 `cat/sed` 入口在 gitignored
 `x9/out/init-sms-java/matching-sms-final-contract.json`；root 统一归档/交接，无编译、CI 或上机结果。
+
+## 2026-11-16 actual personality 更新、typed Client 输入与退休边界
+
+以下为当前root/cache原件静态链，**不是已安装的MTK typed backend或通话/SMS验收**。
+前节普通typed client的路由继续成立；本节补齐它依赖的真实owner、队列和re-add边界。
+
+### 更新的是强owned model，不是临时Call或单slot helper
+
+CommCenter原 `PersonalitiesTracker` 绑定点 `1007a1fe4..1007a2034` 将
+handler+990的tracker与callback **`1007a5150`** 绑定；输入target queue来自handler+18。
+event前24B为真实PersonalityID，action在+18/u8。原jump table `10114d135` 为
+`0e1cf42af4f40000`：0→added、1→enabled、6/7→removed，2/4/5返回；
+不替action3猜业务语义。handler+48是manager secondary interface，其+128/+130/+138
+经this−0x30 thunks到 `handlePersonalityAdded_sync1f2e52048`、
+`handlePersonalityEnabled_sync1f2e52f58`、`handlePersonalityRemoved_sync1f2e53bc8`。
+
+added已有controller分支 `1f2e528d8..8fc`、enabled正常分支 `1f2e53180..1a4`
+都从强controller virtual+38调用 **`getModel_sync1f2e421c8`** 得model强pair，
+再从model virtual+30调用 **`updatePersonalityInfo1f2e77c04`**，传入真实
+`shared_ptr<PersonalityInfo const> const&`。后者 `1f2e77d00..d08` 将model+28/+30
+替换为incoming强pair，并通知model+58 observer；不是只更新integer slot。
+`getPersonalityInfo1f2e77d7c` 在x8返回该强pair并increment control。
+model getter本身没有revision/MD epoch，也不能由本函数未见mutex否定调用者串行化。
+
+### tracker退休fence与manager getter同步必须区分
+
+`PersonalitiesTracker::bind1f038aa40` 先unbind旧hookup，再创建**独立serial child queue**，
+target为输入queue。`updateEvent1f038c1c4` 保存weak hookup/group、复制event、retain强record，
+经async **`1f038c4e0`** 调tracker+50第一阶段，随后group notify **`1f038c75c`**
+调tracker+70→上述CommCenter handler。两个执行阶段都weak-lock并检查旧hookup+20。
+`unbind1f038a944` 在 `1f038a95c` 先清旧hookup+20，再清owner和三个callback。
+所以不能把“已排旧event在rebind后调用新callback”当作既定行为；反过来，这也不是
+native binding/epoch、已发MD mutation或typed delegate终态的退休fence。
+
+原件decoder已修正：四个dispatch stub是 **ADRP/LDR GOT/BR**，不是ADRP/ADD直达。
+当前GOT mapping的slide-v2实值 `page_size=4096 / delta_mask=0x00ffff0000000000 /
+value_add=0`；各GOT均通过page-start与实际rebase chain成员资格，再核对当前export trie：
+
+| 原stub | 原GOT | unslid target / 真export |
+| --- | --- | --- |
+| `1f03c19b8` | `20f7e8d98` | `18dba5310 _dispatch_async_f` |
+| `1f03c1a0c` | `20f7e8e90` | `18dba555c _dispatch_group_notify_f` |
+| `1f03c1a24` | `20f7e8f48` | `18db970d0 _dispatch_queue_attr_make_with_qos_class` |
+| `1f03c1a3c` | `20f7e8f58` | `18dba5814 _dispatch_queue_create_with_target$V2` |
+
+weak-lock veneer **`1f2f7b31c`** 原12B `b0bcd0f010e2019100021fd6` 直接解析到
+真export **`194712078 __ZNSt3__119__shared_weak_count4lockEv`**。旧
+`qualified/original-producer-proof.json` 四个`optimized_queue_stubs.target=20f7e8000`
+**无效且保留不覆盖**；其它21个text/6个data/25个export不因此失效。新补证独立在
+`qualified-queue/original-queue-proof.json`，此次只读target/metadata，没有重读旧21个text范围。
+
+### 普通typed factory真正消费的Client强pair
+
+已知 `100dcf174` 为factory准备临时Client pair时调用 **`100dd1168`**：
+从CallInfo+0xd8读slot，driver+88 virtual+190的结果分普通/另一Client路径，
+**不以该未知predicate或factory的emergency形参推测全部紧急策略**。
+普通分支tail-call **`100dd3498`**，调用原 `PersonalityIdFromSlotIdEx` 得真实ID，
+再经Registry service-map helper **`1001acd00`** 取强
+`SystemDeterminationManagerInterface`。root GOT `10151b320` 的原import为此RTTI，
+不是独立CallFactory item；磁盘bind编码 `8010000000000e62` 不是可调用地址。
+manager primary addresspoint **`20e057338`** 的+18（slot `20e057350`）实际目标为
+**`getIMSClientRef1f2e4c210`**。
+
+这个getter首先调用 **`isPresent1f038b750`**（原veneer `1f2fb16cc`），不是
+`sd::isSimPersonality`。isPresent只检查非空ID并按ID查强record是否存在，**不检查
+record+31的SIM类型、+34的物理slot或当前初始化/注册状态**。
+present分支从manager+18取queue，根据保存的dispatch包装状态选
+`_dispatch_async_and_wait1f2e82fe8→18dba52ec` 或
+`_dispatch_sync1f2e83084→18dba5a00`；原wrapper均将真实结果搬入x8 sret。
+实际map访问block **`1f2e61a04`** 查manager+68的PersonalityID→强controller map，
+存在则virtual+60→**`getImsClientRef1f2e68b38`**，从controller+d8/e0返回强Client pair，
+缺entry则空pair。non-present分支另有特殊PersonalityID比较/诊断路径，不能简化成SIM0 fallback。
+
+这闭合了普通typed action→真实强manager/controller/Client输入，不把clientId当personalityId。
+**仍不能把三个独立读取（slot→ID、isPresent、manager排队后的Client）视作原子
+record/revision快照，也不能把强pair成功视作REGISTERED或media-ready。**
+物理provenance仍须取同一owned record，并由provider自有binding/epoch跨异步准入复核。
+
+### removed→re-add不会自然生成新的Client身份
+
+manager removed正常分支只查强controller并virtual+178；完整本函数没有erase该map entry。
+controller removed `1f2e69980` 的+a0/+a8真实槽分别为
+`deinitializeImsClient_sync1f2e6f40c` / `updateImsClientNetworkServices_sync1f2e6f000`，
+还清理model、状态和DCN owner；不是Client destructor。普通deinit/cleanup/late callback
+与root factory ret-deleter的原边界复用前节已认证证据，不再次声称remove即终态。
+
+随后**若同ID entry仍在**，manager added替换model强info，virtual+170→
+`handlePersonalityAdded_sync1f2e696c4`，再virtual+90→
+`createIMSClient_sync1f2e6803c`。后者入口 `1f2e68054..58` 只要controller+d8 Client非空
+就直接返回，不生成新UUID/Client。因此同一Client/clientId可以跨record替换与re-add保留；
+不能仅按clientId或Call地址建立native epoch，不以强owner寿命代替当前record绑定有效性。
+这是一条条件化原件控制流证明，**不是实机已发生移除/re-add或late event误投的观察**。
+
+证据都在 `x9/out/call-context-producer/`。`qualified-client-targets/original-client-proof.json`
+含9个前次成功比较的保留raw范围、此次唯一新增的isPresent text、7个data范围及3个新ABI目标；
+第一次client pass因误给predicate猜名而exit1，未覆盖raw，resume只使用保留的9个text，
+读新predicate/目标并核对原vtable rebase后 **exit0**。两个空objdump输出和此前short-VA查询
+均保留为invalid，不用于结论。维护工具 **`x9/tools/call_context_evidence.py`** 消除scratch
+import依赖，支持独立producer/queue/client模式，只允许NEW `x9/out`输出；本轮只静态syntax
+parse，未为了维护版本重跑已闭范围。需要重放时从主目录使用已有root mount，例如：
+
+```sh
+python3 x9/tools/call_context_evidence.py --mode queue --out x9/out/<唯一名>
+python3 x9/tools/call_context_evidence.py --mode client --out x9/out/<另一个唯一名>
+```
+
+本轮未修改生产call/SMS行为、运行测试/构建/CI或操作设备。下一真正接线仍是owned
+record→logical binding/MD epoch→profile/admission→匹配typed终态；不能新增空loader或
+默认profile绕过。**VOICE09仍关闭，VOICE20仍无生产caller**；CallList/handover、独立
+双向DSP和当前Messages同token COMMIT/重开/物理ACK/MO对端验收仍未完成。
