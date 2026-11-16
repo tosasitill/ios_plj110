@@ -22,6 +22,8 @@ struct x9_heif_plan {
     const struct x9_heif_document *document;
     uint32_t count, root, resampling, overlays;
     enum x9_heif_clap_policy clap_policy;
+    x9_heif_aspect_source aspect_source;
+    void *aspect_context; /* creation only, never retained in a returned plan */
     struct node nodes[X9_HEIF_MAX_ITEMS];
 };
 static uint32_t be32(const uint8_t *p)
@@ -52,7 +54,7 @@ static int aperture_axis(uint32_t image, uint32_t size_n, uint32_t size_d,
     *resample |= fractional;
     return 0;
 }
-/* The pasp pair describes the pre-item-transform source lattice. Retain raw
+/* The resolved source pair describes the pre-item-transform lattice. Retain
  * spacings for exact crops/mirrors and exchange axes on odd quarter turns.
  * LINEAR_CEIL centers span the exact aperture, so a crop multiplies h/v by
  * (width_n * height_d * out_height)/(width_d * out_width * height_n).
@@ -77,8 +79,8 @@ static int transforms(struct x9_heif_plan *plan, const struct x9_heif_image *ima
     struct node *node)
 {
     uint32_t width = image->width, height = image->height;
-    uint64_t horizontal[METRIC_FACTORS] = {image->pixel_aspect_h};
-    uint64_t vertical[METRIC_FACTORS] = {image->pixel_aspect_v};
+    uint64_t horizontal[METRIC_FACTORS] = {node->geometry.source_aspect.horizontal};
+    uint64_t vertical[METRIC_FACTORS] = {node->geometry.source_aspect.vertical};
     uint64_t *h = horizontal, *v = vertical;
     unsigned count = 1;
     for (unsigned n = 0; n < image->property_count; n++) {
@@ -134,6 +136,18 @@ static int transforms(struct x9_heif_plan *plan, const struct x9_heif_image *ima
     node->geometry.width = width; node->geometry.height = height;
     return 0;
 }
+static int source_aspect(const struct x9_heif_image *image, const struct x9_heif_sample_aspect *aspect)
+{
+    uint64_t h = aspect->horizontal, v = aspect->vertical;
+    if ((!h != !v) || h > INT64_MAX || v > INT64_MAX ||
+        aspect->origin < X9_HEIF_ASPECT_ABSENT || aspect->origin > X9_HEIF_ASPECT_COREMEDIA ||
+        ((aspect->origin == X9_HEIF_ASPECT_ABSENT) != !h)) return EBADMSG;
+    if (image->pixel_aspect_h) {
+        if (aspect->origin != X9_HEIF_ASPECT_PASP ||
+            (__uint128_t)h*image->pixel_aspect_v != (__uint128_t)v*image->pixel_aspect_h) return EBADMSG;
+    } else if (aspect->origin == X9_HEIF_ASPECT_PASP) return EBADMSG;
+    return 0;
+}
 static int visit(struct x9_heif_plan *p, uint32_t id, unsigned depth, uint32_t *index)
 {
     /* Check active state first. Cached subtrees still contribute their full
@@ -162,10 +176,18 @@ static int visit(struct x9_heif_plan *p, uint32_t id, unsigned depth, uint32_t *
         }
         node->geometry.coded_width = image->width; node->geometry.coded_height = image->height;
         node->geometry.derived_count = image->derived_count;
-        node->geometry.pixel_aspect_h = image->pixel_aspect_h;
-        node->geometry.pixel_aspect_v = image->pixel_aspect_v;
-        node->non_square_source = image->pixel_aspect_h != image->pixel_aspect_v;
-        e = transforms(p,image,node);
+        struct x9_heif_sample_aspect aspect = { image->pixel_aspect_h,image->pixel_aspect_v,
+            image->pixel_aspect_h ? X9_HEIF_ASPECT_PASP : X9_HEIF_ASPECT_ABSENT };
+        if (node->type == X9_HEIF_HVC1 && p->aspect_source) {
+            memset(&aspect,0,sizeof(aspect));
+            e = p->aspect_source(p->aspect_context,image,&aspect);
+        }
+        if (!e) e = source_aspect(image,&aspect);
+        if (!e) {
+            node->geometry.source_aspect = aspect;
+            node->non_square_source = aspect.horizontal != aspect.vertical;
+            e = transforms(p,image,node);
+        }
     }
     for (unsigned n = 0; n < image->derived_count && !e; n++) {
         e = visit(p,image->derived[n],depth+1,&node->derived[n]);
@@ -202,20 +224,22 @@ static int visit(struct x9_heif_plan *p, uint32_t id, unsigned depth, uint32_t *
     if (!e) { node->state = 2; *index = at; }
     return e;
 }
-int x9_heif_plan_create_with_policy(const struct x9_heif_document *document, uint32_t id,
-    enum x9_heif_clap_policy policy, struct x9_heif_plan **out)
+static int plan_create(const struct x9_heif_document *document, uint32_t id,
+    enum x9_heif_clap_policy policy, x9_heif_aspect_source source, void *context, struct x9_heif_plan **out)
 {
     if (!document || !out || *out || (policy != X9_HEIF_CLAP_EXACT_SAMPLES &&
         policy != X9_HEIF_CLAP_LINEAR_CEIL)) return EINVAL;
     struct x9_heif_plan *p = calloc(1,sizeof(*p));
     if (!p) return ENOMEM;
     p->document = document; p->clap_policy = policy;
+    p->aspect_source = source; p->aspect_context = context;
     int e = id ? 0 : x9_heif_primary(document,&id);
     if (!e) e = visit(p,id,0,&p->root);
+    p->aspect_source = NULL; p->aspect_context = NULL;
     /* Validate the WHOLE reachable graph before any raster callback. The
      * coded root has a known source lattice and ordered output metric. No
      * derived/child inheritance or mixed placement metric is inferred. Check
-     * BOTH raw source and output ratios: square input may become non-square
+     * BOTH resolved source and output ratios: square input may become non-square
      * under anisotropic LINEAR_CEIL, and non-square may become square. */
     for (unsigned n = 0; n < p->count && !e; n++) {
         const struct node *node = &p->nodes[n];
@@ -226,6 +250,12 @@ int x9_heif_plan_create_with_policy(const struct x9_heif_document *document, uin
     if (e) free(p); else *out = p;
     return e;
 }
+int x9_heif_plan_create_with_policy(const struct x9_heif_document *document, uint32_t id,
+    enum x9_heif_clap_policy policy, struct x9_heif_plan **out)
+{ return plan_create(document,id,policy,NULL,NULL,out); }
+int x9_heif_plan_create_with_source_aspects(const struct x9_heif_document *document, uint32_t id,
+    enum x9_heif_clap_policy policy, x9_heif_aspect_source source, void *context, struct x9_heif_plan **out)
+{ return source ? plan_create(document,id,policy,source,context,out) : EINVAL; }
 int x9_heif_plan_create(const struct x9_heif_document *document, uint32_t id,
     struct x9_heif_plan **out)
 { return x9_heif_plan_create_with_policy(document,id,X9_HEIF_CLAP_EXACT_SAMPLES,out); }

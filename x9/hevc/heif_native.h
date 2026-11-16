@@ -26,10 +26,19 @@ enum x9_heif_graph_color_policy {
  * Progressive chroma siting is explicitly attached to the transfer view;
  * field sequences/different top-bottom locations reject during preflight.
  * Unsupported CICP values never become guessed BT709/sRGB defaults.
- * An untransformed coded root retains its non-square pasp on the returned
- * CVPixelBuffer through Normal transfer; no pixels are resized or relabelled
- * square. Non-square pasp in transformed/derived graphs rejects BEFORE
- * hardware until aspect-aware physical metric propagation is implemented.
+ * A coded root propagates its actual pre-transform sample aspect through
+ * ordered crop/mirror/rotation and the returned CVPixelBuffer, never merely
+ * relabelled square. Source is explicit pasp, otherwise known actual-selected
+ * PPS->SPS VUI, otherwise an observed CM format value with CM-only provenance;
+ * absent CM stays absent, never a synthetic1:1. Native plan creation queries
+ * CM/sample metadata for every reachable coded item without decoding and
+ * retains no AU buffers. Color preflight and the actual decoded source
+ * recheck the immutable plan's ratio/presence read-only. Raw pasp provenance
+ * remains separate from SourcePixelAspectRatio/Origin (absent0, pasp1,
+ * selected-SPS2, observed-CM3).
+ * Any derived/child non-square source OR output still rejects BEFORE hardware;
+ * full derived metric/inheritance remains unimplemented. Explicit LINEAR_CEIL
+ * uses exact aperture/output-sample counts, not double-derived ratios.
  * Aux/alpha, fractional crop, Rext and ordinary ImageIO/CMPhoto routing are
  * still unsupported by THIS exact-samples entrypoint: any aux rejects before
  * the first hardware decode. Fractional sampling has the explicit options

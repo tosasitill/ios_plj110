@@ -22,6 +22,9 @@ int x9_hevc_copy_transfer_extensions(CFDictionaryRef, CFDictionaryRef *);
  * No float-to-integer truncation, signed32 narrowing or inferred defaults.
  * errno result; outputs are cleared on failure and must be disjoint. */
 int x9_hevc_read_pixel_aspect(CFDictionaryRef, uint64_t *horizontal, uint64_t *vertical);
+/* Owned immutable standard dictionary, same positive signed64 domain. A
+ * zero pair returns NULL; mixed zero/nonzero is invalid, not a default. */
+int x9_hevc_copy_pixel_aspect(uint64_t horizontal, uint64_t vertical, CFDictionaryRef *);
 
 /* Exact original CM/container bytes, before any SEI enrichment. Optional HDR
  * absent remains absent; all three CFData fields and optional raw preferred

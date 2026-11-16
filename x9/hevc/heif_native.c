@@ -41,19 +41,6 @@ static int put_number(CFMutableDictionaryRef d, CFStringRef key, uint64_t n)
     if (!number) return ENOMEM;
     CFDictionarySetValue(d,key,number); CFRelease(number); return 0;
 }
-static int copy_aspect(uint64_t h, uint64_t v, CFDictionaryRef *out)
-{
-    *out = NULL;
-    if (!h && !v) return 0;
-    if (!h || !v) return EBADMSG;
-    CFMutableDictionaryRef d = CFDictionaryCreateMutable(NULL,0,
-        &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
-    if (!d) return ENOMEM;
-    int e = put_number(d,kCMFormatDescriptionKey_PixelAspectRatioHorizontalSpacing,h);
-    if (!e) e = put_number(d,kCMFormatDescriptionKey_PixelAspectRatioVerticalSpacing,v);
-    if (e) CFRelease(d); else *out = d;
-    return e;
-}
 static OSStatus check_aspect(CVPixelBufferRef pixel, CFDictionaryRef expected)
 {
     if (!expected) return noErr;
@@ -64,6 +51,31 @@ static OSStatus check_aspect(CVPixelBufferRef pixel, CFDictionaryRef expected)
     if (!e && (!ah || (__uint128_t)eh*av != (__uint128_t)ah*ev)) e = EBADMSG;
     if (actual) CFRelease(actual);
     return parser_error(e); /* read-only; never repair a lost transfer attachment */
+}
+static OSStatus source_aspect_matches(CFDictionaryRef actual, const struct x9_heif_sample_aspect *expected)
+{
+    uint64_t h, v;
+    int e = x9_hevc_read_pixel_aspect(actual,&h,&v);
+    if (!e && (!!h != !!expected->horizontal || (h &&
+        (__uint128_t)h*expected->vertical != (__uint128_t)v*expected->horizontal))) e = EBADMSG;
+    return parser_error(e); /* Includes absent -> unexpected-present mismatch. */
+}
+static int native_source_aspect(void *context, const struct x9_heif_image *image,
+    struct x9_heif_sample_aspect *aspect)
+{
+    struct native_context *c = context;
+    CMSampleBufferRef sample = NULL;
+    CFDictionaryRef info = NULL;
+    /* CM/sample metadata only: no VT decoder registration, hardware or pixel
+     * callback. Do not retain AU storage for every item in a large graph. The
+     * ordinary color preflight and eventual hardware call independently
+     * recheck this source against the immutable completed plan. */
+    OSStatus e = x9_heif_copy_item_sample(c->file,image->id,&sample,&info,NULL,NULL,aspect);
+    if (!e && (!sample || !info)) e = kVTVideoDecoderBadDataErr;
+    if (sample) CFRelease(sample);
+    if (info) CFRelease(info);
+    if (e) { if (!c->failure) c->failure = e; return EIO; }
+    return 0;
 }
 static int rgb_profile(CFDataRef data)
 {
@@ -225,8 +237,14 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
         CMSampleBufferRef sample = NULL; CFDictionaryRef temporary_info = NULL;
         struct x9_hevc_vui vui;
         struct x9_hevc_hdr hdr;
-        c->failure = x9_heif_copy_item_sample(c->file,id,&sample,&temporary_info,&vui,&hdr);
+        struct x9_heif_sample_aspect aspect;
+        c->failure = x9_heif_copy_item_sample(c->file,id,&sample,&temporary_info,&vui,&hdr,&aspect);
         if (!c->failure && (!sample || !temporary_info)) c->failure = kVTVideoDecoderBadDataErr;
+        if (!c->failure && aspect.origin != geometry.source_aspect.origin)
+            c->failure = kVTVideoDecoderBadDataErr;
+        if (!c->failure) c->failure = source_aspect_matches(CMFormatDescriptionGetExtension(
+            CMSampleBufferGetFormatDescription(sample),kCMFormatDescriptionExtension_PixelAspectRatio),
+            &geometry.source_aspect);
         if (c->failure) e = EIO;
         else {
             e = source_color(color,&vui,&hdr,c->policy,&node->source);
@@ -255,7 +273,7 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
             e = put_number(record,CFSTR("TransformedWidth"),geometry.width);
             if (!e) e = put_number(record,CFSTR("TransformedHeight"),geometry.height);
             CFDictionaryRef transformed_aspect = NULL;
-            if (!e) e = copy_aspect(geometry.pixel_aspect_h,geometry.pixel_aspect_v,&transformed_aspect);
+            if (!e) e = x9_hevc_copy_pixel_aspect(geometry.pixel_aspect_h,geometry.pixel_aspect_v,&transformed_aspect);
             if (!e && transformed_aspect)
                 CFDictionarySetValue(record,CFSTR("TransformedPixelAspectRatio"),transformed_aspect);
             if (transformed_aspect) CFRelease(transformed_aspect);
@@ -431,12 +449,23 @@ static int native_raster(void *context, uint32_t id, enum x9_heif_raster_format 
     CFDictionaryRef info = NULL;
     CVPixelBufferRef decoded = NULL, view = NULL, target = NULL;
     int locked = 0;
+    struct x9_heif_geometry geometry;
+    int planned = x9_heif_plan_geometry(c->plan,id,&geometry);
+    if (planned) return planned;
     OSStatus e = X9HEIFCopyItemSample(c->file,id,&sample,&info);
     if (!e && (!sample || !info)) e = kVTVideoDecoderBadDataErr;
+    if (!e) e = source_aspect_matches(CMFormatDescriptionGetExtension(
+        CMSampleBufferGetFormatDescription(sample),kCMFormatDescriptionExtension_PixelAspectRatio),
+        &geometry.source_aspect);
     if (!e) e = X9HEVCCopyHardwarePicture(sample,&decoded);
     if (!e && !decoded) e = kVTVideoDecoderBadDataErr;
     if (!e && (CVPixelBufferGetWidth(decoded) != width || CVPixelBufferGetHeight(decoded) != height))
         e = kVTVideoDecoderBadDataErr;
+    if (!e) {
+        CFTypeRef aspect = CVBufferCopyAttachment(decoded,kCVImageBufferPixelAspectRatioKey,NULL);
+        e = source_aspect_matches(aspect,&geometry.source_aspect);
+        if (aspect) CFRelease(aspect);
+    }
     OSType f = decoded ? CVPixelBufferGetPixelFormatType(decoded) : 0;
     CFTypeRef full = CFDictionaryGetValue(node->source,kCMFormatDescriptionExtension_FullRangeVideo);
     int actual_full = f == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange || f == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
@@ -606,18 +635,22 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
         &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
     CVPixelBufferRef pixel = NULL;
     CFDictionaryRef aspect = NULL;
+    CFDictionaryRef source_aspect = NULL;
     struct x9_heif_raster raster = {0};
     struct x9_heif_geometry geometry;
     int e = !c->file || !c->working || !c->items || !info || !c->working_space ||
         (intermediate && (!c->intermediate || !c->intermediate_space)) ? ENOMEM : 0;
     if (!e && !CGColorSpaceSupportsOutput(c->working_space)) e = ENOTSUP;
     if (!e) e = x9_heif_open(CFDataGetBytePtr(c->file),(size_t)CFDataGetLength(c->file),&c->document);
-    if (!e) e = x9_heif_plan_create_with_policy(c->document,id,clap_policy,&c->plan);
+    if (!e) e = x9_heif_plan_create_with_source_aspects(c->document,id,clap_policy,
+        native_source_aspect,c,&c->plan);
     if (!e) e = x9_heif_plan_geometry(c->plan,id,&geometry);
-    /* Qualify/allocate the exact coded-root output ratio before any hardware
-     * frame. Source CM aspect remains pre-item-transform; export receives the
-     * metric of the actual ordered raster. No derived inheritance is guessed. */
-    if (!e) e = copy_aspect(geometry.pixel_aspect_h,geometry.pixel_aspect_v,&aspect);
+    /* The immutable plan now includes actual preflight CM source spacings,
+     * including selected-SPS or observed-CM-only provenance when pasp is
+     * absent. Allocate the ordered output metric before any hardware frame. */
+    if (!e) e = x9_hevc_copy_pixel_aspect(geometry.pixel_aspect_h,geometry.pixel_aspect_v,&aspect);
+    if (!e) e = x9_hevc_copy_pixel_aspect(geometry.source_aspect.horizontal,
+        geometry.source_aspect.vertical,&source_aspect);
     if (!e) {
         c->resampling = x9_heif_plan_requires_resampling(c->plan);
         c->linear = x9_heif_plan_requires_linear_composition(c->plan);
@@ -657,6 +690,7 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
         if (!e) e = put_number(info,CFSTR("SourceColorPolicy"),(uint32_t)policy);
         if (!e) e = put_number(info,CFSTR("GraphColorPolicy"),(uint32_t)graph_color);
         if (!e) e = put_number(info,CFSTR("CleanAperturePolicy"),(uint32_t)clap_policy);
+        if (!e) e = put_number(info,CFSTR("SourcePixelAspectOrigin"),(uint32_t)geometry.source_aspect.origin);
         if (!e) {
             int64_t size = (int64_t)c->raster_budget;
             CFNumberRef number = CFNumberCreate(NULL,kCFNumberSInt64Type,&size);
@@ -668,8 +702,9 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
             CFDictionarySetValue(info,CFSTR("Items"),c->items);
             CFDictionarySetValue(info,CFSTR("WorkingRGBICCProfile"),c->working);
             if (aspect) CFDictionarySetValue(info,kCMFormatDescriptionExtension_PixelAspectRatio,aspect);
+            if (source_aspect) CFDictionarySetValue(info,CFSTR("SourcePixelAspectRatio"),source_aspect);
             CFDictionarySetValue(info,CFSTR("PixelAspectInterpretation"),
-                CFSTR("present source pasp; ordered raster metric; linear-ceil exact aperture/sample counts; absent remains absent"));
+                CFSTR("separate pasp/selected-SPS/observed-CM source provenance; ordered raster metric; linear-ceil exact aperture/sample counts; absent remains absent"));
             CFDictionarySetValue(info,CFSTR("GraphColorInterpretation"),
                 graph_color == X9_HEIF_GRAPH_COLOR_PER_ITEM ?
                     CFSTR("explicit per-item sources; common ICC composition; iovl colr interprets fill only") :
@@ -702,6 +737,7 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
     }
     if (pixel) CVPixelBufferRelease(pixel);
     if (aspect) CFRelease(aspect);
+    if (source_aspect) CFRelease(source_aspect);
     x9_heif_raster_close(&raster);
     if (info) CFRelease(info);
     for (unsigned n = 0; n < c->count; n++) {

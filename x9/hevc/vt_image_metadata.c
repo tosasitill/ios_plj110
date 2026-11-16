@@ -180,6 +180,29 @@ int x9_hevc_read_pixel_aspect(CFDictionaryRef aspect, uint64_t *horizontal, uint
     *horizontal = (uint64_t)x; *vertical = (uint64_t)y;
     return 0;
 }
+int x9_hevc_copy_pixel_aspect(uint64_t h, uint64_t v, CFDictionaryRef *out)
+{
+    if (!out) return EINVAL;
+    *out = NULL;
+    if (!h && !v) return 0;
+    if (!h || !v) return EBADMSG;
+    if (h > INT64_MAX || v > INT64_MAX) return E2BIG;
+    int64_t x = (int64_t)h, y = (int64_t)v;
+    CFNumberRef horizontal = CFNumberCreate(NULL,kCFNumberSInt64Type,&x);
+    CFNumberRef vertical = CFNumberCreate(NULL,kCFNumberSInt64Type,&y);
+    int e = !horizontal || !vertical ? ENOMEM : 0;
+    if (!e) {
+        const void *keys[] = { kCMFormatDescriptionKey_PixelAspectRatioHorizontalSpacing,
+            kCMFormatDescriptionKey_PixelAspectRatioVerticalSpacing };
+        const void *values[] = { horizontal,vertical };
+        *out = CFDictionaryCreate(NULL,keys,values,2,
+            &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+        if (!*out) e = ENOMEM;
+    }
+    if (horizontal) CFRelease(horizontal);
+    if (vertical) CFRelease(vertical);
+    return e;
+}
 
 /* ICC and nclx-derived strings are both retained. Selection/precedence belongs
  * to the consumer's ColorSync path, not this decoder. Format-description keys

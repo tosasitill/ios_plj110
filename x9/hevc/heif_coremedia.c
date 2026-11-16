@@ -79,13 +79,60 @@ static int format_aspect(CMVideoFormatDescriptionRef format, CFDictionaryRef req
     if (!e && (!ah || (__uint128_t)eh*av != (__uint128_t)ah*ev)) e = EBADMSG;
     return e;
 }
+static int request_source_aspect(const struct x9_heif_image *image, const struct x9_hevc_vui *vui,
+    CFMutableDictionaryRef extensions, enum x9_heif_aspect_origin *origin)
+{
+    *origin = X9_HEIF_ASPECT_ABSENT;
+    if (image->pixel_aspect_h) { *origin = X9_HEIF_ASPECT_PASP; return 0; }
+    if (!vui->present || !vui->aspect_ratio_present || !vui->aspect_ratio_idc) return 0;
+    /* The already fully parsed picture VUI carries the actual selected SPS,
+     * not a representative catalog entry. Unknown/reserved and zero extended
+     * values must not silently become a CM fallback or synthetic square. */
+    if ((vui->aspect_ratio_idc > 16 && vui->aspect_ratio_idc != 255) ||
+        !vui->sar_width || !vui->sar_height) return ENOTSUP;
+    CFDictionaryRef aspect = NULL;
+    int e = x9_hevc_copy_pixel_aspect(vui->sar_width,vui->sar_height,&aspect);
+    if (!e) {
+        CFDictionarySetValue(extensions,kCMFormatDescriptionExtension_PixelAspectRatio,aspect);
+        *origin = X9_HEIF_ASPECT_SELECTED_SPS;
+    }
+    if (aspect) CFRelease(aspect);
+    return e;
+}
+static int record_source_aspect(CMVideoFormatDescriptionRef format, CFDictionaryRef *info,
+    struct x9_heif_sample_aspect *aspect)
+{
+    CFTypeRef value = CMFormatDescriptionGetExtension(format,kCMFormatDescriptionExtension_PixelAspectRatio);
+    int e = x9_hevc_read_pixel_aspect(value,&aspect->horizontal,&aspect->vertical);
+    if (e) return e;
+    if (aspect->origin != X9_HEIF_ASPECT_ABSENT && !aspect->horizontal) return EBADMSG;
+    if (aspect->origin == X9_HEIF_ASPECT_ABSENT && aspect->horizontal)
+        aspect->origin = X9_HEIF_ASPECT_COREMEDIA;
+    CFMutableDictionaryRef d = CFDictionaryCreateMutableCopy(NULL,0,*info);
+    int64_t origin = aspect->origin;
+    CFNumberRef number = CFNumberCreate(NULL,kCFNumberSInt64Type,&origin);
+    if (!d || !number) e = ENOMEM;
+    if (!e) {
+        if (value) CFDictionarySetValue(d,CFSTR("SourcePixelAspectRatio"),value);
+        CFDictionarySetValue(d,CFSTR("SourcePixelAspectOrigin"),number);
+        CFStringRef interpretation[] = { CFSTR("absent"),CFSTR("container-pasp"),
+            CFSTR("actual-selected-pps-sps-vui"),CFSTR("observed-coremedia-format-only") };
+        CFDictionarySetValue(d,CFSTR("SourcePixelAspectInterpretation"),interpretation[aspect->origin]);
+        CFRelease(*info); *info = d; d = NULL;
+    }
+    if (d) CFRelease(d);
+    if (number) CFRelease(number);
+    return e;
+}
 OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
-    CMSampleBufferRef *out, CFDictionaryRef *info_out, struct x9_hevc_vui *vui_out, struct x9_hevc_hdr *hdr_out)
+    CMSampleBufferRef *out, CFDictionaryRef *info_out, struct x9_hevc_vui *vui_out,
+    struct x9_hevc_hdr *hdr_out, struct x9_heif_sample_aspect *aspect_out)
 {
     if (!out || !info_out || (void *)out == (void *)info_out) return kVTParameterErr;
     *out = NULL; *info_out = NULL;
     if (vui_out) memset(vui_out,0,sizeof(*vui_out));
     if (hdr_out) memset(hdr_out,0,sizeof(*hdr_out));
+    if (aspect_out) memset(aspect_out,0,sizeof(*aspect_out));
     if (!file || CFGetTypeID(file) != CFDataGetTypeID() || CFDataGetLength(file) <= 0) return kVTParameterErr;
     const uint8_t *data = CFDataGetBytePtr(file);
     struct x9_heif_document *document = NULL;
@@ -101,6 +148,7 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
     struct x9_hevc_vui vui;
     struct x9_hevc_hdr hdr;
     struct x9_hevc_irap_picture picture;
+    struct x9_heif_sample_aspect aspect = {0};
     size_t bytes = 0, needed = 0;
     int e = !image || !extensions ? ENOMEM : x9_heif_open(data,(size_t)CFDataGetLength(file),&document);
     if (!e && !id) e = x9_heif_primary(document,&id);
@@ -120,6 +168,7 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
     if (!e) e = x9_hevc_sample_vui(&config,data+image->hvcc.offset,(size_t)image->hvcc.bytes,au,bytes,&vui);
     if (!e) e = x9_hevc_sample_hdr(&config,data+image->hvcc.offset,(size_t)image->hvcc.bytes,au,bytes,&hdr);
     if (!e) e = x9_heif_copy_item_info(document,image,&info,extensions);
+    if (!e) e = request_source_aspect(image,&vui,extensions,&aspect.origin);
     if (!e) e = x9_heif_resolve_hdr_extensions(extensions,&hdr);
     CFDictionaryRef resolved = NULL, vui_info = NULL;
     if (!e) e = x9_heif_resolve_color_extensions(extensions,&vui,&hdr,&resolved);
@@ -195,6 +244,7 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
     result = parse_error(format_catalog(format,data+image->hvcc.offset,&config));
     if (!result) result = parse_error(format_hdr(format,extensions));
     if (!result) result = parse_error(format_aspect(format,extensions));
+    if (!result) result = parse_error(record_source_aspect(format,&info,&aspect));
     if (result) goto done;
     result = CMBlockBufferCreateWithMemoryBlock(NULL,NULL,bytes,NULL,NULL,0,bytes,0,&block);
     if (!result) result = CMBlockBufferReplaceDataBytes(au,block,0,bytes);
@@ -206,6 +256,7 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
         *out = sample; sample = NULL; *info_out = info; info = NULL;
         if (vui_out) *vui_out = vui;
         if (hdr_out) *hdr_out = hdr;
+        if (aspect_out) *aspect_out = aspect;
     }
 done:
     if (sample) CFRelease(sample);
@@ -218,4 +269,4 @@ done:
 }
 OSStatus X9HEIFCopyItemSample(CFDataRef file, uint32_t id,
     CMSampleBufferRef *out, CFDictionaryRef *info_out)
-{ return x9_heif_copy_item_sample(file,id,out,info_out,NULL,NULL); }
+{ return x9_heif_copy_item_sample(file,id,out,info_out,NULL,NULL,NULL); }

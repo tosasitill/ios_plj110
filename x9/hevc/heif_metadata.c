@@ -26,25 +26,14 @@ static int aspect_extension(const struct x9_heif_document *document,
     if (e) return e;
     uint32_t h = code32(raw), v = code32(raw+4);
     if (!h || !v) return EBADMSG;
-    CFNumberRef horizontal = number(h), vertical = number(v);
     CFDictionaryRef aspect = NULL;
-    if (!horizontal || !vertical) e = ENOMEM;
-    if (!e) {
-        const void *keys[] = { kCMFormatDescriptionKey_PixelAspectRatioHorizontalSpacing,
-            kCMFormatDescriptionKey_PixelAspectRatioVerticalSpacing };
-        const void *values[] = { horizontal,vertical };
-        aspect = CFDictionaryCreate(NULL,keys,values,2,
-            &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
-        if (!aspect) e = ENOMEM;
-    }
+    e = x9_hevc_copy_pixel_aspect(h,v,&aspect);
     if (!e) {
         CFDictionarySetValue(info,kCMFormatDescriptionExtension_PixelAspectRatio,aspect);
         if (extensions) CFDictionarySetValue(extensions,kCMFormatDescriptionExtension_PixelAspectRatio,aspect);
         *seen = 1;
     }
     if (aspect) CFRelease(aspect);
-    if (horizontal) CFRelease(horizontal);
-    if (vertical) CFRelease(vertical);
     return e;
 }
 static int put_cicp(CFMutableDictionaryRef d, const uint32_t codes[3])

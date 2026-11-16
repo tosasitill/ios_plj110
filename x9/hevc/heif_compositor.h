@@ -19,8 +19,9 @@ struct x9_heif_geometry {
     uint32_t id, width, height; /* after this item's ordered transforms */
     uint32_t coded_width, coded_height; /* ispe, before item transforms */
     uint32_t derived_count, auxiliary_count;
+    struct x9_heif_sample_aspect source_aspect; /* pre-item-transform, separate provenance */
     uint64_t pixel_aspect_h, pixel_aspect_v; /* output ratio, 1..INT64_MAX;
-        * absent source pasp remains0, never an inferred square default */
+        * absent resolved source remains0, never an inferred square default */
 };
 /* The document and its borrowed immutable bytes must outlive the plan. The
  * plan validates ALL reachable dimg/auxl nodes, active-stack cycles, tile
@@ -36,12 +37,27 @@ struct x9_heif_geometry {
  * output ratio must fit positive signed64 CFNumbers, else E2BIG, never rounded.
  * This is not square-pixel conversion or a HEIF mandated resampling policy.
  * Derived/child non-square SOURCE OR OUTPUT ratios still reject before any
- * callbacks; full derived metric/inheritance is not implemented. Absent pasp
- * remains absent; selected-SPS sample-aspect propagation is separate work. */
+ * callbacks; full derived metric/inheritance is not implemented. These
+ * container-only entrypoints preserve absent pasp; the native preflight
+ * variant below resolves actual coded-source SPS/CM sample aspect. */
 int x9_heif_plan_create(
     const struct x9_heif_document *, uint32_t item_id, struct x9_heif_plan **);
 int x9_heif_plan_create_with_policy(const struct x9_heif_document *, uint32_t item_id,
     enum x9_heif_clap_policy, struct x9_heif_plan **);
+/* Native metadata preflight variant, used by the real CM/VT raster adapter.
+ * Query runs ONCE per reachable coded item during immutable plan creation,
+ * before any raster callback. It must not decode, access hardware, retain the
+ * borrowed image or recursively use this plan. Returned aspect is the actual
+ * pre-transform CM source pair with PASP/selected-SPS/observed-CM provenance;
+ * explicit raw pasp must agree rationally and keep PASP origin. No context or
+ * query is retained by the returned plan. Whole-graph non-square source OR
+ * output gates apply equally to resolved SPS/CM ratios, not just pasp.
+ * The original entrypoints above remain container-only geometry planning,
+ * not selected-SPS/CM resolution or proof of a callback's physical metric. */
+typedef int (*x9_heif_aspect_source)(void *context, const struct x9_heif_image *,
+    struct x9_heif_sample_aspect *);
+int x9_heif_plan_create_with_source_aspects(const struct x9_heif_document *, uint32_t item_id,
+    enum x9_heif_clap_policy, x9_heif_aspect_source, void *context, struct x9_heif_plan **);
 /* Includes ALL reachable nodes, not just root transforms. Negative errno on
  * invalid plan; 0 means exact copies suffice, 1 means linear resampling. */
 int x9_heif_plan_requires_resampling(const struct x9_heif_plan *);
