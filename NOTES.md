@@ -157,6 +157,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 同 txn 重复请求终态 owner 修复与当前接线（进行中）
+
+- **基线/分工**：root `feat/call-context-capture`基于main/origin **`252f3003`**；按用户要求复用三个代理与新树`call-context-capture/call-terminal-audit/sms-notification-owner`，分别追loaded manager factory/同queue owner、现行03/21终态代码、强SMS Model到通知ID。scratch仅各树`x9/out`，不动其它硬件树或共享`.local`。完整通话短信goal仍active。
+- **实际生产修复**：terminal代理原 **`1fa2cab8`** 已整合为root **`90079648`**：合法21同txn改ID，旧路径可先回BUSY而原owner随后成功；现在同slot/local generation/txn且actual binding/QMUX仍live时消费repeat，不改原ID/token/epoch或重发MD。03已answered同txn改options，旧路径可追加ARG；现在保首终态，pending changed首ARG与fresh txn行为不变。未改44、MD mutation、REGISTERED或VOICE公告；generic malformed重复保护未扩展。原实际helper `coachz_baseband.cpp:1528..1560`仅拒过deadline的success，error仍可receipt，排除了此前deadline猜测。
+- **确切编译/当前worker**：代理宿主fixture新增两项源码断言，`xcrun --sdk macosx clang++ -std=c++17 -c` **exit0**，未执行。root同生产head90079648/tracked clean输入，fixed layout check **exit0**，单对象`X9Baseband.cpp.o` **exit0/True、34warnings**，命令/log/recipe/result在主`x9/out/call-context-capture/`。`gh run list --branch main --limit3`实际 **[]/exit0**，无CI run ID。正常完整kernel **`x9-call-duplicate-owner-20261116`**已经启动，session **97925**，尚未取终态，不能先称link成功或最终镜像；输出在同名主`x9/out`。
+- **Root短信新静态边**：当前root cache原method entry/LC_FUNCTION_STARTS确认`_convertCTMessageToDictionary:requiresUpload:1f3cbec88..1f3cbf8e4` **3164B**；metadata/新code/keys/selector targets/2原export各actual **exit0**。同CTMessage uniqueIdentifier的UUIDString或`_StringGUID`结果写原dict key **g**；不是把通知uint/messageId转换为GUID。该conversion内conditional `acknowledgeIncomingMessageWithId:`在返回/外部payload写盘/保存链之前，不能称COMMIT或WMS37物理ACK。raw/原pagechain/selector/export/命令与`identity-contract.json`在主`x9/out/sms-guid-owner/`，未重采旧取件/SQL；正在独立只读review，尚未据此宣告GUID到成功record已闭。
+- **尚待/限制**：CALL loaded factory新selection proof已生成，但外层zsh误用readonly `status`致wrapper exit1，reader数值exit未捕获，必须与完整stdout/proof事实分开；不为已采成功范围重跑。SMS已定位新MT callback producer，正在核真正loaded controller owner。尚无原子record/Client/UUID action snapshot或nativeepoch、完整typed backend/profile/terminal/CallList/handover身份/双向DSP及当前Messages成功record/重开/物理ACK/MO对端验收。VOICE09关闭、VOICE20无productioncaller。无测试/人工向量/设备/boot pack/构建后二次产物检查/ADB/mailbox/mount/分区操作；不把静态证据或编译当通话短信完成。下一先取97925终态、归档三个停写代理证据、整合/commit/main push并记录实际结果。
+
 #### 2026-11-16 同 record 构造关联、MD CLIR consumer 与 SMS 同步取件身份（本轮静态进展）
 
 - **基线/分工**：root `feat/call-record-snapshot`基于main/origin **`6dba5aeb`**；按用户要求复用三个代理与新树`call-context-join/call-profile-input/sms-save-authority`，分别闭普通factory强Client/逐动作关联、MD raw CLIR真实消费、通知ID到CTMessage同步取件。本轮是完整通话短信目标的前置进展，goal仍active，**没有新增生产行为修复或最终镜像**。
