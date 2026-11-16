@@ -2804,3 +2804,17 @@ Model now (as Android, one shared AFE, one owner per shared bit):
   400 kHz (Android runs it at 400 kHz, never reads back). Failed CSR writes now log
   X9 CAMERA AP WRITE; borrow logs X9 CAMERA AP TIMING BORROW.
 - Image: x9/out/x9-camera-i2c12-r12-20261116/boot.img
+
+## Camera log 335 (r12) -> r13 (2026-11-16)
+- 335: every power stage passed (WL ID ok, WL 4a on, DOVDD/AFVDD on, VS vote, CAMTG4 24 MHz,
+  MCLK pin208 CMMCLK4 4 mA, reset171 high). Fail: PROBE stage=6 errno=6, one ID read NACK
+  (sensor status 3 = COMP|ACKERR). Power-off then failed at COLD RESTORE step=5 (WAKE) EBUSY.
+- Statically re-checked vs vendor: module is hhmain (README Android log), 0x1a, ID regs
+  0016/0017 = 0x9186, pw_seq order/voltages/delays, WL map (AVDD LDO4 179, AVDD1 LDO7 54,
+  DVDD NLDO2 144), VS voter SID3 0x178a bit2, pins 171/208/174/175. Front hhfront likewise.
+- Difference 1: vendor get_imgsensor_id retries NACK (2 addrs x 5); we read once. r13 retries
+  up to 10 x (1 ms gap) on clean NACK only. Logs X9 CAMERA ID.
+- Difference 2: WL ENABLE keeps non-LDO bit7 (prior c8 = ours|0x80); wake restore needed the
+  whole byte 0, so power-off always EBUSY. Vendor selects WL reset_high once and never lowers
+  it (GPIO203 is also RT5133 enable): keep high, retire journal. Logs X9 CAMERA WAKE.
+- Image: x9/out/x9-camera-id-r13-20261116/boot.img

@@ -426,7 +426,14 @@ static int cam_wake_restore(struct cam_probe_journal *j)
      * unrelated WL channels to be off just to retire a reference. */
     if(p->owned || p->dirty) {
         uint8_t enable=0;e=cam_wl_read(j,3,&enable);if(e)return e;
-        if(enable || j->wl_owned)return EBUSY; /* ALL channels, not only our mask */
+        if((enable&j->board.wl_mask) || j->wl_owned)return EBUSY;
+        /* Log 335: ENABLE keeps non-LDO bit7 (entry c8 = ours|0x80), so an
+         * all-zero requirement always failed. Vendor wl28681c probe selects
+         * reset_high once and never drives it low (GPIO203 is also RT5133
+         * enable). Match Android: leave it output-high, retire the journal. */
+        printf("X9 CAMERA WAKE: pin=%u kept high like Android (enable=%02x)\n",p->pin,enable);
+        p->taken=p->owned=false;p->dirty=0;p->uncertain=0;
+        return 0;
     }
     return cam_pin_restore(j,p);
 }
@@ -783,14 +790,27 @@ static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
         const uint8_t high[2]={(uint8_t)(id_reg>>8),(uint8_t)id_reg},
             low[2]={(uint8_t)((id_reg+1)>>8),(uint8_t)(id_reg+1)};
         uint8_t slave=cam_sensor_slave(which);
-        if(which==X9_CAMERA_ULTRAWIDE) {
-            const uint8_t page[]={0xfc,0xfc,0x40,0};
-            j->page_pending=true;
-            e=cam_bus_transfer_n(&j->sensor,slave,page,4,NULL,0);
-            if(!e) {j->page_pending=false;j->page_known=true;j->sensor_page=0x4000;}
+        /* Vendor get_imgsensor_id: i2c_addr_table {0x34,0x35} (both 7-bit
+         * 0x1a) x GET_SENSOR_ID_RETRY_CNT 5 = up to 10 reads; a NACK is
+         * retried, not fatal. Only a clean NACK (ENXIO, bus not wedged)
+         * is retried; any other error stops immediately. */
+        unsigned attempt=0;
+        for(attempt=1;attempt<=10;attempt++) {
+            e=0;
+            if(which==X9_CAMERA_ULTRAWIDE && !j->page_known) {
+                const uint8_t page[]={0xfc,0xfc,0x40,0};
+                j->page_pending=true;
+                e=cam_bus_transfer_n(&j->sensor,slave,page,4,NULL,0);
+                if(!e) {j->page_pending=false;j->page_known=true;j->sensor_page=0x4000;}
+            }
+            if(!e)e=cam_bus_transfer(&j->sensor,slave,high,2,&hi);
+            if(!e)e=cam_bus_transfer(&j->sensor,slave,low,2,&lo);
+            if(!e && (((uint32_t)hi<<8)|lo)==sensors[which-1].chip_id)break;
+            if(e && (e!=ENXIO || cam_bus_unretired(&j->sensor)))break;
+            if(attempt<10)delay(1000);
         }
-        if(!e)e=cam_bus_transfer(&j->sensor,slave,high,2,&hi);
-        if(!e)e=cam_bus_transfer(&j->sensor,slave,low,2,&lo);
+        printf("X9 CAMERA ID: sensor=%u slave=%02x attempts=%u id=%02x%02x errno=%d status=%08x\n",
+            which,slave,attempt>10?10:attempt,hi,lo,e,j->sensor.last_status);
         if(!e)r->chip_id=((uint32_t)hi<<8)|lo;
         if(!e && r->chip_id!=sensors[which-1].chip_id)e=ENODEV;
         if(!e)r->flags|=X9_CAM_PROBE_MATCHED;
