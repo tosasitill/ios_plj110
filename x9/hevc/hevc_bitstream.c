@@ -1016,6 +1016,8 @@ struct sei_context {
     struct x9_hevc_hdr *hdr;
     const struct x9_hevc_alpha *alpha_before;
     struct x9_hevc_alpha *alpha;
+    const struct x9_hevc_ccv *ccv_before;
+    struct x9_hevc_ccv *ccv;
     unsigned *counts;
     unsigned pps_id, temporal, nal_temporal, prefix, after_vcl;
 };
@@ -1148,12 +1150,75 @@ static int sei_alpha(struct sei_reader *r, uint64_t end, const struct sei_contex
     *s->alpha = alpha; s->alpha->sources = sources;
     return 0;
 }
+static int ccv_equal(const struct x9_hevc_ccv *a, const struct x9_hevc_ccv *b)
+{
+    /* Ignore scope provenance and the reserved bits, as D.3.40 requires. */
+    return a->cancel == b->cancel && a->persistence == b->persistence &&
+        a->primaries_present == b->primaries_present && a->min_present == b->min_present &&
+        a->max_present == b->max_present && a->avg_present == b->avg_present &&
+        !memcmp(a->primaries,b->primaries,sizeof(a->primaries)) &&
+        a->min_luminance == b->min_luminance && a->max_luminance == b->max_luminance &&
+        a->avg_luminance == b->avg_luminance;
+}
+static int sei_ccv(struct sei_reader *r, uint64_t end, const struct sei_context *s,
+    unsigned nested, unsigned apply, unsigned source)
+{
+    struct x9_hevc_ccv ccv = { .present = 1, .sources = source };
+    ccv.cancel = sei_get(r,1,end);
+    if (!ccv.cancel) {
+        ccv.persistence = sei_get(r,1,end);
+        ccv.primaries_present = sei_get(r,1,end);
+        ccv.min_present = sei_get(r,1,end);
+        ccv.max_present = sei_get(r,1,end);
+        ccv.avg_present = sei_get(r,1,end);
+        ccv.reserved_zero = sei_get(r,2,end); /* decoder ignores, not a version gate */
+        if (!(ccv.primaries_present || ccv.min_present || ccv.max_present || ccv.avg_present))
+            return EINVAL;
+        if (ccv.primaries_present) for (unsigned c = 0; c < 3; c++) {
+            for (unsigned xy = 0; xy < 2; xy++) {
+                uint32_t raw = sei_get(r,32,end);
+                /* Avoid implementation-defined unsigned-to-signed narrowing. */
+                int64_t value = raw & UINT32_C(0x80000000) ?
+                    (int64_t)raw - INT64_C(4294967296) : (int64_t)raw;
+                if (value < -5000000 || value > 5000000) return EINVAL;
+                ccv.primaries[c][xy] = (int32_t)value;
+            }
+        }
+        if (ccv.min_present) ccv.min_luminance = sei_get(r,32,end);
+        if (ccv.max_present) ccv.max_luminance = sei_get(r,32,end);
+        if (ccv.avg_present) ccv.avg_luminance = sei_get(r,32,end);
+        if ((ccv.min_present && ccv.max_present && ccv.min_luminance > ccv.max_luminance) ||
+            (ccv.min_present && ccv.avg_present && ccv.min_luminance > ccv.avg_luminance) ||
+            (ccv.avg_present && ccv.max_present && ccv.avg_luminance > ccv.max_luminance)) return EINVAL;
+    }
+    if (r->b.error) return EINVAL;
+    /* Same D.2.1/D.3.1 independently bounded payload tail as SEI165. Cancel
+     * has a partial byte; unknown extension data is ignored, not interpreted.
+     * Never borrow another payload's header or the NAL's trailing bits. */
+    if (r->used < end) {
+        unsigned last = 0;
+        while (r->used < end && !r->b.error) {
+            unsigned n = end-r->used < 8 ? (unsigned)(end-r->used) : 8;
+            last = ((last << n) | sei_get(r,n,end)) & 255u;
+        }
+        if (!last) return EINVAL;
+    }
+    if (r->b.error || r->used != end) return EINVAL;
+    if (!apply) return 0;
+    if (++s->counts[5] > 8 || (!nested && s->nal_temporal != s->temporal) ||
+        (s->after_vcl && !s->ccv_before->present) ||
+        (s->ccv->present && !ccv_equal(s->ccv,&ccv))) return EINVAL;
+    unsigned sources = s->ccv->sources | source;
+    *s->ccv = ccv; s->ccv->sources = sources;
+    return 0;
+}
 static int sei_payload(struct sei_reader *r, uint32_t type, uint32_t bytes, uint64_t end,
     const struct sei_context *s, unsigned nested, unsigned apply, unsigned source)
 {
     if (nested && (type == 129 || type == 132 || type == 133)) return EINVAL;
     /* Suffix165 is reserved_sei_message(), NOT alpha_channel_info(). */
     if (s->prefix && type == 165) return sei_alpha(r,end,s,nested,apply,source);
+    if (s->prefix && type == 149) return sei_ccv(r,end,s,nested,apply,source);
     /* D.2.1 suffix137/144/147/148 are reserved payloads, not these messages. */
     unsigned mastering = s->prefix && type == 137, light = s->prefix && type == 144;
     unsigned ambient = s->prefix && type == 148, preferred = s->prefix && type == 147;
@@ -1260,11 +1325,13 @@ static int sei_scalable(struct sei_reader *r, uint64_t end, const struct sei_con
 static int sei_hdr(const uint8_t *p, size_t n, const struct x9_hevc_config *config,
     const uint8_t *hvcc, unsigned pps_id, unsigned temporal, unsigned after_vcl,
     const struct x9_hevc_hdr *before, struct x9_hevc_hdr *hdr,
-    const struct x9_hevc_alpha *alpha_before, struct x9_hevc_alpha *alpha, unsigned counts[5])
+    const struct x9_hevc_alpha *alpha_before, struct x9_hevc_alpha *alpha,
+    const struct x9_hevc_ccv *ccv_before, struct x9_hevc_ccv *ccv, unsigned counts[6])
 {
     struct sei_reader r = { .b = { .p = p+2, .n = n-2 } };
     const struct sei_context s = { .config = config, .hvcc = hvcc, .pps_id = pps_id,
         .before = before, .hdr = hdr, .alpha_before = alpha_before, .alpha = alpha,
+        .ccv_before = ccv_before, .ccv = ccv,
         .counts = counts, .temporal = temporal,
         .nal_temporal = (p[1]&7)-1u, .prefix = ((p[0]>>1)&63) == 39, .after_vcl = after_vcl };
     uint64_t limit = (uint64_t)(n-2)*8; /* EBSP upper bound, not a payload bound */
@@ -1309,8 +1376,9 @@ int x9_hevc_sample_metadata(const struct x9_hevc_config *c, const uint8_t *hvcc,
     struct x9_hevc_hdr hdr = {0};
     struct x9_hevc_hdr before = {0};
     struct x9_hevc_alpha alpha = {0}, alpha_before = {0};
+    struct x9_hevc_ccv ccv = {0}, ccv_before = {0};
     unsigned vcl_seen = 0;
-    unsigned counts[5] = {0};
+    unsigned counts[6] = {0};
     size_t at = 0;
     while (at < sample_bytes) {
         uint32_t bytes = 0;
@@ -1319,14 +1387,15 @@ int x9_hevc_sample_metadata(const struct x9_hevc_config *c, const uint8_t *hvcc,
         if (type < 32) vcl_seen = 1;
         if (type == 39 || type == 40) {
             e = sei_hdr(sample+at,bytes,c,hvcc,metadata.pps_id,
-                metadata.temporal_id,vcl_seen,&before,&hdr,&alpha_before,&alpha,counts);
+                metadata.temporal_id,vcl_seen,&before,&hdr,&alpha_before,&alpha,&ccv_before,&ccv,counts);
             if (e) return e;
-            if (!vcl_seen) { before = hdr; alpha_before = alpha; }
+            if (!vcl_seen) { before = hdr; alpha_before = alpha; ccv_before = ccv; }
         }
         at += bytes;
     }
     metadata.hdr = hdr;
     metadata.alpha = alpha;
+    metadata.ccv = ccv;
     *out = metadata; return 0;
 }
 int x9_hevc_sample_hdr(const struct x9_hevc_config *c, const uint8_t *hvcc,
@@ -1337,11 +1406,31 @@ int x9_hevc_sample_hdr(const struct x9_hevc_config *c, const uint8_t *hvcc,
     struct x9_hevc_au_metadata metadata;
     int e = x9_hevc_sample_metadata(c,hvcc,hvcc_bytes,sample,sample_bytes,&metadata);
     /* Still-picture/HEIF callers consume only HDR and have no associated
-     * alpha carrier or output-order state. Do not silently drop SEI165 or
-     * infer opaque pixels/cancel success from its presence or raw use_idc. */
+     * alpha carrier or CCV output-order consumer. Do not silently drop these
+     * messages or infer alpha/cancel/output state from ordinary HDR success. */
     if (!e && metadata.alpha.present) e = ENOTSUP;
+    if (!e && metadata.ccv.present) {
+        struct x9_hevc_vui vui;
+        uint32_t applicable = 0;
+        e = x9_hevc_sample_vui(c,hvcc,hvcc_bytes,sample,sample_bytes,&vui);
+        if (!e) e = x9_hevc_ccv_applicability(&vui,&metadata.hdr,&applicable);
+        if (!e && applicable) e = ENOTSUP;
+    }
     if (!e) *out = metadata.hdr;
     return e;
+}
+int x9_hevc_ccv_applicability(const struct x9_hevc_vui *vui,
+    const struct x9_hevc_hdr *hdr, uint32_t *applicable)
+{
+    if (!applicable) return EINVAL;
+    *applicable = 0;
+    if (!vui || x9_hevc_hdr_validate(hdr)) return EINVAL;
+    uint32_t transfer = hdr->preferred_present ? hdr->preferred_transfer : vui->transfer;
+    /* Raw SPS transfer4/5 is an ignore condition even when SEI147 overrides
+     * it. Do not substitute CM/container colour labels for these wire facts. */
+    *applicable = transfer != 2 && vui->colour_primaries != 2 && vui->matrix != 2 &&
+        vui->transfer != 2 && vui->transfer != 4 && vui->transfer != 5;
+    return 0;
 }
 int x9_hevc_hdr_validate(const struct x9_hevc_hdr *hdr)
 {

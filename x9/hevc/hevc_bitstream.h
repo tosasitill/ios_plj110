@@ -163,8 +163,9 @@ struct x9_hevc_hdr {
  * exact CM/container snapshots. Does not invent absent fields or mastering
  * chromaticities, rescale values, or validate complete colour conformance. */
 int x9_hevc_hdr_validate(const struct x9_hevc_hdr *);
-/* HDR-only still/HEIF preflight also validates SEI165 and returns ENOTSUP
- * for resolved base alpha (including cancel), rather than dropping it. */
+/* HDR-only still/HEIF preflight also validates SEI165/149: resolved base alpha
+ * and applicable CCV (including cancel) return ENOTSUP rather than being
+ * silently dropped. D.3.40's mandatory CCV ignore cases still pass through. */
 int x9_hevc_sample_hdr(const struct x9_hevc_config *, const uint8_t *hvcc,
     size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes, struct x9_hevc_hdr *);
 /* F.14.2.8/F.14.3.8: exact resolved base-layer prefix SEI165 syntax in THIS AU.
@@ -183,6 +184,27 @@ struct x9_hevc_alpha {
     uint32_t present, sources, cancel, use_idc, bit_depth_minus8;
     uint32_t transparent, opaque, incr, clip, clip_type;
 };
+/* D.2.40/D.3.40: resolved base-layer prefix SEI149 facts in THIS AU.
+ * Signed chromaticities retain their exact i(32) values and original component
+ * order; luminance is unscaled u(32), NOT cd/m2. Reserved bits are retained but
+ * ignored semantically. Scope/duplicate checks do not establish applicability:
+ * selected-SPS colour and CLVS alternative transfer must still be consulted.
+ * Persistence/cancel is OUTPUT-order state, never SUBMIT/HDR forward state.
+ * Existing still/video consumers reject applicable facts until that consumer
+ * exists, including cancel; the normative unspecified/transfer ignore cases
+ * stay ignored. Unknown suffix149 remains reserved, not a CCV message. */
+struct x9_hevc_ccv {
+    uint32_t present, sources, cancel, persistence;
+    uint32_t primaries_present, min_present, max_present, avg_present, reserved_zero;
+    int32_t primaries[3][2];
+    uint32_t min_luminance, max_luminance, avg_luminance;
+};
+/* D.3.40's mandatory ignore conditions from actual selected-SPS VUI and
+ * resolved CLVS SEI147 state, not a container/CFString guess. Returns errno;
+ * clears applicable on failure. Does not implement output-order persistence,
+ * colour-primary inference or an inverse transfer/tone mapping policy. */
+int x9_hevc_ccv_applicability(const struct x9_hevc_vui *, const struct x9_hevc_hdr *,
+    uint32_t *applicable);
 /* Complete AU/catalog/SEI validation before publishing any facts. EOS/EOB are
  * observed NAL units, not inferred from DRAIN or no_output_of_prior_pics_flag.
  * The metadata gate is bounded, not a complete validator of unknown SEI
@@ -197,6 +219,7 @@ struct x9_hevc_au_metadata {
     uint32_t log2_max_poc_lsb, poc_lsb, pic_output_flag, first_slice_type;
     struct x9_hevc_hdr hdr;
     struct x9_hevc_alpha alpha;
+    struct x9_hevc_ccv ccv;
 };
 int x9_hevc_sample_metadata(const struct x9_hevc_config *, const uint8_t *hvcc,
     size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes,

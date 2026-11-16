@@ -244,6 +244,17 @@ static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
      * consumer exist, refuse resolved alpha before token/native mutation. */
     if (!gate && metadata.alpha.present) gate = ENOTSUP;
     if (!gate) gate = x9_hevc_hdr_sequence_next(&s->hdr_sequence,&metadata,&prospective);
+    /* D.3.40 persistence/cancel follows ORIGINAL picture output order. Consult
+     * the actual selected SPS and prospective CLVS SEI147 for mandatory ignore
+     * cases; otherwise do not silently drop CCV or commit it as SUBMIT state. */
+    if (!gate && metadata.ccv.present) {
+        struct x9_hevc_vui vui;
+        uint32_t applicable = 0;
+        gate = x9_hevc_sample_vui(&s->config,CFDataGetBytePtr(s->hvcc),
+            (size_t)CFDataGetLength(s->hvcc),input,bytes,&vui);
+        if (!gate) gate = x9_hevc_ccv_applicability(&vui,&prospective.hdr,&applicable);
+        if (!gate && applicable) gate = ENOTSUP;
+    }
     if (!gate) gate = x9_hevc_poc_sequence_next(&s->poc_sequence,&metadata,&prospective_poc,&picture_poc);
     if (!gate && picture_poc.clvs != prospective.clvs) gate = EINVAL;
     if (gate) { e = codec_error(gate); goto done; }
