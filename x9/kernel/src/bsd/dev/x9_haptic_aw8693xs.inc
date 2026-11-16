@@ -230,19 +230,47 @@ static int hcfg_raw(uint8_t reg,uint8_t value)
 {uint8_t tx[]={reg,value};return htransfer(tx,2,NULL);} /* TMCFG lock/unlock */
 static int hcommand(uint8_t value)
 {uint8_t tx[]={9,value};return htransfer(tx,2,NULL); /* command bits self-clear */}
+/* SYSST (0x01) is live status. OPPO's play path (haptic_hv.c rtp_work_routine
+ * / rtp_play, aw8693xs_stop) never gates on its protection bits; protections
+ * arrive only as latched SYSINT in the IRQ handler, which the OPLUS build just
+ * logs. Log 324: a transient protection bit during the first RTP start was
+ * made fatal here (EIO), then the 25 ms stop wait expired during auto-brake.
+ * Record and log the bits; only I2C transfer errors fail. */
+static unsigned hfault_logs;
+static void hnote_fault(uint8_t sysst,const char *where)
+{
+    hs.hw_fault=sysst&0xe6;
+    if(hs.hw_fault && hfault_logs<8)
+        printf("X9 HAPTIC: SYSST=%02x at %s state=%02x (status only, as OPPO)\n",
+            sysst,where,hs.hw_state),++hfault_logs;
+}
 static int hstate(void)
 {
     uint8_t state,fault;int e=hget(0x3f,&state);if(!e)e=hget(1,&fault);
-    if(!e){hs.hw_state=state;hs.hw_fault=fault&0xe6;}
-    return e?e:hs.hw_fault?EIO:0;
+    if(!e){hs.hw_state=state;hnote_fault(fault,"state");}
+    return e;
+}
+/* aw8693xs_wait_enter_standby: whole GLBRD5 == 0, 100 polls x 2-2.5 ms. */
+static int hwait_standby(void)
+{
+    uint64_t end=now_ns()+250000000ULL;int e;
+    do {e=hstate();if(e || !hs.hw_state)return e;delay(2000);}while(now_ns()<end);
+    return ETIMEDOUT;
 }
 static int hoff(void)
 {
     if(!hb.configured && !hb.active)return 0;
     int e=hb.stuck?EIO:hcommand(2);
-    uint64_t end=now_ns()+25000000;
-    if(!e)do {e=hstate();if(e || !hs.hw_state)break;delay(100);}while(now_ns()<end);
-    if(!e && hs.hw_state)e=ETIMEDOUT;
+    if(!e)e=hwait_standby();
+    if(e==ETIMEDOUT) {
+        /* aw8693xs_stop fallback: play_mode(STANDBY) pulses SYSCTRL3 bit5
+         * (i2c_w_bits, no readback gate), then require standby again. */
+        uint8_t v;printf("X9 HAPTIC: no standby after STOP state=%02x; forcing SYSCTRL3 standby as OPPO\n",hs.hw_state);
+        e=hget(0x45,&v);
+        if(!e){uint8_t tx[]={0x45,(uint8_t)(v|0x20)};e=htransfer(tx,2,NULL);}
+        if(!e){uint8_t tx[]={0x45,(uint8_t)(v&~0x20)};e=htransfer(tx,2,NULL);}
+        if(!e)e=hwait_standby();
+    }
     if(e) {
         /* An uncertain I2C operation cannot prevent electrical shutdown.
          * Pull only our confirmed dedicated GPIO reset low, not bus reset.
@@ -260,8 +288,8 @@ static int hfeed(const int8_t *data,unsigned count)
 {
     if(!count || count>15)return EINVAL;
     uint8_t flags;int e=hget(1,&flags);if(e)return e;
-    hs.hw_fault=flags&0xe6;if(hs.hw_fault)return EIO;
-    if(flags&8)return EAGAIN;
+    hnote_fault(flags,"feed");
+    if(flags&8)return EAGAIN; /* FF_AFS, as aw8693xs_rtp_get_fifo_afs */
     uint8_t tx[16];tx[0]=0x32;memcpy(tx+1,data,count);
     return htransfer(tx,count+1,NULL); /* only COMP proves bus submission */
 }
@@ -270,9 +298,15 @@ static int hgo(void)
     int e=hstate();if(e)return e;
     if(hs.hw_state)return EBUSY;
     hb.active=true; /* BEFORE a possibly landed GO */
-    e=hcommand(1);uint64_t end=now_ns()+5000000;
-    if(!e)do {e=hstate();if(e || hs.hw_state==8)break;delay(50);}while(now_ns()<end);
-    return e?e:hs.hw_state==8?0:ETIMEDOUT;
+    /* rtp_work_routine: GO, sleep 2 ms, then up to 200 polls x 2-2.5 ms for
+     * (GLBRD5 & 0x0f) == RTP_GO. Boost startup routinely exceeds 5 ms.
+     * Poll faster than OPPO but give the same total budget. */
+    e=hcommand(1);if(e)return e;
+    delay(2000);uint64_t end=now_ns()+400000000ULL;
+    do {e=hstate();if(e || (hs.hw_state&15)==8)break;delay(500);}while(now_ns()<end);
+    if(!e && (hs.hw_state&15)!=8)
+        printf("X9 HAPTIC: no RTP_GO after GO state=%02x\n",hs.hw_state);
+    return e?e:(hs.hw_state&15)==8?0:ETIMEDOUT;
 }
 static int hconfigure(void)
 {

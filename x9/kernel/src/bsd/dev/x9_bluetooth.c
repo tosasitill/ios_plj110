@@ -122,8 +122,14 @@ static int irq_bind(void)
     if(reg[0]!=0x06800000-0x400000ULL || reg[1]!=0x40000 ||
        reg[2]!=0x06880000-0x400000ULL || reg[3]!=0x200000) return ENXIO;
     gic=(volatile uint32_t *)ml_io_map(0x06800000,0x40000); if(!gic) return ENOMEM;
-    if((rd(gic,0)&0x11)!=0x11 || (rd(gic,0)&(1u<<31)) ||
-       (((rd(gic,4)&31)+1)*32)<=UART_INTID || !(rd(gic,G_GROUP)&IRQ_BIT) ||
+    /* Non-secure view, two security states: CTLR bit4 ARE_NS + bit1
+     * EnableGrp1A; bit0 is RES0 (pe_fiq sets it, reads back 0x12, log 324).
+     * IGROUPR is not checked: this GIC reads group bits as zero from NS even
+     * for delivered Group 1 NS interrupts (pe_fiq.c, GICR_IGROUPR0); Android
+     * 8250_mtk takes this SPI328 as a normal NS IRQ. Route/priority/enable
+     * readbacks below still refuse a line NS cannot actually program. */
+    if((rd(gic,0)&0x12)!=0x12 || (rd(gic,0)&(1u<<31)) ||
+       (((rd(gic,4)&31)+1)*32)<=UART_INTID ||
        (rd(gic,G_CONFIG)&(3u<<((UART_INTID%16)*2))) ||
        ((rd(gic,G_ENABLE)|rd(gic,G_ACTIVE)|rd(gic,G_PENDING))&IRQ_BIT)) {
         printf("X9 BT: irq_bind GIC refused ctlr=%x typer=%x group=%x config=%x enable=%x active=%x pending=%x bit=%x\n",
@@ -161,14 +167,24 @@ static int irq_bind(void)
     *(volatile uint8_t *)((uintptr_t)gic+G_PRIORITY)=0xa0;
     __asm__ volatile("dsb sy" ::: "memory");
     if(*(volatile uint64_t *)((uintptr_t)gic+G_ROUTE)!=mpidr ||
-       *(volatile uint8_t *)((uintptr_t)gic+G_PRIORITY)!=0xa0) return EIO;
+       *(volatile uint8_t *)((uintptr_t)gic+G_PRIORITY)!=0xa0) {
+        printf("X9 BT: irq_bind GIC route/priority not NS-writable route=%llx/%llx prio=%x saved=%llx/%x\n",
+               *(volatile uint64_t *)((uintptr_t)gic+G_ROUTE),mpidr,
+               *(volatile uint8_t *)((uintptr_t)gic+G_PRIORITY),route_saved,priority_saved);
+        return EIO;
+    }
     /* 8250 UART64 RX trigger16, RDI + line-status. Not Linux APDMA. The
      * hardware FIFO is empty, drained above; no flush after a command. */
     wr(uart,8,0x41);
     boolean_t old=rx_lock(); rx.owned=true; wr(uart,4,5); wr(gic,G_ENABLE,IRQ_BIT);
     rx_unlock(old);
     for(unsigned i=0;i<500 && (rd(gic,0)&(1u<<31));i++) delay(2);
-    if((rd(gic,0)&(1u<<31)) || !(rd(gic,G_ENABLE)&IRQ_BIT)) return EIO;
+    if((rd(gic,0)&(1u<<31)) || !(rd(gic,G_ENABLE)&IRQ_BIT)) {
+        printf("X9 BT: irq_bind GIC enable not latched ctlr=%x enable=%x pending=%x\n",
+               rd(gic,0),rd(gic,G_ENABLE),rd(gic,G_PENDING));
+        return EIO;
+    }
+    printf("X9 BT: irq_bind SPI%u route=%llx prio=a0 enabled\n",UART_INTID-32,route_owned);
     return 0;
 }
 static void irq_stop(void)
@@ -206,7 +222,6 @@ static int irq_resume(void)
     int error=x9_bt_hardware_check(); if(error) return error;
     boolean_t old=rx_lock();
     if(!irq_captured || rx.owned || (rd(gic,G_ENABLE)&IRQ_BIT) ||
-       !(rd(gic,G_GROUP)&IRQ_BIT) ||
        (rd(gic,G_CONFIG)&(3u<<((UART_INTID%16)*2))) ||
        *(volatile uint64_t *)((uintptr_t)gic+G_ROUTE)!=route_owned ||
        *(volatile uint8_t *)((uintptr_t)gic+G_PRIORITY)!=0xa0) error=EBUSY;

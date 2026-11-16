@@ -242,7 +242,7 @@ static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
                     }
                     if(!e && !count) {
                         uint8_t fifo;e=hget(4,&fifo);if(!e)e=hstate();
-                        if(!e && (fifo&1) && !hs.hw_state) {
+                        if(!e && (fifo&1) && !(hs.hw_state&15)) { /* rtp_play: STATE_MASK */
                             /* Real FIFO empty + native standby, not elapsed
                              * wall time, proves this hardware run ended. */
                             hb.active=false;on_at=0;
