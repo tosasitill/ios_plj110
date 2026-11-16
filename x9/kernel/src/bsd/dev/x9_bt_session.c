@@ -281,8 +281,30 @@ int x9_bt_session_run(const struct x9_bt_session_ops *o,
     STEP(X9_BT_SESSION_ROUTING, set_uart(&o->io, b->flow_control, r->ap_flags));
     STEP(X9_BT_SESSION_ROUTING, o->io.drain(ctx, 1000));
     STEP(X9_BT_SESSION_ROUTING, o->post_download(ctx, inband));
-    STEP(X9_BT_SESSION_OWN, wake(&o->io));
-    STEP(X9_BT_SESSION_OWN, o->verify_ownership(ctx));
+    /* btmtk_uart_load_rom_patch after bypass(0): wakeup 0xFF; on failure
+     * ("fw get dirty data trigger EINT") btmtk_uart_driver_own_cmd. */
+    error = wake(&o->io);
+    if (error) {
+        static const uint8_t own[] = {1,0x6f,0xfc,6,1,3,2,0,3,1};
+        static const uint8_t own_ack[] = {4,0xe4,7,2,3,3,0,0,3,1};
+        int first = error;
+        r->stage = X9_BT_SESSION_OWN;
+        error = exact(&o->io, own, sizeof(own), own_ack, sizeof(own_ack));
+        printf("X9 BT: post-download wake errno=%d; driver-own fallback errno=%d (as Android)\n",
+               first, error);
+        if (error) return error;
+    }
+    bool bt_awake = false;
+    STEP(X9_BT_SESSION_OWN, o->verify_ownership(ctx, &bt_awake));
+    if (!bt_awake) {
+        /* open_done step 28: 0xFF with no expected event, one 500 ms try.
+         * Consume a late wake event so it cannot reach the next command. */
+        static const uint8_t ff[] = {0xff};
+        uint8_t wrx[260]; size_t wn = sizeof(wrx);
+        int werr = o->io.exchange(ctx, ff, sizeof(ff), wrx, &wn, 500);
+        printf("X9 BT: DEV0_BT_AWAKE=0, sent 0xFF (no event required) reply errno=%d len=%u\n",
+               werr, (unsigned)(werr ? 0 : wn));
+    }
     r->driver_owned = true;
     /* Both UART tty/serdev calibration callbacks are real Android no-ops;
      * XO/connfem have already been sent. Ownership is NOT function power-on.

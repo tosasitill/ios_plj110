@@ -25,8 +25,10 @@ struct x9_bt_session_ops {
     /* Read actual hub sleep mechanism/inband support, never compile flags. */
     int (*hub_features)(void *, bool *hardware_sleep, bool *inband);
     int (*post_download)(void *, bool inband);
-    /* Verify driver ownership/host-awake feedback after the FW ACK. */
-    int (*verify_ownership)(void *);
+    /* btmtk_uart_open_done: connv3 power-on done, SET_HOST_AWAKE (Android
+     * logs FAIL/CANCEL but never fails), report DEV0/STA0 BT_AWAKE so the
+     * session can send Android's no-event 0xFF, then assert_bit_ctrl(0). */
+    int (*verify_ownership)(void *, bool *bt_awake);
 };
 struct x9_bt_session_board {
     uint8_t xo[25]; /* CONNXO record bytes 2..26, without its LE length. */

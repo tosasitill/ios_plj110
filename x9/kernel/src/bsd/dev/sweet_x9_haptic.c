@@ -47,8 +47,23 @@ static bool allowed(struct proc *p)
     char name[32]={0};proc_name(proc_pid(p),name,sizeof(name));
     return uid==501 && !strcmp(name,"mediaserverd");
 }
+/* Per-stream aggregate (first 16): proves whether non-zero RTP samples
+ * reached the FIFO in RTP_GO, without per-sample serial lines. */
+static uint64_t st_accepted,st_submitted;static unsigned st_peak,st_gos,st_logs;
+static uint8_t st_state_or;
+static void stream_summary(void)
+{
+    if(!(hs.flags&X9_HAPTIC_RUNNING) || st_logs>=16)return;
+    st_logs++;
+    printf("X9 HAPTIC: stream gen=%llu accepted=%llu submitted=%llu peak=%u go=%u state_or=%02x sysst=%02x underruns=%llu\n",
+        hs.generation,hs.accepted_frames-st_accepted,hs.submitted_frames-st_submitted,
+        st_peak,st_gos,st_state_or,hs.hw_fault,hs.underruns);
+}
+static void stream_reset(void)
+{st_accepted=hs.accepted_frames;st_submitted=hs.submitted_frames;st_peak=st_gos=0;st_state_or=0;}
 static int stop_locked(void)
 {
+    stream_summary();
     hs.flags&=~X9_HAPTIC_RUNNING;draining=scene_active=quiet_stop=false;
     ++hs.generation;head=count=0;sequence=0;
     int e=hoff();on_at=last_signal_ns=0;hs.last_stop_ns=now_ns();
@@ -67,7 +82,7 @@ static int start_locked(struct x9_haptic_start *s)
     if(hs.mode!=2 || !(hs.flags&X9_HAPTIC_READY))return ENXIO;
     if(now_ns()<cool_until)return EAGAIN;
     if((hs.flags&X9_HAPTIC_RUNNING) || hb.active)return EBUSY;
-    hs.flags&=~X9_HAPTIC_THROTTLED;hs.flags|=X9_HAPTIC_RUNNING;
+    hs.flags&=~X9_HAPTIC_THROTTLED;hs.flags|=X9_HAPTIC_RUNNING;stream_reset();
     ++hs.generation;head=count=0;sequence=0;draining=scene_active=false;
     x9_haptic_converter_init(&converter,hs.f0_millihz,s->conversion,s->intensity,s->sharpness);
     hs.last_write_ns=now_ns();s->generation=hs.generation;return 0;
@@ -228,7 +243,8 @@ static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
                 }
                 if(!hb.active) {
                     if(count>=120 || (draining && count)) {
-                        e=hgo();if(!e){on_at=now_ns();quiet_stop=false;}
+                        e=hgo();st_state_or|=(uint8_t)hs.hw_state;
+                        if(!e){on_at=now_ns();quiet_stop=false;++st_gos;}
                     }
                 }
                 if(!e && hb.active) {
@@ -237,6 +253,8 @@ static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
                         unsigned n=MIN(count,MIN(15u,MIN(budget,X9_HAPTIC_RING-head)));
                         e=hfeed(ring+head,n);
                         if(e==EAGAIN){e=0;break;}if(e)break;
+                        for(unsigned i=0;i<n;i++){int a=ring[head+i]<0?-ring[head+i]:ring[head+i];
+                            if((unsigned)a>st_peak)st_peak=(unsigned)a;}
                         for(unsigned i=0;i<n;i++)if(ring[head+i]){last_signal_ns=now_ns();break;}
                         head=(head+n)%X9_HAPTIC_RING;count-=n;budget-=n;hs.submitted_frames+=n;
                     }

@@ -291,33 +291,46 @@ static int post_download(void *context, bool inband)
         !(rd(ep[1],0x5c)&1) || !(rd(ep[2],0x5c)&1)) return EIO;
     return x9_bt_hardware_check();
 }
-static int verify_ownership(void *context)
+static int verify_ownership(void *context, bool *bt_awake)
 {
     (void)context;
+    if (!bt_awake) return EINVAL;
+    *bt_awake=false;
     int error=x9_bt_hardware_check(); if (error) return error;
     if (rd(hub,CON2)&4) return ENXIO;
+    /* btmtk_uart_open_done order: connv3_pwr_on_done first. */
+    firmware_live=true; /* A later supply-accounting error is not function-off. */
+    error=x9_conn_power_done(X9_CONN_BT); if (error) return error;
     if (rd(hub,STA0)&4) {
-        /* State bit11, SET bit2, CLR bit4; they are NOT interchangeable. */
-        wr(hub,IRQ_CLR,8); wr(hub,DEV0_SET,4);
-        for (unsigned n=0;n<20;n++) {
-            uint32_t dev=rd(hub,DEV0), sta=rd(hub,STA0);
-            if ((dev&(1u<<11)) && (sta&(1u<<7)) && (sta&8) &&
-                (dev&(1u<<12)) && (rd(hub,IRQ_STA)&8))
-                {
-                    firmware_live=true; /* A later supply-accounting error is not function-off. */
-                    error=x9_conn_power_done(X9_CONN_BT);
-                    if (!error) { ownership=OWN_DRIVER; field(hub,STA0,1u<<10,0); }
-                    return error;
-                }
-            delay(50);
+        /* uarthub_host_awake_sta_ctrl_mt6993(0,1): clear feedback IRQ, read
+         * pre-state, DEV0_STA_SET bit2. Poll (11 us + 20 x 50-60 us) only if
+         * CMM_BT_AWAKE(STA0 bit3)=1 and DEV0 host-awake(bit11) was 0; else
+         * CANCEL. check_irq when sent state STA0 bit7 already equalled 1.
+         * Android returns 0 on FAIL and CANCEL alike: logged, never fatal. */
+        wr(hub,IRQ_CLR,8);
+        uint32_t dev_before=rd(hub,DEV0), sta_before=rd(hub,STA0);
+        bool cmm=(sta_before&8)!=0, was_set=(dev_before&(1u<<11))!=0;
+        bool check_irq=(sta_before&(1u<<7))!=0;
+        wr(hub,DEV0_SET,4);
+        const char *result="CANCEL";
+        if (cmm && !was_set) {
+            result="FAIL"; delay(11);
+            for (unsigned n=0;n<20;n++) {
+                if ((!check_irq || (rd(hub,IRQ_STA)&8)) && (rd(hub,STA0)&(1u<<7)))
+                    { result="OK"; break; }
+                delay(55);
+            }
         }
-        return ETIMEDOUT;
-    }
-    firmware_live=true;
-    error=x9_conn_power_done(X9_CONN_BT);
+        uint32_t dev_after=rd(hub,DEV0), sta_after=rd(hub,STA0);
+        /* mtk8250_uart_hub_get_bt_awake_sta = STA0 bit6 (bt_awake_sta). */
+        *bt_awake=(sta_after&(1u<<6))!=0;
+        printf("X9 BT: SET_HOST_AWK %s dev0=%x/%x sta0=%x/%x irq=%x cmm=%d bt_awake=%d\n",
+               result,dev_before,dev_after,sta_before,sta_after,rd(hub,IRQ_STA),
+               cmm,*bt_awake);
+    } else *bt_awake=true; /* no hw sleep mechanism: Android skips 27/28 */
     /* btmtktty power-on done: mtk8250_uart_hub_assert_bit_ctrl(0). */
-    if (!error) { ownership=OWN_DRIVER; field(hub,STA0,1u<<10,0); }
-    return error;
+    ownership=OWN_DRIVER; field(hub,STA0,1u<<10,0);
+    return 0;
 }
 
 /* mt6993.c:uarthub_host_awake_sta_ctrl. Only our DEV0 command and shared

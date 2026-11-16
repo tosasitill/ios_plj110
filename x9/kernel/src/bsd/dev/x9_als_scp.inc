@@ -428,6 +428,10 @@ static int als_list(void)
      length > capacity || capacity > 4096 || le32(p+4) != als_crc32(h,16+length)) return EBADMSG;
  for (unsigned i = 0; i < length; i += 40) {
   const uint8_t *info = p+24+i;
+  /* Logs 322-325 listed only type8 (tcs3720 ps) although OPPO's DT has
+   * light_1 = the same TCS3720; record every entry the SCP returns. */
+  printf("X9 ALS SCP: LIST record type=%u gain=%u name=%.*s vendor=%.*s\n",
+      info[0],le32(info+4),16,info+8,16,info+24);
   if (info[0] == X9_PROX_MTK_TYPE) {
    if (prox_info || !le32(info+4)) return EBADMSG;
    prox_info = info; continue;
