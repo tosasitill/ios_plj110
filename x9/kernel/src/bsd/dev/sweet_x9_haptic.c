@@ -239,8 +239,12 @@ static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
                  * their time relative to subsequent transients. */
                 bool signal=false;
                 for(unsigned i=0;i<count;i++)if(ring[(head+i)%X9_HAPTIC_RING]){signal=true;break;}
+                /* While running, keep streaming silence for 200 ms after the
+                 * last signal (OPPO streams continuously): parking 20 ms
+                 * after each tap made every keystroke pay GO + boost
+                 * startup again (log 329/330 "delayed"). */
                 if(!scene_active && !draining && !signal &&
-                   (!hb.active || (last_signal_ns && now-last_signal_ns>=20000000))) {
+                   (!hb.active || (last_signal_ns && now-last_signal_ns>=200000000))) {
                     head=count=0;quiet_stop=true;
                 }
                 if(!hb.active) {

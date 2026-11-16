@@ -1,18 +1,25 @@
-/* Integer-only 48kHz Actuator -> 12kHz signed RTP conversion.
- * No allocation, float, packet-dependent carrier reset or hidden ID guessing.
- * Retuning preserves the time envelope while translating D22's carrier to
- * the actual LRA. Raw mode is available for already tuned custom waveforms.
+/* Integer-only 48kHz Actuator -> 12kHz signed RTP, OPPO RichTap stream
+ * style (haptic_hv.c aw_stream_mode): the PCM is the finished drive
+ * waveform and goes to RTP unchanged; strength is the chip gain/boost.
+ *
+ * iOS 20H392 D221 haptic engine (Library/Audio/Tunings/D221/Haptics):
+ * transients are pre-shaped full-scale drive pulses, MicroTap ~1/2 cycle
+ * (one-sided push), MiniTap ~1 cycle, FullTap ~2 cycles, at 80..300 Hz
+ * selected by sharpness; continuous events are enveloped sines. Logs
+ * 327..330 rebuilt everything as an envelope-retuned 173 Hz sine with
+ * 6 ms hold + kick/brake: a 7 ms MicroTap became a ~30 ms buzz, sharpness
+ * was discarded and x6 clipped every tap (log 330 in_peak 17695..32509)
+ * -- "late, loose, wrong for the scene". Now linear 32767 -> 127.
+ * No DC removal: MicroTaps are intentionally one-sided.
  */
 #ifndef X9_HAPTIC_CONVERT_H
 #define X9_HAPTIC_CONVERT_H
 #include "x9_haptic.h"
 struct x9_haptic_converter {
     uint32_t phase, step, conversion, intensity, sharpness, decimator;
-    int32_t dc, envelope, lowpass, sum, hold;
-    int32_t in_peak, active, kick, brake, brake_amp, last_amp;
+    int32_t lowpass, sum, in_peak;
 };
-/* Q15 sine approximation on a full unsigned 32-bit turn. Bhaskara's
- * approximation, bounded 64-bit intermediates, exact zero at half turns. */
+/* Q15 sine approximation on a full unsigned 32-bit turn (scene synthesis). */
 static inline int32_t x9_haptic_sine(uint32_t phase)
 {
     uint32_t x=(phase&0x7fffffff)>>16;
@@ -29,67 +36,17 @@ static inline void x9_haptic_converter_init(struct x9_haptic_converter *c,
 }
 static inline int x9_haptic_convert_sample(struct x9_haptic_converter *c,int16_t pcm,int8_t *out)
 {
-    /* Remove DC before rectification. Attack ~0.25ms, release ~2ms;
-     * a zero input eventually yields exactly zero, not a vibrating noise floor. */
-    int32_t dc_delta=(int32_t)pcm-c->dc;
-    c->dc+=dc_delta/512;
-    if(!pcm && c->dc && c->dc<512 && c->dc> -512)c->dc+=c->dc>0?-1:1;
-    int32_t input=(int32_t)pcm-c->dc;
     {int32_t a=pcm<0?-(int32_t)pcm:pcm;if(a>c->in_peak)c->in_peak=a;}
-    int32_t magnitude=input<0?-input:input;
-    /* Peak hold over one D22 carrier half period (6 ms covers >=84 Hz),
-     * then ~2 ms release: a smooth envelope instead of a rectified ripple
-     * at twice iOS's carrier, which beat against the LRA sine (log 327). */
-    if(magnitude>=c->envelope){c->envelope=magnitude;c->hold=288;}
-    else if(c->hold)c->hold--;
-    else c->envelope-=(c->envelope-magnitude)/96+1;
-    if(c->envelope<0 || (magnitude<16 && c->envelope<96))c->envelope=0;
-    /* Two-state lowpass + four-sample average is the raw decimator, not a
-     * sufficient anti-alias filter for arbitrary audio. Actuator content is
-     * low-frequency haptic PCM; this is not a full-band audio transport. */
-    c->lowpass+=(input-c->lowpass)/4;c->sum+=c->lowpass;
+    /* One-pole lowpass (~2 kHz) + four-sample average: content is <=300 Hz
+     * drive, group delay ~0.1 ms. */
+    c->lowpass+=((int32_t)pcm-c->lowpass)/4;c->sum+=c->lowpass;
     if(++c->decimator<4)return 0;
     c->decimator=0;int32_t value=c->sum/4;c->sum=0;
-    if(c->conversion==X9_HAPTIC_RETUNE) {
-        /* As OPPO streams haptic PCM (RichTap stream mode, aw_stream_mode/
-         * aw_set_gain): samples go to RTP unchanged, strength is one chip
-         * gain <= HAPTIC_GAIN_LIMIT 0x80 (ours) at max boost. So drive is
-         * strictly LINEAR in iOS's envelope: no per-sample (327: smeared) or
-         * per-event floor. Only the iOS->OPPO scale is ours: x3 left typical
-         * taps (peaks ~3000..5000 of 32767, HakiOS) too light in log 328;
-         * x6 puts a ~5500 tap at OPPO's full level, 1000 at 18%.
-         * Pure f0 sine: an LRA turns a 3rd harmonic into buzz. */
-        int64_t scaled=(int64_t)c->envelope*6;
-        int32_t target=scaled>32767?32767:(int32_t)scaled,amp,sign=1;
-        /* LRA transient as OPPO's own effects shape it: a resonant motor
-         * barely builds up within iOS's 10..70 ms taps (log 329: "light,
-         * loose") and rings on after them. Overdrive the first two cycles
-         * at twice the event's own level, then follow it linearly; when it
-         * ends, drive one reverse-phase cycle ramping down from the last
-         * level (active brake). Both scale with the event: still linear. */
-        uint32_t period=c->step?(uint32_t)((1ULL<<32)/c->step):70;
-        if(target) {
-            if(!c->active){c->active=1;c->kick=(int32_t)(2*period);}
-            c->brake=0;
-            amp=target;
-            if(c->kick){c->kick--;int64_t k=(int64_t)target*2;amp=k>32767?32767:(int32_t)k;}
-            c->last_amp=amp;
-        } else {
-            if(c->active){c->active=0;c->kick=0;c->brake=(int32_t)period;c->brake_amp=c->last_amp;}
-            if(c->brake){amp=(int32_t)((int64_t)c->brake_amp*c->brake/(int32_t)period);c->brake--;sign=-1;}
-            else amp=0;
-        }
-        value=sign*(int32_t)((int64_t)amp*x9_haptic_sine(c->phase)/32768);
-        c->phase+=c->step;
-        value=(int32_t)((int64_t)value*c->intensity/1000);
-        value=value*127/32768;
-        if(value>127)value=127;if(value< -127)value= -127;
-        *out=(int8_t)value;return 1;
-    }
-    c->phase+=c->step;
+    c->phase+=c->step; /* scene synthesis continues the same phase */
     value=(int32_t)((int64_t)value*c->intensity/1000);
-    value=value*96/32768; /* raw mode: signed8 peak <=96 */
-    if(value>96)value=96;if(value< -96)value= -96;
+    int32_t limit=c->conversion==X9_HAPTIC_RETUNE?127:96; /* raw: legacy <=96 */
+    value=(int32_t)(((int64_t)value*limit+(value<0?-16384:16384))/32768);
+    if(value>limit)value=limit;if(value< -limit)value= -limit;
     *out=(int8_t)value;return 1;
 }
 /* Scene synthesis shares the native converter's continuous phase. This
