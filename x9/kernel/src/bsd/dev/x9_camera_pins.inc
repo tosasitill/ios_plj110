@@ -46,7 +46,7 @@ static void cam_pin_snapshot(struct cam_probe_journal *j,struct cam_probe_pin *p
 static int cam_pin_write(struct cam_probe_journal *j,struct cam_probe_pin *p,
                           unsigned field,uint32_t value,bool cleanup)
 {
-    if(field>=CAM_PIN_FIELDS || value>1 || !p->taken)return EINVAL;
+    if(field>=CAM_PIN_FIELDS || value>(field==CAM_PIN_MODE?15u:1u) || !p->taken)return EINVAL;
     int e=cam_pin_check(j,p,cleanup);if(e)return e;
     uint32_t bit=1u<<field,before=cam_pin_value(j,p,field);
     if(before!=p->expected[field] && !(cleanup && (p->uncertain&bit) && before==p->prior[field]))
@@ -161,9 +161,9 @@ static int cam_routes_take(struct cam_probe_journal *j)
     for(unsigned i=0;i<4;i++) {
         struct cam_probe_pin *p=&j->route[i];
         int e=cam_pins_guard(j,false);if(!e)e=cam_pin_check(j,p,false);if(e)return e;
-        if(p->mode!=1 && (p->mode || p->dir))return EBUSY;
-        p->taken=true; /* includes borrowed AP mode1: guard, never restore */
-        e=cam_pin_write(j,p,CAM_PIN_MODE,1,false);if(e)return e;
+        if(!p->ap_mode || (p->mode!=p->ap_mode && (p->mode || p->dir)))return EBUSY;
+        p->taken=true; /* includes a borrowed AP function: guard, never restore */
+        e=cam_pin_write(j,p,CAM_PIN_MODE,p->ap_mode,false);if(e)return e;
     }
     return cam_pins_guard(j,false);
 }

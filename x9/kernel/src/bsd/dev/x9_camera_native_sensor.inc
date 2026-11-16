@@ -40,7 +40,12 @@ static int cam_native_sensor_power(const struct x9_camera_sensor *s,int on)
         cam_native_sensor.sensor=s->sensor;
         cam_native_sensor.configured=cam_native_sensor.prepared=false;
         e=cam_sensor_session_open_locked(s->sensor,&cam_native_sensor.epoch,&r);
-        if(e)cam_native_sensor.error=e;
+        if(e) {
+            cam_native_sensor.error=e;
+            /* Same journal record as mode3: stage/blockers/clock/rail/pin
+             * snapshot already read by the failed open. No new MMIO. */
+            if(cam_native_sensor.epoch)cam_sensor_cold_log(&r);
+        }
         return e;
     }
     /* Core pairs even an unadmitted power-on error once. An empty epoch is

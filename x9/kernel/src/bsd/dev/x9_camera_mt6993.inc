@@ -57,6 +57,7 @@ struct cam_probe_board {
 enum { CAM_PIN_MODE, CAM_PIN_DIR, CAM_PIN_DOUT, CAM_PIN_FIELDS };
 struct cam_probe_pin {
     uint32_t pin, mode, dir, dout;
+    uint32_t ap_mode; /* route pins only: MT6993 AP I2C function, per pin */
     uint32_t expected[CAM_PIN_FIELDS], prior[CAM_PIN_FIELDS], dirty, uncertain;
     bool valid, taken, owned, conflict;
 };
@@ -610,10 +611,18 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
        !j->ldo.base || !j->ldo.dma || !j->ldo.gate)return ENOMEM;
     r->mclk_cfg=cam_rr(j->vlp,j->board.clk_off);
     r->mclk_status=cam_rr(j->vlp,0x330);
+    /* mt6993-pinfunc.h: sensor SCL/SDA (172-175,190/191,200/201) are AP
+     * SCLn/SDAn in mode1, but GPIO162/163 mode1 is SCP_SCL2/SDA2 and AP
+     * SCL12/SDA12 (WL28681C + RT5133 bus i2c@16200000) is mode2. Live DT
+     * drives the only alternative SDA12 pin, GPIO187, as a GPIO in the
+     * WL28681C reset group, so I2C12 must be 162/163 mode2. */
     const unsigned route[]={j->board.scl,j->board.sda,162,163};
+    const unsigned route_mode[]={1,1,2,2};
     for(unsigned i=0;i<4;i++) {
         cam_pin_snapshot(j,&j->route[i],route[i]);
-        if(j->route[i].mode!=1 && (j->route[i].mode || j->route[i].dir))r->blockers|=X9_CAM_BLOCK_ROUTE;
+        j->route[i].ap_mode=route_mode[i];
+        if(j->route[i].mode!=route_mode[i] && (j->route[i].mode || j->route[i].dir))
+            r->blockers|=X9_CAM_BLOCK_ROUTE;
     }
     cam_pin_snapshot(j,&j->reset,j->board.reset);
     cam_pin_snapshot(j,&j->mclk,j->board.mclk);
