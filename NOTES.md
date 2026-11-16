@@ -157,6 +157,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 同版输入续接：追加当前只读日志快照并开始三代理静态分析
+
+- 原件采集提交 **`ea18da65`** 已实际ff合main并push成功，原`call-input-capture`树/分支已移除；18个原件保留在主checkout `x9/out/android-call-inputs-20261116-092442/`，没有重新提取/覆盖。复用用户授权的三个代理，新树分别为`dial-java-producer`、`voice-dsp-payload`、`init-sms-java`，root为`call-owned-runtime`；共享`.local`及其它硬件工作树不动。
+- root同一私有serial/唯一connected device前提下补抓 **radio/main logcat、telephony.registry、telecom、dmesg** 五份只读快照，原stdout/stderr及确切命令/exit/bytes/SHA在本轮`x9/out/call-owned-runtime/`；未清日志、拨号/短信、安装、setprop、重启或写分区。radio现有窗口为 **11-16 09:15:01.518–09:31:55.485**，不能代替11-15已保存MO/呼入，也不因当前窗口缺初始化/SMS事件而断言未初始化。当前telephony snapshot两个Phone Id的call state为0，telecom `mCalls`为空，当前不是通话路由/媒体成功证据。
+- 将上述窄只读快照流程保存在现有 **`x9/tools/record_android_calls.py snapshot --out <case>`**：沿用case私有session、确认sole selected device、固定五个读取命令、45s单命令上限、0600文件、原stdout/stderr保留及私有manifest。预先检查所有输出名并exclusive创建，禁止覆盖已有快照；记录可识别源形状而不单信su exit0，不称通话/SMS receipt。不启动后台worker，不包含任意shell/ioctl/设置探针。正式Python语法编译通过；没有重跑采集、测试套件/人工向量、生产源码编译/CI或boot pack。
+- 同版`audio_ipi.ko`分析发现`get_adsp_core_total`/主loader为外部import；原`/proc/modules`确有独立`adsp`，完整mounted模块inventory没有其文件。只读补列system_dlkm亦无匹配；基于此新依赖尝试读取active `vendor_boot_b`的槽位/长度时，ADB返回 **device not found**，未读分区。失败stdout/stderr保留，不将exit/空文件当提取成功，不重试、不改设备或拿旧备份默认同版。已抓18个原件和五份日志快照不受此断连影响；未获得主adsp模块，不能宣称firmware loader/core数量已闭。
+- 当前新增输入供三个代理继续matching CLIR producer、DSP容器/实际模块consumer与Java初始化/SMS ACK owner。完整owned iOS caller/backend、CallList/handover、独立双向voice及当前iOS Messages/对端验收仍未实现；**VOICE09未开放，无最终通话短信镜像**。本轮采集/工具不计作生产修复；代理结果与实际归档/整合收尾待下条记录。
+
 #### 2026-11-16 用户重新连接ADB：同版Java/音频原件已只读提取（首批输入阻断解除，功能仍未完成）
 
 - 用户明确 **“adb已连接 提取吧”**，本轮从`e6e7b0c0`建`feat/call-input-capture`，只读ADB。先要求唯一connected device，并与旧call session私有serial一致才采集；identity/root身份和build实际回读均已保存。当前fingerprint仍为`OPPO/PLJ110/OP5E17L1:17/CP2A.260605.016/B.46c413f-20895a6-20bdbdd:user/release-keys`，slot **`_b`**。没有拨号、发短信、安装、logcat clear、setprop、重启/flash或分区写入；其它工作树、`.local`和分区备份未改变。
