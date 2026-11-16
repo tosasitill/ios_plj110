@@ -157,6 +157,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 END post-wait owner fence 与 concrete CALL/SMS 下一边（本轮进行中）
+
+- **基线/分工**：root `feat/sms-controller-owner`基于main/origin **`a8729e20`**；按用户明确要求复用三个代理，`call-action-owner`追真实CallModel强record更新、`sms-controller-dispatch`追supplied concrete Controller的MT/parser边、`call-sms-receipt-review`审现行CALL/WMS37收据。scratch仅各树`x9/out`，不动其它硬件树、共享`.local`、设备或备份。完整通话短信goal仍 **active**。
+- **实际生产修复/编译终态**：receipt代理原 **`11f0cb55`**已review/cherry-pick为root **`ec47c9db`**：stage1 `take/end_snapshot`两个可等待MD mutex的操作后，建新`0x905` action前再检查原owner live与deadline，关闭等待期间actual QMUX已release、DEL尚未dispatch的已证空窗。**仅post-wait fence，不是BB身份检查与MD submit原子化**，最后check以后/submit内部等待与writer的host-generation/deadline guard仍缺；已selected/partial旧mutation drain合同不改。四个新增fixture源向量未执行；代理宿主`clang++ -std=c++17 -Wall -Wextra -Werror -c` **exit0**。root以实际生产head **ec47c9db/tracked clean**单对象编译`X9Baseband.cpp.o` **exit0/True、34warnings**；session **3293已终态**，命令/source-head/status/recipe/log/results保留主`x9/out/call-end-postwait/`，不再重编或复检对象。WMS37窄链未发现独立缺陷，未改SMS生产代码。
+- **Root新dictionary gate证据**：head/blast/callback/continuation/selector-class-target/helper-export六个模式各实际 **exit0**，在主`x9/out/sms-dictionary-owner/`；dictionary入口实际4B thunk（首读1024B含邻函数，不将邻字节认作本method）。`_processReceivedDictionaryInBlastDoor`捕原dict `g`与同storage/completion，交真实IMBlastdoor；callback的returned对象只有通过真实`BlastDoorSMSMessage` class gate才进入`_processReceivedSMSMessage`，不是原dictionary。nested continuation仅转发原完成参数，非SQL收据。原continuation proof的origin文案误写外层method，待维护erratum修正，保留原proof不重采；returned GUID producer及dict g→成功record身份仍未闭。
+- **两个代理当前边/尚待**：CALL已闭实际`IMSCallModel` ctor +70/+78强record、AP+1d8 update与retain-before-release helper，最后仅核driver AP+1e0槽与旧dial AP+118，随后收束，不称same-action record+Client+CallInfo UUID snapshot/native epoch。SMS已闭原`CSISMS::create`真实supplied `sms::Controller`、secondary interface +68调整、virtual+20到MT/parser及同response/details/ACK强owner callback，最后仅必要named import资格，**不读新1007f622c消费者或server**；Model/status→通知ID仍缺。两代理正在整理现有docs/合同/维护reader/commit；receipt代理已停写，尚待归档树。root尚未合main/push本轮。
+- **构建/验收边界**：没有本轮完整kernel/CI run/boot pack/上机/测试或构建后二次hash、解包、反汇编、产物比较。上一有效完整kernel仍生产 **`90079648` / `x9/out/x9-call-duplicate-owner-20261116/kernel.development.sweet`**，不能重命名成ec47修复镜像。VOICE09关闭、VOICE20无生产caller；typed owned capture/backend/profile/native epoch/terminal、CallList/handover、双向DSP和当前Messages COMMIT/重开/物理ACK/MO验收仍未完成。本轮下一步是收两代理终态、root gate contract独立复核、无覆盖归档、正常提交合main/push；无待取编译句柄，不标complete或blocked。
+
 #### 2026-11-16 同 txn 重复请求终态 owner 修复与当前接线（本轮收束，完整目标未完成）
 
 - **基线/分工**：root `feat/call-context-capture`基于main/origin **`252f3003`**；按用户要求复用三个代理与新树`call-context-capture/call-terminal-audit/sms-notification-owner`，分别追loaded manager factory/同queue owner、现行03/21终态代码、强SMS Model到通知ID。scratch仅各树`x9/out`，不动其它硬件树或共享`.local`。完整通话短信goal仍active。

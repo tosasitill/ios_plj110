@@ -2697,3 +2697,44 @@ controller counter/clientId或44成功当record revision/native epoch。
 `python3 x9/tools/call_context_evidence.py --mode selection --out x9/out/<新目录>`；
 r1之后exact ctor export、C1 operands、page-chain末节点及system load-command size/end
 guard仅静态AST parse/diff review，**没有重跑reader或旧模式、测试、编译、CI、boot/设备动作**。
+
+## 2026-11-16 Dictionary 的 BlastDoor returned-object gate：不是保存身份收据
+
+沿前节dictionary `g`的下一实际owner边，只新增dictionary入口/BlastDoor method、外层
+callback、nested continuation和必要selector/class/helper资格。六次窄采样均实际 **exit0**；
+未扩BlastDoor server、未重采旧receive/巨大process-SMS函数或SQL链，也没有短信运行验收。
+
+- 原relative entry **`1f3ce8cc8`**的`_processReceivedDictionary:storageContext:withCompletionBlock:`
+  实际只有 **`1f3cc00b4..1f3cc00b8 /4B`**，`b 1f3d0cec0`到真实
+  `_processReceivedDictionaryInBlastDoor:storageContext:withCompletionBlock:` selector stub。
+  `head-r1`首读1024B含邻函数，**仅首4B归本method**，不重读或把邻1020B当本体。
+- 原relative entry **`1f3ce8ef0`**指向BlastDoor method
+  **`1f3cd3ad4..1f3cd3be4 /272B`**。原dictionary x2 retain→x22，`3b10..3b20`
+  从前节已资格的原slot **`21242ebd0`（g）**取值。stack block base为sp+8；其
+  **+20=原g、+28=session、+30=storageContext、+38=原dictionary、+40=原completion**。
+  `3b98`以同dictionary交真selector **`sendSMSDictionary:withCompletionBlock:`**，
+  原class-ref **`21242e4f0→1e2851470`**/ro`1e1303870`明确为 **IMBlastdoor**。
+- 外层callback **`1f3cd3be4..1f3cd4044 /1120B`**的x1 retain→x19是**returned
+  parser object**，不是capture的原dictionary。nonnull x19在`3d50..3d70`经过真
+  **`_IMWeakLinkClass("BlastDoorSMSMessage", "BlastDoor")`**及真
+  **`objc_opt_isKindOfClass`** bit0门；通过才在`3dcc`将**returned x19**与原session/
+  storageContext交`_processReceivedSMSMessage:storageContext:withCompletionBlock:`。
+  nil/error或class gate都不等于数据库保存结果，不能让原dict冒充typed returned对象。
+- 在外层 **`3d90..3da0`**构造的nested continuation
+  **`1f3cd4044..1f3cd41e0 /412B`**仅捕原g（+20）与原completion（+28）；
+  `417c..4190`在completion非空时原样转发w1/x2。这里没有SQL COMMIT或物理WMS37
+  receipt，也**不证明returned对象GUID等于原g**，更不证明成功RecordID。
+
+五个helper veneers的原目标与独立原export trie（flags0）相符：
+`1f9dee600→1800bb4a4 _objc_retain_x1`、`1f9dee618→1800bb4e0 _objc_retain_x2`、
+**`1f9dee624→1800bb864 _objc_retain_x20`**（不是retain_x3）、
+`1f9dee528→1800c13f8 _objc_opt_isKindOfClass`、
+`1f9dee21c→1928d90a4 _IMWeakLinkClass`；原CFString分别length19/9，明确上述class/framework名。
+
+主 **`x9/out/sms-dictionary-owner/`**保留raw/pagechains、`reads.json`、六次命令/log/exit、
+`dictionary-owner-contract.json`和`metadata-erratum.txt`。历史`continuation-r1/proof.json`
+的`callback.origin`误写外层method `3b50/3b5c`，**正确来源是外层callback的3d90..3da0**；
+原proof未覆盖。历史targets里未命名helpers以独立helper-export proof补证。
+scratch reader r4仅修origin元数据及未来head范围，只作语法检查，未再次执行采样。
+下一真正缺口仍是returned **BlastDoorSMSMessage.GUID producer**与原dict g→成功record身份，
+以及另一端CTParser response→Model/status→通知ID；不绕过sanitizer、不伪造成功/ACK/ready。
