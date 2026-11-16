@@ -2833,3 +2833,14 @@ Model now (as Android, one shared AFE, one owner per shared bit):
   (START=0, W1C, DMA WARM/CLR/HANDSHAKE|HARD, SOFTRESET HANDSHAKE|SOFT, TX_MEM_ADDR=1000,
   DELAY_LEN=2). Logs X9 CAMERA AP RESET.
 - Image: x9/out/x9-camera-i2creset-r14-20261116/boot.img
+
+## Camera log 337 (r14) -> r15 (2026-11-16)
+- 337: no hang (ran to 52 s). Vendor init_hw reset ran but changed nothing (MULTI 4380, TIMING 20
+  unchanged); ID still NACK x10. MCLK FENC=1 at entry explained: LK leaves CAMTGs on; Android
+  only shows N when idle because clk_disable_unused turned it off. Offsets all match clk-mt6993.c.
+- Android live pad state (pin string = mode dir out in drv2 smt ies pullen pullup + rsel) for
+  174/175 and 162/163: IES1 SMT1 PU1 PD0 RSEL7. Never read/set by us; DT has no pinctrl for
+  174/175 and LK only uses i2c12 -> sensor pads may lack input/pull-up on iOS = NACK.
+- r15: cam_sensor_pads in route take logs i2c12 reference pads + sensor pads (X9 CAMERA PAD) and
+  sets back 174/175, front 172/173 to IES1 SMT1 PU1 PD0 RSEL7 (bank5 0x120e0000 SET/CLR).
+- Image: x9/out/x9-camera-pad-r15-20261116/boot.img

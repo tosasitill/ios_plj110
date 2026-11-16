@@ -156,6 +156,49 @@ static int cam_pin_restore(struct cam_probe_journal *j,struct cam_probe_pin *p)
     e=cam_pin_check(j,p,true);if(e)return e;
     p->taken=p->owned=false;return 0;
 }
+/* Sensor I2C pad bias. Android live state (adb debugfs pinctrl, camera
+ * idle and streaming alike) for SCL4/SDA4 174/175 and SCL12/SDA12 162/163:
+ * "1001001111 (rsel = 7)" = IES1 SMT1 PU1 PD0 RSEL7. The DT has no pinctrl
+ * for these pads; LK only uses i2c12. Logs 335-337: everything else matches
+ * Android but every sensor ID read NACKs. pinctrl-mt6993.c fields:
+ * bank5 0x120e0000: IES 0x50, PD 0x80, PU 0x90, RSEL 0xb0, SMT 0xc0;
+ * bank4 0x12060000 (162/163): IES 0x70, PD 0xa0, PU 0xb0, RSEL 0xd0, SMT 0xe0.
+ * SET/CLR aliases at +4/+8, like the drive field. */
+struct cam_pad { unsigned pin, bit, rsel_shift; };
+static void cam_pad_log(const char *what,vm_offset_t b,const struct cam_pad *p,
+    unsigned ies,unsigned pd,unsigned pu,unsigned rs,unsigned smt)
+{
+    printf("X9 CAMERA PAD %s: pin=%u ies=%u smt=%u pu=%u pd=%u rsel=%u\n",what,p->pin,
+        (cam_rr(b,ies)>>p->bit)&1,(cam_rr(b,smt)>>p->bit)&1,(cam_rr(b,pu)>>p->bit)&1,
+        (cam_rr(b,pd)>>p->bit)&1,(cam_rr(b,rs)>>p->rsel_shift)&7);
+}
+static int cam_sensor_pads(struct cam_probe_journal *j)
+{
+    static vm_offset_t b4,b5;
+    if(!b5)b5=ml_io_map(0x120e0000,0x1000);
+    if(!b4)b4=ml_io_map(0x12060000,0x1000);
+    if(!b4 || !b5)return ENOMEM;
+    const struct cam_pad ref[2]={{162,13,15},{163,15,21}};
+    for(unsigned i=0;i<2;i++)cam_pad_log("ref-i2c12",b4,&ref[i],0x70,0xa0,0xb0,0xd0,0xe0);
+    struct cam_pad pads[2];
+    if(j->board.scl==174){pads[0]=(struct cam_pad){174,3,3};pads[1]=(struct cam_pad){175,5,9};}
+    else if(j->board.scl==172){pads[0]=(struct cam_pad){172,2,0};pads[1]=(struct cam_pad){173,4,6};}
+    else return 0; /* tele/UW: no Android capture, unchanged */
+    for(unsigned i=0;i<2;i++) {
+        const struct cam_pad *p=&pads[i];uint32_t m=1u<<p->bit;
+        cam_pad_log("entry",b5,p,0x50,0x80,0x90,0xb0,0xc0);
+        cam_rw(b5,0x80+8,m);                       /* PD clear */
+        cam_rw(b5,0x50+4,m);                       /* IES set */
+        cam_rw(b5,0xc0+4,m);                       /* SMT set */
+        cam_rw(b5,0xb0+4,7u<<p->rsel_shift);       /* RSEL = 7 */
+        cam_rw(b5,0x90+4,m);                       /* PU set */
+        __asm__ volatile("dsb sy" ::: "memory");
+        cam_pad_log("android",b5,p,0x50,0x80,0x90,0xb0,0xc0);
+        if(!((cam_rr(b5,0x50)>>p->bit)&1) || !((cam_rr(b5,0x90)>>p->bit)&1) ||
+           ((cam_rr(b5,0x80)>>p->bit)&1) || ((cam_rr(b5,0xb0)>>p->rsel_shift)&7)!=7)return EIO;
+    }
+    return 0;
+}
 static int cam_routes_take(struct cam_probe_journal *j)
 {
     for(unsigned i=0;i<4;i++) {
@@ -165,6 +208,7 @@ static int cam_routes_take(struct cam_probe_journal *j)
         p->taken=true; /* includes a borrowed AP function: guard, never restore */
         e=cam_pin_write(j,p,CAM_PIN_MODE,p->ap_mode,false);if(e)return e;
     }
+    int e=cam_sensor_pads(j);if(e)return e;
     return cam_pins_guard(j,false);
 }
 static int cam_routes_restore(struct cam_probe_journal *j)
