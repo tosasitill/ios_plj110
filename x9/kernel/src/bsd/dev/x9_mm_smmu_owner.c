@@ -262,7 +262,8 @@ int x9_mm_smmu_owner_adopt(const struct x9_mm_smmu_owner_adoption *a,
         for(unsigned n=0;n<sizeof(owner_reg32)/sizeof(owner_reg32[0]) && !e;n++)o->reg32[n]=owner_rr(o,owner_reg32[n]);
         for(unsigned n=0;n<sizeof(owner_reg64)/sizeof(owner_reg64[0]) && !e;n++)o->reg64[n]=owner_rr64(o,owner_reg64[n]);
         if(!e)e=owner_capture(o);
-        o->prod=o->cons=owner_rr(o,0x98);
+        /* A failed power/storage check must not fall through to MMIO. */
+        if(!e)o->prod=o->cons=owner_rr(o,0x98);
         if(!e)e=owner_live(o);
         if(!e && o->prod!=owner_rr(o,0x9c))e=EBUSY;
         if(!e)e=owner_auth(o,false);
@@ -518,13 +519,24 @@ static int owner_camera_guard(void *cookie,uint64_t token,unsigned op,
 static void owner_camera_leave(void *cookie,uint64_t token,unsigned op)
 {
     struct x9_mm_smmu_owner *o=cookie;vm_offset_t va=0;
+    uint32_t prod=0,cons=0;
+    int e;
     if(token!=o->camera_token || !o->camera || o->op!=X9_MM_OWNER_CAMERA_INSTALL+op-1)panic("X9 MM: mismatched camera owner leave");
-    int e=owner_guard_locked(o);
-    if(!e && owner_rr(o,0x98)!=owner_rr(o,0x9c))e=EBUSY;
+    e=owner_guard_locked(o);
+    if(!e) {
+        prod=owner_rr(o,0x98);cons=owner_rr(o,0x9c);
+        if(prod!=cons)e=EBUSY;
+    }
     if(!e)e=owner_slice(owner_ste_region(o),o->ste_pa+0x80u*64u,64,&va);
-    if(!e)memcpy((void *)(o->expected_ste+0x80u*64u),(const void *)va,64);
+    if(!e) {
+        memcpy((void *)(o->expected_ste+0x80u*64u),(const void *)va,64);
+        o->prod=prod;o->cons=cons;
+    }
     else if(!o->fault)o->fault=(uint32_t)e;
-    o->prod=o->cons=owner_rr(o,0x98);
+    /* complete(error) may already have quarantined this owner, or guard
+     * may have lost power/authority. Do not read MMIO after that failure or
+     * turn an unknown/in-flight queue into a completed ledger. Keep the
+     * last accepted record; leave releases only acquired serialization. */
     owner_auth_leave(o,e?X9_MM_SMMU_QUARANTINED:X9_MM_SMMU_INSTALLED);
     o->camera=NULL;o->active=false;o->active_sid=0;o->camera_queue_live=false;
     lck_mtx_unlock(&mm_owner_lock);
