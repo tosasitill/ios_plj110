@@ -82,8 +82,10 @@ struct x9_hevc_irap_picture {
 int x9_hevc_irap_annexb(const struct x9_hevc_config *, const uint8_t *hvcc,
     const uint8_t *sample, size_t sample_bytes, uint8_t *dst, size_t capacity,
     size_t *written, struct x9_hevc_irap_picture *picture);
-/* Stateful video AU gate. Firmware owns reference picture sets and POC/DPB,
- * not this parser. Allows base-layer TRAIL/TSA/STSA/RADL/RASL/BLA/IDR/CRA;
+/* Stateful video AU gate. Firmware owns reference picture sets and the
+ * decoder's POC/DPB operation. The host POC helper below only derives metadata
+ * and checks real output order; it never drives references or sorts pictures.
+ * Allows base-layer TRAIL/TSA/STSA/RADL/RASL/BLA/IDR/CRA;
  * excludes reserved types and multilayer profiles. One complete picture per
  * sample, any retained PPS, all slices in one picture use the SAME PPS;
  * in-band parameter sets must match one unchanged retained hvcC set.
