@@ -1895,3 +1895,43 @@ WMS 初始化→真实 per-SIM host-ready；WMS20→605 token→唯一 writer→
 当前源码精确行号、旧证据资格与限定盘点在 gitignored
 `x9/out/sms-production-audit/current-sms-final-evidence-boundary.json` 及同目录；仅新增此短小节，
 无源码修改、编译、测试/人工向量或设备操作，完整短信验收仍未完成。
+
+## 2026-11-16 matching Java 拨号 producer：显式 CLIR 与 per-sub 来源（仅静态）
+
+此前缺失的同版 Java 原件现已只读提取，build 为 Android17
+`CP2A.260605.016/B.46c413f-20895a6-20bdbdd`；raw/hash/ADB command 的权威记录在
+`x9/out/android-call-inputs-20261116-092442/files-manifest.json`，不重算原件 hash。
+本节只收束已有 ASC 反编译与 refs，**没有原 DEX code_item 偏移/opcode 复核或运行证明**；
+下列 `*.java:L..L` 都是保留反编译文件的行号，不冒充原字节地址。
+
+- `GsmMmiCode.java:1598..1611`、`ImsPhoneMmiCode.java:1498..1511` 的
+  `getCLIRMode`：SC31 的 action `*`/Activate → raw2，`#`/Deactivate → raw1；
+  action 判定分别在 `1434..1453`、`1285..1304`。
+  `CommandsInterface.java:29..31` 命名 DEFAULT0/INVOCATION1/SUPPRESSION2，非 Apple privacy enum。
+- temporary 不是单独设置 CLIR：regex 的 group12 经 `makeEmptyNull` 成实际非空 dialingNumber，
+  还需 SC31 和上述 action；对应 `GsmMmiCode.java:436..468,1714..1723`、
+  `ImsPhoneMmiCode.java:272..313,1681..1690`，空串处理分别在 `74..81`、`29..36`。
+- `ImsPhone.java:318..399` 先把 tracker `getClirMode()` 放进 builder，再由 temporary MMI
+  覆盖并仅将 extracted number 送 tracker；普通无 prefix **不等于固定 raw0**。
+  `ImsPhoneCallTracker.java:3171..3182` 读取 `clir_sub_key + mPhone.getSubId()`；
+  `Phone.java:3805..3822` 的保存者也用该 per-sub key，并检查 commit 失败。
+- 缺 preference 时传入动态 `mInterfaceImpl.getClirDefaultSuppression()`；factory 选择在
+  `ImsPhoneCallTracker.java:1140`。现存 `IOplusImsPhoneCallTracker.java:81..84` 仅 interface
+  返回0，未取得实际被选厂商实现；另有 null preference/default-phone guard 返回0。
+  **二者均不是当前运行默认值**，不据此制造默认 profile/0 值准入。
+- 非 ECC tracker 保留 `DialArgs.clirMode`（`3219..3235`），`dialInternal:182` 写 `oir`；
+  Java `ImsCallSessionProxy.java:4594..4656` 普通非 ECC/非 `*82` 正常 voice 分支保持该 int，
+  经 `ImsRILAdapter.java:3773..3787,2528..2531,2207..2236` → **MTK**
+  `RadioVoiceProxy.java:66..78` → `RILUtils.java:4270..4306` 的 HAL `Dial.clir` 原值赋值。
+  此为 Java 静态路径，不替代旧 native 证据或本次真实 MD receipt。
+- Java owner：`ImsService.java:1026..1064,3244..3260` 按 phone index 建 adapter、取同 index
+  handler/adapter 创建 session；session 留 `mPhoneId`/adapter（`2000..2016`），adapter 留
+  constructor phoneId 并据此选 HIDL/AIDL service（`1569..1572,1762..1772,1848..1858`）。
+  这不是当前 subscription/SIM/native epoch 或 handover 后绑定已经闭合。
+
+证据在 `x9/out/dial-java-producer/matching-java-producer-final.json`；已有命令产物为
+同目录 `get-*.stdout/stderr`、`tel-getclirmode-refs.txt`、`ims-dial-refs.txt` 等。
+`replay-commands.txt` 明标重建 recipe 而非历史 argv/exit；本轮未重跑 ASC、扩大扫描或触设备。
+fresh `x9/out/call-owned-runtime/` 的 CLIR/OIR 零命中亦不证明 raw0。仍缺实际 default 实现/值、
+完整可达 iOS owned producer/backend 与最终事件/媒体验收；无生产源码、测试、编译、CI/镜像，
+VOICE09 保持关闭，不新增 unused API、默认 profile 或开放拨号准入。
