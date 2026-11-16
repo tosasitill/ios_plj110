@@ -2106,7 +2106,8 @@ added已有controller分支 `1f2e528d8..8fc`、enabled正常分支 `1f2e53180..1
 都从强controller virtual+38调用 **`getModel_sync1f2e421c8`** 得model强pair，
 再从model virtual+30调用 **`updatePersonalityInfo1f2e77c04`**，传入真实
 `shared_ptr<PersonalityInfo const> const&`。后者 `1f2e77d00..d08` 将model+28/+30
-替换为incoming强pair，并通知model+58 observer；不是只更新integer slot。
+替换为incoming强pair，再同步调用model+58的Config强owner；不是只更新integer slot。
+**+58原先被称为observer的类型判断已由末节原ctor/vtable证据纠正**，不能据此添加订阅器。
 `getPersonalityInfo1f2e77d7c` 在x8返回该强pair并increment control。
 model getter本身没有revision/MD epoch，也不能由本函数未见mutex否定调用者串行化。
 
@@ -2239,3 +2240,62 @@ scalar local snapshot防止验证后再次读取caller字段，不代表跨并�
 没有link、boot pack、CI或设备操作，也没有构建后二次hash/解包/反汇编检查。
 完整typed/backend/profile/epoch/state/media和当前Messages最终验收仍未完成；后续应连接真实
 owned producer，而不是为此小修复开放默认profile或重复收集已闭合的CLIR原件。
+
+## 2026-11-16 model+58 的真实 Config owner：不是可订阅 observer
+
+前节旧update切片只能证明model先写`+28/+30`强PersonalityInfo，再调用`+58`对象的
+virtual+10；它不能给该对象命名为observer。本次只新增ctor/config范围，复用旧update raw，
+不重采getter、tracker/queue或CallList。当前root/cache原件资格见
+`x9/out/call-owned-next/record-observer/qualified-r4/original-config-proof.json`，实际 **exit0**。
+
+### 输入与具体 addresspoint
+
+- 真export `IMSSubscriberModel C1 1f2e76ed0`直接branch到`C2 1f2e77538`。
+  C2保存`x2→x23`，将该**按值传入、ABI间接寻址的ConfigInterface shared_ptr**强copy到
+  model`+58/+60`；不是第四个业务参数。`x4`的PersonalityBoundInstance强pair另在`+48/+50`。
+  这两个实际ctor为同参数forward，不沿用其它类C2的VTT参数假设。
+- 真export `IMSSubscriberConfig C1 1f2e42d6c→C2 1f2e42d70`；C2参数为Registry、
+  PersonalityInfo、PersonalityBoundInstance的pair引用。
+- Config ctor `1f2e42f04..f0c`安装实际addresspoint **`20e056820`**，真vtable export
+  **`__ZTVN2sd19IMSSubscriberConfigE=20e056810`**。原slide-v2链成员槽
+  **`20e056830`（virtual+10）→1f2e430fc**，原export确为
+  `sd::IMSSubscriberConfig::updatePersonalityInfo(shared_ptr<PersonalityInfo const> const&)`。
+  nlist仅作初始lead，资格依赖原ctor、原page chain及真export，不是重建符号命名。
+
+### 实际更新与顺序
+
+Config update只有8B：`add x0,x0,#0x38; b 1f2e43104`。
+新增原helper **`1f2e43104..4317c`（120B）** 先取并retain incoming strong control，
+再写Config`+38/+40`，随后release old control，同步返回；旧control最后强引用的分支
+会调用其deleter/release helper，不是新record订阅事件。
+组合既有model切片，顺序是 **model强record替换→同incoming pair的Config强record替换**。
+这条实际函数链没有第三方observer登记或独立dispatch enqueue，不从该赋值推断整个系统
+都没有其它观察机制。它也不生成record revision、native binding lease、Call UUID/MD epoch，
+不能以strong pair成功或clientId仍在证明REGISTERED/media-ready。
+
+原scope的七个text于失败r2已真实与cache相等；r4复用这些raw及原page，只新增helper120B
+（cache31 offset`0x61c3104`）并保存必要header/load-command/export/slide元数据。
+原七个callable/vtable export全部为 **flags0 / REGULAR**。r2/r3失败真正原因是scratch
+trie parser在advance child cursor后才取suffix，产生空symbol；**不是缺vtable export或
+ABSOLUTE kind**。失败目录和最初`--macho`忽略范围的巨大输出保留、标无效，不覆盖原证据。
+契约/命令/失败边界为同目录 `model-config-contract.json/commands.txt/
+reader-failure-and-resume.txt`；原source-head仍`aad2b3ab`，不以事后维护提交替换。
+
+维护 **`x9/tools/call_context_evidence.py --mode config`** 只读8个新text、1个data槽与system
+image/export，使用原slide chain及具体update/vtable真export检查，不执行旧producer/client/
+queue范围。维护版仅静态Python syntax和diff review，**本次实际原件资格来自scratch reader，
+未为维护版重新采样**。未来在主checkout已有root mount上，用NEW目录可独立重放：
+
+```sh
+python3 x9/tools/call_context_evidence.py --mode config --out x9/out/<唯一新目录>
+```
+
+这不是production provider/hook。下一仍要真实typed action的同owned record/revision关联到
+logical allocation/txn与native epoch并接匹配终态；现有44只携SIM、20只携号码，不能充当
+record变更通知。**VOICE09保持关闭，VOICE20无生产caller**，完整通话媒体/CallList/handover
+及当前Messages持久化、物理ACK、MO对端验收仍未完成。
+
+同轮短信源码审查仅排除一条猜测缺口：`release_pending`槽不被分配，DEL_CLIENT先完成
+`x9m_del`清旧订阅/local generation更新，再清pending2；MT enqueue亦拒绝pending/unused。
+所以没有显式generation形参本身不足以证明跨client发布，不补无据API/ACK/ready。
+精确链记录在 `x9/out/sms-owned-next/owner-boundary.txt`；没有短信production delta或新实机结果。

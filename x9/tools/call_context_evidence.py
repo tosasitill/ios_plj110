@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Read fixed 20H392 call-context ranges from an existing root/cache, without probes.
 
-Modes qualify the personality producer, its dispatch targets, or the typed Client
-input path. Requires capstone. Creates only a NEW x9/out directory; original cache,
-root, extracted images and older evidence are never changed. A successful exit
+Modes qualify the personality producer, its dispatch targets, the typed Client
+input path, or the model's concrete config owner. Requires capstone. Creates only
+a NEW x9/out directory; original cache, root, extracted images and older evidence
+are never changed. A successful exit
 qualifies static bytes/exports, not a loaded backend, native epoch or call/SMS result.
 """
 import argparse
@@ -15,13 +16,14 @@ from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM
 
 MAIN = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--mode', required=True, choices=('producer', 'queue', 'client'))
+parser.add_argument('--mode', required=True, choices=('producer', 'queue', 'client', 'config'))
 parser.add_argument('--root-mount', type=Path, default=Path('/private/tmp/x9root'),
                     help='existing current root mount; this tool never attaches or changes it')
 parser.add_argument('--out', required=True, type=Path, help='NEW directory under repository x9/out')
 args = parser.parse_args()
 QUEUE_ONLY = args.mode == 'queue'
 CLIENT_ONLY = args.mode == 'client'
+CONFIG_ONLY = args.mode == 'config'
 OUT = args.out.resolve()
 if not OUT.is_relative_to((MAIN / 'x9/out').resolve()):
     parser.error('--out must be under repository x9/out')
@@ -87,7 +89,8 @@ paths = {'system': support / 'libSystemDetermination.dylib', 'base': support / '
          'cxx': MAIN / '.local/apple/dsc-20H392/usr/lib/libc++.1.dylib',
          'dispatch': MAIN / '.local/apple/dsc-20H392/usr/lib/system/libdispatch.dylib',
          'root': args.root_mount / 'System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter'}
-images = {k: Macho(v) for k, v in paths.items() if not QUEUE_ONLY or k in ('cxx', 'dispatch')}
+image_names = ('system',) if CONFIG_ONLY else ('cxx', 'dispatch') if QUEUE_ONLY else tuple(paths)
+images = {k: Macho(paths[k]) for k in image_names}
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
 md.detail = True
 slices = [
@@ -115,6 +118,19 @@ slices = [
 ]
 if QUEUE_ONLY:
     slices = []
+elif CONFIG_ONLY:
+    # Only newly qualified ctor/config ranges, not the old model update,
+    # manager getters, tracker or queue slices. +58 is a config strong pair.
+    slices = [
+        ('model-C1-forward', 'system', 0x1f2e76ed0, 4),
+        ('model-C2-argument-map', 'system', 0x1f2e77538, 0x34),
+        ('model-owned-fields', 'system', 0x1f2e776d8, 0xbc),
+        ('config-C1-forward', 'system', 0x1f2e42d6c, 4),
+        ('config-C2-argument-map', 'system', 0x1f2e42d70, 0x2c),
+        ('config-addresspoint-and-owned-fields', 'system', 0x1f2e42f04, 0x84),
+        ('config-update', 'system', 0x1f2e430fc, 8),
+        ('owned-pair-assignment', 'system', 0x1f2e43104, 0x78),
+    ]
 elif CLIENT_ONLY:
     slices = [
         ('controller-personality-added', 'system', 0x1f2e696c4, 0x2bc),
@@ -151,6 +167,8 @@ data_ranges = [('model-vtable-context', 'system', 0x20e058f38, 0x28),
                ('root-personality-event-jump-table', 'root', 0x10114d135, 8)]
 if QUEUE_ONLY:
     data_ranges = []
+elif CONFIG_ONLY:
+    data_ranges = [('config-personality-update-vtable-slot', 'system', 0x20e056830, 8)]
 elif CLIENT_ONLY:
     data_ranges = [('manager-client-ref-vtable-slot', 'system', 0x20e057350, 8),
                    ('controller-client-ref-vtable-slot', 'system', 0x20e0581a8, 8),
@@ -172,7 +190,8 @@ for name, image, va, n in data_ranges:
 
 # Read current-cache export tries, not reconstructed nlist, to name new ABI/queue targets.
 exports = []
-for image in (('cxx', 'dispatch') if QUEUE_ONLY else ('system', 'base', 'cxx', 'dispatch')):
+export_images = ('system',) if CONFIG_ONLY else ('cxx', 'dispatch') if QUEUE_ONLY else ('system', 'base', 'cxx', 'dispatch')
+for image in export_images:
     obj = images[image]
     base = next(s[1] for s in obj.segs if s[0] == '__TEXT')
     header = read(base, 32)
@@ -213,6 +232,8 @@ for image in (('cxx', 'dispatch') if QUEUE_ONLY else ('system', 'base', 'cxx', '
                 if CLIENT_ONLY:
                     selected |= image == 'base' and va == 0x1f038b750
                     selected |= image == 'dispatch' and name in ('_dispatch_sync', '_dispatch_async_and_wait')
+                if CONFIG_ONLY:
+                    selected |= image == 'system' and va in (0x20e056810, 0x20e058ef8)
                 if selected:
                     exports.append({'image': image, 'symbol': name, 'flags': hex(flags), 'va': hex(va)})
         count = trie[end]; q = end + 1
@@ -297,6 +318,8 @@ stub_specs = ((0x1f03c19b8, '_dispatch_async_f'), (0x1f03c1a0c, '_dispatch_group
 if CLIENT_ONLY:
     stub_specs = ((0x1f2fb16cc, '__Z9isPresentRKNSt3__110shared_ptrIK8RegistryEERK13PersonalityID'),
                   (0x1f2e82fe8, '_dispatch_async_and_wait'), (0x1f2e83084, '_dispatch_sync'))
+elif CONFIG_ONLY:
+    stub_specs = ()
 for va, expected in stub_specs:
     data = read(va, 12); ins = list(md.disasm(data, va)); regs = {}; target = None; got_proof = None
     if len(ins) != 3:
@@ -319,13 +342,23 @@ for va, expected in stub_specs:
     (OUT/f'stub-{va:x}.original-code.bin').write_bytes(data)
     stubs.append({'va': hex(va), 'hex': data.hex(), 'instructions': [f'{i.mnemonic} {i.op_str}' for i in ins],
                   'target': hex(target), 'original_target_exports': matches, 'got_rebase': got_proof})
-if CLIENT_ONLY:
+if CLIENT_ONLY or CONFIG_ONLY:
     for record in data_proof:
         if record['image'] == 'system':
             record['rebased_slots'] = [rebase_v2(int(record['va'],16)+offset)[1] for offset in range(0,len(bytes.fromhex(record['hex'])),8)]
             if [int(r['raw'],16) for r in record['rebased_slots']] != [int(v,16) for v in record['qwords']]:
                 raise ValueError('original slot bytes differ from recorded data')
-(OUT/('original-queue-proof.json' if QUEUE_ONLY else 'original-client-proof.json' if CLIENT_ONLY else 'original-producer-proof.json')).write_text(json.dumps({'scope':'Original static producer/queue ABI; not loaded backend or live call/SMS verification',
+if CONFIG_ONLY:
+    slot = data_proof[0]['rebased_slots'][0]
+    if int(slot['unslid_target'], 16) != 0x1f2e430fc or not any(
+            int(e['va'], 16) == 0x1f2e430fc and 'IMSSubscriberConfig' in e['symbol'] and
+            'updatePersonalityInfo' in e['symbol'] for e in exports):
+        raise ValueError('config update slot does not name the concrete original export')
+    if not any(e['symbol'] == '__ZTVN2sd19IMSSubscriberConfigE' and
+               int(e['va'], 16) == 0x20e056810 for e in exports):
+        raise ValueError('config addresspoint lacks the concrete original vtable export')
+proof_name = 'original-' + args.mode + '-proof.json'
+(OUT/proof_name).write_text(json.dumps({'scope':'Original static context ABI; not loaded backend or live call/SMS verification',
     'sources': {k:str(p) for k,p in paths.items()}, 'slices':proof, 'data':data_proof, 'exports':exports,
     'optimized_queue_stubs':stubs, 'original_reads':reads}, indent=2)+'\n')
 print(f'{len(proof)} text ranges; {len(data_proof)} data ranges; {len(exports)} exports; qualified ABI targets={len(stubs)}')
