@@ -234,6 +234,7 @@ struct sps_info {
     uint32_t profile, bit_depth, level, vps_id, sps_id;
     uint32_t decoder_profile, profile_compatibility;
     uint32_t max_sub_layers, max_dpb, max_reorder;
+    uint32_t log2_max_poc_lsb, log2_ctb;
 };
 static int sps(const uint8_t *p, size_t n, struct sps_info *c, struct x9_hevc_vui *out)
 {
@@ -285,6 +286,7 @@ static int sps(const uint8_t *p, size_t n, struct sps_info *c, struct x9_hevc_vu
     c->height = c->coded_height - (t + bot) * 2;
     unsigned poc = ue(&b);
     if (b.error || poc > 12) return EINVAL;
+    c->log2_max_poc_lsb = poc + 4;
     c->max_sub_layers = sub + 1;
     unsigned first = bit(&b) ? 0 : sub;
     for (unsigned i = first; i <= sub; i++) {
@@ -298,6 +300,7 @@ static int sps(const uint8_t *p, size_t n, struct sps_info *c, struct x9_hevc_vu
     unsigned ctb = min_cb + bounded_ue(&b,3);
     if (b.error || ctb > 6 || ctb < 4 || c->coded_width % (1u << min_cb) ||
         c->coded_height % (1u << min_cb)) return EINVAL;
+    c->log2_ctb = ctb;
     unsigned min_tb = bounded_ue(&b,min_cb-3) + 2;
     unsigned max_tb = ctb < 5 ? ctb : 5;
     if (b.error || min_tb > max_tb) return EINVAL;
@@ -566,6 +569,57 @@ int x9_hevc_parameter_sets_annexb(const struct x9_hevc_config *c, const uint8_t 
     }
     return 0;
 }
+struct slice_prefix {
+    struct sps_info sps;
+    unsigned dependent_enabled, output_present, extra_bits, address_bits, ctbs;
+};
+struct slice_facts { unsigned dependent, type, output, poc_lsb; };
+static int slice_prefix(const struct x9_hevc_config *c, const uint8_t *hvcc,
+    unsigned pid, struct slice_prefix *out)
+{
+    const struct x9_hevc_parameter_set *pps = find_set(c,34,pid);
+    const struct x9_hevc_parameter_set *selected = pps ? find_set(c,33,pps->reference_id) : NULL;
+    if (!selected) return EINVAL;
+    struct slice_prefix prefix = {0};
+    int e = sps(hvcc+selected->offset,selected->bytes,&prefix.sps,NULL);
+    if (e) return e;
+    if (prefix.sps.sps_id != selected->id || prefix.sps.vps_id != selected->reference_id)
+        return EINVAL;
+    struct bits b = { .p = hvcc+pps->offset+2, .n = pps->bytes-2 };
+    unsigned pps_id = ue(&b), sps_id = ue(&b);
+    prefix.dependent_enabled = bit(&b); prefix.output_present = bit(&b);
+    prefix.extra_bits = get(&b,3);
+    if (b.error || pps_id != pid || sps_id != selected->id) return EINVAL;
+    unsigned ctb = 1u << prefix.sps.log2_ctb;
+    prefix.ctbs = ((prefix.sps.coded_width+ctb-1)/ctb) *
+        ((prefix.sps.coded_height+ctb-1)/ctb);
+    for (unsigned n = prefix.ctbs-1; n; n >>= 1) prefix.address_bits++;
+    *out = prefix; return 0;
+}
+/* b is positioned just AFTER slice_pic_parameter_set_id. The accepted SPS
+ * has chroma_format_idc=1, so no separate_colour_plane_flag/header field.
+ * Dependent segments inherit their independent segment's facts; their
+ * coded data must never be mistaken for another slice header. */
+static int slice_facts(struct bits *b, unsigned nal_type, unsigned first,
+    const struct slice_prefix *prefix, struct slice_facts *out)
+{
+    struct slice_facts facts = {0};
+    if (!first) {
+        if (prefix->dependent_enabled) facts.dependent = bit(b);
+        unsigned address = get(b,prefix->address_bits);
+        if (!address || address >= prefix->ctbs) return EINVAL;
+    }
+    if (!facts.dependent) {
+        skip(b,prefix->extra_bits); /* reserved fields are not slice_type */
+        facts.type = bounded_ue(b,2);
+        facts.output = prefix->output_present ? bit(b) : 1;
+        if (nal_type != 19 && nal_type != 20)
+            facts.poc_lsb = get(b,prefix->sps.log2_max_poc_lsb);
+        if (nal_type >= 16 && facts.type != 2) return EINVAL;
+    }
+    if (b->error) return EINVAL;
+    *out = facts; return 0;
+}
 static int au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
     const uint8_t *p, size_t n, uint8_t *dst, size_t cap, size_t *written,
     int independent, struct x9_hevc_irap_picture *picture,
@@ -581,6 +635,8 @@ static int au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
      * A prefix after a VCL must be followed by another VCL in THIS AU. */
     unsigned phase = 0, no_output = 0; /* prefix0, VCL1, suffix2, EOS3, EOB4 */
     unsigned prefix_pending = 0, eos = 0, eob = 0;
+    struct slice_prefix selected = {0};
+    struct slice_facts first_facts = {0};
     while (at < n) {
         if (++nals > 1024 || n - at < c->length_size) return EINVAL;
         uint32_t bytes = 0;
@@ -602,6 +658,14 @@ static int au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
             if (b.error || !find_set(c, 34, pid) || (!slices && !first) ||
                 (slices && (type != vcl || tid != temporal || pid != picture_pps ||
                  prior != no_output))) return EINVAL;
+            if (slices && first) return ENOTSUP; /* exactly one picture */
+            int e = !slices ? slice_prefix(c,hvcc,pid,&selected) : 0;
+            struct slice_facts facts;
+            if (!e) e = slice_facts(&b,type,first,&selected,&facts);
+            if (e) return e;
+            if (!slices) first_facts = facts;
+            else if (!facts.dependent && (facts.output != first_facts.output ||
+                facts.poc_lsb != first_facts.poc_lsb)) return EINVAL;
             picture_pps = pid;
             pictures += first; slices++; vcl = type; temporal = tid;
             no_output = prior; phase = 1; prefix_pending = 0;
@@ -639,7 +703,9 @@ static int au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
         .pps_id = picture_pps, .no_output_of_prior_pics_flag = no_output };
     if (metadata) *metadata = (struct x9_hevc_au_metadata){ .nal_type = vcl,
         .temporal_id = temporal, .pps_id = picture_pps,
-        .no_output_of_prior_pics_flag = no_output, .eos_present = eos, .eob_present = eob };
+        .no_output_of_prior_pics_flag = no_output, .eos_present = eos, .eob_present = eob,
+        .log2_max_poc_lsb = selected.sps.log2_max_poc_lsb, .poc_lsb = first_facts.poc_lsb,
+        .pic_output_flag = first_facts.output, .first_slice_type = first_facts.type };
     if (!dst) return 0;
     if (cap < size) return EMSGSIZE;
     at = 0; size = 0;
@@ -992,6 +1058,62 @@ int x9_hevc_hdr_validate(const struct x9_hevc_hdr *hdr)
     if (hdr->ambient_present && (!(hdr->ambient[0] | hdr->ambient[1] | hdr->ambient[2] | hdr->ambient[3]) ||
         (((unsigned)hdr->ambient[4] << 8) | hdr->ambient[5]) > 50000 ||
         (((unsigned)hdr->ambient[6] << 8) | hdr->ambient[7]) > 50000)) return EINVAL;
+    return 0;
+}
+int x9_hevc_poc_sequence_next(const struct x9_hevc_poc_sequence *current,
+    const struct x9_hevc_au_metadata *picture, struct x9_hevc_poc_sequence *out,
+    struct x9_hevc_poc_picture *result)
+{
+    if (!out || !result || (void *)out == (void *)result) return EINVAL;
+    struct x9_hevc_poc_sequence previous = {0};
+    struct x9_hevc_au_metadata facts = {0};
+    if (current) previous = *current;
+    if (picture) facts = *picture;
+    memset(out,0,sizeof(*out)); memset(result,0,sizeof(*result));
+    if (!current || !picture || previous.started > 1 || previous.prev_valid > 1 ||
+        previous.eos_present > 1 || previous.eob_present > 1 || previous.eob_present ||
+        previous.started != !!previous.clvs || previous.started != previous.prev_valid ||
+        (!previous.started && (previous.eos_present || previous.prev_lsb || previous.prev_msb)) ||
+        previous.prev_lsb > 65535 || previous.prev_msb < (int64_t)INT32_MIN-65535 ||
+        previous.prev_msb > INT32_MAX ||
+        previous.prev_msb+previous.prev_lsb < INT32_MIN ||
+        previous.prev_msb+previous.prev_lsb > INT32_MAX ||
+        facts.nal_type > 21 || (facts.nal_type > 9 && facts.nal_type < 16) ||
+        facts.temporal_id > 6 || (facts.nal_type >= 16 && facts.temporal_id) ||
+        facts.log2_max_poc_lsb < 4 || facts.log2_max_poc_lsb > 16 ||
+        facts.pic_output_flag > 1 || facts.first_slice_type > 2 ||
+        facts.no_output_of_prior_pics_flag > 1 || facts.eos_present > 1 || facts.eob_present > 1)
+        return EINVAL;
+    unsigned maximum = 1u << facts.log2_max_poc_lsb;
+    if (facts.poc_lsb >= maximum ||
+        ((facts.nal_type == 19 || facts.nal_type == 20) && facts.poc_lsb)) return EINVAL;
+    unsigned irap = facts.nal_type >= 16;
+    if ((!previous.started || previous.eos_present) && !irap) return ENOTSUP;
+    /* 8.1.3: IDR/BLA, bitstream first IRAP or IRAP after EOS. A middle CRA
+     * does not reset POC, even if no_output_of_prior_pics_flag is set. */
+    unsigned boundary = !previous.started || previous.eos_present ||
+        (irap && facts.nal_type <= 20);
+    if (boundary && previous.clvs == UINT64_MAX) return E2BIG;
+    int64_t msb = boundary ? 0 : previous.prev_msb;
+    if (!boundary) {
+        if (facts.poc_lsb < previous.prev_lsb &&
+            previous.prev_lsb-facts.poc_lsb >= maximum/2) msb += maximum;
+        else if (facts.poc_lsb > previous.prev_lsb &&
+            facts.poc_lsb-previous.prev_lsb > maximum/2) msb -= maximum;
+    }
+    int64_t poc = msb + facts.poc_lsb;
+    if (poc < INT32_MIN || poc > INT32_MAX) return EINVAL;
+    struct x9_hevc_poc_sequence next = boundary ? (struct x9_hevc_poc_sequence){0} : previous;
+    /* 8.3.1: exclude RADL6/7, RASL8/9 and the *_N types0/2/4/6/8. */
+    if (!facts.temporal_id && !(facts.nal_type >= 6 && facts.nal_type <= 9) &&
+        !(facts.nal_type < 16 && !(facts.nal_type & 1))) {
+        next.prev_msb = msb; next.prev_lsb = facts.poc_lsb; next.prev_valid = 1;
+    }
+    next.clvs = previous.clvs + boundary; next.started = 1;
+    next.eos_present = facts.eos_present; next.eob_present = facts.eob_present;
+    *out = next;
+    *result = (struct x9_hevc_poc_picture){ .value = (int32_t)poc,
+        .no_rasl_output_flag = irap && boundary, .clvs = next.clvs };
     return 0;
 }
 int x9_hevc_hdr_sequence_next(const struct x9_hevc_hdr_sequence *current,

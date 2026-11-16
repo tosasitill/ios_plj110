@@ -3,7 +3,9 @@
  * Temporal processing permits deferred display-order output. Without it we
  * synchronously drain before returning, as VT requires. A drain MUST retain
  * the codec DPB/parameter sets (see session_ops contract), not recreate IDRs.
- * No host POC sorting, software references, worker or successful ACK-as-frame.
+ * Header-derived POC checks the actual RECEIVE order of ORIGINAL tokens; it
+ * never sorts, chooses the next output or supplies software references.
+ * No worker or successful ACK-as-frame.
  */
 static OSStatus codec_error(int e)
 {
@@ -86,6 +88,8 @@ static void video_fault(struct state *s, OSStatus error)
     if (s->fd >= 0) { close(s->fd); s->fd = -1; }
     s->native_session = 0;
     memset(&s->hdr_sequence,0,sizeof(s->hdr_sequence));
+    memset(&s->poc_sequence,0,sizeof(s->poc_sequence));
+    s->last_output_clvs = 0; s->last_output_poc = 0;
     memset(&s->hdr_sources,0,sizeof(s->hdr_sources));
     while (s->pending_count && !s->invalid) {
         struct pending_frame f = pending_take(s, 0);
@@ -116,11 +120,27 @@ static int video_receive(struct state *s, uint32_t wait_ms, OSStatus *error)
          r.format != (s->config.bit_depth == 10 ? X9_VDEC_P010 : X9_VDEC_NV12)))) {
         free(raw); *error = kVTVideoDecoderBadDataErr; return EIO;
     }
+    /* Correlated pixels, not accepted input, offered FB or DROPPED retirement,
+     * supply the output-order observation. The bitstream's raw output flag0
+     * is suppressed only AFTER a real terminal RECEIVE; it never authorizes
+     * slice freeing or fabrication of a dropped completion. A caller's
+     * DoNotOutputFrame suppresses VT rendering, not this physical observation.
+     * Within one CLVS, 8.3.1/C.5.2 require strictly increasing output POC;
+     * old-CLVS pixels cannot follow a newer CLVS. No timestamp/PTS guessing. */
+    const struct pending_frame *observed = &s->pending[i];
+    if (!(r.result_flags & X9_VDEC_OUTPUT_DROPPED) && observed->pic_output_flag) {
+        if (observed->hdr_clvs < s->last_output_clvs ||
+            (observed->hdr_clvs == s->last_output_clvs && observed->poc <= s->last_output_poc)) {
+            free(raw); *error = kVTVideoDecoderBadDataErr; return EIO;
+        }
+        s->last_output_clvs = observed->hdr_clvs; s->last_output_poc = observed->poc;
+    }
     struct pending_frame f = pending_take(s, i);
     CVPixelBufferRef pixel = NULL;
     OSStatus result = noErr;
     VTDecodeInfoFlags flags = 0;
-    if ((r.result_flags & X9_VDEC_OUTPUT_DROPPED) || f.suppress) flags = kVTDecodeInfo_FrameDropped;
+    if ((r.result_flags & X9_VDEC_OUTPUT_DROPPED) || f.suppress || !f.pic_output_flag)
+        flags = kVTDecodeInfo_FrameDropped;
     else {
         struct x9_vdec_picture picture = { .width = r.width, .height = r.height,
             .format = r.format, .flags = r.flags, .output_bytes = r.output_bytes };
@@ -201,9 +221,13 @@ static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
     if (e) goto done;
     struct x9_hevc_au_metadata metadata;
     struct x9_hevc_hdr_sequence prospective;
+    struct x9_hevc_poc_sequence prospective_poc;
+    struct x9_hevc_poc_picture picture_poc;
     int gate = x9_hevc_sample_metadata(&s->config,CFDataGetBytePtr(s->hvcc),
         (size_t)CFDataGetLength(s->hvcc),input,bytes,&metadata);
     if (!gate) gate = x9_hevc_hdr_sequence_next(&s->hdr_sequence,&metadata,&prospective);
+    if (!gate) gate = x9_hevc_poc_sequence_next(&s->poc_sequence,&metadata,&prospective_poc,&picture_poc);
+    if (!gate && picture_poc.clvs != prospective.clvs) gate = EINVAL;
     if (gate) { e = codec_error(gate); goto done; }
     struct x9_hevc_hdr original_hdr;
     struct hdr_source_history prospective_sources;
@@ -229,6 +253,7 @@ static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
         goto done; /* kernel/provider did NOT accept this current input */
     }
     s->hdr_sequence = prospective; /* provider accepted; not an ACK-as-frame */
+    s->poc_sequence = prospective_poc;
     s->hdr_sources = prospective_sources;
     for (unsigned i = 0; i < s->pending_count; i++) {
         if (!replacements[i]) continue;
@@ -236,7 +261,8 @@ static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
         replacements[i] = NULL;
     }
     s->pending[s->pending_count++] = (struct pending_frame){ .token = token,
-        .hdr_clvs = prospective.clvs, .frame = frame,
+        .hdr_clvs = prospective.clvs, .poc = picture_poc.value,
+        .pic_output_flag = metadata.pic_output_flag, .frame = frame,
         .description = snapshot,
         .suppress = !!(flags & kVTDecodeFrame_DoNotOutputFrame) };
     snapshot = NULL; /* ownership transferred to this ORIGINAL token */

@@ -140,11 +140,37 @@ int x9_hevc_sample_hdr(const struct x9_hevc_config *, const uint8_t *hvcc,
 struct x9_hevc_au_metadata {
     uint32_t nal_type, temporal_id, pps_id, no_output_of_prior_pics_flag;
     uint32_t eos_present, eob_present;
+    /* Selected SPS's real POC width and every independent slice's agreeing
+     * LSB/output flag. IDR LSB and absent pic_output_flag are inferred 0/1
+     * by 7.4.7.1. first_slice_type is not a claim that all slice types agree.
+     * These are header facts, not full POC, display or DMA completion. */
+    uint32_t log2_max_poc_lsb, poc_lsb, pic_output_flag, first_slice_type;
     struct x9_hevc_hdr hdr;
 };
 int x9_hevc_sample_metadata(const struct x9_hevc_config *, const uint8_t *hvcc,
     size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes,
     struct x9_hevc_au_metadata *);
+/* Base-layer 8.3.1 POC process, no external HandleCraAsBlaFlag. Keep the
+ * previous Tid0 picture EXCLUDING RADL/RASL/sub-layer-non-reference pictures,
+ * not the immediately previous AU. clvs follows genuine IRAP/EOS boundaries;
+ * slice no_output_of_prior_pics_flag and host DRAIN never reset it.
+ * Zero state starts a bitstream; commit next ONLY after accepted SUBMIT.
+ * Metadata must come from sample_metadata. No POC sorting, RPS/DPB process,
+ * pixels, buffer retirement or inferred output is performed. Outputs are
+ * disjoint; failure clears them. current may equal next. */
+struct x9_hevc_poc_sequence {
+    uint64_t clvs;
+    int64_t prev_msb; /* can be below INT32_MIN even when full POC is in range */
+    uint32_t prev_lsb, prev_valid, started, eos_present, eob_present;
+};
+struct x9_hevc_poc_picture {
+    int32_t value;
+    uint32_t no_rasl_output_flag; /* for CURRENT IRAP, not an associated RASL */
+    uint64_t clvs;
+};
+int x9_hevc_poc_sequence_next(const struct x9_hevc_poc_sequence *,
+    const struct x9_hevc_au_metadata *, struct x9_hevc_poc_sequence *next,
+    struct x9_hevc_poc_picture *);
 /* Prospective, resolved base-SEI-only state; zero initializes a fresh bitstream.
  * Commit ONLY after the native provider accepts SUBMIT. Container/CM values
  * are deliberately not stored here. No external HandleCraAsBlaFlag is used.

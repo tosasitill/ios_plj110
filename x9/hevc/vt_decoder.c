@@ -60,6 +60,8 @@ static pthread_mutex_t registration_lock = PTHREAD_MUTEX_INITIALIZER;
 static Boolean registered;
 struct pending_frame {
     uint64_t token, hdr_clvs;
+    int32_t poc;
+    uint32_t pic_output_flag;
     void *frame;
     CMVideoFormatDescriptionRef description;
     Boolean suppress, deferred;
@@ -83,6 +85,9 @@ struct state {
     CFDataRef hvcc;
     struct x9_hevc_config config;
     struct x9_hevc_hdr_sequence hdr_sequence;
+    struct x9_hevc_poc_sequence poc_sequence;
+    uint64_t last_output_clvs;
+    int32_t last_output_poc;
     struct hdr_source_history hdr_sources;
 };
 static CFStringRef symbol_key(const char *name)
@@ -128,6 +133,8 @@ static void video_cancel(struct state *s)
     if (s->fd >= 0) { close(s->fd); s->fd = -1; }
     s->native_session = 0;
     memset(&s->hdr_sequence,0,sizeof(s->hdr_sequence));
+    memset(&s->poc_sequence,0,sizeof(s->poc_sequence));
+    s->last_output_clvs = 0; s->last_output_poc = 0;
     memset(&s->hdr_sources,0,sizeof(s->hdr_sources));
     for (unsigned i = 0; i < s->pending_count; i++) CFRelease(s->pending[i].description);
     s->pending_count = 0;
@@ -242,6 +249,8 @@ static OSStatus start(Base object, void *session, CMVideoFormatDescriptionRef fo
         s->generation = status.generation; s->native_session = native.session;
         s->max_pending = caps.max_pending;
         memset(&s->hdr_sequence,0,sizeof(s->hdr_sequence));
+        memset(&s->poc_sequence,0,sizeof(s->poc_sequence));
+        s->last_output_clvs = 0; s->last_output_poc = 0;
         memset(&s->hdr_sources,0,sizeof(s->hdr_sources));
     }
 done:
