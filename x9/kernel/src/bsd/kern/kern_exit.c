@@ -2178,7 +2178,11 @@ proc_exit(proc_t p)
 		 * CRASH line (not a mach exception). Log the final status and exit reason
 		 * (namespace/code/flags and the EXIT_REASON_USER_DESC string, sanitized)
 		 * for the UI/cellular daemons only. */
-		static const char *const x9_exit_watch[] = {"SpringBoard", "backboardd", "CommCenter", NULL};
+		/* Log 326: the BT launcher respawns every 10 s with no CRASH line and
+		 * its stderr is /dev/null; p_comm shows whether exec reached bluetoothd
+		 * (p_comm is 16 chars: "X9BluetoothLaunc"). */
+		static const char *const x9_exit_watch[] = {"SpringBoard", "backboardd", "CommCenter",
+		    "bluetoothd", "X9BluetoothLaunc", NULL};
 		for (int i = 0; x9_exit_watch[i]; i++) {
 			if (strncmp(p->p_comm, x9_exit_watch[i], sizeof(p->p_comm)) != 0) {
 				continue;

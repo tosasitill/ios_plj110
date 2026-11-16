@@ -45,17 +45,30 @@ static inline int x9_haptic_convert_sample(struct x9_haptic_converter *c,int16_t
     if(++c->decimator<4)return 0;
     c->decimator=0;int32_t value=c->sum/4;c->sum=0;
     if(c->conversion==X9_HAPTIC_RETUNE) {
-        /* Approximate sine peak from rectified sine mean, with a limiter.
+        /* HakiOS hakios.haptic.c gain_for(), tested on the same D22 Actuator
+         * stream: iOS tap peaks span 1000..33000 of 32768, and following them
+         * proportionally left most feedback "at a tenth of Android's gain or
+         * less: not felt at all" (log 326: weak buzz). Full drive from a third
+         * of full scale up, 5/8 for the softest, silence at or below 256.
          * Sharpness adds a bounded 3rd harmonic, not a change in pattern time. */
-        int32_t env=c->envelope*157/100;if(env>32767)env=32767;
+        int32_t env=c->envelope,third=32767/3,amp;
+        if(env<=256)amp=0;
+        else if(env>=third)amp=32767;
+        else amp=32767*5/8+(int32_t)((int64_t)(32767*3/8)*env/third);
         int32_t sine=x9_haptic_sine(c->phase);
         int32_t harmonic=x9_haptic_sine(c->phase*3);
         sine=(sine*(4000-(int32_t)c->sharpness)+harmonic*(int32_t)c->sharpness)/4000;
-        value=(int32_t)((int64_t)env*sine/32768);
+        value=(int32_t)((int64_t)amp*sine/32768);
+        c->phase+=c->step;
+        value=(int32_t)((int64_t)value*c->intensity/1000);
+        /* Full signed8 swing; chip gain PLAYCFG2 0x60 stays below OPPO's 0x80. */
+        value=value*127/32768;
+        if(value>127)value=127;if(value< -127)value= -127;
+        *out=(int8_t)value;return 1;
     }
     c->phase+=c->step;
     value=(int32_t)((int64_t)value*c->intensity/1000);
-    value=value*96/32768; /* signed8 peak <=96, additional hardware gain cap */
+    value=value*96/32768; /* raw mode: signed8 peak <=96 */
     if(value>96)value=96;if(value< -96)value= -96;
     *out=(int8_t)value;return 1;
 }
