@@ -34,6 +34,7 @@ struct x9_vdec_control {
     struct vcontrol_input_record *inputs, *active_input;
     struct vcontrol_output_record *outputs, *active_output;
     const uint8_t *input_source; /* borrowed ONLY for the reserved synchronous call */
+    const struct x9_vcp_bus_call_log *active_start_call; /* same bounded borrow */
     uint32_t input_capacity;
     uint8_t *scratch;
     struct x9_vcp_query active_query;
@@ -335,6 +336,154 @@ static int vcontrol_snapshot(struct x9_vdec_control *c, uint64_t end,
     if (!e && (out->has_fault || out->enable_smmu != 1)) e = EIO;
     if (!e) e = vmem_deadline(end);
     lck_mtx_unlock(&s->lock);
+    return e;
+}
+/* shared->lock and arena->lock held, after the current physical call check.
+ * The live-window check can wait on lower ownership/backing operations, so
+ * check the original deadline AGAIN before any live load. A completed copy
+ * is journaled even if its subsequent deadline check fails. */
+static int vcontrol_postreply_copy(struct x9_vdec_shared *s, uint64_t end,
+    uint32_t offset, uint8_t *out, uint32_t bytes, uint32_t *bitmap, uint32_t bit)
+{
+    volatile uint8_t *p = NULL;
+    int e = vmem_deadline(end);
+    if (!e) e = vshared_live_window(s,offset,bytes,&p);
+    if (!e) e = vmem_deadline(end);
+    if (!e) {
+        __asm__ volatile("dmb oshld" ::: "memory");
+        for (uint32_t n = 0; n < bytes; n++) out[n] = p[n];
+        __asm__ volatile("dmb oshld" ::: "memory");
+        *bitmap |= bit;
+        e = vmem_deadline(end);
+    }
+    return e;
+}
+/* Actual status0 START parser branch calls this while c->lock and the whole
+ * physical reservation are held. Fresh copies only: scratch from a previous
+ * preparation/recheck is never promoted by a failed read. No live store,
+ * header admission, negotiated layout or firmware-generation inference. */
+static int vcontrol_observe_start_reply(void *cookie, uint64_t epoch, uint64_t end,
+    const struct x9_vcp_init *init, const struct x9_vcp_init_result *initialized,
+    const struct x9_vcp_start *q, const struct x9_vcp_start_result *reply,
+    const struct x9_vcp_bus_call_log *call)
+{
+    struct x9_vdec_control *c = cookie;
+    struct x9_vdec_shared *s = c->shared;
+    struct x9_vdec_control_input_journal *j;
+    const struct x9_vdec_control_start_resources *r;
+    uint32_t state, observation_errno = 0;
+    int e;
+    if (!c->active_input || !c->status.input_records ||
+        c->status.input_records > X9_VDEC_CONTROL_MAX_RECORDS ||
+        c->active_input != &c->inputs[c->status.input_records-1]) return ESTALE;
+    j = &c->active_input->journal; r = &j->resources;
+    if (j->postreply_attempted) return EALREADY;
+    j->postreply_attempted = 1;
+    e = vmem_deadline(end);
+    if (!e && (call != c->active_start_call || !call || call->epoch != epoch ||
+        !call->request_attempted || !call->prepared || !call->ack_matched ||
+        epoch != c->status.epoch || epoch != s->epoch || epoch != r->epoch ||
+        !c->status.bound || !c->status.slot_initialized ||
+        !c->status.start_attempted || c->status.start_replied ||
+        !c->status.input_prepared || !c->status.vsi_staged ||
+        !j->input_prepared || !j->vsi_staged || reply->firmware_status ||
+        init->service_id != c->init.service_id || init->context_id != c->init.context_id ||
+        init->instance_token != c->init.instance_token ||
+        r->instance_token != c->init.instance_token ||
+        initialized->firmware_status || c->status.init.firmware_status ||
+        initialized->firmware_vsi_address != c->status.init.firmware_vsi_address ||
+        q->firmware_vsi_address != initialized->firmware_vsi_address ||
+        q->service_id != init->service_id || q->context_id != init->context_id ||
+        q->service_id != j->request.service_id || q->context_id != j->request.context_id ||
+        q->firmware_vsi_address != j->request.firmware_vsi_address ||
+        q->bytes_used != j->request.bytes_used || q->buffer_bytes != j->request.buffer_bytes ||
+        q->flags != j->request.flags || q->bytes_used != r->bytes_used ||
+        r->submission_index != c->status.input_records-1 ||
+        r->slot.index != c->slot.index || r->slot.offset != c->slot.offset ||
+        r->slot.bytes != c->slot.bytes || c->slot.index >= X9_VCP_INSTANCE_SLOT_COUNT ||
+        c->slot.bytes != X9_VCP_INSTANCE_SLOT_BYTES ||
+        c->slot.offset != X9_VCP_COMMON_PREFIX_BYTES +
+            c->slot.index*X9_VCP_INSTANCE_SLOT_BYTES ||
+        !r->input_token || r->input_token != c->status.resources.input_token ||
+        r->input_slice_token != c->active_input->slice.token ||
+        c->active_input->slice.epoch != epoch ||
+        q->buffer_bytes != c->active_input->slice.capacity ||
+        r->input.capacity != c->active_input->slice.capacity ||
+        r->input.bytes != c->active_input->slice.bytes ||
+        r->input.iova != c->status.resources.input.iova)) e = ESTALE;
+    if (!e) e = x9_vdec_dma_slice_state(s->codec,&c->active_input->slice,&state);
+    if (!e && state != X9_VDEC_DMA_DEVICE) e = EBUSY;
+    if (e) { j->postreply_errno = (uint32_t)e; return e; }
+    lck_mtx_lock(&s->lock);
+    lck_mtx_lock(&s->arena->lock);
+    e = vmem_deadline(end);
+    if (!e && !(s->bound_slots & (1u << c->slot.index))) e = ESTALE;
+    for (unsigned n = 0; n < 2 && !e; n++) {
+        struct x9_vdec_control_postreply_snapshot *p = &j->postreply[n];
+        uint8_t *slot = c->scratch+n*X9_VCP_INSTANCE_SLOT_BYTES;
+        uint32_t bit = 1u << n;
+        e = vcontrol_postreply_copy(s,end,X9_VCP_GLOBAL_VDEC_OFFSET,
+            p->common_raw,sizeof(p->common_raw),&j->postreply_common_bitmap,bit);
+        if (!e) e = vcontrol_postreply_copy(s,end,
+            X9_VCP_GLOBAL_VDEC_OFFSET+c->slot.offset,slot,X9_VCP_INSTANCE_SLOT_BYTES,
+            &j->postreply_sample_bitmap,bit);
+        if (j->postreply_sample_bitmap & bit) {
+            /* These loads are ONLY from this completed immutable host copy.
+             * Preserve raw values before any parser may reject the sample. */
+            p->raw_1364 = vcontrol_load32(slot,0x1364);
+            p->raw_1374 = vcontrol_load32(slot,0x1374);
+            p->raw_plane_count = vcontrol_load32(slot,0xf28);
+            p->raw_input_driven = slot[0x1000];
+            p->raw_bitdepth = vcontrol_load32(slot,0xf80);
+            memcpy(p->decode_raw.addresses,slot+0xe7c,sizeof(p->decode_raw.addresses));
+            memcpy(p->decode_raw.tokens_errors,slot+0xf18,sizeof(p->decode_raw.tokens_errors));
+            memcpy(p->decode_raw.timestamp,slot+0xf48,sizeof(p->decode_raw.timestamp));
+            memcpy(p->decode_raw.modes,slot+0x1000,sizeof(p->decode_raw.modes));
+            memcpy(p->decode_raw.bitdepth,slot+0xf80,sizeof(p->decode_raw.bitdepth));
+            memcpy(p->decode_raw.general,slot+0x1208,sizeof(p->decode_raw.general));
+            memcpy(p->decode_raw.blocked,slot+0x1228,sizeof(p->decode_raw.blocked));
+            memcpy(p->picture_raw,slot+0xf50,sizeof(p->picture_raw));
+            memcpy(p->crop_raw,slot+0xfd8,sizeof(p->crop_raw));
+            memcpy(p->dpb_raw,slot+0xe78,sizeof(p->dpb_raw));
+            p->decode_errno = (uint32_t)x9_vcp_parse_decode_snapshot(
+                X9_VCP_DECODE_ABI_MT6993_CAPTURE1,slot,X9_VCP_INSTANCE_SLOT_BYTES,&p->decode);
+            p->picture_errno = (uint32_t)x9_vcp_parse_picture_snapshot(
+                X9_VCP_PICTURE_ABI_MT6993_CAPTURE1,slot,X9_VCP_INSTANCE_SLOT_BYTES,&p->picture);
+        }
+    }
+    lck_mtx_unlock(&s->arena->lock);
+    lck_mtx_unlock(&s->lock);
+    for (unsigned n = 0; n < 2; n++) {
+        struct x9_vdec_control_postreply_snapshot *p = &j->postreply[n];
+        uint32_t bit = 1u << n;
+        if (j->postreply_common_bitmap & bit) {
+            p->common_errno = (uint32_t)x9_vcp_parse_common_snapshot(
+                X9_VCP_COMMON_ABI_MT6993_CAPTURE1,p->common_raw,sizeof(p->common_raw),&p->common);
+            /* These are the same real common owner/fault checks consumed by
+             * START preparation, not a new post-only PIC readiness gate. */
+            if (!e && p->common_errno) e = (int)p->common_errno;
+            if (!e && (p->common.has_fault || p->common.enable_smmu != 1)) e = EIO;
+        }
+        if ((j->postreply_sample_bitmap & bit) && !observation_errno)
+            observation_errno = p->decode_errno ? p->decode_errno : p->picture_errno;
+        if ((j->postreply_common_bitmap & j->postreply_sample_bitmap & bit) &&
+            !p->common_errno && !p->decode_errno && !p->picture_errno)
+            j->postreply_parsed_bitmap |= bit;
+    }
+    if (!e) e = vmem_deadline(end);
+    if (!e && j->postreply_parsed_bitmap == 3) {
+        const struct x9_vdec_control_postreply_snapshot *a = &j->postreply[0], *b = &j->postreply[1];
+        if (memcmp(&a->common,&b->common,sizeof(a->common)) ||
+            memcmp(&a->decode,&b->decode,sizeof(a->decode)) ||
+            memcmp(&a->picture,&b->picture,sizeof(a->picture)) ||
+            a->raw_1364 != b->raw_1364 || a->raw_1374 != b->raw_1374)
+            observation_errno = EAGAIN;
+        else j->postreply_observed = 1;
+    }
+    j->postreply_errno = e ? (uint32_t)e : observation_errno;
+    /* Changing/post-only unparseable fields merely make the observation
+     * unavailable; never add a normal START admission/completion gate. Real
+     * handle/window/power/epoch/deadline errors retain the existing fault. */
     return e;
 }
 static int vcontrol_vp(void *cookie, uint64_t epoch, uint64_t end,
@@ -804,6 +953,7 @@ int x9_vdec_control_create(struct x9_vcp_bus *bus, struct x9_vdec_shared *s,
         .route_enter = vcontrol_route_enter, .route_leave = vcontrol_route_leave,
         .shm = vcontrol_shm, .alloc = vcontrol_alloc, .clock = vcontrol_clock,
         .wait = vcontrol_wait, .vp = vcontrol_vp, .notification = vcontrol_notification,
+        .observe_start_reply = vcontrol_observe_start_reply,
         .observe_query_reply = vcontrol_observe_query,
         .recheck = vcontrol_service_recheck,
         .prepare_output = vcontrol_prepare_output };
@@ -1134,8 +1284,11 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *c, const uint8_t *annex
             .bytes_used = used,
             .buffer_bytes = (capacity + VDMA_CPU_BYTES - 1) & ~(VDMA_CPU_BYTES - 1),
             .flags = flags };
+        c->active_input->journal.request = q; /* before reservation/preparation */
+        c->active_start_call = log;
         e = x9_vcp_bus_decode_start(c->bus,&c->init,&c->status.init,&q,&c->reverse,
             ms,out,log);
+        c->active_start_call = NULL;
         c->input_source = NULL; /* never retained after return, including error */
         if (e == EBUSY && !log->epoch) {
             if (c->active_input->slice.token)
@@ -1157,6 +1310,9 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *c, const uint8_t *annex
         c->active_input->journal.control_replied = log->ack_matched;
         c->active_input->journal.call = *log;
         c->active_input->journal.last_errno = (uint32_t)e;
+        c->active_input->journal.postreply_valid = !e && log->ack_matched &&
+            c->active_input->journal.postreply_observed &&
+            !c->active_input->journal.postreply_errno;
         c->active_input = NULL;
         vcontrol_fault(c,e);
     }

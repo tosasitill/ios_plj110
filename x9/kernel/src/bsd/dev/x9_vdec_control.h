@@ -107,11 +107,39 @@ struct x9_vdec_control_status {
  * slices remain owned even after the latest status fields change. This stage
  * never reuses published backing: only whole-domain retirement frees it. */
 #define X9_VDEC_CONTROL_MAX_RECORDS 64u
+/* One immutable, freshly copied NC post-b001 observation. Raw offsets are
+ * not negotiated fields or firmware-generation authority. Parser errors
+ * leave raw values/common bytes intact; consult the corresponding errno. */
+struct x9_vdec_control_postreply_snapshot {
+    uint8_t common_raw[X9_VCP_COMMON_PREFIX_BYTES];
+    /* Preserve exactly the existing parsers' consumed immutable spans too,
+     * including when their parsed output is cleared on a semantic error. */
+    struct {
+        uint8_t addresses[0x5c], tokens_errors[0x24], timestamp[8];
+        uint8_t modes[5], bitdepth[4], general[16], blocked[4];
+    } decode_raw;
+    uint8_t picture_raw[64], crop_raw[16], dpb_raw[4];
+    struct x9_vcp_common_snapshot common;
+    struct x9_vcp_decode_snapshot decode;
+    struct x9_vcp_picture_snapshot picture;
+    uint32_t raw_1364, raw_1374, raw_plane_count, raw_input_driven, raw_bitdepth;
+    uint32_t common_errno, decode_errno, picture_errno;
+};
 struct x9_vdec_control_input_journal {
     struct x9_vdec_control_start_resources resources;
+    struct x9_vcp_start request; /* exact retained a001 host framing */
     struct x9_vcp_start_result result;
     struct x9_vcp_bus_call_log call;
     uint32_t input_prepared, vsi_attempted, vsi_staged, control_replied, last_errno;
+    /* Bit n denotes a COMPLETE fresh copy n, never an old scratch image.
+     * parsed additionally requires that sample's three parsers to succeed. */
+    uint32_t postreply_attempted, postreply_common_bitmap, postreply_sample_bitmap;
+    uint32_t postreply_parsed_bitmap, postreply_observed, postreply_valid, postreply_errno;
+    /* observed: both complete, parsed samples agreed. valid additionally
+     * requires the enclosing physical call_end to succeed with matched ACK.
+     * Neither proves atomic FW state, header readiness, count synchronization,
+     * selected layout, pixels, ring consumption or DEVICE retirement. */
+    struct x9_vdec_control_postreply_snapshot postreply[2];
     uint32_t free_bs_observed; /* token-matched head ONLY, no read/count write */
     struct x9_vcp_ring_snapshot free_bs;
 };

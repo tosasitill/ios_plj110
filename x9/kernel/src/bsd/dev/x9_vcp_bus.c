@@ -516,6 +516,7 @@ static bool same_ops(const struct x9_vcp_bus_reverse_ops *a,
     return a->cookie == z->cookie && a->route_enter == z->route_enter &&
         a->route_leave == z->route_leave && a->prepare_output == z->prepare_output &&
         a->prepare_start == z->prepare_start &&
+        a->observe_start_reply == z->observe_start_reply &&
         a->observe_query_reply == z->observe_query_reply &&
         a->notification == z->notification &&
         a->recheck == z->recheck && a->shm == z->shm && a->alloc == z->alloc &&
@@ -1050,6 +1051,11 @@ static int control_call(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
             } else if (start) {
                 e = x9_vcp_parse_start_reply(init,log->last_rx,X9_VCP_WIRE_BYTES,sr);
                 log->ack_matched = !e || (e == EIO && sr->firmware_status != 0);
+                if (!e && ops->observe_start_reply) {
+                    e = call_check(b,log,end);
+                    if (!e) e = ops->observe_start_reply(ops->cookie,log->epoch,end,
+                        init,initialized,start,sr,log);
+                }
             } else if (query) {
                 e = x9_vcp_parse_query_reply(query,log->last_rx,X9_VCP_WIRE_BYTES,qr);
                 log->ack_matched = !e || (e == EIO && qr->firmware_status != 0);

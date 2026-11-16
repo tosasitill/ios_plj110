@@ -4,6 +4,7 @@
 #ifdef KERNEL
 #include "x9_vcp_wire.h"
 struct x9_vcp_bus;
+struct x9_vcp_bus_call_log;
 enum x9_vcp_bus_phase {
     X9_VCP_BUS_RESERVED, X9_VCP_BUS_COLD, X9_VCP_BUS_STARTING, X9_VCP_BUS_WAIT_READY,
     X9_VCP_BUS_RUNNING, X9_VCP_BUS_QUARANTINED, X9_VCP_BUS_STOPPING,
@@ -195,6 +196,17 @@ struct x9_vcp_bus_reverse_ops {
     int (*prepare_start)(void *, uint64_t epoch, uint64_t deadline_ns,
         const struct x9_vcp_init *, const struct x9_vcp_init_result *,
         const struct x9_vcp_start *);
+    /* Optional observation of a parsed, current-route status0 b001. The
+     * exact copied request/INIT and current call journal remain resident,
+     * outside bus_lock with the whole reservation/current state lock held.
+     * No bus/control reentry, live stores, layout/READY or DMA grant. Keep
+     * raw samples on failure; an enclosing call_end failure must invalidate
+     * whole-call success without erasing those observations. Reply context
+     * is preserved raw: an echo of the request context is not established. */
+    int (*observe_start_reply)(void *, uint64_t epoch, uint64_t deadline_ns,
+        const struct x9_vcp_init *, const struct x9_vcp_init_result *,
+        const struct x9_vcp_start *, const struct x9_vcp_start_result *,
+        const struct x9_vcp_bus_call_log *);
     /* Optional matched status0 b100 observer. Invoked before route/call end,
      * outside bus_lock but retaining the whole reservation/current state lock.
      * Resolve ONLY genuinely owned advertised SHM; never cast FW/AP addresses
