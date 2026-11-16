@@ -157,6 +157,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 用户重新连接ADB：同版Java/音频原件已只读提取（首批输入阻断解除，功能仍未完成）
+
+- 用户明确 **“adb已连接 提取吧”**，本轮从`e6e7b0c0`建`feat/call-input-capture`，只读ADB。先要求唯一connected device，并与旧call session私有serial一致才采集；identity/root身份和build实际回读均已保存。当前fingerprint仍为`OPPO/PLJ110/OP5E17L1:17/CP2A.260605.016/B.46c413f-20895a6-20bdbdd:user/release-keys`，slot **`_b`**。没有拨号、发短信、安装、logcat clear、setprop、重启/flash或分区写入；其它工作树、`.local`和分区备份未改变。
+- **已抓18个原件/239438658B**：7个JAR（含此前首缺`telephony-common.jar`5996240B、`framework-telephony.jar`539925B，以及framework/oplus/mediatek/ims/telecom依赖）；3个APK通过本次实际`pm path`取得TeleService/Contacts/ImsService位置，不猜路径；7个同版audio模块通过实际模块文件inventory匹配loader名取得；当前active **`audio_dsp_b`33554432B**按实际by-name链接/blockdev长度只读cat。10个Java ZIP均含真实classes*.dex，模块均ELF，DSP长度匹配；这是抓取原件资格，不是构建产物复检或功能验收。
+- 原始/衍生材料已无覆盖归档主checkout **`x9/out/android-call-inputs-20261116-092442/`**，raw文件在`files/`保持设备路径，`files-manifest.json`含每项确切ADB command/exit/bytes/SHA，私有serial仅`session.json`等gitignored文件。实际模块名是`adsp-v3.ko`、`audio_ipi.ko`、`mt6993-mt6681.ko`、`snd-soc-audiodsp-common.ko`、`snd-soc-mt6681.ko`、`snd-soc-mt6993-afe.ko`、`snd-soc-mtk-common.ko`；原件与旧模块名inventory区别已保留，不将su返回0单独作为成功（部分错误在stdout）。
+- 本次实际`/proc/asound/cards/pcm`给出 **card0/PCM41=Hostless_Speech**。这是当前Android descriptor，不替代旧MO的call-time mux/trigger、scene0 task-info8B或DSP receipt。ASOC debugfs、ADSP/audio_ipi module参数面不存在，tiny*工具不在PATH；未盲发ioctl或新增探针，未把idle状态当通话路由。ASC已按原件做ImsService manifest、telephony/IMS窄class inventory，真实GsmCdmaPhone/GsmMmiCode/ImsPhoneCallTracker类存在；尚未将class存在当producer闭合。
+- **下一真正动作已改变**：matching Java和同版DSP payload不再是“文件未抓到”的阻断，可以从新原件继续CLIR意图→raw producer、初始化/短信owner及DSP容器/consumer；仍需完整owned iOS caller/backend、CallList/handover、独立双向音频与当前iOS短信端到端验收。VOICE09仍关闭，无production delta/编译/CI/boot镜像，本次只完成用户要求的只读原件提取，不声称最终修复。用户明确续接后的blocked审计重新开始；不以历史blocked阻止本次获准采集，也不替用户控制的goal恢复状态。
+
 #### 2026-11-16 完整通话/短信目标：连续三轮无进展后的阻断交接
 
 - 三代理加速收束的上一轮产生新证据；其后**三个连续goal turns均无功能/输入进展**，每轮核实main/origin仍为`6e7b46fb`、tracked clean、已抓两个JAR路径均missing。本轮再核三个代理全部completed，gh main为`[]`，没有可认定为verified wait的活动代理/构建句柄。未重启相同任务、未重扫已排除类、未重编旧kernel，也未操作设备。
