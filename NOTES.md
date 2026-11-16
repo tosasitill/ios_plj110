@@ -158,7 +158,7 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
-#### 2026-11-16 方向传感器：内核 + iOS 接入（实现/构建中）
+#### 2026-11-16 方向传感器：内核 + iOS 接入（整包候选已构建，待实机）
 
 - **范围/观察**：单代理 `feat/orientation` / `.worktrees/orientation`，基线 `ff9e900f`，不改其它窗口。原日志 `~/330.txt` 的完整 SCP LIST 已证明 type1 `icm456xy acc` / gain1000、type4 gyro / gain1000000、type27 dev_orient；本轮只做 **真实加速度 → iOS 横竖屏/face-up/down**，不把 type3 欧拉角或 type27 的未知枚举冒充 Apple 方向，不宣称指南针/陀螺仪/CoreMotion 全套已接入。
 - **决定性 iOS 契约**：原 backboardd `BKOrientationManager 100079fe4` 匹配 built-in ff00/3；`BKAccelerometerInterface 100043cc8..100043cf8` 读 type13 XYZ。另一路 `CMDeviceOrientationManager` 仍走 Apple motion userclient（原 `191c78324` 送 selector0x20/3B），不能仅靠 HID 发布称自动旋转成功。新 own-code bridge 仅替换原五个 public 方法：start `1919ba350`、stop `191c6f84c`、available `1919baad0`、active `191c6f838`、blocking getter `1919c022c`；保留原 NSOperationQueue/CMDeviceOrientation 对象与 BK/SpringBoard 旋转锁/策略，不改 Apple 文件或 VM text。原 selector 表已用 `init` 与全部21个同类 selector 一致解码（共享池 base `18229979f`），不是乱猜方法名。
@@ -166,6 +166,11 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **收尾资格**：原 CoreMotion 完整 metadata 证明 blocking 为 `@16@0:8`、初始化为 `@28@0:8i16d20`，五入口精确 ABI 在安装前全匹配；原 stringForOrientation 表0..6是 Ambiguous/Portrait/PortraitUpsideDown/LandscapeLeft/LandscapeRight/FaceUp/FaceDown。原 blocking `1919c0404` 调同 initializer 并返回对象，不以名字猜 ABI。左右重力轴按 top-edge-left x<0→3 / x>0→4修正，仍待板级实测；换算约分5避免极端int32乘积溢出，initializer显式init-family声明保ARC ownership。回调保DATA有效、generation和最新对象一致。最初metadata读取用了extracted文件缺少共享selector池失败，改读已有只读SystemOS cache后成功；没有运行测试。
 - **已构建/未验收**：初版 iOS arm64 build/sign exit0（95008B，后续 ABI/lifecycle 修正待整包重编）；`prepare-local.py --check` exit0，真实 recipe 单对象 `sweet_x9_motion.o/sweet_x9_als.o/SweetHID.cpo/KernelConfigTables.cpo` 均 True/exit0（首次脚本因未建 out 子目录失败，未发生编译；修正目录后成功）。没有运行测试脚本/套件、设备/ADB/mailbox/分区操作或构建后二次产物检查；`gh run list` 为 `[]`，无 CI run ID。原证据/本轮只读 SystemOS mount、精确编译日志在功能树 `x9/out/orientation-20261116/`。整包、提交/push 与卸载/归档结果随后记录；**横竖屏左右映射、旋转锁和实际自动旋转仍需新镜像实机验收**。
 
+
+- **最终整包**：实现 `266d3de9`，吸收当时main `343b2409` 的源码merge **`43396f2`**（显示/状态栏/服务新改动保留；NOTES和gitignore冲突只保完整incoming并加入本轮段/生成头规则）。`candidate.py` 实际exit0：重新构建蓝牙runtime/root payload，完整104/104 overlay（3 prebuilt），新iOS桥build/sign **95456B**；隔离DXB来源为已保留rootboot13的编译树，自带0001+0006 UART IRQ，构建前按本仓库patch逐源diff成功。嵌入7个BT文件1110953B、8个已知旧版本，可保留完整原BT链路，不能冒称手机端蓝牙已验收。Image **33173504B**、boot **15372288B**，原rootboot13参数仅新增`x9_motion=3`（605B），GPU280/ALS3/PROX3/camera1不变，UI/fill缺省off。无测试套件/额外解包/hash/反汇编/复建检查、无CI run（gh为[]）、无设备操作。
+- **交付镜像/回退**：主checkout `x9/out/x9-orientation-native-20261116/boot/boot.img`；同一kernel正常二次打包（不是重建检查）`x9/out/x9-orientation-off-20261116/boot.img`，实际exit0/Image33173504B/boot15372288B，唯一motion token为0，停止桥/加速度注册但不删除自有dylib，BT仍为root1。candidate自动生成的`boot-rollback/boot.img`是 **BT恢复Apple jobs**，不是方向回退，不推荐混用。本轮仅生成文件，**尚未启动或安装**；motion3第一次用户启动会在`/private/var/x9/motion/`安装hash-addressed自有dylib；保留既有BT PID1 root installer，若它尚未安装会写既有7文件并保Apple原件备份，需用户确认启动这些根盘安装行为。
+- **下一验收**：用户手动临时boot（无需GPU mailbox，前提设备仍GPU280）；新日志按 `X9 MOTION SCP: LIST name=icm456xy acc gain=1000` → `X9 MOTION: ENABLE ACK` → `accelerometer valid`/真实DATA → `X9 MOTION USER: ... adapter installed/subscriber started/orientation=` 检查，ACK不当DATA。打开**支持横屏的Safari页面**，关闭旋转锁后分别左/右转、恢复竖屏、打开旋转锁重复；平放观察5/6、故障/陈旧时不造默认portrait。D22桌面可只竖屏，不能以桌面不转判驱动失败；板级轴正负/旋转锁/实际UI自动旋转与故障回调仍未实机证明。源码入口`x9/motion/`/`X9Motion.h`/`sweet_x9_motion.c`，完整输入/argv/编译和失败原日志保留在主checkout `x9/out/orientation-20261116/`；只读SystemOS本轮mount已按本轮attach plist正常detach exit0，其它mount/窗口/备份不动。
+- **发布/收尾**：feature初次push exit0；停止前将完整out无覆盖APFS复制到主checkout（不追加hash检查），更新正式main合并/发布及清理状态。本轮整合时root main出现其它任务的未提交NOTES，故不覆盖/切换root、不更新它的index；以GitHub PR合main，精确结果随后记录。
 
 #### 2026-11-16 SMS ACK concrete owner（同 ID 内存退休静态收束；物理 ACK 仍缺）
 
