@@ -200,6 +200,8 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **最终v3构建**：源码 **fb94992b**，`build.py all --boot-config x9/build/boot-device.json --name x9-power-policy-v3-20261116` actual exit0；103/103 overlay、Image **31821824 B**、boot **14929920 B**，沿用GPU280，未生成plugin-package，设备保持280时无需mailbox。随后吸收同期main **5f406973**（SMS源码报告+NOTES-only，生产源码未变），保留全部SMS交接；NOTES插入冲突按两边内容完整合并，不覆盖主checkout未提交记录。本轮无新CI/设备启动结果。最终可交付为v3，不是330/rootboot11的单变量整包，也未合其它活动实验分支。
 - **实际合并/发布**：功能提交 `15ec6524`、编译修正 `fb94992b`、同期SMS合并与最终构建交接 `d738222b`；main从 `5f406973` fast-forward至`d738222b`，`git push origin main` actual exit0（5f406973..d738222b），feature push亦exit0。四个输出目录已无覆盖迁到主checkout `x9/out/`，最终用户手动boot路径 **`x9/out/x9-power-policy-v3-20261116/boot.img`**；保留中间/失败日志，不推荐首轮/v2。未改变主checkout当前SMS分支的未提交记录。功能树34项ignored配置/生成头/pycache已无覆盖归档于 `x9/out/power-policy-archive-20261116/`，仅unlink该树`.local` symlink，target未动；local feature branch已正常`-d`删除（原d738222b留在main）。本条推送后正常remove本轮worktree，其他会话不动。全部硬件验收仍待用户新日志，本条为交付源码与编译候选，不是已验证待机功耗。
 
+- **分支清理完成（2026-11-16）**：按用户“合入 main 并删除”要求，复核远端功能 head `d738222b7448a9f73084a0def92da71a464d0f26` 已是 main 祖先；带该精确 lease 删除 `origin/feat/power-policy` actual exit0，随后 `ls-remote` 确认该远端 ref 不存在、main 已由同期工作推进至 `ff9e900f`。原本地 `feat/power-policy` 与 `.worktrees/power-policy` 均已删除；v3 镜像、四目录构建输出与 `x9/out/power-policy-archive-20261116/` 归档保留。清理交接独立工作树提交，不改主 checkout SMS 未提交 NOTES，不动其它工作树。本轮没有新构建、CI run 或设备操作；实机调频/休眠/唤醒仍待验收。
+
 
 #### 2026-11-16 SMS retrieve 实际 route（静态收束；退休/物理ACK仍缺）
 
