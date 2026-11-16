@@ -60,6 +60,7 @@ struct x9_vdec_control_status {
     uint64_t epoch, notifications;
     uint32_t init_attempted, bound, recheck_pending, last_errno;
     uint32_t start_attempted, start_replied;
+    uint32_t reset_attempted, reset_replied, reset_drain_type;
     uint32_t output_attempted, output_prepared, output_notified;
     uint32_t input_attempted, input_prepared;
     uint32_t slot_initialized, vsi_attempted, vsi_staged;
@@ -76,6 +77,8 @@ struct x9_vdec_control_status {
     struct x9_vcp_output_record output; /* latest offered extents, NOT pixel layout */
     struct x9_vcp_init_result init;
     struct x9_vcp_start_result start;
+    struct x9_vcp_reset_result reset;
+    struct x9_vcp_bus_call_log reset_call;
     struct x9_vcp_output_notification last_notification;
     struct x9_vcp_ring_snapshot rings[3]; /* last raw observations, check bitmap; never dequeue */
 };
@@ -126,6 +129,20 @@ int x9_vdec_control_init(struct x9_vdec_control *, uint32_t timeout_ms,
  * No fabricated profiles, decode completion, output or START callback. */
 int x9_vdec_control_query(struct x9_vdec_control *, const struct x9_vcp_query *,
     uint32_t timeout_ms, struct x9_vcp_query_result *, struct x9_vcp_bus_call_log *);
+/* Once-only physical a003 with raw observed selector0..2 and the actual bound
+ * firmware alias. Requires initialized slot and no unresolved START; a host
+ * bus-busy refusal before reservation leaves it fresh. Retains exact result
+ * and call journal, including failed/uncertain requests. Never writes FW/VSI
+ * flags or resets/releases any input/output/memory/DPB record.
+ * Any reserved attempt closes further QUERY/START/output/RESET admission:
+ * selector semantics and post-RESET DPB/mode preservation are not established.
+ * The reverse/async worker continues servicing retained DEVICE resources.
+ * Matched status0 is only b003, not session_ops DRAIN, EOS, DMA/IRQ/fence
+ * retirement, cache permission or a route to free the native arenas.
+ * This is not a platform/session registration or a userspace ioctl.
+ */
+int x9_vdec_control_decode_reset(struct x9_vdec_control *, uint32_t drain_type,
+    uint32_t timeout_ms, struct x9_vcp_reset_result *, struct x9_vcp_bus_call_log *);
 /* Register ONE fresh output per call. Allocate real codec arena slices,
  * assign a fresh native buffer token/record index, retain all handles, hand off to
  * PoC under the bus call reservation and send physical a005/service2. Size

@@ -524,6 +524,30 @@ int x9_vcp_encode_wait_reply(const struct x9_vcp_init *request,
     return 0;
 }
 
+int x9_vcp_encode_reset(const struct x9_vcp_reset *request,
+    uint8_t out[X9_VCP_WIRE_BYTES])
+{
+    struct x9_vcp_reset q;
+    uint8_t *p;
+    if (!out) return EINVAL;
+    if (!request) {
+        memset(out,0,X9_VCP_WIRE_BYTES);
+        return EINVAL;
+    }
+    memcpy(&q,request,sizeof(q));
+    memset(out,0,X9_VCP_WIRE_BYTES);
+    if (q.service_id != X9_VCP_VDEC_SERVICE || !q.firmware_vsi_alias ||
+        q.firmware_vsi_alias == UINT64_MAX || q.drain_type > 2) return EINVAL;
+    put32(out,q.service_id);
+    put32(out+4,X9_VCP_RESET_BYTES);
+    p = out+8;
+    put32(p,X9_VCP_RESET);
+    put32(p+4,q.context_id);
+    put64(p+8,q.firmware_vsi_alias);
+    put32(p+16,q.drain_type);
+    return 0;
+}
+
 int x9_vcp_encode_query(const struct x9_vcp_query *query,
                         uint8_t out[X9_VCP_WIRE_BYTES])
 {
@@ -640,6 +664,8 @@ int x9_vcp_parse_init_reply(const struct x9_vcp_init *request, const uint8_t *in
     out->firmware_vsi_address = (uint32_t)address;
     return 0;
 }
+
+#include "x9_vcp_reset_reply.inc"
 
 int x9_vcp_parse_start_reply(const struct x9_vcp_init *instance, const uint8_t *input,
     uint32_t bytes, struct x9_vcp_start_result *out)

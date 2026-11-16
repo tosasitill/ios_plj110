@@ -988,28 +988,29 @@ static int control_call(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
     struct x9_vcp_init_result *ir, struct x9_vcp_query_result *qr,
     const struct x9_vcp_init_result *initialized, const struct x9_vcp_start *start,
     struct x9_vcp_start_result *sr,
+    const struct x9_vcp_reset *reset, struct x9_vcp_reset_result *rr,
     struct x9_vcp_bus_call_log *log)
 {
-    uint32_t expected = start ? X9_VCP_START_DONE :
+    uint32_t expected = reset ? X9_VCP_RESET_DONE : start ? X9_VCP_START_DONE :
         query ? X9_VCP_QUERY_CAP_DONE : X9_VCP_INIT_DONE;
     unsigned loops = 0;
     bool service_ready = false, prepared_service = false;
     int e = call_begin(b,init,ops,log,&service_ready);
     if (e) { log->last_errno = (uint32_t)e; return e; }
     e = call_check(b,log,end);
-    if (!e && start) {
+    if (!e && (start || reset)) {
         /* A live service/instance must already exist. Do not make START the
          * first AP command and bootstrap SHM behind the preparation callback. */
         if (!service_ready || !b->caller->status.exposed) e = ENXIO;
         else e = control_rx_baseline(b,end,log);
-        if (!e) {
+        if (!e && start) {
             log->prepare_attempted = 1;
             e = ops->prepare_start(ops->cookie,log->epoch,end,init,initialized,start);
             if (!e) e = call_check(b,log,end);
             if (!e) log->prepared = 1;
         }
     }
-    if (!e && !start && service_ready)
+    if (!e && !start && !reset && service_ready)
         e = control_rx_baseline(b,end,log);
     if (!e) e = call_expose(b,log);
     if (!e) {
@@ -1041,7 +1042,10 @@ static int control_call(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
             /* Whole-call serialization leaves no legitimate foreign control
              * ACK outstanding. Never enter foreign state for a stale ACK. */
             if (journal.foreign) e = EPROTO;
-            else if (start) {
+            else if (reset) {
+                e = x9_vcp_parse_reset_reply(init,log->last_rx,X9_VCP_WIRE_BYTES,rr);
+                log->ack_matched = !e || (e == EIO && rr->firmware_status != 0);
+            } else if (start) {
                 e = x9_vcp_parse_start_reply(init,log->last_rx,X9_VCP_WIRE_BYTES,sr);
                 log->ack_matched = !e || (e == EIO && sr->firmware_status != 0);
             } else if (query) {
@@ -1072,7 +1076,7 @@ int x9_vcp_bus_init(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
     memset(result,0,sizeof(*result)); memset(log,0,sizeof(*log));
     e = deadline(timeout_ms,&end);
     if (!e) e = x9_vcp_encode_init(&q,request);
-    if (!e) e = control_call(b,&q,NULL,&handlers,end,request,result,NULL,NULL,NULL,NULL,log);
+    if (!e) e = control_call(b,&q,NULL,&handlers,end,request,result,NULL,NULL,NULL,NULL,NULL,NULL,log);
     /* A matched alias is not usable after timeout/cancellation/guard loss. */
     if (e) result->firmware_vsi_address = 0;
     log->last_errno = (uint32_t)e;
@@ -1096,7 +1100,7 @@ int x9_vcp_bus_query(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
         q.instance_token != i.instance_token || i.instance_token == UINT64_MAX ||
         q.data_token == UINT64_MAX)) e = EINVAL;
     if (!e) e = x9_vcp_encode_query(&q,request);
-    if (!e) e = control_call(b,&i,&q,&handlers,end,request,NULL,result,NULL,NULL,NULL,log);
+    if (!e) e = control_call(b,&i,&q,&handlers,end,request,NULL,result,NULL,NULL,NULL,NULL,NULL,log);
     if (e) result->firmware_data_address = 0;
     log->last_errno = (uint32_t)e;
     return e;
@@ -1123,7 +1127,32 @@ int x9_vcp_bus_decode_start(struct x9_vcp_bus *b, const struct x9_vcp_init *init
         q.firmware_vsi_address != ready.firmware_vsi_address ||
         q.service_id != i.service_id || q.context_id != i.context_id)) e = EINVAL;
     if (!e) e = x9_vcp_encode_start(&q,request);
-    if (!e) e = control_call(b,&i,NULL,&handlers,end,request,NULL,NULL,&ready,&q,result,log);
+    if (!e) e = control_call(b,&i,NULL,&handlers,end,request,NULL,NULL,&ready,&q,result,NULL,NULL,log);
+    log->last_errno = (uint32_t)e;
+    return e;
+}
+int x9_vcp_bus_decode_reset(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
+    const struct x9_vcp_init_result *initialized, const struct x9_vcp_reset *reset,
+    const struct x9_vcp_bus_reverse_ops *ops, uint32_t ms,
+    struct x9_vcp_reset_result *result, struct x9_vcp_bus_call_log *log)
+{
+    struct x9_vcp_init i;
+    struct x9_vcp_init_result ready;
+    struct x9_vcp_reset q;
+    struct x9_vcp_bus_reverse_ops handlers;
+    uint8_t request[X9_VCP_WIRE_BYTES];
+    uint64_t end = 0;
+    int e;
+    if (!init || !initialized || !reset || !ops || !result || !log) return EINVAL;
+    i = *init; ready = *initialized; q = *reset; handlers = *ops;
+    memset(result,0,sizeof(*result)); memset(log,0,sizeof(*log));
+    e = deadline(ms,&end);
+    if (!e && (!i.instance_token || i.instance_token == UINT64_MAX ||
+        i.service_id != X9_VCP_VDEC_SERVICE || ready.firmware_status ||
+        !ready.firmware_vsi_address || q.firmware_vsi_alias != ready.firmware_vsi_address ||
+        q.service_id != i.service_id || q.context_id != i.context_id)) e = EINVAL;
+    if (!e) e = x9_vcp_encode_reset(&q,request);
+    if (!e) e = control_call(b,&i,NULL,&handlers,end,request,NULL,NULL,&ready,NULL,NULL,&q,result,log);
     log->last_errno = (uint32_t)e;
     return e;
 }

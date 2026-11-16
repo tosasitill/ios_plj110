@@ -659,11 +659,47 @@ int x9_vdec_control_query(struct x9_vdec_control *c, const struct x9_vcp_query *
     memset(out,0,sizeof(*out)); memset(log,0,sizeof(*log));
     if (!ms || ms > 3000) return EINVAL;
     lck_mtx_lock(&c->lock);
-    e = c->closing || !c->status.bound || c->status.start_attempted ? EBUSY :
+    e = c->closing || !c->status.bound || c->status.start_attempted ||
+        c->status.reset_attempted ? EBUSY :
         (int)c->status.last_errno;
     if (!e) e = x9_vcp_bus_check_shared(c->bus,c->status.epoch,&c->shared->global);
     if (!e) e = x9_vcp_bus_query(c->bus,&c->init,q,&c->reverse,ms,out,log);
     if (log->epoch) vcontrol_fault(c,e); /* includes a failed routed RX baseline */
+    lck_mtx_unlock(&c->lock);
+    return e;
+}
+int x9_vdec_control_decode_reset(struct x9_vdec_control *c, uint32_t drain_type,
+    uint32_t ms, struct x9_vcp_reset_result *out, struct x9_vcp_bus_call_log *log)
+{
+    struct x9_vcp_reset q;
+    int e;
+    if (!c || c->magic != VCONTROL_MAGIC || !out || !log) return EINVAL;
+    memset(out,0,sizeof(*out)); memset(log,0,sizeof(*log));
+    if (!ms || ms > 3000 || drain_type > 2) return EINVAL;
+    lck_mtx_lock(&c->lock);
+    e = c->closing || !c->status.bound || !c->status.slot_initialized ||
+        c->status.reset_attempted ||
+        (c->status.start_attempted && !c->status.start_replied) ? EBUSY :
+        (int)c->status.last_errno;
+    if (!e) e = x9_vcp_bus_check_shared(c->bus,c->status.epoch,&c->shared->global);
+    if (!e) {
+        q = (struct x9_vcp_reset){ .service_id = c->init.service_id,
+            .context_id = c->init.context_id,
+            .firmware_vsi_alias = c->status.init.firmware_vsi_address,
+            .drain_type = drain_type };
+        c->status.reset_attempted = 1; c->status.reset_drain_type = drain_type;
+        e = x9_vcp_bus_decode_reset(c->bus,&c->init,&c->status.init,&q,
+            &c->reverse,ms,out,log);
+        if (e == EBUSY && !log->epoch) {
+            /* No reservation, send, callbacks or state exposure. The one-shot
+             * reset slot may still be used; no DMA record was touched. */
+            c->status.reset_attempted = 0; c->status.reset_drain_type = 0;
+            lck_mtx_unlock(&c->lock); return e;
+        }
+        c->status.reset = *out; c->status.reset_call = *log;
+        c->status.reset_replied = log->ack_matched;
+        vcontrol_fault(c,e);
+    }
     lck_mtx_unlock(&c->lock);
     return e;
 }
@@ -721,7 +757,8 @@ int x9_vdec_control_register_output(struct x9_vdec_control *c, uint32_t planes,
         if (bytes[n] > X9_MM_SMMU_MAX_CHECK_BYTES) return EMSGSIZE;
     memset(out,0,sizeof(*out)); memset(log,0,sizeof(*log));
     lck_mtx_lock(&c->lock);
-    e = c->closing || !c->status.bound ? EBUSY : (int)c->status.last_errno;
+    e = c->closing || !c->status.bound || c->status.reset_attempted ? EBUSY :
+        (int)c->status.last_errno;
     if (!e && c->status.start_attempted && !c->status.start_replied) e = EBUSY;
     if (!e && c->status.output_records == X9_VDEC_CONTROL_MAX_RECORDS) e = ENOSPC;
     if (!e && c->status.output_records) {
@@ -800,7 +837,8 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *c, const uint8_t *annex
         capacity > X9_MM_SMMU_MAX_CHECK_BYTES || dynamic_low_latency > UINT8_MAX)
         return EINVAL;
     lck_mtx_lock(&c->lock);
-    e = c->closing || !c->status.bound ? EBUSY : (int)c->status.last_errno;
+    e = c->closing || !c->status.bound || c->status.reset_attempted ? EBUSY :
+        (int)c->status.last_errno;
     if (!e && ((c->status.start_attempted && !c->status.start_replied) ||
         !c->status.output_prepared)) e = EBUSY;
     if (!e && c->status.input_records == X9_VDEC_CONTROL_MAX_RECORDS) e = ENOSPC;

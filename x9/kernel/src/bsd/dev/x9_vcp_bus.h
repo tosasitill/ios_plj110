@@ -288,6 +288,20 @@ int x9_vcp_bus_decode_start(struct x9_vcp_bus *, const struct x9_vcp_init *,
     const struct x9_vcp_init_result *, const struct x9_vcp_start *,
     const struct x9_vcp_bus_reverse_ops *, uint32_t timeout_ms,
     struct x9_vcp_start_result *, struct x9_vcp_bus_call_log *);
+/* Physical service1 a003 for an ALREADY initialized instance. Same whole-call
+ * OUT0/IN1/lifetime reservation, fresh RX baseline, one <=3s absolute deadline
+ * and real reverse/foreign notification dispatch as START. Match ONLY b003,
+ * preserve signed status/context/opaque bytes, quarantine failures/uncertain
+ * sends. No new SHM bootstrap, VSI writes, retry, firmware reset/clock lease
+ * release or host-buffer recycle. Alias must match retained b000.
+ * Success means ONLY this control reply; selectors0..2 have no established
+ * drain/DPB/EOS semantics here. The caller must retain ALL prior DMA records
+ * and independently qualify any later submission after this state mutation.
+ */
+int x9_vcp_bus_decode_reset(struct x9_vcp_bus *, const struct x9_vcp_init *,
+    const struct x9_vcp_init_result *, const struct x9_vcp_reset *,
+    const struct x9_vcp_bus_reverse_ops *, uint32_t timeout_ms,
+    struct x9_vcp_reset_result *, struct x9_vcp_bus_call_log *);
 /* Physical service2 a005 for ONE fresh output record. Shares OUT0/IN1 with
  * INIT/QUERY/START; owner must exclude unresolved prior control calls for this
  * instance, not discard their live DMA records. Requires successful b000 and

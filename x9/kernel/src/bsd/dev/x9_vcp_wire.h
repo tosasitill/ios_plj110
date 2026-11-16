@@ -26,6 +26,10 @@
 #define X9_VCP_START_DONE 0xb001u
 #define X9_VCP_START_BYTES 40u
 #define X9_VCP_START_REPLY_BYTES 40u
+#define X9_VCP_RESET 0xa003u
+#define X9_VCP_RESET_DONE 0xb003u
+#define X9_VCP_RESET_BYTES 24u
+#define X9_VCP_RESET_REPLY_BYTES 40u
 #define X9_VCP_QUERY_CAP 0xa100u
 #define X9_VCP_QUERY_CAP_DONE 0xb100u
 #define X9_VCP_BACKUP 0xa101u /* NOT QUERY_CAP */
@@ -311,6 +315,30 @@ struct x9_vcp_start {
  */
 int x9_vcp_encode_start(const struct x9_vcp_start *, uint8_t out[X9_VCP_WIRE_BYTES]);
 
+struct x9_vcp_reset_result {
+    int32_t firmware_status;
+    uint32_t reply_context_id;
+    uint8_t opaque[20]; /* payload20..39; not a parsed control/buffer receipt */
+};
+/* b003/service1/40B ONLY, from one immutable complete 72B mailbox snapshot.
+ * RESET's sender passes its own b003 payload to the shared 40B send helper;
+ * this framing is not borrowed from b001. Match the retained fresh AP token
+ * at payload8, NOT the firmware alias in a003; reject zero/UINT64_MAX tokens.
+ * b004 shares stock's waiter branch but is NOT a RESET reply: do not accept it.
+ * Context echo is unproven: preserve payload4 and all payload20..39 unchanged.
+ * Matched nonzero signed status returns EIO with the whole result preserved;
+ * other errors zero the result. The captured -14/zero-token reply cannot be
+ * attributed to a pending instance. Input/result/instance may overlap.
+ * No selector or command sequence echo is established. The provider must own
+ * the current instance/epoch, serialize the control call and exclude stale ACKs
+ * before sending, not attribute a same-token reply to the newest submission.
+ * Return0 means ONLY a matching firmware reply, never RESET success semantics,
+ * producer exclusion, retained DPB, buffer release, DMA drain, CPU cache ownership
+ * or permission to submit again. No state change, transport, live read or ACK.
+ */
+int x9_vcp_parse_reset_reply(const struct x9_vcp_init *, const uint8_t *,
+    uint32_t bytes, struct x9_vcp_reset_result *);
+
 struct x9_vcp_start_result {
     int32_t firmware_status;
     uint32_t reply_context_id;
@@ -329,6 +357,22 @@ struct x9_vcp_start_result {
  */
 int x9_vcp_parse_start_reply(const struct x9_vcp_init *, const uint8_t *,
     uint32_t bytes, struct x9_vcp_start_result *);
+
+struct x9_vcp_reset {
+    uint32_t service_id, context_id;
+    uint64_t firmware_vsi_alias; /* payload8, NOT the AP instance token */
+    uint32_t drain_type; /* observed selectors0..2; NOT a firmware status */
+};
+/* Captured vdec_vcp_reset .text24b94/1a4: a003/24B, payload8 u64 alias,
+ * payload16 selector, payload20 zero. vdec_vcp_decode's NULL-bs branch selects
+ * 0 with NULL fb,1 with fb+340==0,2 otherwise; do not infer their FW semantics.
+ * Encode only these observed selectors. Snapshot inputs before zeroing output;
+ * overlap is allowed, errors clear all72B. No NULL-buffer pointer, VSI write,
+ * transport, DMA drain, DPB preservation, EOS or buffer retirement is implied.
+ * The live caller must match the alias to its retained initialized slot and
+ * establish current firmware/owner authority before sending.
+ */
+int x9_vcp_encode_reset(const struct x9_vcp_reset *, uint8_t out[X9_VCP_WIRE_BYTES]);
 
 /* Captured c005/c006 mem object: payload24:type, 28:requested length,
  * 32:iova, 40:pa, 48:va. For INSTANCE allocations, pa == iova == DMA address,
