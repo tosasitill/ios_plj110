@@ -40,6 +40,7 @@ struct cam_probe_bus {
     vm_offset_t base, dma, gate, top, univpll, mainpll;
     uint32_t gate_bit, saved[CAM_I2C_SAVED_COUNT], last_status, clock_shift, clock_bit, clock_source;
     uint32_t banks, dma_banks, timing_hz, clock_con1, max_hz;
+    bool vendor_reset; /* run mtk_i2c_init_hw reset at take (AOV-shared sensor bus) */
     uint32_t expected[CAM_I2C_SAVED_COUNT], prior[CAM_I2C_SAVED_COUNT];
     uint32_t dirty, uncertain;
     uint32_t group_gate_mask, parent_entry, parent_expected;
@@ -244,6 +245,29 @@ static int cam_bus_take(struct cam_probe_bus *b)
         e=cam_wait_bits(b->gate,0xe00,b->gate_bit,0,1000);if(e)return e;
     }
     e=cam_bus_idle(b);if(e)return e;
+    if(b->vendor_reset) {
+        /* Vendor mtk_i2c_init_hw (mt6991: apdma_sync, dma_ver 2) runs on
+         * every runtime resume, i.e. right before the first Android sensor
+         * ID read, and after each ACK error. Log 335/336: powered, clocked
+         * and muxed exactly like the live Android state, yet a clean NACK
+         * on the AOV-shared i2c4 (MULTI=4380). Reset APDMA ch0+controller. */
+        uint32_t m0=cam_rr(b->base,CAM_I2C_MULTI),t0=cam_rr(b->base,CAM_I2C_TIMING);
+        cam_rw(b->base,CAM_I2C_START,0);
+        uint32_t st=cam_rr(b->base,CAM_I2C_STAT);if(st)cam_rw(b->base,CAM_I2C_STAT,st);
+        cam_rw(b->dma,0x0c,1);delay(2);           /* I2C_DMA_WARM_RST */
+        cam_rw(b->dma,0x0c,0);delay(2);           /* I2C_DMA_CLR_FLAG */
+        cam_rw(b->dma,0x0c,4|2);                  /* HANDSHAKE_RST|HARD_RST */
+        cam_rw(b->base,0x50,0x20|1);delay(2);     /* I2C_HANDSHAKE_RST|I2C_SOFT_RST */
+        cam_rw(b->dma,0x0c,0);
+        cam_rw(b->base,0x50,0);
+        __asm__ volatile("dsb sy" ::: "memory");
+        cam_rw(b->dma,0x1c,0x1000);               /* I2C_DMA_TX_MEM_ADDR_INIT_VALUE */
+        cam_rw(b->base,0x1c,2);                   /* I2C_DELAY_LEN */
+        printf("X9 CAMERA AP RESET: gate=%x multi=%x->%x timing=%x->%x stat=%x start=%x delay=%x (vendor init_hw)\n",
+            b->gate_bit,m0,cam_rr(b->base,CAM_I2C_MULTI),t0,cam_rr(b->base,CAM_I2C_TIMING),
+            cam_rr(b->base,CAM_I2C_STAT),cam_rr(b->base,CAM_I2C_START),cam_rr(b->base,0x1c));
+        e=cam_bus_idle(b);if(e)return e;
+    }
     /* Like vendor mtk_i2c_init_hw: W1C whatever INTR_STAT a previous
      * owner (LK RT5133/WL28681C) left, and clear the FIFO pointers. */
     uint32_t stale=cam_rr(b->base,CAM_I2C_STAT);
@@ -634,7 +658,7 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
         .dma=cam_board_map(uw?0x16480000:tele?0x16420000:back?0x163d0000:0x16390000,0x30000),.banks=8,.dma_banks=3,
         .gate=cam_board_map(uw?0x13a50000:0x12650000,0x1000),.gate_bit=tele?8:back?4:2,
         .top=j->top,.univpll=j->pll,.mainpll=j->mainpll,.clock_shift=uw?8:16,.clock_bit=uw?30:29,
-        .group_gate_mask=uw?0x03:0x3f};
+        .group_gate_mask=uw?0x03:0x3f,.vendor_reset=true};
     j->ldo=(struct cam_probe_bus){.max_hz=400000, /* live DT i2c12 clock-frequency */
         .base=cam_board_map(0x16200000,0x40000),
         .dma=cam_board_map(0x164f0000,0x10000),.banks=4,.dma_banks=1,

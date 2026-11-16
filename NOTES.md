@@ -2818,3 +2818,18 @@ Model now (as Android, one shared AFE, one owner per shared bit):
   whole byte 0, so power-off always EBUSY. Vendor selects WL reset_high once and never lowers
   it (GPIO203 is also RT5133 enable): keep high, retire journal. Logs X9 CAMERA WAKE.
 - Image: x9/out/x9-camera-id-r13-20261116/boot.img
+
+## Camera log 336 (r13) -> r14 (2026-11-16)
+- 336: ID retry ran 10x, all NACK (status 3). Power-off now completes (WAKE kept high, enable=80).
+  Phone hung silently at 23.45 s mid WiFi NVRAM download (330-335 all finished WiFi); no
+  CrashReporter/panic report on disk for this boot; no static camera link found (camera rails/VS
+  are camera-only per DT). Watch for recurrence.
+- Android live state (adb root, debugfs, camera streaming): CAMTG4 24 MHz on; WL LDO2/4/7
+  1.160/2.804/1.804 V on (WL reg03=ee); LN60_7 1.8 V, LDC0_3 3.0 V; GPIO171 out-high, 208 mode1,
+  174/175 mode1 pull-up rsel7 (same idle/streaming). Identical to iOS r13 state.
+- i2c4 is shared with SCP AOV (aov sensor-i2c includes i2c4) and enters with MULTI=4380.
+  Vendor mtk_i2c_init_hw (apdma_sync) soft-resets controller + APDMA on every runtime resume
+  and after each ACK error; we never reset. r14: vendor reset sequence at sensor-bus take
+  (START=0, W1C, DMA WARM/CLR/HANDSHAKE|HARD, SOFTRESET HANDSHAKE|SOFT, TX_MEM_ADDR=1000,
+  DELAY_LEN=2). Logs X9 CAMERA AP RESET.
+- Image: x9/out/x9-camera-i2creset-r14-20261116/boot.img
