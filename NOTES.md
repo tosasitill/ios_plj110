@@ -771,6 +771,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 - **实际交付/停止状态**：上述NOTES-only证据交接提交`3ef4690e`已push成功（`f759de7f..3ef4690e`），`commit.log/.exit0`、`push-handoff.log/.exit0`在本批out，句柄78964已terminal；不是新功能源码或硬解验收。活动树与长期原件保留，无后台分析/编译/设备任务。本条最终补记正常commit/push，最新有效功能源码与编译仍是`c9baabd2`，完整goal保持active。
 
+#### 2026-11-16 AP IRQ 候选与 captured VCP power 分支（当前交接，无生产 delta）
+
+- **活动基线/范围**：从已push、tracked干净的`0c0f051f`继续`.worktrees/hevc-hw` / `feat/hevc-hw`。此前续接只有只读检查，没有新的代码/构建里程碑；本轮转向native WAITISR的AP IRQ候选，得到改变下一动作的分支证据，**没有新增硬解生产代码**。完整HEVC/HEIF目标active，不合main、不启子代理、不改共享`.local`，唯一最终boot仍等全部代码齐全。
+- **先修正reference路径，再排除照搬AP handler**：实际驱动在固定reference的`kernel/kernel_device_modules-6.12/drivers/media/platform/mtk-vcodec/`，不是此前不存在的`.../platform/mediatek`。保存的`.local/x9/modem/live.dts`之`/soc/vdec@36000000`明确`vdec-power-in-vcp=1`，且该节点没有`reg`/`reg-names`/`interrupts`。reference commit **`4d505a4292dab3176a45fec66dc85debc362e24c`**的`vdec_decode_prepare/unprepare`在`power_in_vcp`时直接return；其它分支的IRQ enable/disable还要求`!mtk_vcodec_is_vcp`。其IRQ setup对first IRQ缺失可直接返回0，已注册IRQ则先disable；因此函数存在或probe返回0不能当AP中断已安装/启用。**这些是captured DT和reference静态分支，不是matching loaded KO或当前XNU运行证明**；不能从VDEC基地址、RV55 packed IRQ descriptor或别的设备GIC实现猜AP SPI。
+- **WAITISR owner/结果仍不能伪造**：reference reverse c007读取`msg->status`作hardware selector，等待实际context的`int_cond[core_id]`，结束时清condition/type，再回d007；同一condition还有`wake_up_dec_ctx`软件writer，且secure5 handler可跳MMIO后wake，不能把condition1当物理IRQ证据。现有RV55原件profile另有H265-local→shared semaphore及registered-remote两条路线，但其runtime选择/owner仍false；**AP资源缺席不证明所有HEVC wait都local，也不授权默认成功、略掉mandatory wait或授予buffer退休**。当前native control仍有64-record持续journals/自动service pump，rings仍observation-only；clock/wait/qualify_start、bus-owner真实halt/drain及所有READY/authority/producer-exclusion/retirement/普通VT门原样。
+- **本地材料/确切结果**：新唯一 **`x9/out/hevc-ap-irq-route-boundary-20261116/`**保存10份带原行号的有界source/DT摘录、`findings.json`、`source-head.txt`和`replay-commands.txt`。只读摘录脚本exit0；已有type1 vendor_boot提取的模块名单单独保留，含clock/VCP/SMMU而无decoder/common KO，**只描述这个subset，不宣称整个`.local`或设备缺module**。没有重提旧RV55帧、弱ISA/RTOS/implicit-length类，没有测试/样本/人工向量、analyzer/frontend/native单对象/full kernel/XNU/固件/boot构建，也没有成功产物二次解包/hash/反汇编/重建比较或设备/ADB/fastboot/mailbox/MMIO/SMC/分区动作。最新有效功能源码/编译仍为 **`c9baabd2` / `x9/out/heif-amve-final-20261116/`**，无新CI build；本条正常commit/push结果另记，不算功能交付。
+- **下一准确边/完整范围不缩小**：停止未经qualification的AP IRQ移植；先闭真实VCP-owned IRQ/clock、selected HEVC local/remote wait及instance/generation关联，再绑定mandatory native hardware ops，不能写无人消费的IRQ接口或成功空provider。cold最高authority、真实持续session_ops、BS/FB独立producer排他/durable dequeue、DPB/layout/scratch/cache/逐buffer退休/c006真ACK、linear NV12/P010/HYFBC、CCV output/POC与late CLLI/nested HDR、HDR/LUT/tone-map/chroma实效、pasp/aux-alpha/Rext/prem/合法HEIF属性/implicit lengths和普通VT-CMPhoto-ImageIO自动入口全部保留。未满足全goal连续三轮同一外部阻断审计，不能标blocked或complete。
+
 ### 5.1 已在设备上观察到能用（详情见旧 NOTES）
 
 - 启动到 SpringBoard，UFS 原生根盘读写，UFS HS-G5/FAST/RateB/2 lane（180）。
