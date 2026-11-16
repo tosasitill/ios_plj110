@@ -36,6 +36,8 @@ struct x9_vdec_control {
     const uint8_t *input_source; /* borrowed ONLY for the reserved synchronous call */
     uint32_t input_capacity;
     uint8_t *scratch;
+    struct x9_vcp_query active_query;
+    bool query_active, query_cap_staged;
     bool closing, route_registered;
 };
 static void vcontrol_journal_input(struct x9_vdec_control *c)
@@ -128,6 +130,77 @@ static int vcontrol_wait(void *cookie, uint64_t epoch, uint64_t end,
 {
     struct x9_vdec_control *c = cookie;
     return c->hardware.wait(c->hardware.cookie,epoch,end,q,out);
+}
+/* Current control lock + whole bus reservation. HFRP's captured converter
+ * determines an alias DOMAIN, not authority to read firmware/private DRAM.
+ * Authority is this retained current DEVICE-owned native NC shared arena. */
+static int vcontrol_observe_query(void *cookie, uint64_t epoch, uint64_t end,
+    const struct x9_vcp_query *q, const struct x9_vcp_query_result *reply)
+{
+    struct x9_vdec_control *c = cookie;
+    struct x9_vdec_shared *s = c->shared;
+    uint64_t iova, alias64;
+    uint32_t offset = 0;
+    int e;
+    if (!c->query_active || epoch != c->status.epoch || !c->status.bound ||
+        q->service_id != c->init.service_id || q->context_id != c->init.context_id ||
+        q->instance_token != c->init.instance_token ||
+        q->capability_id != c->active_query.capability_id ||
+        q->data_token != c->active_query.data_token || reply->firmware_status)
+        return ESTALE;
+    if (q->capability_id != X9_VCP_FORMAT_CAPABILITY_ID) return 0;
+    lck_mtx_lock(&s->lock);
+    e = vmem_deadline(end);
+    if (!e && (s->magic != VSHARED_MAGIC || s->epoch != epoch ||
+        s->global.iova > UINT64_MAX-X9_VCP_GLOBAL_VDEC_OFFSET ||
+        s->service.vdec.iova != s->global.iova+X9_VCP_GLOBAL_VDEC_OFFSET ||
+        s->service.vdec.bytes != X9_VCP_GLOBAL_VDEC_BYTES)) e = ESTALE;
+    iova = s->service.vdec.iova;
+    if (!e && (iova < UINT64_C(0x140000000) ||
+        iova >= UINT64_C(0x1c0000000) ||
+        s->service.vdec.bytes > UINT64_C(0x1c0000000)-iova)) e = ERANGE;
+    if (!e) {
+        alias64 = UINT64_C(0x30000000)+iova-UINT64_C(0x140000000);
+        if (alias64 > UINT32_MAX-X9_VCP_FORMAT_TABLE_OFFSET ||
+            reply->firmware_data_address != alias64+X9_VCP_FORMAT_TABLE_OFFSET)
+            e = ERANGE;
+        if (!e) e = x9_vcp_shared_offset(iova,(uint32_t)alias64,
+            s->service.vdec.bytes,reply->firmware_data_address,
+            X9_VCP_FORMAT_TABLE_BYTES,&offset);
+        if (!e && offset != X9_VCP_FORMAT_TABLE_OFFSET) e = ERANGE;
+    }
+    for (unsigned n = 0; n < 2 && !e; n++) {
+        e = vshared_observe(s,X9_VCP_GLOBAL_VDEC_OFFSET+offset,
+            c->scratch+n*X9_VCP_FORMAT_TABLE_BYTES,X9_VCP_FORMAT_TABLE_BYTES);
+        if (!e) e = vmem_deadline(end);
+    }
+    if (!e && memcmp(c->scratch,c->scratch+X9_VCP_FORMAT_TABLE_BYTES,
+        X9_VCP_FORMAT_TABLE_BYTES)) e = EAGAIN;
+    if (!e) e = x9_vcp_parse_format_snapshot(X9_VCP_FORMAT_ABI_MT6993_CAPTURE1,
+        c->scratch+X9_VCP_FORMAT_TABLE_BYTES,X9_VCP_FORMAT_TABLE_BYTES,
+        &c->status.formats);
+    if (!e) {
+        c->query_cap_staged = true;
+        c->status.formats_observed = 1;
+        c->status.formats_valid = 0; /* call_end still owns final success */
+    }
+    lck_mtx_unlock(&s->lock);
+    return e;
+}
+/* Status-only exact lookup. Even a unique FRAME entry with a legal raw plane
+ * count says nothing about linear/tiled layout, required capacities or DMA.
+ * Unknown/unsupported format must not suppress independently stable rings. */
+static void vcontrol_picture_format(struct x9_vdec_control *c)
+{
+    int e;
+    c->status.picture_format_matched = 0;
+    memset(&c->status.picture_format,0,sizeof(c->status.picture_format));
+    if (!c->status.picture_observed) e = EAGAIN;
+    else if (!c->status.formats_valid) e = ENXIO;
+    else e = x9_vcp_find_frame_format(&c->status.formats,c->status.picture.fourcc,
+        &c->status.picture_format);
+    c->status.picture_format_errno = (uint32_t)e;
+    c->status.picture_format_matched = !e;
 }
 /* These are native NC accesses, not calls into a platform mock writer. Slot
  * resolver/unique binding checks precede every use; no generic live write API
@@ -366,6 +439,7 @@ static int vcontrol_recheck(struct x9_vdec_control *c, uint64_t end)
             c->status.picture_observed = 1;
         }
     }
+    vcontrol_picture_format(c);
     for (unsigned kind = 0; kind < 3 && !e; kind++) {
         struct x9_vcp_ring_snapshot ring;
         e = vcontrol_ring_snapshot(c,kind,&ring);
@@ -398,6 +472,7 @@ static int vcontrol_notification(void *cookie, uint64_t epoch, uint64_t end,
     c->status.recheck_pending = 1;
     c->status.ring_valid_bitmap = 0;
     c->status.picture_observed = 0;
+    vcontrol_picture_format(c);
     memset(c->status.rings,0,sizeof(c->status.rings));
     if (q->firmware_status) return EIO;
     /* During INIT there is no bound VSI yet: retain the actual event until
@@ -586,6 +661,7 @@ int x9_vdec_control_create(struct x9_vcp_bus *bus, struct x9_vdec_shared *s,
         .route_enter = vcontrol_route_enter, .route_leave = vcontrol_route_leave,
         .shm = vcontrol_shm, .alloc = vcontrol_alloc, .clock = vcontrol_clock,
         .wait = vcontrol_wait, .vp = vcontrol_vp, .notification = vcontrol_notification,
+        .observe_query_reply = vcontrol_observe_query,
         .recheck = vcontrol_service_recheck,
         .prepare_output = vcontrol_prepare_output };
     if (hardware->qualify_start) c->reverse.prepare_start = vcontrol_prepare_start;
@@ -673,8 +749,10 @@ int x9_vdec_control_init(struct x9_vdec_control *c, uint32_t ms,
 int x9_vdec_control_query(struct x9_vdec_control *c, const struct x9_vcp_query *q,
     uint32_t ms, struct x9_vcp_query_result *out, struct x9_vcp_bus_call_log *log)
 {
+    struct x9_vcp_query query;
     int e;
     if (!c || c->magic != VCONTROL_MAGIC || !q || !out || !log) return EINVAL;
+    query = *q;
     memset(out,0,sizeof(*out)); memset(log,0,sizeof(*log));
     if (!ms || ms > 3000) return EINVAL;
     lck_mtx_lock(&c->lock);
@@ -682,7 +760,24 @@ int x9_vdec_control_query(struct x9_vdec_control *c, const struct x9_vcp_query *
         c->status.reset_attempted ? EBUSY :
         (int)c->status.last_errno;
     if (!e) e = x9_vcp_bus_check_shared(c->bus,c->status.epoch,&c->shared->global);
-    if (!e) e = x9_vcp_bus_query(c->bus,&c->init,q,&c->reverse,ms,out,log);
+    if (!e) {
+        c->active_query = query;
+        c->query_active = true; c->query_cap_staged = false;
+        e = x9_vcp_bus_query(c->bus,&c->init,&query,&c->reverse,ms,out,log);
+        c->query_active = false;
+        /* A pre-reservation refusal has not attempted this query; retain any
+         * prior valid observation. Every reserved cap0 transaction replaces
+         * validity, including routed-baseline/callback/call_end failures. */
+        if (log->epoch && query.capability_id == X9_VCP_FORMAT_CAPABILITY_ID) {
+            c->status.format_query = query;
+            c->status.format_reply = *out;
+            c->status.format_call = *log;
+            c->status.formats_observed = c->query_cap_staged;
+            c->status.formats_valid = !e && log->ack_matched && c->query_cap_staged;
+            c->status.formats_last_errno = (uint32_t)e;
+            vcontrol_picture_format(c);
+        }
+    }
     if (log->epoch) vcontrol_fault(c,e); /* includes a failed routed RX baseline */
     lck_mtx_unlock(&c->lock);
     return e;

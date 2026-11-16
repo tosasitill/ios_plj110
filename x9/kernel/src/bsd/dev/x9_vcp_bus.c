@@ -515,7 +515,9 @@ static bool same_ops(const struct x9_vcp_bus_reverse_ops *a,
     /* Compare defined fields, not uninitialized structure padding. */
     return a->cookie == z->cookie && a->route_enter == z->route_enter &&
         a->route_leave == z->route_leave && a->prepare_output == z->prepare_output &&
-        a->prepare_start == z->prepare_start && a->notification == z->notification &&
+        a->prepare_start == z->prepare_start &&
+        a->observe_query_reply == z->observe_query_reply &&
+        a->notification == z->notification &&
         a->recheck == z->recheck && a->shm == z->shm && a->alloc == z->alloc &&
         a->clock == z->clock && a->wait == z->wait && a->vp == z->vp;
 }
@@ -1051,6 +1053,8 @@ static int control_call(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
             } else if (query) {
                 e = x9_vcp_parse_query_reply(query,log->last_rx,X9_VCP_WIRE_BYTES,qr);
                 log->ack_matched = !e || (e == EIO && qr->firmware_status != 0);
+                if (!e && ops->observe_query_reply)
+                    e = ops->observe_query_reply(ops->cookie,log->epoch,end,query,qr);
             } else {
                 e = x9_vcp_parse_init_reply(init,log->last_rx,X9_VCP_WIRE_BYTES,ir);
                 log->ack_matched = !e || (e == EIO && ir->firmware_status != 0);

@@ -574,6 +574,47 @@ int x9_vcp_encode_query(const struct x9_vcp_query *query,
     return 0;
 }
 
+int x9_vcp_parse_format_snapshot(uint32_t abi, const uint8_t *input,
+    uint32_t bytes, struct x9_vcp_format_snapshot *out)
+{
+    uint8_t snapshot[X9_VCP_FORMAT_TABLE_BYTES];
+    if (!out) return EINVAL;
+    if (!input || abi != X9_VCP_FORMAT_ABI_MT6993_CAPTURE1 ||
+        bytes != sizeof(snapshot)) {
+        memset(out,0,sizeof(*out)); return EINVAL;
+    }
+    memcpy(snapshot,input,sizeof(snapshot));
+    memset(out,0,sizeof(*out));
+    for (unsigned n = 0; n < X9_VCP_FORMAT_TABLE_RECORDS; n++) {
+        const uint8_t *p = snapshot+16u*n;
+        out->records[n].fourcc = get32(p);
+        out->records[n].type = get32(p+4);
+        out->records[n].num_planes = get32(p+8);
+        out->records[n].reserved = get32(p+12);
+    }
+    return 0;
+}
+int x9_vcp_find_frame_format(const struct x9_vcp_format_snapshot *table,
+    uint32_t fourcc, struct x9_vcp_format_record *out)
+{
+    struct x9_vcp_format_record match = {0};
+    unsigned found = 0;
+    if (!out) return EINVAL;
+    if (!table || !fourcc) { memset(out,0,sizeof(*out)); return EINVAL; }
+    /* Delay the output write: it may overlap the immutable input table. */
+    for (unsigned n = 0; n < X9_VCP_FORMAT_TABLE_RECORDS; n++) {
+        if (table->records[n].fourcc != fourcc) continue;
+        match = table->records[n]; found++;
+    }
+    memset(out,0,sizeof(*out));
+    if (!found) return ENOENT;
+    if (found != 1) return EEXIST;
+    *out = match;
+    if (match.type != X9_VCP_FORMAT_TYPE_FRAME) return ENOTSUP;
+    if (!match.num_planes || match.num_planes > 8) return ERANGE;
+    return 0;
+}
+
 int x9_vcp_parse_query_reply(const struct x9_vcp_query *query, const uint8_t *input,
                               uint32_t bytes, struct x9_vcp_query_result *out)
 {

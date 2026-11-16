@@ -195,6 +195,13 @@ struct x9_vcp_bus_reverse_ops {
     int (*prepare_start)(void *, uint64_t epoch, uint64_t deadline_ns,
         const struct x9_vcp_init *, const struct x9_vcp_init_result *,
         const struct x9_vcp_start *);
+    /* Optional matched status0 b100 observer. Invoked before route/call end,
+     * outside bus_lock but retaining the whole reservation/current state lock.
+     * Resolve ONLY genuinely owned advertised SHM; never cast FW/AP addresses
+     * or grant READY/DMA/layout. Staged observations must be invalidated if
+     * the enclosing transaction subsequently fails. No bus/control reentry. */
+    int (*observe_query_reply)(void *, uint64_t epoch, uint64_t deadline_ns,
+        const struct x9_vcp_query *, const struct x9_vcp_query_result *);
     /* Matched b005/e000 are one-way events, NOT reverse requests needing ACK.
      * Record/schedule a current owned coherent ring/resource recheck. Do not
      * attribute b005 to a pending buffer (it contains no buffer token), mark

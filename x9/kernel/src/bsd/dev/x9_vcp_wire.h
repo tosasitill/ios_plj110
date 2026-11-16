@@ -228,6 +228,32 @@ struct x9_vcp_query_result {
     uint32_t firmware_data_address;
 };
 
+/* Captured capID0 producer: SHM auxiliary_0 after the 32 instance slots.
+ * These are bounded raw records, not fabricated default formats or layouts.
+ * Only a provider-owned, exact b100 SHM resolution permits live observation. */
+#define X9_VCP_FORMAT_ABI_MT6993_CAPTURE1 1u
+#define X9_VCP_FORMAT_CAPABILITY_ID 0u
+#define X9_VCP_FORMAT_TABLE_OFFSET 0x33d50u
+#define X9_VCP_FORMAT_TABLE_BYTES 0x800u
+#define X9_VCP_FORMAT_TABLE_RECORDS 128u
+#define X9_VCP_FORMAT_TYPE_FRAME 2u
+struct x9_vcp_format_record {
+    uint32_t fourcc, type, num_planes, reserved;
+};
+struct x9_vcp_format_snapshot {
+    struct x9_vcp_format_record records[X9_VCP_FORMAT_TABLE_RECORDS];
+};
+/* Immutable host copy only; preserves zero/unknown fields. Overlap-safe;
+ * error zeroes output. This is not runtime cap negotiation or linear pixels. */
+int x9_vcp_parse_format_snapshot(uint32_t abi, const uint8_t *, uint32_t bytes,
+    struct x9_vcp_format_snapshot *);
+/* Scan ALL 128 records, requiring a unique nonzero exact fourcc (no stock
+ * default_out fallback). EEXIST duplicate, ENOENT absent, ENOTSUP non-FRAME,
+ * ERANGE planes outside1..8. Retains the unique raw record even if type/planes
+ * unsupported. No alias/token lookup, capacity, DMA/cache/READY permission. */
+int x9_vcp_find_frame_format(const struct x9_vcp_format_snapshot *, uint32_t fourcc,
+    struct x9_vcp_format_record *);
+
 /* Host-owned complete 72-byte mailbox snapshot, not a live MMIO pointer.
  * These functions send nothing and do not make capabilities/READY available.
  * Outer id is the VDEC service ID=1 in BOTH directions. Transport OUT0/IN1

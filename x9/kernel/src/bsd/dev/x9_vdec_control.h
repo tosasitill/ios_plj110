@@ -75,6 +75,15 @@ struct x9_vdec_control_status {
     uint32_t ring_valid_bitmap; /* independently parsed rings in latest recheck */
     uint32_t picture_observed; /* equal sampled fields ONLY, NOT negotiated/ready */
     struct x9_vcp_picture_snapshot picture; /* check picture_observed; never layout authority */
+    uint32_t formats_observed, formats_valid, formats_last_errno;
+    /* observed: equal NC samples; valid: also whole current cap0 call success.
+     * Neither implies a matched frame, decode layout or hardware readiness. */
+    struct x9_vcp_query format_query;
+    struct x9_vcp_query_result format_reply;
+    struct x9_vcp_bus_call_log format_call;
+    struct x9_vcp_format_snapshot formats;
+    uint32_t picture_format_matched, picture_format_errno;
+    struct x9_vcp_format_record picture_format; /* exact raw match, not pixels */
     struct x9_vdec_control_start_resources resources; /* latest attempt, NOT a completed frame */
     struct x9_vcp_output_record output; /* latest offered extents, NOT pixel layout */
     struct x9_vcp_init_result init;
@@ -127,8 +136,10 @@ int x9_vdec_control_create(struct x9_vcp_bus *, struct x9_vdec_shared *,
 int x9_vdec_control_init(struct x9_vdec_control *, uint32_t timeout_ms,
     struct x9_vcp_init_result *, struct x9_vcp_bus_call_log *);
 /* Before START only: no interleaving QUERY with unresolved picture DMA.
- * QUERY replies still need separately owned capability-data resolution.
- * No fabricated profiles, decode completion, output or START callback. */
+ * cap0 resolves ONLY exact owned auxiliary_0 through verified HFRP alias,
+ * sampling a full2048B twice during the reserved matched b100 callback.
+ * Other capIDs retain raw ACK behaviour without invented table semantics.
+ * No fabricated profiles, decode completion, layout or READY permission. */
 int x9_vdec_control_query(struct x9_vdec_control *, const struct x9_vcp_query *,
     uint32_t timeout_ms, struct x9_vcp_query_result *, struct x9_vcp_bus_call_log *);
 /* Once-only physical a003 with raw observed selector0..2 and the actual bound
