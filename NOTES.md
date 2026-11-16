@@ -158,7 +158,7 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
-#### 2026-11-16 iPhone式切镜连续性与视频能力续接（进行中）
+#### 2026-11-16 iPhone式切镜连续性与视频能力：r6构建成功，尚未上机验收
 
 - 单代理续用 `feat/camera-integration` / `.worktrees/camera-integration`，基线 `c3289258` clean；仍无新r4运行日志，最新330为mode1。scratch仅本树 `x9/out/camera-seamless-video-20261116/`。不操作设备/ADB/mailbox/分区，不运行测试套件，不二次检查成功构建产物。
 - **确定缺口**：bridge仅公告Photo格式；未实现帧率与`VideoRecordingInProgress`控制。当前物理DMA/供电/退休合同只允许一颗传感器，冷STOP/close/start必有采集缺口；不能把保持graph、冻结旧帧/改PTS或复用未退休映射称iPhone同步双路无缝切换。八个exported epoch lifetime上限仍在，必须保留安全守卫。
@@ -170,6 +170,9 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **kernel单对象终态**：正常Builder `compile_one(sweet_x9_camera.o)` **True/actual exit0，172 warnings**，原session52402已终态，新32B预算ABI与现有native源共同编译通过；bridge session11307亦已终态。接下来固定源码commit/push后以唯一r5整包；保持camera2、加lenses1、GPU280和其余MG参数不变，不启用未确认的mgwipe3。本轮没有CI run ID、设备启动/编码/保存结果。
 - **r5构建/能力修正**：源码 **d3a17b05 / tracked clean** 的完整 `all --boot-config x9/build/boot-device.json --boot-arg x9_camera_lenses=1 --name x9-camera-seamless-video-r5-20261116` **actual exit0**，103/103 overlay、3 prebuilt，kernel/bridge/shim/boot成功，原log Image31977472B/boot15036416B；session79713终态，无二次产物检查。源码push actual exit0 c3289258..d3a17b05；gh run list实际exit0 `[]`，没有CI run。随后源码复核发现原2fps下限超出广角/前置的16-bit帧长能力（4361ns×65532、4415ns×65530），不能公告可固定2fps并在setter成功后worker才ERANGE。因此统一四颗镜头共同范围为**4..30fps**，更新格式、preset、setter、ISP和默认值，2fps请求提前unsupported；上述2..30描述为修正前历史。r5保留为成功中间包，**不推荐其低帧率能力**。下一唯一r6整包使用新提交，不覆盖r5或失败日志。
 - **帧率修正编译**：bridge `compile-r4` **actual exit0**，原log159616B，与前次相同的1 unused static warning和initializer linker warning，session49824已终态；这不是二次验证旧产物，而是新4..30源码的正常编译。未编译期间改输入，未运行测试套件/产物重检查，原r5与r2失败记录不动；下一提交后完整r6以固定clean SHA构建。
+- **最终r6终态/发布**：固定源码 **`4ad0671671002cb3fd3efafacdc9e91b14e3aa14` / tracked clean**，正常 `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --boot-arg x9_camera_lenses=1 --name x9-camera-seamless-video-r6-20261116` **actual exit0**；103/103 overlay、3 prebuilt，bridge159616B，kernel/bridge/shim/boot全成功，原log **Image31977472B / boot15036416B**。session72028已取终态，没有成功后二次解包/hash/反汇编/复建对比。帧率修正源码push **actual exit0 d3a17b05..4ad06716**（session73806终态）；最终gh run list亦 **exit0 `[]`**（session52362终态），本轮无CI run ID。
+- **候选/证据路径**：最终只推荐本树 **`x9/out/x9-camera-seamless-video-r6-20261116/boot.img`**；同目录保留 `source-head.txt/source-status.txt/boot-input.json/local-input.json/command.txt/full-build.log/full-build.exit/build.log`，输入SHA固定4ad06716，status空。r5成功中间包与compile-r2失败保留，不覆盖/重命名。GPU280 unchanged、没有新plugin-package，设备保持280则无需mailbox；mgwipe仍未启用。最后仅notes-only提交/push，不修改构建输入SHA，不合main或删除活动相机树宣称功能完成。
+- **下一最小运行验收/限制**：用户从主checkout执行 `fastboot boot .worktrees/camera-integration/x9/out/x9-camera-seamless-video-r6-20261116/boot.img`，先原生后置移动预览→前置→照片保存，成功后一次0.6→1→3物理切镜；若原生按钮缺失，记录该事实，不把现有ZoomFactor路由说成已接UI。再录像10–15秒、停止、相册重开并核画面/声音同步；保留新 `~/N.txt` 和屏幕现象。日志应逐阶段验native mode2/four-ID/close→RAW/handler→PROFILE实际D22适配→VIDEO registration/真实factory→recording start/stop，以及真实 `source_gap`。**仍无r6上机/编码/音视频封装/Photos保存结果，完整相机与真正iPhone无缝功能未完成**：底层仅单路冷切，8 exported epoch上限保留，native0.6/3/虚拟三摄、同步预热、多路采集、硬件VENC、AF/OIS/标定均未闭；不能用保持graph/新RAW亮度easing或工厂创建0代替无间断/录像验收。
 
 #### 2026-11-16 四镜头接线与后置变焦切换：r4 完整构建成功，尚未上机验收
 
