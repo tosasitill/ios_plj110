@@ -158,6 +158,18 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 四镜头接线进行中（尚未完整构建/上机）
+
+- 当前树 `feat/camera-integration`，基线 `b1f6bce3`。上轮未提交源码已接收；正在审查并正常编译，不执行测试套件或设备操作。最新有效运行证据仍330/mode1，r3/mode2未验收。
+- 长焦新增物理端口/ID:2、独占 RequestStreams 与冷供电/字节表；超广角当前仅 catalog/CSI plan，banked word init 与 SID5 DVDD/DVDD1 别名转换尚未闭，保持 ENOTSUP、不公告 READY。
+- 新窄缺口：PHY open仍有两路硬编码；tele 1.624G CPHY不能套主摄3.3G rate-band/CTLE。主摄 CAMTG4 的 DT clock ID23/pin208 与旧选 CAMTG7 配置冲突，待原供应者源码核对。iOS D22原件无超广角/虚拟三摄preset，不把物理端口或数字crop当0.6/1/3自动切镜。
+- 本条是开始状态，后续实际构建/提交结果追加于此；无新CI run ID/boot结果。
+- **源码里程碑**：超广角新增 bank-aware word table validator/loader 与混合16-bit init/8-bit控制协议，生成pre/init的short/long+preview五表；真实0010高字节07选择short，先12-pair pre-init、5ms延迟、init、preview，最终page4000。禁止控制页stream/hold/非pre-init复位写，内部4001:0100不当stream；不把未知byte邻寄存器当readback要求。新增I2C9/CSI2/WL6/SID5电源、drive字段shift3；DVDD/DVDD1只建一个journal，SN-LDO请求1.008V按厂商selector公式取1.010V(51)，限定本boot冷拥有的51→50请求转换，不借用/重调live foreign rail；该实现遵循pw_seq请求意图，**未证明Android regulator core两consumer请求的最终实机电压**。失败保留journal/前置依赖，无复位重试。
+- **长焦及共享链审查**：真实tele PHY1/CPHY1.624G使用<2.5G设置、默认CDR10，static CTLE只BW3/CDR0、不套主摄的force/CDR9；主摄DT mclk ID23与厂商CAMTG4/pin208一致，修旧CAMTG7配置为off70/shift0/status7/update24。receiver changed比较改按真实port找sensor map；OUTMUX last_vc改profile值(tele0/UW3)，不再误拿CSI端口作VC。新增只读80B GET_LENSES，旧88Bstatus不变。四路校准仍来自本boot bounded FDT/devinfo，无固定efuse词/Apple ISP compatible。
+- **iOS接线**：保持D22独立tele port/ID:2，不冒用虚拟dual ID:3；后置wide流按请求ZoomFactor的本地X9 UI锚点0.6/1/3选择真实UW/wide/tele，实际crop=global/base，metadata报告真正应用的global zoom。worker在RAW/handler外的边界收到严格STOP+close成功后才open/start下一颗，保留同graph、推进run_epoch/重置AE/AWB；待拍票据存在则延后切镜，切镜中拒新票据，失败不回滚/重试。前置不参与后置路由。没有伪同步组/融合；**D22原preset没有UW/三摄，0.6/3按钮尚未闭，锚点不是实测光学校准、不是Apple虚拟三摄合同或无缝切换**。
+- **正常编译**：原compile-r1的bridge/ctl exit0、kernel True/exit0/166 warnings；word路径compile-r2的bridge/ctl exit0、kernel True/exit0/171 warnings；最终compile-r3 bridge/ctl exit0（原log报告136848B），kernel True/exit0/172 warnings。三个编译句柄均已实际终态。原命令/日志/exit及分析原件在本树gitignored `x9/out/camera-multilens-20261116/`，未执行测试/套件、产物二次解包/hash/反汇编/对比、CI或设备操作。
+- **准入/下一步**：默认仍只dual；新增opt-in `x9_camera_lenses=1`启用四镜头准入（旧tele/uw单路opt-in保留），不是绕过ID/close资格。boot-device原546B，加该token565B，未改其他token/MG缓存。下一固定源码正常完整r4候选构建；仍须用户手动上机并提供新mode2日志，核四真实ID/close、RAW/handler/屏幕、0.6→1→3路由日志及拍照保存。8 exported-epoch pin上限、AF/OIS/光学校准/虚拟三摄按钮与真实拍摄验收仍缺，不合main宣称完成。
+
 #### 2026-11-16 相机图标缺失：补 metadata-only ISP 发现与独立一次性 MG 刷新
 
 - **用户现象/范围**：用户报告桌面没有相机。仍没有新增数字日志（最新330，mode1）；本地根盘工作克隆只读检查 `/Applications/Camera.app/Info.plist` 发现 app 存在、bundle 为 com.apple.camera、UIRequiredDeviceCapabilities 只有 arm64、SBAppTags 为 still-camera；旧克隆 IconState 中没有 camera。这些是克隆观察，不冒充当前设备 App/LS/限制状态。

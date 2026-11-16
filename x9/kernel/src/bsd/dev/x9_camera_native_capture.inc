@@ -61,7 +61,7 @@ static int cam_native_capture_fault(struct cam_native_capture_context *c,int e)
 static int cam_native_capture_sensor(uint64_t epoch,const struct x9_camera_sensor *s)
 {
     int e;
-    if(!s || s->sensor<X9_CAMERA_BACK || s->sensor>X9_CAMERA_FRONT ||
+    if(!s || !x9_camera_sensor_valid(s->sensor) ||
        s!=&sensors[s->sensor-1])return EINVAL;
     e=cam_sensor_session_match(epoch);if(e)return e;
     if(cam_sensor_live.probe.sensor!=s->sensor)return ESTALE;
@@ -496,7 +496,7 @@ static int cam_native_capture_retirement_guard(void *context,uint64_t epoch,
     const struct x9_camera_sensor *s)
 {
     if(context!=&cam_native_capture || !s || s->sensor<X9_CAMERA_BACK ||
-       s->sensor>X9_CAMERA_FRONT || s!=&sensors[s->sensor-1])return EINVAL;
+       s->sensor>X9_CAMERA_SENSOR_COUNT || s!=&sensors[s->sensor-1])return EINVAL;
     return cam_native_capture_power_guard_locked(epoch);
 }
 
@@ -604,7 +604,7 @@ static int cam_native_capture_capture(void *context,uint64_t epoch,
     struct x9_camera_camsv_dma dma={0};
     int e;
     if(c!=&cam_native_capture || !s || s->sensor<X9_CAMERA_BACK ||
-       s->sensor>X9_CAMERA_FRONT || s!=&sensors[s->sensor-1] ||
+       s->sensor>X9_CAMERA_SENSOR_COUNT || s!=&sensors[s->sensor-1] ||
        (on!=0 && on!=1) || !generation)return EINVAL;
     if(!on)return cam_native_capture_off_locked(c,epoch,s);
     lck_mtx_lock(&camera_native_capture_lock);

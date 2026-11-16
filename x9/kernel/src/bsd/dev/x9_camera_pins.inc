@@ -80,7 +80,7 @@ static int cam_drive_check(struct cam_probe_journal *j,bool cleanup)
     if(!p->valid)return EINVAL;
     if(p->conflict)return EBUSY;
     if(!cleanup && p->uncertain)return EIO;
-    uint32_t v=cam_rr(j->board.drive_base,0)&7;
+    uint32_t v=(cam_rr(j->board.drive_base,0)>>j->board.drive_shift)&7;
     if(v!=p->expected && !(cleanup && p->uncertain && v==p->prior))
         return cam_drive_conflict(j,p->expected,v);
     return 0;
@@ -103,13 +103,13 @@ static int cam_drive_alias(struct cam_probe_journal *j,uint32_t bits,bool set,bo
     struct cam_probe_drive *p=&j->drive;
     int e=cam_pins_guard(j,cleanup);if(e)return e;
     if(cam_pin_mode(j->gpio,j->board.mclk))return EBUSY; /* never retune live MCLK */
-    uint32_t before=cam_rr(j->board.drive_base,0)&7;
+    uint32_t before=(cam_rr(j->board.drive_base,0)>>j->board.drive_shift)&7;
     if(before!=p->expected && !(cleanup && p->uncertain && before==p->prior))
         return cam_drive_conflict(j,p->expected,before);
     p->prior=before;p->expected=set?(before|bits):(before&~bits);
     p->dirty|=bits;p->uncertain=true; /* BEFORE SET/CLR; never whole-bank RMW */
-    cam_rw(j->board.drive_base,set?4:8,bits);
-    uint32_t observed=cam_rr(j->board.drive_base,0)&7;
+    cam_rw(j->board.drive_base,set?4:8,bits<<j->board.drive_shift);
+    uint32_t observed=(cam_rr(j->board.drive_base,0)>>j->board.drive_shift)&7;
     if(observed!=p->expected) {
         if(observed!=before)return cam_drive_conflict(j,p->expected,observed);
         return EIO;
@@ -123,7 +123,7 @@ static int cam_drive_write(struct cam_probe_journal *j,uint32_t value,bool clean
     int e=cam_pins_guard(j,cleanup);if(e)return e;
     e=cam_drive_check(j,cleanup);if(e)return e;
     j->drive.taken=true;
-    uint32_t before=cam_rr(j->board.drive_base,0)&7;
+    uint32_t before=(cam_rr(j->board.drive_base,0)>>j->board.drive_shift)&7;
     if(before!=j->drive.expected && !(cleanup && j->drive.uncertain && before==j->drive.prior))
         return cam_drive_conflict(j,j->drive.expected,before);
     if(cam_pin_mode(j->gpio,j->board.mclk))return EBUSY;
@@ -131,7 +131,7 @@ static int cam_drive_write(struct cam_probe_journal *j,uint32_t value,bool clean
     /* SET is confirmed before computing the CLR delta; an ambiguous SET
      * stops here, never silently proceeds to the second mutation. */
     e=cam_drive_check(j,cleanup);if(e)return e;
-    before=cam_rr(j->board.drive_base,0)&7;
+    before=(cam_rr(j->board.drive_base,0)>>j->board.drive_shift)&7;
     if(before!=j->drive.expected && !(cleanup && j->drive.uncertain && before==j->drive.prior))
         return cam_drive_conflict(j,j->drive.expected,before);
     e=cam_drive_alias(j,before&~value,false,cleanup);if(e)return e;

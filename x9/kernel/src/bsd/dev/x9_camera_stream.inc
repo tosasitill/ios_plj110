@@ -9,7 +9,7 @@ static int cam_stream_guard_locked(const struct x9_camera_sensor *s,bool before_
 {
     boolean_t old;
     int e;
-    if(s->sensor!=X9_CAMERA_BACK && s->sensor!=X9_CAMERA_FRONT)return EINVAL;
+    if(!x9_camera_sensor_valid(s->sensor))return EINVAL;
     if(s!=&sensors[s->sensor-1] || !session.capture || !session.stream ||
        cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED || cam_sensor_live.close_attempted ||
        !cam_source.captured || cam_source.phase!=CAM_SOURCE_ARMED || cam_source.error ||
@@ -77,7 +77,7 @@ static int cam_stream_set_locked(const struct x9_camera_sensor *s,uint8_t value)
            !(cam_irq_fbc.source_ack&CAM_STREAM_ON))e=ESTALE;
     } else if(cam_irq_fbc.source_phase!=CAM_STREAM_IDLE || cam_irq_fbc.source_issued)e=ESTALE;
     cam_irq_spin_drop(old);if(e)goto out;
-    ap=(struct cam_sensor_ap){&cam_journal.sensor,s->sensor==X9_CAMERA_BACK?0x1a:0x10};
+    ap=(struct cam_sensor_ap){&cam_journal.sensor,cam_sensor_slave(s->sensor)};
     /* Fresh actual prior/hold observations. Idle-on additionally checks
      * the vendor frame-count OFF sentinel; no stable arbitrary rebase. */
     for(unsigned sample=0;sample<2;sample++) {

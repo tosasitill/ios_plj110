@@ -335,9 +335,12 @@ static int cam_mm_take(struct cam_mm_journal *j,unsigned sensor,struct x9_camera
     if(!j->sv_cg)j->sv_cg=ml_io_map(0x3a680000,0x1000);
     if(!j->top || !j->cam_cg || !j->sv_cg)return ENOMEM;
     memcpy(j->desc,cam_mm_descs,sizeof(j->desc));
-    if(sensor==X9_CAMERA_BACK) {
+    {
+        unsigned port=cam_sensor_port(sensor);
+        if(port>3)return ENOTSUP;
         struct cam_mm_desc *d=&j->desc[X9_CAM_MM_SENINF_MUX];
-        d->mask=1u<<20;d->effect_mask=1u<<11;d->cfg=0x60;d->shift=0;
+        d->mask=1u<<(17+port);d->effect_mask=1u<<(14-port);
+        d->cfg=port==3?0x60:0x50;d->shift=port==3?0:8*(port+1);
     }
     for(unsigned k=0;k<3;k++) {
         const struct cam_mm_desc *d=&j->desc[X9_CAM_MM_CAM_MUX+k];
@@ -411,7 +414,7 @@ static int cam_mm_session_open(unsigned sensor,uint64_t *epoch,struct x9_camera_
 {
     int e;
     *epoch=0;cam_mm_status_init(sensor,r);
-    if(sensor!=X9_CAMERA_BACK && sensor!=X9_CAMERA_FRONT)e=EINVAL;
+    if(!x9_camera_sensor_valid(sensor))e=EINVAL;
     else if(st.mode!=2 && st.mode!=3)e=EPERM;
     else if(cam_mm_live.epoch || cam_mm.active || cam_mm.seen || session.capture)e=EBUSY;
     else if(cam_resources_latched || cam_probe_latched)e=EIO;

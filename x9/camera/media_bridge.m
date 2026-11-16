@@ -42,7 +42,7 @@ id x9_camera_media_vendor_with_caller(id self,SEL selector,uintptr_t returnAddre
                 id made=((id(*)(id,SEL))objc_msgSend)(self,sel_registerName("alloc"));
                 ours=((id(*)(id,SEL,void*))objc_msgSend)(made,sel_registerName("initWithDeviceCreateFunction:"),
                                                        (void*)x9_camera_device_create);
-                dprintf(2,"X9 CAMERA MEDIA: physical backend ready; dual-stream vendor %s\n",ours?"created":"failed");
+                dprintf(2,"X9 CAMERA MEDIA: physical backend ready; physical-stream vendor %s\n",ours?"created":"failed");
             }
             /* Recheck after init too: construction is not a hardware lease. */
             if(ours && x9_camera_backend_ready())result=ours;

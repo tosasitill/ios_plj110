@@ -69,9 +69,9 @@ static int cam_native_ae_seed_locked(uint64_t epoch,const struct x9_camera_confi
 {
     struct cam_native_ae_controls c;
     uint32_t which=cam_sensor_live.probe.sensor;
-    struct cam_sensor_ap ap={&cam_journal.sensor,which==X9_CAMERA_BACK?0x1a:0x10};
+    struct cam_sensor_ap ap={&cam_journal.sensor,cam_sensor_slave(which)};
     int e=cam_sensor_session_match(epoch);
-    if(!e && (!cfg || which<X9_CAMERA_BACK || which>X9_CAMERA_FRONT ||
+    if(!e && (!cfg || !x9_camera_sensor_valid(which) ||
        cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED || session.stream ||
        !(cfg->flags&X9_CAM_CFG_VERIFIED) || cfg->last_errno ||
        memcmp(cfg,&cam_sensor_live.config,sizeof(*cfg))))e=ESTALE;
@@ -107,7 +107,8 @@ static int cam_native_ae_queue_locked(uint64_t epoch,uint32_t lines,uint32_t gai
     if(gain<1024 || gain>65536)return EINVAL;
     s=&sensors[cam_native_ae.sensor-1];
     c=(struct cam_native_ae_controls){.lines=lines,.frame_lines=frame_lines,
-        .gain=(uint32_t)((uint64_t)s->gain_unity*(gain-1024)/gain)};
+        .gain=s->gain_linear?(uint32_t)((uint64_t)s->gain_unity*gain/1024):
+            (uint32_t)((uint64_t)s->gain_unity*(gain-1024)/gain)};
     if(cam_native_ae_validate(s,c))return EINVAL;
     if(cam_native_ae.queued_serial==UINT64_MAX)return EOVERFLOW;
     cam_native_ae.wanted=c;cam_native_ae.queued_serial++;cam_native_ae.pending=true;
@@ -149,7 +150,7 @@ static int cam_native_ae_write(struct cam_sensor_ap *ap,uint64_t epoch,uint64_t 
 static int cam_native_ae_next_locked(uint64_t epoch,struct x9_camera_completed_frame *f)
 {
     struct cam_native_ae_controls observed,c;
-    struct cam_sensor_ap ap={&cam_journal.sensor,cam_native_ae.sensor==X9_CAMERA_BACK?0x1a:0x10};
+    struct cam_sensor_ap ap={&cam_journal.sensor,cam_sensor_slave(cam_native_ae.sensor)};
     const uint16_t regs[]={0x0340,0x0341,0x0202,0x0203,0x0204,0x0205};
     uint64_t span,end;
     uint8_t values[6],byte=0,previous=0;

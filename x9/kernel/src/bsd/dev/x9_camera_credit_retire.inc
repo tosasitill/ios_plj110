@@ -106,7 +106,7 @@ static int cam_sv_credit_retire_locked(uint64_t epoch)
     cam_sv.credit_retire_attempted=true; /* no replay even before first sample */
     nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
     ap=(struct cam_sensor_ap){&cam_journal.sensor,
-        cam_sv.request.frame.sensor==X9_CAMERA_BACK?0x1a:0x10};
+        cam_sensor_slave(cam_sv.request.frame.sensor)};
     for(unsigned sample=0;sample<2;sample++) {
         e=cam_irq_credit_retired_guard(epoch);if(e)goto out;
         if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}

@@ -157,7 +157,7 @@ static int cam_native_reopen_dormant_locked(uint64_t epoch,uint64_t token)
     if(!e)e=cam_sv_environment();if(!e)e=cam_irq_mapping();if(!e)e=cam_irq_power();
     if(!e)e=cam_irq_controller();if(!e)e=cam_irq_idle();
     struct cam_sensor_ap ap={&cam_journal.sensor,
-        cam_sensor_live.probe.sensor==X9_CAMERA_BACK?0x1a:0x10};
+        cam_sensor_slave(cam_sensor_live.probe.sensor)};
     const uint16_t regs[]={0x0100,0x0104,0x0005};
     for(unsigned sample=0;sample<2 && !e;sample++) {
         uint8_t value;

@@ -45,7 +45,7 @@ static int cam_native_producer_guard_locked(uint64_t epoch,struct x9_camera_smmu
      * journals, pinned map and source/port checks remain independently live. */
     e=cam_sv_guard();if(!e)e=cam_rx_session_guard();if(!e)e=cam_mac_guard();
     if(!e)e=cam_phy_guard();if(!e)e=cam_out_guard();if(e)return e;
-    struct cam_sensor_ap ap={&cam_journal.sensor,cam_sv.request.frame.sensor==X9_CAMERA_BACK?0x1a:0x10};
+    struct cam_sensor_ap ap={&cam_journal.sensor,cam_sensor_slave(cam_sv.request.frame.sensor)};
     uint8_t byte;
     const uint16_t regs[]={0x0100,0x0104,0x0005};
     for(unsigned i=0;i<3;i++) {
@@ -131,7 +131,7 @@ static int cam_native_unstarted_retire_locked(uint64_t epoch,struct x9_camera_sm
     if(!e)e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);
     if(!e) {
         struct cam_sensor_ap ap={&cam_journal.sensor,
-            cam_sensor_live.probe.sensor==X9_CAMERA_BACK?0x1a:0x10};
+            cam_sensor_slave(cam_sensor_live.probe.sensor)};
         uint8_t value;
         const uint16_t regs[]={0x0100,0x0104,0x0005};
         for(unsigned i=0;i<3 && !e;i++) {

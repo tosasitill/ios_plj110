@@ -7,6 +7,13 @@
 #define X9_CAMERA_STATUS_DEVICE "/dev/x9-camera-status"
 #define X9_CAMERA_BACK 1u
 #define X9_CAMERA_FRONT 2u
+#define X9_CAMERA_ULTRAWIDE 3u
+#define X9_CAMERA_TELEPHOTO 4u
+#define X9_CAMERA_SENSOR_COUNT 4u
+#define X9_CAMERA_DUAL_MASK ((1u<<X9_CAMERA_BACK)|(1u<<X9_CAMERA_FRONT))
+#define X9_CAMERA_ALL_MASK (X9_CAMERA_DUAL_MASK|(1u<<X9_CAMERA_ULTRAWIDE)|(1u<<X9_CAMERA_TELEPHOTO))
+static inline int x9_camera_sensor_valid(uint32_t sensor)
+{ return sensor>=X9_CAMERA_BACK && sensor<=X9_CAMERA_SENSOR_COUNT; }
 #define X9_CAMERA_READY 1u
 #define X9_CAMERA_STREAMING 2u
 #define X9_CAMERA_FAULT 4u
@@ -35,14 +42,23 @@ struct x9_camera_status {
 #define X9_CAM_COLD_PMIF 1024u
 #define X9_CAM_COLD_SENSOR_PARENT 2048u
 #define X9_CAM_COLD_WL_PARENT 4096u
+#define X9_CAM_COLD_DVDD 8192u
 enum x9_camera_cold_restore_step { X9_CAM_COLD_NONE, X9_CAM_COLD_QUIESCE,
     X9_CAM_COLD_RESTORE_DOVDD, X9_CAM_COLD_RESTORE_WL, X9_CAM_COLD_RESTORE_AFVDD,
     X9_CAM_COLD_RESTORE_WAKE, X9_CAM_COLD_RESTORE_PINS, X9_CAM_COLD_RESTORE_SENSOR_BUS,
     X9_CAM_COLD_RESTORE_WL_BUS, X9_CAM_COLD_RESTORE_ROUTES,
     X9_CAM_COLD_RESTORE_CLOCK, X9_CAM_COLD_RESTORE_VS, X9_CAM_COLD_RESTORE_DONE,
     X9_CAM_COLD_RESTORE_PMIF, X9_CAM_COLD_RESTORE_WL_PARENT,
-    X9_CAM_COLD_RESTORE_SENSOR_PARENT };
+    X9_CAM_COLD_RESTORE_SENSOR_PARENT, X9_CAM_COLD_RESTORE_DVDD };
 #define X9_CAMERA_GET_STATUS _IOR('C', 0x90, struct x9_camera_status)
+/* Additive read-only ABI; original 88B status and its two ID slots stay intact.
+ * Presence in a source catalog is NOT PROBED/READY. Only actual matched IDs
+ * with successful cold close populate these records. No MMIO on this ioctl. */
+struct x9_camera_lenses {
+    uint32_t version, count, supported_mask, reserved;
+    struct { uint32_t sensor, chip_id, flags, reserved; } lens[X9_CAMERA_SENSOR_COUNT];
+};
+#define X9_CAMERA_GET_LENSES _IOR('C', 0x9e, struct x9_camera_lenses)
 /* Explicit stop receipt; close(2)==0 is not proof that cdev d_close ran.
  * Requests contain version/sensor/generation_before only, all else zero.
  * owned_* journal ATTEMPTED callbacks, not DMA leases or hardware grants.
@@ -285,7 +301,7 @@ struct x9_camera_config {
  * one, bypassing SMMU, or feeding patterns is NOT a hardware implementation. */
 enum x9_camera_power_id { X9_CAM_MCLK, X9_CAM_RESET, X9_CAM_AVDD,
     X9_CAM_AVDD1, X9_CAM_AFVDD, X9_CAM_DVDD, X9_CAM_DOVDD,
-    X9_CAM_DRIVE, X9_CAM_SCL_AP, X9_CAM_SDA_AP };
+    X9_CAM_DRIVE, X9_CAM_SCL_AP, X9_CAM_SDA_AP, X9_CAM_DVDD1 };
 struct x9_camera_power_step { uint32_t id, value, delay_us; };
 struct x9_camera_sensor {
     uint32_t sensor, bus, slave, chip_id, width, height, bayer;
@@ -293,6 +309,11 @@ struct x9_camera_sensor {
     uint32_t gain_unity, gain_max, cphy, lanes;
     const struct x9_camera_power_step *power;
     uint32_t power_count;
+    /* Board/mode facts, independent of camera position and I2C slave address.
+     * UWIDE uses banked word TABLE writes but byte control/read APIs. */
+    uint32_t id_reg, mirror, csi_port, vc, last_vc, line_length, margin;
+    uint32_t table_word, gain_linear;
+    uint64_t pclk, data_rate;
 };
 struct x9_camera_platform {
     /* Version4 delegates configuration to the real powered sensor service.

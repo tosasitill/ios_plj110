@@ -119,7 +119,7 @@ static int cam_mac_open_locked(uint64_t epoch,struct x9_camera_mac_status *s)
     uint32_t port,bit,split,irq,again[CAM_MAC_MAX_REGS];
     unsigned ctrl,phy,opt,hdr,resync,resync2,dt,async_cfg,async_split,afifo;
     unsigned idx;
-    static vm_offset_t csi[2][2],seninf_top;
+    static vm_offset_t csi[X9_CAMERA_SENSOR_COUNT][2],seninf_top;
     int e;
     memset(s,0,sizeof(*s));s->sensor_epoch=epoch;s->sensor=cam_sensor_live.probe.sensor;
     if(cam_mac.held)return EALREADY;
@@ -128,15 +128,15 @@ static int cam_mac_open_locked(uint64_t epoch,struct x9_camera_mac_status *s)
     if(cam_out.held)return EBUSY;
     if(!cam_rx_sensor_held_locked(epoch) || cam_rx_live.close_attempted || cam_rx_live.error)return ESTALE;
     e=cam_pipeline_plan(s->sensor,&plan);if(e)return e;
-    if(plan.csi_port!=(s->sensor==X9_CAMERA_BACK?3u:0u) ||
-       plan.cphy!=(s->sensor==X9_CAMERA_BACK?1u:0u) ||
-       plan.lanes!=(s->sensor==X9_CAMERA_BACK?3u:4u) || plan.dt!=0x2b)return ENOTSUP;
+    if(plan.csi_port!=(cam_sensor_port(s->sensor)) ||
+       plan.cphy!=sensors[s->sensor-1].cphy ||
+       plan.lanes!=sensors[s->sensor-1].lanes || plan.dt!=0x2b)return ENOTSUP;
     e=cam_rx_session_guard();if(e)return cam_rx_session_fault(e);
     port=plan.csi_port;bit=1u<<port;split=3u<<(2*port);irq=bit|(bit<<8);
-    cam_mac.bank[CAM_MAC_TOP]=cam_rx_maps[s->sensor==X9_CAMERA_BACK?0:1].mac;
+    cam_mac.bank[CAM_MAC_TOP]=cam_rx_maps[(s->sensor-1)].mac;
     /* Preserve cached mappings across sessions; physical port changes require
      * selecting the corresponding cached map, not retargeting a live one. */
-    idx=s->sensor==X9_CAMERA_BACK?0:1;
+    idx=(s->sensor-1);
     if(!csi[idx][0])csi[idx][0]=ml_io_map(0x13885000ull+port*0x8000ull,0x1000);
     if(!csi[idx][1])csi[idx][1]=ml_io_map(0x13886000ull+port*0x8000ull,0x1000);
     if(!seninf_top)seninf_top=ml_io_map(0x3a400000,0x1000);
@@ -329,7 +329,7 @@ int x9_camera_sensor_session_configure_mac(uint64_t epoch,struct x9_camera_mac_s
     if(!e && cam_out.held)e=EBUSY;
     if(!e && !cam_rx_sensor_held_locked(epoch))e=ENXIO;
     if(!e) {
-        ap=(struct cam_sensor_ap){&cam_journal.sensor,cam_sensor_live.probe.sensor==X9_CAMERA_BACK?0x1a:0x10};
+        ap=(struct cam_sensor_ap){&cam_journal.sensor,cam_sensor_slave(cam_sensor_live.probe.sensor)};
         e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e && byte)e=EBUSY;
         if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=EBUSY;
         if(e)cam_sensor_session_fault(e);

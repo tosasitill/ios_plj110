@@ -309,7 +309,7 @@ int x9_camera_sensor_session_prepare_smi_clocks(uint64_t epoch,struct x9_camera_
     if(!e&&(cam_mac.held||cam_phy.held||cam_out.held))e=EBUSY;
     if(!e) {
         s->sensor=cam_sensor_live.probe.sensor;
-        ap=(struct cam_sensor_ap){&cam_journal.sensor,s->sensor==X9_CAMERA_BACK?0x1a:0x10};
+        ap=(struct cam_sensor_ap){&cam_journal.sensor,cam_sensor_slave(s->sensor)};
         e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e&&byte)e=EBUSY;
         if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e&&byte)e=EBUSY;
         if(!e)e=cam_smi_clocks_open_locked(epoch,s->sensor);

@@ -128,6 +128,7 @@ static void *(*derived_storage)(CMBaseObjectRef);
 static CMBaseClassID (*device_class_id)(void);
 static CMBaseClassID (*stream_class_id)(void);
 static CFStringRef port_back;           /* kFigCapturePortType_BackFacingCamera */
+static CFStringRef port_telephoto;
 static CFStringRef port_front;          /* kFigCapturePortType_FrontFacingCamera */
 static CFStringRef flash_off;           /* real 20H392 String enum, not a numeric mode */
 static Class block_class[3];            /* real libclosure concrete block classes, not arbitrary CF values */
@@ -178,6 +179,8 @@ find_functions(void)
 	port_back = port != NULL ? *port : NULL;
 	port = dlsym(RTLD_DEFAULT, "kFigCapturePortType_FrontFacingCamera");
 	port_front = port != NULL ? *port : NULL;
+    port = dlsym(RTLD_DEFAULT, "kFigCapturePortType_BackFacingTelephotoCamera");
+    port_telephoto = port != NULL ? *port : NULL;
 	port = dlsym(RTLD_DEFAULT, "kFigCaptureFlashMode_ForceFlashOff");
 	flash_off = port != NULL ? *port : NULL;
 	if (flash_off == NULL || CFGetTypeID(flash_off) != CFStringGetTypeID()) {
@@ -470,12 +473,33 @@ static const struct camera {
 	bool            turned;         /* its sensor the other way up from the iPhone's: the pictures turned half round */
 	double          focal_length, f_number, pixel_size, fov;
 	int             formats[2][3];  /* sensor width, height, frames a second of "Photo" and of a video format */
-} cameras[2] = {
+} cameras[3] = {
 	{ 1, "Back Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:0", false, 4.0, 1.8, 1.22, 65.0,
 	  { { 4032, 3024, 30 }, { 4032, 3024, 30 } } },        /* "Photo", "Video-60" */
 	{ 2, "Front Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:1", false, 2.87, 2.2, 1.0, 70.0,
 	  { { 3088, 2320, 30 }, { 3840, 2160, 30 } } },        /* "Photo", "Video-30" */
+    /* Exact D22 standalone telephoto ID:2/port, not virtual dual ID:3.
+     * Optical fields remain a D22-compatible descriptor, not X9 calibration. */
+    { X9_CAMERA_TELEPHOTO, "Back Telephoto Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:2",
+      false, 6.0, 2.6, 1.0, 28.0, { {4032,3024,30}, {4032,3024,30} } },
 };
+
+/* X9 rear zoom policy, relative to the wide camera: 0.6 / 1 / 3 anchors.
+ * These are UI routing anchors, NOT measured focal/FOV calibration or an
+ * Apple synchronized/fusion device. Only positively ready physical lenses
+ * are eligible; a missing tele keeps wide digital zoom, never a fake tele. */
+struct lens_choice { uint32_t sensor; float base_zoom, requested_zoom; };
+static struct lens_choice rear_lens(uint32_t sensor,uint32_t mask,float zoom)
+{
+    struct lens_choice c={sensor,1,zoom};
+    if(sensor!=X9_CAMERA_BACK)return c;
+    if(zoom<1 && (mask&(1u<<X9_CAMERA_ULTRAWIDE))) {
+        c.sensor=X9_CAMERA_ULTRAWIDE;c.base_zoom=0.6f;
+    } else if(zoom>=3 && (mask&(1u<<X9_CAMERA_TELEPHOTO))) {
+        c.sensor=X9_CAMERA_TELEPHOTO;c.base_zoom=3;
+    }
+    return c;
+}
 
 struct still_request {
 	struct still_request *next;
@@ -596,6 +620,11 @@ struct stream {
 	_Atomic int     format_index;
 	_Atomic double  min_fps, max_fps;
 	_Atomic float   zoom;           /* ZoomFactor: the picture is the middle 1/zoom of the sensor each way */
+
+    uint32_t ready_mask; /* constructor's qualified physical backend mask */
+    uint32_t physical_sensor; /* worker-owned, selected before first RAW read */
+    float applied_zoom, base_zoom;
+    bool lens_switching; /* protected by lock; blocks new shutter tickets */
 	const struct camera *camera;
 	CFStringRef     port;
 	bool            af_now;         /* a focus asked for (AutoFocusNow and the like): a search at the next frame */
@@ -971,8 +1000,10 @@ stream_set_property(CMBaseObjectRef o, CFStringRef key, CFTypeRef value)
 		if (value != NULL && CFGetTypeID(value) == CFNumberGetTypeID()) {
 			CFNumberGetValue(value, kCFNumberDoubleType, &zoom);
 		}
-		zoom = zoom < 1 ? 1 : zoom > MAX_ZOOM ? MAX_ZOOM : zoom;
 		if (!isfinite(zoom)) return ERR_PARAM;
+        double minimum=s->camera->sensor==X9_CAMERA_BACK &&
+            (s->ready_mask&(1u<<X9_CAMERA_ULTRAWIDE))?0.6:1;
+        zoom = zoom < minimum ? minimum : zoom > MAX_ZOOM ? MAX_ZOOM : zoom;
 		if (fabs(zoom - s->zoom) >= 0.25 || (zoom == 1) != (s->zoom == 1)) {
 			say("stream: zoom %.2fx", zoom);
 		}
@@ -1008,7 +1039,7 @@ stream_set_property(CMBaseObjectRef o, CFStringRef key, CFTypeRef value)
 		}
 		request->options = options;
 		pthread_mutex_lock(&s->lock);
-		if (s->stopping || atomic_load(&s->first_errno) || atomic_load(&capture_retire_errno) ||
+		if (s->stopping || s->lens_switching || atomic_load(&s->first_errno) || atomic_load(&capture_retire_errno) ||
 		    s->stills_wanted >= STILL_REQUEST_LIMIT || s->stills_issued == UINT64_MAX || (!s->running && s->run_epoch == UINT64_MAX)) {
 			pthread_mutex_unlock(&s->lock);
 			still_release(request);
@@ -1286,7 +1317,7 @@ metadata_time(CFTypeRef metadata, CFStringRef port, CMTime *pts)
 
 /* the frame's metadata, as H10ISP's stream gives them (see md_names) */
 static CFDictionaryRef
-frame_metadata(const struct isp *isp, const struct hakios_camera_frame *f, const struct isp_stats *st, CFStringRef port)
+frame_metadata(const struct isp *isp, const struct hakios_camera_frame *f, const struct isp_stats *st, CFStringRef port,float applied_zoom)
 {
 	CFMutableDictionaryRef m;
 	double exposure = f->exposure_lines * (double)f->line_ns / 1e9, analog = f->gain_unity ? (double)f->gain / f->gain_unity : 1;
@@ -1321,7 +1352,9 @@ frame_metadata(const struct isp *isp, const struct hakios_camera_frame *f, const
 	 * (-[BWMultiStreamCameraSourceNode _ispAppliedZoomFactorFromSampleBufferMetadataDictionary:outputIndex:])
 	 * and would make up the rest of what was asked for itself; without it, a zoomed preview stood still.
 	 */
-	md_put(m, MD_ZOOM, number_f(isp->zoom));
+    /* Report the actual applied global zoom, not just this lens's crop.
+     * At3x tele uses1x crop; reporting1 would make the graph crop again. */
+	md_put(m, MD_ZOOM, number_f(applied_zoom));
 	CMTime pts;
 
 	if (!metadata_time(m, port, &pts) || CMTimeCompare(pts, CMClockMakeHostTimeFromSystemUnits(f->time)) != 0) {
@@ -1774,22 +1807,25 @@ load_tuning(struct isp *isp, uint32_t sensor)
 
 static bool valid_frame(const struct hakios_camera_frame *f, uint32_t sensor)
 {
-    uint32_t width=sensor==1?4096:3264,height=sensor==1?3072:2448;
+    bool tele=sensor==X9_CAMERA_TELEPHOTO,uw=sensor==X9_CAMERA_ULTRAWIDE;
+    uint32_t width=sensor==X9_CAMERA_FRONT?3264:4096,height=sensor==X9_CAMERA_FRONT?2448:3072;
+    uint32_t margin=uw?24:tele?56:48;
     uint32_t stride=(width/4*5+63)&~63u;
     uint64_t sof_time=hakios_camera_sof_time(f);
     for (unsigned i=0;i<sizeof(f->reserved)/sizeof(f->reserved[0]);i++)
         if (f->reserved[i]) return false;
     return !memcmp(f->magic, HAKIOS_CAMERA_MAGIC, 8) && f->header_bytes == sizeof(*f) &&
-        f->sensor == sensor && f->format == 1 && f->bayer == (sensor==1?3u:0u) && f->black == 64 &&
-        (sensor==1 || sensor==2) && f->width==width && f->height==height && f->stride==stride &&
+        f->sensor == sensor && f->format == 1 && f->bayer == ((tele||uw)?1u:sensor==1?3u:0u) && f->black == 64 &&
+        x9_camera_sensor_valid(sensor) && f->width==width && f->height==height && f->stride==stride &&
         (uint64_t)f->stride * f->height <= X9_CAMERA_MAX_BYTES &&
-        f->line_ns==(sensor==1?4415u:4361u) && f->gain_unity==1024 &&
+        f->line_ns==(uw?5200u:tele?8538u:sensor==1?4415u:4361u) && f->gain_unity==1024 &&
         f->gain_max==65536 && f->gain >= f->gain_unity && f->gain <= f->gain_max &&
-        f->frame_lines_min==(sensor==1?7546u:7642u) &&
-        f->frame_lines_max==(sensor==1?65532u:65530u) && f->margin==48 &&
+        f->frame_lines_min==(uw?6408u:tele?3888u:sensor==1?7546u:7642u) &&
+        f->frame_lines_max==(uw?65535u:sensor==2?65530u:65532u) && f->margin==margin &&
         f->frame_lines_min > f->margin && f->frame_lines >= f->frame_lines_min &&
-        f->frame_lines <= f->frame_lines_max && f->exposure_lines >= (sensor==1?6u:16u) &&
+        f->frame_lines <= f->frame_lines_max && f->exposure_lines >= (uw?4u:tele?8u:sensor==1?6u:16u) &&
         (sensor!=1 || (!(f->frame_lines%2) && !(f->exposure_lines%2))) &&
+        (!tele || (!(f->frame_lines%4) && !(f->exposure_lines%4))) &&
         f->exposure_lines <= f->frame_lines - f->margin && f->time && sof_time &&
         f->timing_flags==HAKIOS_CAMERA_TIMING_SOF && sof_time<=f->time &&
         f->time<=mach_absolute_time() && f->sequence && f->focus==HAKIOS_CAMERA_NO_FOCUS;
@@ -1826,6 +1862,39 @@ worker(void *context)
 	while (s->running) {
 		ssize_t n;
 
+        struct lens_choice choice=rear_lens(s->camera->sensor,s->ready_mask,atomic_load(&s->zoom));
+        if(choice.sensor!=s->physical_sensor) {
+            /* This boundary is outside RAW rendering/handlers. Never switch
+             * a queued shutter to another lens or join a callback thread. */
+            pthread_mutex_lock(&s->lock);
+            bool switch_now=s->running && !s->stopping && !s->stills_wanted && !s->callback_active;
+            if(switch_now && s->run_epoch==UINT64_MAX) {pthread_mutex_unlock(&s->lock);error=EOVERFLOW;break;}
+            if(switch_now)s->lens_switching=true;
+            pthread_mutex_unlock(&s->lock);
+            if(switch_now) {
+                uint32_t old_sensor=s->physical_sensor;
+                error=close_camera_once(s,device);device=-1;
+                if(error || !s->running)break;
+                /* The receipt plus descriptor close must succeed BEFORE
+                 * opening the next cold sensor. No retry/rollback after fault. */
+                device=open(HAKIOS_CAMERA_DEVICE,O_RDWR|O_CLOEXEC);
+                if(device<0) {error=errno;break;}
+                s->camera_fd=device;
+                struct hakios_camera_command select={.command=HAKIOS_CAMERA_SENSOR,.a=choice.sensor,.b=~0u};
+                ssize_t sent=write(device,&select,sizeof(select));
+                if(sent!=sizeof(select)) {error=sent<0?errno:EMSGSIZE;break;}
+                pthread_mutex_lock(&s->lock);
+                s->physical_sensor=choice.sensor;s->base_zoom=choice.base_zoom;
+                s->applied_zoom=choice.requested_zoom;s->run_epoch++;s->lens_switching=false;
+                pthread_mutex_unlock(&s->lock);
+                free(buffer);buffer=NULL;bytes=0;last_sequence=0;tuned_for=~0u;
+                isp_init(&isp);memset(&af,0,sizeof(af));lux=cct=-1;
+                say("rear lens switched %u -> %u: %.2fx (base %.2fx), physical close/start; no fusion",
+                    old_sensor,choice.sensor,choice.requested_zoom,choice.base_zoom);
+                continue;
+            }
+        }
+
 		if (buffer == NULL) {
 			n = read(device, &head, sizeof(head));
 			int read_error = n < 0 ? errno : 0;
@@ -1837,7 +1906,7 @@ worker(void *context)
 				break;
 			}
 			/* Start already selected this sensor synchronously. A mismatched record is not permission to reissue SENSOR. */
-			if (!valid_frame(&head, s->camera->sensor)) {
+			if (!valid_frame(&head, s->physical_sensor)) {
                 say("invalid RAW10 header; stopping before allocation"); error=EPROTO; break;
             }
             bytes = sizeof(head) + (size_t)head.stride * head.height;
@@ -1857,7 +1926,7 @@ worker(void *context)
 		}
 
 		const struct hakios_camera_frame *f = (const void *)buffer;
-		if (!valid_frame(f, s->camera->sensor) ||
+		if (!valid_frame(f, s->physical_sensor) ||
             bytes != sizeof(*f) + (size_t)f->stride * f->height ||
             f->sequence<=last_sequence || f->time<=last_time || hakios_camera_sof_time(f)<=last_sof) {
             say("invalid/stale frame; not delivering to capture graph"); error=EPROTO; break;
@@ -1880,7 +1949,9 @@ worker(void *context)
 		cct = cct < 0 ? colour_temperature(&isp) : cct * 0.97f + colour_temperature(&isp) * 0.03f;
 		isp_tune(&isp, lux, cct);
 		pthread_mutex_lock(&s->lock);
-		isp.zoom = s->zoom;
+        choice=rear_lens(s->camera->sensor,s->ready_mask,atomic_load(&s->zoom));
+        if(choice.sensor==s->physical_sensor)s->applied_zoom=choice.requested_zoom;
+        isp.zoom=s->applied_zoom/s->base_zoom;
 		bool af_now = s->af_now, af_locked = s->af_locked;
 		float af_window[4];
 
@@ -1906,7 +1977,7 @@ worker(void *context)
 		af_frame(device, &af, f, raw, af_window, af_locked);
 		s->frames++;
 
-		CFDictionaryRef metadata = frame_metadata(&isp, f, &st, s->port);
+		CFDictionaryRef metadata = frame_metadata(&isp, f, &st, s->port,s->applied_zoom);
 
 		/*
 		 * Only once the graph has started the stream. Its PixelBufferHandler blocks hand the buffer
@@ -1934,7 +2005,7 @@ worker(void *context)
 	stream_fault(s, error);
 	s->graph_running = false;
 	free(buffer);
-	(void)close_camera_once(s, device);
+    if(device>=0)(void)close_camera_once(s, device);
 	s->running = false;
 	say("frames stopped (%llu): first_errno=%d stop_errno=%d close_errno=%d", (unsigned long long)s->frames,
 	    atomic_load(&s->first_errno), atomic_load(&s->stop_errno), atomic_load(&s->close_errno));
@@ -2053,7 +2124,8 @@ stream_begin(CMBaseObjectRef o, bool graph)
 		if (result) goto done;
 	}
 	int fd = open(HAKIOS_CAMERA_DEVICE, O_RDWR | O_CLOEXEC);
-	struct hakios_camera_command select = { .command = HAKIOS_CAMERA_SENSOR, .a = s->camera->sensor, .b = ~0u };
+    struct lens_choice choice=rear_lens(s->camera->sensor,s->ready_mask,atomic_load(&s->zoom));
+	struct hakios_camera_command select = { .command = HAKIOS_CAMERA_SENSOR, .a = choice.sensor, .b = ~0u };
 
 	if (fd < 0) {
 		stream_fault(s, errno);
@@ -2076,6 +2148,9 @@ stream_begin(CMBaseObjectRef o, bool graph)
 	s->frames = 0;
 	pthread_mutex_lock(&s->lock);
 	s->run_epoch++;
+
+    s->physical_sensor=choice.sensor;s->applied_zoom=choice.requested_zoom;s->base_zoom=choice.base_zoom;
+    s->lens_switching=false;
 	s->stopping = false;
 	s->graph_running = graph;
 	s->running = true;
@@ -2289,6 +2364,7 @@ stream_create(CFAllocatorRef allocator, const struct camera *camera, CFStringRef
 	s->af_window[2] = s->af_window[3] = 0.7f;
 	s->max_fps = 30;
 	s->camera = camera;
+    s->physical_sensor=camera->sensor;s->applied_zoom=s->base_zoom=1;
 	s->port = port;
 	for (int i = 0; i < OUTPUTS; i++) {
 		s->out[i].name = output_names[i];
@@ -2348,7 +2424,12 @@ static unsigned requests, relinquishes;
 static OSStatus
 device_request_streams(CMBaseObjectRef o, CFArrayRef streams, CFDictionaryRef options)
 {
-	(void)o;
+    struct device *owner=derived_storage(o);
+    if(streams && CFGetTypeID(streams)!=CFArrayGetTypeID())return ERR_PARAM;
+    if(streams && CFArrayGetCount(streams)>1)return ERR_UNSUPPORTED; /* no concurrent/fusion grant */
+    if(streams && CFArrayGetCount(streams)==1 &&
+       !CFArrayContainsValue(owner->streams,CFRangeMake(0,CFArrayGetCount(owner->streams)),
+           CFArrayGetValueAtIndex(streams,0)))return ERR_PARAM;
 	if (requests++ < 3) {
 		say("device: streams asked for (%ld)%s", streams ? (long)CFArrayGetCount(streams) : 0L, options ? ", with options" : "");
 		if (options != NULL) {
@@ -2445,7 +2526,9 @@ OSStatus x9_camera_device_create(CFAllocatorRef allocator, CFDictionaryRef optio
 OSStatus
 x9_camera_device_create(CFAllocatorRef allocator, CFDictionaryRef options, CMBaseObjectRef *out)
 {
-	CMBaseObjectRef device = NULL, stream[2];
+	CMBaseObjectRef device = NULL, stream[3]={0};
+    uint32_t ready_mask=x9_camera_backend_mask();
+    unsigned count=(ready_mask&(1u<<X9_CAMERA_TELEPHOTO))?3:2;
 	struct device *d;
 
 	(void)options;
@@ -2456,36 +2539,36 @@ x9_camera_device_create(CFAllocatorRef allocator, CFDictionaryRef options, CMBas
 	if (!media_functions_usable || out == NULL) {
 		return ERR_UNSUPPORTED;
 	}
-	if ((stream[0] = stream_create(allocator, &cameras[0], port_back)) == NULL) {
-		return ERR_UNSUPPORTED;
-	}
-	if ((stream[1] = stream_create(allocator, &cameras[1], port_front)) == NULL) {
-		CFRelease(stream[0]);
-		return ERR_UNSUPPORTED;
-	}
-	if (derived_create(allocator, &device_vtable, device_class_id(), &device) != 0 || device == NULL) {
-		CFRelease(stream[0]);
-		CFRelease(stream[1]);
-		say("the device cannot be made");
-		return ERR_UNSUPPORTED;
-	}
+    if(!ready_mask || (count==3 && (!port_telephoto || CFGetTypeID(port_telephoto)!=CFStringGetTypeID())))
+        return ERR_NOT_AVAILABLE;
+    CFStringRef ports[3]={port_back,port_front,port_telephoto};
+    for(unsigned i=0;i<count;i++) {
+        stream[i]=stream_create(allocator,&cameras[i],ports[i]);
+        if(!stream[i]) {
+            for(unsigned k=0;k<i;k++)CFRelease(stream[k]);
+            return ERR_NOT_AVAILABLE;
+        }
+        stream_of(stream[i])->ready_mask=ready_mask;
+    }
+    if(derived_create(allocator,&device_vtable,device_class_id(),&device)!=0 || !device) {
+        for(unsigned i=0;i<count;i++)CFRelease(stream[i]);
+        return ERR_UNSUPPORTED;
+    }
 	d = derived_storage(device);
 	memset(d, 0, sizeof(*d));
-	d->streams = CFArrayCreate(NULL, (const void **)stream, 2, &kCFTypeArrayCallBacks);
+	d->streams = CFArrayCreate(NULL, (const void **)stream, count, &kCFTypeArrayCallBacks);
 	if (d->streams == NULL) {
-		CFRelease(stream[0]);
-		CFRelease(stream[1]);
+        for(unsigned i=0;i<count;i++)CFRelease(stream[i]);
 		CFRelease(device);
 		return ERR_NOT_AVAILABLE;
 	}
 	d->supported = supported(device_props, sizeof(device_props) / sizeof(device_props[0]));
-	CFRelease(stream[0]);
-	CFRelease(stream[1]);
+    for(unsigned i=0;i<count;i++)CFRelease(stream[i]);
 	if (atomic_load(&capture_retire_errno) || !x9_camera_backend_ready()) {
 		CFRelease(device);
 		return ERR_NOT_AVAILABLE;
 	}
 	*out = device;
-	say("the device made: two streams, the back camera and the front one");
+	say("the device made: %u real streams (wide/front%s), exclusive physical switching; no fusion",count,count==3?"/telephoto":"");
 	return 0;
 }

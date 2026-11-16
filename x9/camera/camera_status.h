@@ -9,16 +9,32 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include "../kernel/src/bsd/dev/x9_camera.h"
-static bool x9_camera_backend_ready(void)
+static uint32_t x9_camera_backend_mask(void)
 {
     int fd = open(X9_CAMERA_STATUS_DEVICE, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return false;
+    if (fd < 0) return 0;
     struct x9_camera_status status = {0};
+    struct x9_camera_lenses lenses = {0};
     int query = ioctl(fd, X9_CAMERA_GET_STATUS, &status);
+    if(!query)query=ioctl(fd,X9_CAMERA_GET_LENSES,&lenses);
     int closed = close(fd);
-    return !query && !closed && status.version == 1 && status.mode == 2 &&
-        (status.flags & X9_CAMERA_READY) && !(status.flags & (X9_CAMERA_FAULT | X9_CAMERA_RETAINED)) &&
-        status.supported_mask == ((1u << X9_CAMERA_BACK) | (1u << X9_CAMERA_FRONT)) &&
-        status.chip_id[0] == 0x9186 && status.chip_id[1] == 0x0615 && !status.cold_retained;
+    uint32_t mask=status.supported_mask;
+    if(query || closed || status.version!=1 || status.mode!=2 ||
+       !(status.flags&X9_CAMERA_READY) || (status.flags&(X9_CAMERA_FAULT|X9_CAMERA_RETAINED)) ||
+       status.cold_retained || lenses.version!=1 || lenses.count!=X9_CAMERA_SENSOR_COUNT ||
+       lenses.reserved || lenses.supported_mask!=mask ||
+       ((mask&X9_CAMERA_DUAL_MASK)!=X9_CAMERA_DUAL_MASK || (mask&~X9_CAMERA_ALL_MASK)) ||
+       status.chip_id[0]!=0x9186 || status.chip_id[1]!=0x0615)return 0;
+    const uint32_t expected[X9_CAMERA_SENSOR_COUNT]={0x9186,0x0615,0x38e5,0x8202};
+    for(unsigned i=0;i<X9_CAMERA_SENSOR_COUNT;i++) {
+        if(lenses.lens[i].sensor!=i+1 || lenses.lens[i].reserved)return 0;
+        if((mask&(1u<<(i+1))) &&
+           (lenses.lens[i].chip_id!=expected[i] ||
+            lenses.lens[i].flags!=(X9_CAMERA_PROBED|X9_CAMERA_READY)))return 0;
+        if(!(mask&(1u<<(i+1))) && (lenses.lens[i].flags&X9_CAMERA_READY))return 0;
+    }
+    return mask;
 }
+static bool x9_camera_backend_ready(void)
+{ return x9_camera_backend_mask()!=0; }
 #endif

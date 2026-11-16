@@ -13,7 +13,7 @@ static struct { uint64_t epoch; unsigned sensor; } cam_native_clock_request;
 
 static int cam_native_clock_request_locked(uint64_t epoch,unsigned sensor)
 {
-    if(!epoch || (sensor!=X9_CAMERA_BACK && sensor!=X9_CAMERA_FRONT))return EINVAL;
+    if(!epoch || (!x9_camera_sensor_valid(sensor)))return EINVAL;
     if(cam_native_clock_request.epoch || cam_mm_live.epoch || cam_mm.native_clock.seen)
         return EBUSY;
     cam_native_clock_request.epoch=epoch;cam_native_clock_request.sensor=sensor;

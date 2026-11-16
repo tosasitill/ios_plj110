@@ -21,7 +21,7 @@ static int cam_native_source_standby_locked(uint64_t epoch)
         session.capture || session.stream))e=EBUSY;
     if(e)return e;
     ap=(struct cam_sensor_ap){&cam_journal.sensor,
-        cam_sensor_live.probe.sensor==X9_CAMERA_BACK?0x1a:0x10};
+        cam_sensor_slave(cam_sensor_live.probe.sensor)};
     e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e && byte)e=EBUSY;
     if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=EBUSY;
     return e?e:cam_sensor_ap_guard(&ap);
@@ -52,7 +52,7 @@ static void cam_native_source_snapshot_locked(void)
 }
 
 /* Actual live.dts cdphy-dvfs-step0..3, not the driver's stale 356MHz
- * comment: 312/364/416/499MHz, 575/600/650/725mV. Both current preview
+ * comment: 312/364/416/499MHz, 575/600/650/725mV. The current preview
  * profiles fall below step0 data-rate limits. Accept only the corresponding
  * actual MM parent selector and BOTH freshly measured counts. Two counter
  * ticks are the original meter agreement bound, not a measured ppm claim.

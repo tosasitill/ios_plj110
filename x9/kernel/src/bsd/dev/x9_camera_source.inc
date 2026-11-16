@@ -157,7 +157,7 @@ static int cam_source_admission_locked(uint64_t epoch)
     const uint32_t phy_flags=X9_CAM_PHY_CALIBRATED|X9_CAM_PHY_TIMING_CONFIGURED|
         X9_CAM_PHY_DIGITAL_CONFIGURED|X9_CAM_PHY_CTLE_CONFIGURED;
     unsigned sensor=cam_sv.status.sensor;
-    struct cam_sensor_ap ap={&cam_journal.sensor,sensor==X9_CAMERA_BACK?0x1a:0x10};
+    struct cam_sensor_ap ap={&cam_journal.sensor,cam_sensor_slave(sensor)};
     uint8_t byte;
     int e;
     if(cam_sensor_live.epoch!=epoch || cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED ||
@@ -174,7 +174,7 @@ static int cam_source_admission_locked(uint64_t epoch)
        cam_smi.error || !(cam_smi.status.flags&X9_CAM_SMI_CLOCKS_CONFIGURED) ||
        !(cam_smi.status.a0.flags&X9_CAM_SMI_A0_CONFIGURED) ||
        !(cam_smi.status.shared.flags&X9_CAM_SMI_SHARED_CONFIGURED))return ESTALE;
-    if(sensor!=X9_CAMERA_FRONT && sensor!=X9_CAMERA_BACK)return EINVAL;
+    if(!x9_camera_sensor_valid(sensor))return EINVAL;
     e=cam_sv_environment();if(e)return e;
     for(unsigned sample=0;sample<2;sample++) {
         e=cam_sensor_ap_read(&ap,0x0100,&byte);if(e)return e;if(byte)return EBUSY;
@@ -186,9 +186,9 @@ static int cam_source_admission_locked(uint64_t epoch)
         return cam_source.error; /* no snapshot rebase after first admission */
     }
     cam_source.epoch=epoch;cam_source.count=0;
-    e=cam_source_add(CAM_SOURCE_MAC,CAM_MAC_TOP,0x40,3,sensor==X9_CAMERA_FRONT?1:2);
-    if(!e)e=cam_source_add(CAM_SOURCE_MAC,CAM_MAC_A,0,0xf,sensor==X9_CAMERA_FRONT?0xf:7);
-    if(sensor==X9_CAMERA_FRONT) {
+    e=cam_source_add(CAM_SOURCE_MAC,CAM_MAC_TOP,0x40,3,sensors[sensor-1].cphy?2:1);
+    if(!e)e=cam_source_add(CAM_SOURCE_MAC,CAM_MAC_A,0,0xf,sensors[sensor-1].cphy?7:0xf);
+    if(!sensors[sensor-1].cphy) {
         unsigned lane=cam_phy_find(CAM_PHY_D,4);
         if(lane==CAM_PHY_NO_REG || cam_phy.reg[lane].expected!=0x80403102u)e=ESTALE;
         if(!e)e=cam_source_add(CAM_SOURCE_PHY,CAM_PHY_D,0,0xf03,0xf01);

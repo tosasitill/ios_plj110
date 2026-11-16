@@ -96,9 +96,15 @@ static int cam_phy_calibration(unsigned sensor,uint32_t *word)
        SecureDTGetProperty(chosen,"x9-camera-calibration",&p,&n)!=kSuccess ||
        !p || n!=sizeof(h))return ENXIO;
     memcpy(&h,p,sizeof(h));
-    if(h.version!=1 || h.flags!=X9_CAM_CALIBRATION_LK_DATA || h.port_mask!=9 ||
-       h.word_count<=0x1dc/4 || h.word_count>400 || h.reserved[0] || h.reserved[1])return EINVAL;
-    *word=sensor==X9_CAMERA_BACK?h.main:h.front;
+    if(h.version!=2 || h.flags!=X9_CAM_CALIBRATION_LK_DATA || h.port_mask!=15 ||
+       h.word_count<=0x1dc/4 || h.word_count>400)return EINVAL;
+    switch(sensor) {
+    case X9_CAMERA_BACK:*word=h.main;break;
+    case X9_CAMERA_FRONT:*word=h.front;break;
+    case X9_CAMERA_TELEPHOTO:*word=h.telephoto;break;
+    case X9_CAMERA_ULTRAWIDE:*word=h.ultrawide;break;
+    default:return EINVAL;
+    }
     /* Do not print devinfo or copy calibration words into persisted logs. */
     return 0;
 }
@@ -211,7 +217,8 @@ static int cam_phy_timing_values(uint32_t count,uint64_t *hz,uint32_t *settle,ui
         /* hhfront pixel_rate864M /4 lanes *RAW10 =2160Mbps.
          * vendor ui_224 uses integer MHz first, then integer ns division. */
         uint64_t ui_224=224000ull/(cam_phy.status.nominal_data_rate/1000000);
-        value=ui_224>=64?((ui_224-64)*ck+999999999)/1000000000:0;
+        uint64_t trail_ns=cam_phy.status.sensor==X9_CAMERA_ULTRAWIDE?71:64;
+        value=ui_224>=trail_ns?((ui_224-trail_ns)*ck+999999999)/1000000000:0;
         if(value>1023)return ERANGE;*trail=(uint32_t)value;
     }
     return 0;
@@ -273,7 +280,7 @@ static int cam_phy_timing_restore(void)
 }
 /* Final sensor override, following the generic PHY power/calibration and
  * (when connected) digital configuration, not the generic EQ band table.
- * hhfront_static_ctle_param has BW3/CDR0; hhmain preview selects
+ * hhfront/hhtele_static_ctle_param have BW3/CDR0; hhmain preview selects
  * hhmain_cdr_0x9, BW3/CDR9. All other CTLE parameters are zero, with the
  * vendor IS floor2. Both unsplit profiles use both real analog banks.
  * For CPHY the vendor common delay-enable helper still forces the three
@@ -282,6 +289,7 @@ static int cam_phy_timing_restore(void)
 static int cam_phy_ctle_locked(uint64_t epoch)
 {
     bool cphy;
+    uint32_t cdr=cam_phy.status.sensor==X9_CAMERA_BACK?9:0;
     int e;
     if(!cam_phy.held || epoch!=cam_phy.epoch)return ESTALE;
     if(cam_phy.error)return cam_phy.error;
@@ -290,28 +298,28 @@ static int cam_phy_ctle_locked(uint64_t epoch)
     if(cam_phy.status.flags&X9_CAM_PHY_CTLE_ATTEMPTED)return EALREADY;
     if(!(cam_phy.status.flags&X9_CAM_PHY_CALIBRATED) ||
        cam_phy.calibration_done!=3 || cam_phy.calibration_pending)return ENXIO;
-    cphy=cam_phy.status.sensor==X9_CAMERA_BACK;
+    cphy=sensors[cam_phy.status.sensor-1].cphy!=0;
     if(cam_phy.status.cphy!=(cphy?1u:0u))return EINVAL;
     e=cam_phy_dependencies();if(e)return e;
     cam_phy.status.flags|=X9_CAM_PHY_CTLE_ATTEMPTED;cam_phy.status.stage=6;
     for(unsigned b=CAM_PHY_A;b<=CAM_PHY_B&&!e;b++) {
         cam_phy.status.bank=b;
-        if(cphy) {
+        if(cphy && cdr) {
             for(unsigned k=0;k<3&&!e;k++) {
                 unsigned offset=0xb0+0x10*k;
                 e=cam_phy_write(b,offset+4,CAM_PHY_DELAY_FORCE_EN,CAM_PHY_DELAY_FORCE_EN);
                 if(!e)e=cam_phy_write(b,offset,CAM_PHY_DELAY_EN,CAM_PHY_DELAY_EN);
             }
-            if(!e)e=cam_phy_write(b,0x18,0x1f000000,9u<<24);
-            if(!e)e=cam_phy_write(b,0x34,0x1f,9);
-            if(!e)e=cam_phy_write(b,0x1c,0x1f000000,9u<<24);
-            if(!e)e=cam_phy_write(b,0x34,0x1f00,9u<<8);
+            if(!e)e=cam_phy_write(b,0x18,0x1f000000,cdr<<24);
+            if(!e)e=cam_phy_write(b,0x34,0x1f,cdr);
+            if(!e)e=cam_phy_write(b,0x1c,0x1f000000,cdr<<24);
+            if(!e)e=cam_phy_write(b,0x34,0x1f00,cdr<<8);
         }
         if(!e)e=cam_phy_write(b,0x14,CAM_PHY_EQ_OVERRIDE_MASK,CAM_PHY_EQ_OVERRIDE);
     }
     if(!e)e=cam_phy_dependencies();
     if(e)return cam_phy_fault(e);
-    cam_phy.status.cdr_delay=cphy?9:0;cam_phy.status.eq_control=CAM_PHY_EQ_OVERRIDE;
+    cam_phy.status.cdr_delay=cdr;cam_phy.status.eq_control=CAM_PHY_EQ_OVERRIDE;
     cam_phy.status.flags|=X9_CAM_PHY_CTLE_CONFIGURED;cam_phy.status.stage=7;
     cam_phy_status();return 0;
 }
@@ -344,13 +352,16 @@ static int cam_phy_ctle_unforce(void)
     }
     return e;
 }
-/* Configure only the two preview bands. Rates are sensor table-derived
+/* Configure the preview bands. Rates are sensor table-derived
  * nominal settings, NOT hardware measurements or a SENINF throughput vote.
  * Termination defaults occur only for an explicitly present all-zero LK
  * word, as vendor apply_efuse_data; missing data never silently defaults. */
 static int cam_phy_settings(uint32_t efuse,bool cphy)
 {
     int e=0;
+    bool slow=cphy && cam_phy.status.nominal_data_rate<2500000000ull;
+    bool fast_dphy=!cphy && cam_phy.status.nominal_data_rate>=2500000000ull;
+    if(cam_phy.status.nominal_data_rate>=4500000000ull)return ENOTSUP;
     for(unsigned b=CAM_PHY_A;b<=CAM_PHY_B&&!e;b++) {
         unsigned shift=b==CAM_PHY_A?27:12;
         uint32_t term[3];
@@ -360,11 +371,11 @@ static int cam_phy_settings(uint32_t efuse,bool cphy)
         PHY_SET(8,0x77031f1f,0x44000000|term[0]|(term[0]<<8)); /* ALP, selfcal off */
         PHY_SET(0xc,0x09f01f1f,(cphy?0x09400000:0x09000000)|term[1]|(term[1]<<8));
         PHY_SET(0x10,0x1f1f,term[2]|(term[2]<<8));
-        PHY_SET(0x14,0xffbf,cphy?0x117:4); /* nominal EQ band, inherited latch preserved */
-        PHY_SET(0x38,0x03000100,0x01000000); /* LDO LP1/X26M0, EQ_OS_IS0 */
-        PHY_SET(0x18,0x1f1f1f1f,cphy?0x06080808:0x04090909);
-        PHY_SET(0x1c,0x1f1f1f1f,cphy?0x06080808:0x04090909);
-        if(cphy)PHY_SET(0x34,0x1f1f,0x606);
+        PHY_SET(0x14,0xffbf,cphy?(slow?0x99:0x117):(fast_dphy?0x15:4)); /* MT6993 preview bands */
+        PHY_SET(0x38,0x03000100,slow?0x01000100:0x01000000); /* LDO LP1/X26M0, EQ_OS_IS */
+        PHY_SET(0x18,0x1f1f1f1f,cphy?(slow?0x0a090909:0x06080808):0x04090909);
+        PHY_SET(0x1c,0x1f1f1f1f,cphy?(slow?0x0a090909:0x06080808):0x04090909);
+        if(cphy)PHY_SET(0x34,0x1f1f,slow?0xa0a:0x606);
         PHY_SET(0x20,0xffff,0x400); /* MT6993 reserve, not MT6899 */
         PHY_SET(0x100,0x202020,0x202020); /* three 16-bit AFIFOs; no FLUSH/CLEAR */
         PHY_SET(0,cphy?0x007000c0:0x007077c0,cphy?0x100000:(0x7c0|(b==CAM_PHY_A?0x4000:0)));
@@ -417,17 +428,19 @@ static int cam_phy_power_calibrate(unsigned b)
 }
 static int cam_phy_open_locked(uint64_t epoch,struct x9_camera_phy_status *s)
 {
-    static vm_offset_t maps[2][CAM_PHY_BANKS];
+    static vm_offset_t maps[X9_CAMERA_SENSOR_COUNT][CAM_PHY_BANKS];
     struct x9_camera_pipeline plan;
     uint32_t again[CAM_PHY_MAX_REGS],efuse;
-    unsigned idx=s->sensor==X9_CAMERA_BACK?0:1;
+    unsigned idx=(s->sensor-1);
     int e;
     if(cam_phy.held)return EALREADY;
     if(cam_out.held)return EBUSY;
     if(!cam_rx_sensor_held_locked(epoch) || cam_rx_live.error || cam_rx_live.close_attempted || !cam_mac.held || cam_mac.close_attempted ||
        cam_mac.epoch!=epoch || !(cam_mac.status.flags&X9_CAM_MAC_CONFIGURED) || cam_mac.error)return ESTALE;
     e=cam_pipeline_plan(s->sensor,&plan);if(e)return e;
-    if(plan.csi_port!=(idx?0u:3u)||plan.cphy!=(idx?0u:1u)||plan.lanes!=(idx?4u:3u)||plan.dt!=0x2b)return ENOTSUP;
+    const struct x9_camera_sensor *profile=cam_sensor_profile(s->sensor);
+    if(!profile || plan.csi_port!=profile->csi_port || plan.cphy!=profile->cphy ||
+       plan.lanes!=profile->lanes || plan.dt!=0x2b)return ENOTSUP;
     e=cam_phy_calibration(s->sensor,&efuse);if(e)return e;
     e=cam_mac_dependencies();if(e)return e;
     cam_phy.count=0;
@@ -481,7 +494,7 @@ static int cam_phy_open_locked(uint64_t epoch,struct x9_camera_phy_status *s)
     cam_phy.status=*s;cam_phy.status.flags=X9_CAM_PHY_ATTEMPTED|X9_CAM_PHY_LK_EFUSE;
     if(!efuse)cam_phy.status.flags|=X9_CAM_PHY_DEFAULT_TERM;
     cam_phy.status.csi_port=plan.csi_port;cam_phy.status.cphy=plan.cphy;
-    cam_phy.status.nominal_data_rate=plan.cphy?3300004166ull:2160000000ull;
+    cam_phy.status.nominal_data_rate=sensors[s->sensor-1].data_rate;
     cam_phy.epoch=epoch;cam_phy.held=true;cam_phy.close_attempted=false;
     cam_phy.error=0;cam_phy.pending_reg=CAM_PHY_NO_REG;
     cam_phy.calibration_pending=cam_phy.calibration_done=0;cam_phy.status.stage=2;
@@ -562,7 +575,7 @@ int x9_camera_sensor_session_prepare_analog(uint64_t epoch,struct x9_camera_phy_
     if(!e && (!cam_rx_sensor_held_locked(epoch)||!cam_mac.held))e=ENXIO;
     if(!e) {
         s->sensor=cam_sensor_live.probe.sensor;
-        ap=(struct cam_sensor_ap){&cam_journal.sensor,s->sensor==X9_CAMERA_BACK?0x1a:0x10};
+        ap=(struct cam_sensor_ap){&cam_journal.sensor,cam_sensor_slave(s->sensor)};
         e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e && byte)e=EBUSY;
         if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=EBUSY;
         if(e)cam_sensor_session_fault(e);
@@ -592,7 +605,7 @@ int x9_camera_sensor_session_configure_ctle(uint64_t epoch,struct x9_camera_phy_
     if(!e && cam_out.held)e=EBUSY;
     if(!e) {
         s->sensor=cam_sensor_live.probe.sensor;
-        ap=(struct cam_sensor_ap){&cam_journal.sensor,s->sensor==X9_CAMERA_BACK?0x1a:0x10};
+        ap=(struct cam_sensor_ap){&cam_journal.sensor,cam_sensor_slave(s->sensor)};
         e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e && byte)e=EBUSY;
         if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=EBUSY;
         if(!e)e=cam_phy_ctle_locked(epoch);
@@ -620,7 +633,7 @@ int x9_camera_sensor_session_configure_timing(uint64_t epoch,struct x9_camera_ph
     if(!e && (cam_out.held || (cam_phy.status.flags&X9_CAM_PHY_CTLE_ATTEMPTED)))e=EBUSY;
     if(!e) {
         s->sensor=cam_sensor_live.probe.sensor;
-        ap=(struct cam_sensor_ap){&cam_journal.sensor,s->sensor==X9_CAMERA_BACK?0x1a:0x10};
+        ap=(struct cam_sensor_ap){&cam_journal.sensor,cam_sensor_slave(s->sensor)};
         e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e && byte)e=EBUSY;
         if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=EBUSY;
         if(!e)e=cam_phy_timing_locked(epoch);

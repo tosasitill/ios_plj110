@@ -114,7 +114,7 @@ static int cam_native_bw_take_locked(uint64_t epoch)
        session.capture || session.stream)return ESTALE;
     e=cam_pipeline_plan(cam_smi.status.sensor,&plan);if(e)return e;
     ap=(struct cam_sensor_ap){&cam_journal.sensor,
-        cam_smi.status.sensor==X9_CAMERA_BACK?0x1a:0x10};
+        cam_sensor_slave(cam_smi.status.sensor)};
     e=cam_sensor_ap_read(&ap,0x0100,&lo);if(!e && lo)e=EBUSY;
     if(!e)e=cam_sensor_ap_read(&ap,0x0104,&lo);if(!e && lo)e=EBUSY;
     if(e)return e;
@@ -124,9 +124,9 @@ static int cam_native_bw_take_locked(uint64_t epoch)
     e=cam_sensor_ap_read(&ap,0x0340,&hi);
     if(!e)e=cam_sensor_ap_read(&ap,0x0341,&lo);if(e)return e;
     fl=((uint32_t)hi<<8)|lo;
-    pclk=plan.sensor==X9_CAMERA_BACK?2196000000ull:864000000ull;
-    min_fl=plan.sensor==X9_CAMERA_BACK?7546u:7642u;
-    if(ll!=(plan.sensor==X9_CAMERA_BACK?9696u:3768u) || fl<min_fl || fl<plan.height)
+    pclk=sensors[plan.sensor-1].pclk;
+    min_fl=sensors[plan.sensor-1].frame_lines;
+    if(ll!=sensors[plan.sensor-1].line_length || fl<min_fl || fl<plan.height)
         return ERANGE;
     /* AE may extend FL, never shorten the configured minimum. Hold the
      * worst case minimum frame period, even if this actual FL is longer. */

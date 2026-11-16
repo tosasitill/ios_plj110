@@ -620,7 +620,7 @@ static int cam_sv_open_locked(uint64_t epoch)
         cam_sv.field[slot]=cam_sv_find(cam_sv_fields[slot].offset);
         if(cam_sv.field[slot]==CAM_SV_MAX_REGS)return EINVAL;
     }
-    m=&cam_rx_maps[sensor==X9_CAMERA_BACK?0:1];
+    m=&cam_rx_maps[(sensor-1)];
     cam_sv.view[0]=m->sv[0];cam_sv.view[1]=m->sv[1];cam_sv.epoch=epoch;
     memset(&cam_sv.status,0,sizeof(cam_sv.status));cam_sv.status.sensor=sensor;
     cam_sv.status.flags=X9_CAM_SV_HW_ATTEMPTED;

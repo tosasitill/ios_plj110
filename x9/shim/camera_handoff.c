@@ -17,6 +17,9 @@ static const char camera_paths[CN_COUNT][FDT_CAPTURE_PATH_BYTES]={
     "/soc/seninf-top@3a400000/seninf-csi-port-0",
     "/soc/seninf-top@3a400000/seninf-csi-port-3",
     "/efuse@10160000/csi-data0@1d0","/efuse@10160000/csi-data3@1dc",
+    "/soc/seninf-top@3a400000/seninf-csi-port-1",
+    "/soc/seninf-top@3a400000/seninf-csi-port-2",
+    "/efuse@10160000/csi-data1@1d4","/efuse@10160000/csi-data2@1d8",
     "/chosen","/chosen@0"};
 _Static_assert(CN_COUNT<=FDT_COLLECT_MAX_NODES,"camera node table");
 /* ~6KiB BSS, never on the shim's 64KiB stack; only this call consumes it. */
@@ -94,7 +97,7 @@ int fdt_camera_patch_adt(uintptr_t dt,void *adt,size_t size)
     }
     plog_hex("X9 CAMERA FDT nodes present",a->c.present);
     plog_hex("X9 CAMERA FDT properties",a->c.count);
-    struct x9_camera_irq_layout q={0};uint32_t words[3]={0},features=0;
+    struct x9_camera_irq_layout q={0};uint32_t words[5]={0},features=0;
     if(camera_irq_qualify(a,&q))features|=CF_IRQ;
     if(camera_calibration_qualify(a,words))features|=CF_CALIBRATION;
     uint32_t ok=0;
@@ -119,9 +122,10 @@ int fdt_camera_patch_adt(uintptr_t dt,void *adt,size_t size)
         plog_str("X9 CAMERA IRQ FDT: GIC parent/banks/specifiers refused; topology absent\n");
     }
     if(features&CF_CALIBRATION) {
-        uint8_t *p=slot[SlotCAL];put(p,1);put(p+4,X9_CAM_CALIBRATION_LK_DATA);
-        put(p+8,words[0]);put(p+12,9);put(p+16,words[1]);put(p+20,words[2]);
-        plog_str("X9 CAMERA CAL FDT: this boot's CSI0/3 devinfo copied; no PHY/rate/DMA grant\n");
+        uint8_t *p=slot[SlotCAL];put(p,2);put(p+4,X9_CAM_CALIBRATION_LK_DATA);
+        put(p+8,words[0]);put(p+12,15);put(p+16,words[1]);put(p+20,words[2]);
+        put(p+24,words[3]);put(p+28,words[4]);
+        plog_str("X9 CAMERA CAL FDT: this boot's CSI0/1/2/3 devinfo copied; no PHY/rate/DMA grant\n");
     } else plog_str("X9 CAMERA CAL FDT: LK devinfo/CSI cell mapping refused; no calibration data\n");
     return features?1:0;
 }

@@ -26,7 +26,7 @@ static int cam_repeat_cancel_bus_guard_locked(uint64_t epoch)
     if(!e)e=cam_irq_idle();if(!e)e=cam_sv_guard();if(!e)e=cam_rx_session_guard();
     if(!e)e=cam_mac_guard();if(!e)e=cam_phy_guard();if(!e)e=cam_out_guard();if(e)return e;
     struct cam_sensor_ap ap={&cam_journal.sensor,
-        cam_repeat_cancel.next.frame.sensor==X9_CAMERA_BACK?0x1a:0x10};
+        cam_sensor_slave(cam_repeat_cancel.next.frame.sensor)};
     const uint16_t regs[]={0x0100,0x0104,0x0005};uint8_t value;
     for(unsigned i=0;i<3 && !e;i++) {
         e=cam_sensor_ap_read(&ap,regs[i],&value);

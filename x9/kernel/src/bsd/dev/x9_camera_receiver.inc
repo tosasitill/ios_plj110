@@ -66,7 +66,7 @@ static const unsigned cam_rx_sv_offsets[X9_CAM_RX_SV_WORDS]={
     0x1200,0x1204,0x1210,0x2100,0x2140
 };
 struct cam_rx_maps { vm_offset_t mac,async,out[2],sv[2]; };
-static struct cam_rx_maps cam_rx_maps[2];
+static struct cam_rx_maps cam_rx_maps[X9_CAMERA_SENSOR_COUNT];
 static struct {
     uint64_t epoch, sensor_epoch;
     bool close_attempted;
@@ -133,7 +133,10 @@ static uint32_t cam_rx_changed(const struct x9_camera_receiver_sample *a,
     const struct x9_camera_receiver_sample *b,unsigned port)
 {
     uint32_t changed=0;
-    const struct cam_rx_maps *m=&cam_rx_maps[port==3?0:1];
+    const struct cam_rx_maps *m=NULL;
+    for(unsigned i=0;i<X9_CAMERA_SENSOR_COUNT;i++)
+        if(sensors[i].csi_port==port) {m=&cam_rx_maps[i];break;}
+    if(!m)return UINT32_MAX; /* never compare a tele/UW observation through front maps */
     static const unsigned mac_offsets[4]={0,4,0x40,0x70};
     for(unsigned word=0;word<4;word++)
         if(cam_source_compare_word(m->mac,mac_offsets[word],a->mac[word])!=
@@ -168,9 +171,9 @@ static uint32_t cam_rx_changed(const struct x9_camera_receiver_sample *a,
 static int cam_rx_inspect(void *arg)
 {
     struct x9_camera_receiver *r=arg;
-    struct cam_rx_maps *m=&cam_rx_maps[r->sensor==X9_CAMERA_BACK?0:1];
+    struct cam_rx_maps *m=&cam_rx_maps[(r->sensor-1)];
     int e;
-    unsigned port=r->sensor==X9_CAMERA_BACK?3:0;
+    unsigned port=cam_sensor_port(r->sensor);
     r->stage=X9_CAM_RX_STAGE_MAP;
     r->mac_base=0x13884000ull+port*0x8000ull;
     r->out_base=0x3a200000;r->out_inner_base=0x3a208000;r->sv_base=0x3a600000;
@@ -248,8 +251,8 @@ static int cam_rx_session_guard(void)
 {
     struct x9_camera_receiver_sample a,b;
     struct x9_camera_receiver *r=&cam_rx_live.status;
-    const struct cam_rx_maps *m=&cam_rx_maps[r->sensor==X9_CAMERA_BACK?0:1];
-    unsigned port=r->sensor==X9_CAMERA_BACK?3:0;
+    const struct cam_rx_maps *m=&cam_rx_maps[(r->sensor-1)];
+    unsigned port=cam_sensor_port(r->sensor);
     uint32_t busy,changed,fbc0_mask,dma0_mask,cmos_mask,vf_mask,phy_mask,dl_mask;
     int e;
     if(!cam_rx_live.epoch || cam_rx_live.epoch!=cam_mm_live.epoch)return ESTALE;

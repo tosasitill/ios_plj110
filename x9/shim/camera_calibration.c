@@ -1,5 +1,5 @@
 /* LK devinfo is a little-endian byte array, NOT FDT cells or efuse MMIO.
- * mtk-devinfo.c reads atag,devinfo.data[reg/4]. Only CSI port0/3 words
+ * mtk-devinfo.c reads atag,devinfo.data[reg/4]. Only CSI port0/3/1/2 words
  * are transferred; no device ID, whole table, fixed board values or grant. */
 #include "camera_fdt.h"
 #include "plog.h"
@@ -31,14 +31,16 @@ static int cell(struct camera_fdt *a,unsigned consumer,const char *port,unsigned
  if(!get(a,node,"reg",&p,&n)||n!=8||be32(p)!=offset||be32(p+4)!=4)return 0;
  return camera_fdt_need(a,handle,node,CF_CALIBRATION);
 }
-int camera_calibration_qualify(struct camera_fdt *a,uint32_t out[3])
+int camera_calibration_qualify(struct camera_fdt *a,uint32_t out[5])
 {
  const uint8_t *p,*alt;size_t n,m;uint32_t count;
  const unsigned top=CN_TOP,efuse=CN_EFUSE;
  if(!enabled(a,efuse)||!enabled(a,top)||!string(a,efuse,"compatible","mediatek,devinfo")||
     !string(a,top,"compatible","mediatek,seninf-core")||
     !cell(a,CN_CSI0,"0",CN_CELL0,0x1d0)||
-    !cell(a,CN_CSI3,"3",CN_CELL3,0x1dc))return 0;
+    !cell(a,CN_CSI3,"3",CN_CELL3,0x1dc)||
+    !cell(a,CN_CSI1,"1",CN_CELL1,0x1d4)||
+    !cell(a,CN_CSI2,"2",CN_CELL2,0x1d8))return 0;
  int chosen=fdt_collect_get(&a->c,CN_CHOSEN,"atag,devinfo",&p,&n);
  int other=fdt_collect_get(&a->c,CN_CHOSEN0,"atag,devinfo",&alt,&m);
  /* Never fall back from a malformed/ambiguous chosen to another. */
@@ -48,5 +50,6 @@ int camera_calibration_qualify(struct camera_fdt *a,uint32_t out[3])
  if(n<4)return 0;
  count=le32(p);
  if(count<=0x1dc/4||count>400||n!=4+(size_t)count*4)return 0;
- out[0]=count;out[1]=le32(p+4+0x1d0);out[2]=le32(p+4+0x1dc);return 1;
+ out[0]=count;out[1]=le32(p+4+0x1d0);out[2]=le32(p+4+0x1dc);
+ out[3]=le32(p+4+0x1d4);out[4]=le32(p+4+0x1d8);return 1;
 }

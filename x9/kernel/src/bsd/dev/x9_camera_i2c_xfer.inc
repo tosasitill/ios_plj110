@@ -37,13 +37,13 @@ static int cam_bus_terminal_check(struct cam_probe_bus *b,uint32_t status)
     if(cam_rr(b->base,CAM_I2C_STAT)!=status)return ESTALE;
     return 0;
 }
-/* WRRD: one/two register-address bytes followed by ONE data byte.
+/* WRRD: one/two register-address bytes followed by one/two data bytes.
  * FIFO_DATA is byte-accessed upstream even with 32-bit CSR. */
-static int cam_bus_transfer(struct cam_probe_bus *b,uint8_t slave,
-                            const uint8_t *tx,unsigned count,uint8_t *rx)
+static int cam_bus_transfer_n(struct cam_probe_bus *b,uint8_t slave,
+                            const uint8_t *tx,unsigned count,uint8_t *rx,unsigned rx_count)
 {
     if(!b->owned || cam_bus_unretired(b) ||
-       !tx || !count || count>3)return EINVAL;
+       !tx || !count || count>4 || rx_count>2 || (!!rx != !!rx_count))return EINVAL;
     int e=cam_bus_clock(b);if(!e)e=cam_bus_idle(b);
     if(!e)e=cam_bus_controls(b,false);if(e)return e;
     uint32_t control=(b->saved[1]&~((1u<<1)|(1u<<2)|(1u<<4)|(1u<<8)|(1u<<9)))|
@@ -53,7 +53,7 @@ static int cam_bus_transfer(struct cam_probe_bus *b,uint8_t slave,
     if(!e)e=cam_bus_control_write(b,CAM_I2C_MASK,0,false);
     if(!e)e=cam_bus_control_write(b,CAM_I2C_ADDR,(uint32_t)slave<<1,false);
     if(!e)e=cam_bus_control_write(b,CAM_I2C_LEN,count,false);
-    if(!e)e=cam_bus_control_write(b,CAM_I2C_AUX,rx?1:0,false);
+    if(!e)e=cam_bus_control_write(b,CAM_I2C_AUX,rx_count,false);
     if(!e)e=cam_bus_control_write(b,CAM_I2C_TRANS,rx?2:1,false);
     if(!e)e=cam_bus_idle(b); /* no newly active channel before FIFO clear */
     if(!e)e=cam_bus_controls(b,false); /* fresh pin/clock/CSR guard before FIFO mutation */
@@ -87,10 +87,10 @@ static int cam_bus_transfer(struct cam_probe_bus *b,uint8_t slave,
     if(e)return cam_bus_request_fault(b,e,status,start);
     int result=(status&6)?ENXIO:0; /* a qualified NACK is not an ACK */
     uint32_t pending=cam_rr(b->base,CAM_I2C_FIFO)&31;
-    if((!result && pending!=(rx?1u:0u)) || (result && pending>count))
+    if((!result && pending!=rx_count) || (result && pending>count))
         return cam_bus_request_fault(b,EIO,status,start);
-    uint8_t byte=0;
-    if(!result && rx)byte=*(volatile uint8_t *)(b->base+CAM_I2C_DATA);
+    uint8_t bytes[2]={0};
+    if(!result)for(unsigned i=0;i<rx_count;i++)bytes[i]=*(volatile uint8_t *)(b->base+CAM_I2C_DATA);
     /* Recheck after consuming RX, before the first cleanup write. */
     e=cam_bus_terminal_check(b,status);
     if(!e) {
@@ -113,6 +113,9 @@ static int cam_bus_transfer(struct cam_probe_bus *b,uint8_t slave,
     if(e)return cam_bus_request_fault(b,e,status,start);
     b->fifo_owned=b->request_owned=false; /* only after confirmed local idle */
     if(result)b->failed_status=true;
-    if(!result && rx)*rx=byte; /* no output byte before cleanup succeeds */
+    if(!result && rx)memcpy(rx,bytes,rx_count); /* no output before cleanup succeeds */
     return result;
 }
+static int cam_bus_transfer(struct cam_probe_bus *b,uint8_t slave,
+                            const uint8_t *tx,unsigned count,uint8_t *rx)
+{ return cam_bus_transfer_n(b,slave,tx,count,rx,rx?1:0); }

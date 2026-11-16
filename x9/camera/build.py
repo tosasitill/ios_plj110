@@ -26,7 +26,7 @@ def sensor_tables(root, out):
     lines = ['/* Generated from public OPPO/MediaTek sensor register data.',
              ' * Original licenses/notices follow. Not for git. */']
     manifest = {}
-    for sensor in ('hhmain', 'hhfront'):
+    for sensor in ('hhmain', 'hhfront', 'hhtele', 'hhuwide'):
         text = ''
         if root:
             p = root / f'{sensor}_mipi_raw/{sensor}_Sensor_setting.h'
@@ -37,25 +37,52 @@ def sensor_tables(root, out):
             lines.append(text.split('/*****', 1)[0])
             manifest[sensor] = {'source': str(p), 'license': license_id,
                                 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
-        for mode in ('init', 'preview'):
+        word = sensor == 'hhuwide'
+        modes = ('pre_long', 'init_long', 'pre_short', 'init_short', 'preview') if word else ('init', 'preview')
+        for mode in modes:
             name = f'{sensor}_{mode}'
             values = []
             if root:
                 stripped = re.sub(r'/\*.*?\*/|//[^\n]*', '', text, flags=re.S)
-                m = re.search(r'\b' + name + r'_setting\s*\[\s*\]\s*=\s*\{([^{}]*)\}', stripped)
+                original = (f'hhuwide_sensor_init_pre_setting_{mode[4:]}' if mode.startswith('pre_') else
+                            f'hhuwide_sensor_init_setting_{mode[5:]}' if mode.startswith('init_') else
+                            'hhuwide_preview_setting') if word else name + '_setting'
+                m = re.search(r'\b' + original + r'\s*\[\s*\]\s*=\s*\{([^{}]*)\}', stripped)
                 if not m or '#' in m[1]:
                     raise ValueError(f'{name}: missing/conditional table')
                 tokens = [s.strip() for s in m[1].split(',') if s.strip()]
                 if any(not re.fullmatch(r'0x[0-9a-fA-F]+|[0-9]+', t) for t in tokens):
                     raise ValueError(f'{name}: not a literal register table')
                 values = [int(t, 0) for t in tokens]
-                if not values or len(values) % 2 or len(values) > 4096:
+                if not values or len(values) % 2 or len(values) > (8192 if word else 4096):
                     raise ValueError(f'{name}: invalid size')
+                page = None
                 for reg, val in zip(values[::2], values[1::2]):
-                    if (not 0 <= reg <= 65535 or not 0 <= val <= 255 or
+                    if word:
+                        if not 0 <= reg <= 65535 or not 0 <= val <= 65535:
+                            raise ValueError(f'{name}: non-word register pair')
+                        if reg == 0xfcfc:
+                            if val not in (0x4000, 0x4001, 0x2000, 0x2001, 0x2002, 0x2006):
+                                raise ValueError(f'{name}: unknown page')
+                            page = val
+                        elif page is None:
+                            raise ValueError(f'{name}: write before page selection')
+                        elif page == 0x4000 and reg in (0x0100, 0x0101, 0x0103, 0x0104, 0x0016, 0x0017):
+                            raise ValueError(f'{name}: live stream/hold/ID write')
+                        elif page == 0x4000 and reg in (0, 0x6014, 0x6018) and not mode.startswith('pre_'):
+                            raise ValueError(f'{name}: reset write outside pre-init')
+                    elif (not 0 <= reg <= 65535 or not 0 <= val <= 255 or
                             reg in (0x0016, 0x0017, 0x0100, 0x0101, 0x0103, 0x0104) or
                             0x0a00 <= reg <= 0x0aff):
                         raise ValueError(f'{name}: unsafe/non-byte/stream/reset/hold/OTP register pair')
+                if word and mode.startswith('pre_'):
+                    expected = [0xfcfc,0x4000,0,0xe,0,0x38e5,0x6018,1,0x7002,0x408,0x6014,1,
+                                0xfcfc,0x2002,0x1e92,0x8000,0x1e84,0x282b,0x1e86,0x320,
+                                0xfcfc,0x4000,0x7002,8]
+                    if values != expected:
+                        raise ValueError(f'{name}: changed cold reset prelude')
+                if word and page != 0x4000:
+                    raise ValueError(f'{name}: table does not return to control page')
                 manifest[sensor][mode + '_pairs'] = len(values) // 2
             lines.append(f'#define X9_{name.upper()}_COUNT {len(values)}u')
             lines.append(f'static const uint16_t x9_{name}[] = {{')
@@ -105,13 +132,14 @@ def main():
     (a.out / 'camera-bridge.json').write_text(json.dumps({
         'bytes': len(data), 'sha256': sha.hex(), 'ios_path': path,
         'profile': '20H392 / CMCapture 45d37488-2cc7-3028-8a4d-936bce7a220b',
-        'vendor_tables': bool(a.vendor_root), 'platform_adapter': False,
+        'vendor_tables': bool(a.vendor_root),
+        'platform_adapter': 'native; admitted at boot only after selected physical probes and close',
         'sensor_probe_backend': 'MT6993 cold AP FIFO/WL28681C; shared providers required',
         'sensor_standby_backend': 'explicit mode3 cold init/preview + stable readback + restore',
         'front_fab_backend': 'fixed page7f read-port, bounded exit, conditional B4 init patch',
         'sensor_factory_calibration': False,
         'hardware_tested': False}, indent=2) + '\n')
-    print(f'X9 camera: {len(data)} bytes; explicit cold probe/standby, no capture adapter; install only with x9_camera=2', flush=True)
+    print(f'X9 camera: {len(data)} bytes; native bridge + bounded cold sensor tables; hardware_tested=false; install only with x9_camera=2', flush=True)
 
 
 if __name__ == '__main__':

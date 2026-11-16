@@ -48,10 +48,11 @@ struct cam_probe_bus {
     bool fifo_owned, request_owned; /* attempted operations, NOT hardware leases */
 };
 struct cam_probe_board {
-    uint32_t reset, mclk, scl, sda, wl_mask, wl_count;
+    uint32_t reset, mclk, scl, sda, wl_mask, wl_count, sensor;
     uint32_t wl_channel[3], wl_code[3], wl_delay[3];
     uint32_t clk_off, clk_shift, clk_status_bit, clk_update_bit, clk_group;
     vm_offset_t drive_base;
+    uint32_t drive_shift;
 };
 enum { CAM_PIN_MODE, CAM_PIN_DIR, CAM_PIN_DOUT, CAM_PIN_FIELDS };
 struct cam_probe_pin {
@@ -85,6 +86,9 @@ struct cam_probe_journal {
     bool wl_tracking, wl_conflict;
     struct cam_probe_pin route[4], wake, reset, mclk;
     struct cam_probe_rail dovdd, afvdd;
+    struct cam_probe_rail dvdd; /* UW DVDD/DVDD1 are ONE SID5 provider. */
+    uint16_t sensor_page;
+    bool page_known, page_pending;
     bool vs_owned, pmif_fault;
     bool pins_owned, wl_owned, mux_owned, vote_owned;
     uint32_t restore_step, restore_channel;
@@ -315,13 +319,19 @@ static int cam_pmif_wait(vm_offset_t bus, unsigned expected)
 static int cam_pmic_xfer_locked(struct cam_probe_journal *j, unsigned sid,
                                 unsigned reg, uint8_t *v, bool write)
 {
-    if((sid!=3 && sid!=6) || reg>0xffff)return EPERM;
-    if(write && !((sid==3 && (reg==0x24a ||
+    if((sid!=3 && sid!=6 && !(sid==5 && j->board.sensor==X9_CAMERA_ULTRAWIDE)) || reg>0xffff)return EPERM;
+    bool uw_rail=j->board.sensor==X9_CAMERA_ULTRAWIDE && sid==5 &&
+        (reg==j->dvdd.sel_reg || reg==j->afvdd.sel_reg ||
+         ((reg==j->dvdd.en_reg+1 || reg==j->dvdd.en_reg+2 ||
+           reg==j->afvdd.en_reg+1 || reg==j->afvdd.en_reg+2) && *v==1));
+    if(write && !(uw_rail || (j->board.sensor==X9_CAMERA_TELEPHOTO && sid==j->afvdd.sid &&
+        (reg==j->afvdd.sel_reg || ((reg==j->afvdd.en_reg+1 || reg==j->afvdd.en_reg+2) && *v==1))) || (sid==3 && (reg==0x24a ||
         ((reg==0x2048 || reg==0x2049) && *v==1) ||
         ((reg==0x178b || reg==0x178c) && *v==4))) ||
         (sid==6 && (reg==0x1e61 || ((reg==0x1f08 || reg==0x1f09) && *v==1)))))return EPERM;
     if(j->pmif_fault)return EIO;
-    vm_offset_t bus=sid==3?j->pmif_p:j->pmif_m;
+    /* Captured spmi-dev-mask55a8: SID3/5 on P, SID6 on M. */
+    vm_offset_t bus=(sid==3 || sid==5)?j->pmif_p:j->pmif_m;
     if(!bus || !(cam_rr(bus,0)&1))return ENXIO;
     int e=cam_pmif_wait(bus,0);if(e)return e;
     j->pmif_pending=bus;
@@ -409,6 +419,8 @@ static uint32_t cam_cold_retained(const struct cam_probe_journal *j)
     if(j->wl_owned || j->wl_enabled || j->wl_programmed)mask|=X9_CAM_COLD_WL_RAILS;
     if(j->dovdd.taken || j->dovdd.enable_owned || j->dovdd.voltage_owned)mask|=X9_CAM_COLD_DOVDD;
     if(j->afvdd.taken || j->afvdd.enable_owned || j->afvdd.voltage_owned)mask|=X9_CAM_COLD_AFVDD;
+    if(j->dvdd.taken || j->dvdd.enable_owned || j->dvdd.voltage_owned ||
+       j->dvdd.conflict || j->dvdd.selector_uncertain || j->dvdd.enable_uncertain)mask|=X9_CAM_COLD_DVDD;
     if(j->vs_owned)mask|=X9_CAM_COLD_VS;
     if(cam_pin_retained(&j->wake))mask|=X9_CAM_COLD_WAKE;
     for(unsigned i=0;i<4;i++)if(cam_pin_retained(&j->route[i]))mask|=X9_CAM_COLD_ROUTES;
@@ -467,8 +479,20 @@ static int cam_cold_isolate(struct cam_probe_journal *j)
 static int cam_restore(struct cam_probe_journal *j)
 {
     int e=cam_cold_isolate(j);if(e)return e;
+    if(j->board.sensor==X9_CAMERA_ULTRAWIDE) {
+        j->restore_step=X9_CAM_COLD_RESTORE_AFVDD;
+        e=cam_rail_restore(j,&j->afvdd);if(e)return cam_restore_failed(j,e);
+        j->restore_step=X9_CAM_COLD_RESTORE_DVDD;
+        e=cam_rail_restore(j,&j->dvdd);if(e)return cam_restore_failed(j,e);
+    }
     /* Reverse actual board power order, including the interleaved shared
      * supplies. A failed rail/channel keeps its journal and all prerequisites. */
+    if(j->board.sensor==X9_CAMERA_TELEPHOTO) {
+        j->restore_step=X9_CAM_COLD_RESTORE_AFVDD;
+        e=cam_rail_restore(j,&j->afvdd);if(e)return cam_restore_failed(j,e);
+        j->restore_step=X9_CAM_COLD_RESTORE_DOVDD;
+        e=cam_rail_restore(j,&j->dovdd);if(e)return cam_restore_failed(j,e);
+    }
     if(j->board.wl_count==3) {
         j->restore_step=X9_CAM_COLD_RESTORE_DOVDD;
         e=cam_rail_restore(j,&j->dovdd);if(e)return cam_restore_failed(j,e);
@@ -481,10 +505,14 @@ static int cam_restore(struct cam_probe_journal *j)
             j->restore_step=X9_CAM_COLD_RESTORE_AFVDD;
             e=cam_rail_restore(j,&j->afvdd);if(e)return cam_restore_failed(j,e);
         }
-        if(j->board.wl_count==2 && i==2) {
+        if(j->board.sensor==X9_CAMERA_FRONT && i==2) {
             j->restore_step=X9_CAM_COLD_RESTORE_DOVDD;
             e=cam_rail_restore(j,&j->dovdd);if(e)return cam_restore_failed(j,e);
         }
+    }
+    if(j->board.sensor==X9_CAMERA_ULTRAWIDE) {
+        j->restore_step=X9_CAM_COLD_RESTORE_DOVDD;
+        e=cam_rail_restore(j,&j->dovdd);if(e)return cam_restore_failed(j,e);
     }
     j->restore_step=X9_CAM_COLD_RESTORE_WAKE;
     e=cam_wake_restore(j);if(e)return cam_restore_failed(j,e);
@@ -521,16 +549,16 @@ static int cam_restore(struct cam_probe_journal *j)
 static struct {
     vm_offset_t pa, va;
     vm_size_t size;
-} cam_board_maps[24];
+} cam_board_maps[32];
 static vm_offset_t cam_board_map(vm_offset_t pa, vm_size_t size)
 {
-    unsigned empty=24;
-    for(unsigned i=0;i<24;i++) {
+    unsigned empty=32;
+    for(unsigned i=0;i<32;i++) {
         if(cam_board_maps[i].pa==pa && cam_board_maps[i].size==size)
             return cam_board_maps[i].va;
-        if(!cam_board_maps[i].va && empty==24)empty=i;
+        if(!cam_board_maps[i].va && empty==32)empty=i;
     }
-    if(empty==24)return 0;
+    if(empty==32)return 0;
     vm_offset_t va=ml_io_map(pa,size);
     if(va) {
         cam_board_maps[empty].pa=pa;cam_board_maps[empty].size=size;
@@ -542,18 +570,20 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
                               struct x9_camera_probe *r)
 {
     memset(j,0,sizeof(*j));
-    bool back=which==X9_CAMERA_BACK;
+    if(!x9_camera_sensor_valid(which))return EINVAL;
+    bool back=which==X9_CAMERA_BACK,tele=which==X9_CAMERA_TELEPHOTO,uw=which==X9_CAMERA_ULTRAWIDE;
     j->board=(struct cam_probe_board){
-        .reset=back?171:170, .mclk=back?208:72,
-        .scl=back?174:172, .sda=back?175:173,
-        .wl_mask=back?0x4a:0x05, .wl_count=back?3:2,
-        .wl_channel={back?4u:3u,back?7u:1u,2},
+        .sensor=which, .reset=uw?205:tele?189:back?171:170, .mclk=uw?192:tele?188:back?208:72,
+        .scl=uw?200:tele?190:back?174:172, .sda=uw?201:tele?191:back?175:173,
+        .wl_mask=uw?0x20:tele?0x11:back?0x4a:0x05, .wl_count=uw?1:back?3:2,
+        .wl_channel={uw?6u:tele?5u:back?4u:3u,back?7u:1u,2},
         /* WL PLDO=1.372V+code*8mV; NLDO=0.496V+(code-0x3d)*8mV. */
-        .wl_code={back?179u:191u,back?54u:137u,144},
-        .wl_delay={back?3000u:1000u,back?3000u:1000u,4000},
-        .clk_off=back?0x70:0x60, .clk_shift=back?24:8,
-        .clk_status_bit=back?4:10, .clk_update_bit=back?27:21,
-        .clk_group=back?6:5
+        .wl_code={uw?104u:tele?179u:back?179u:191u,tele?137u:back?54u:137u,144},
+        .wl_delay={uw?1000u:tele?3000u:back?3000u:1000u,tele?4000u:back?3000u:1000u,4000},
+        /* Captured mclk ID23/pin208 is CAMTG4, not CAMTG7. */
+        .clk_off=back?0x70:0x60, .clk_shift=uw?24:tele?16:back?0:8,
+        .clk_status_bit=uw?8:tele?9:back?7:10, .clk_update_bit=uw?23:tele?22:back?24:21,
+        .clk_group=back?6:5,.drive_shift=uw?3:0
     };
     j->gpio=cam_board_map(0x1002d000,0x1000);
     j->vlp=cam_board_map(0x1c200000,0x1000);
@@ -562,20 +592,20 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
     j->pll=cam_board_map(0x1c213100,0x100);
     j->mainpll=cam_board_map(0x1c213000,0x100);
     j->pmif_p=cam_board_map(0x1c018000,0x2000);
-    j->pmif_m=back?cam_board_map(0x1c01a000,0x2000):0;
-    j->board.drive_base=cam_board_map(back?0x13800000:0x13040000,0x1000);
+    j->pmif_m=(back||tele)?cam_board_map(0x1c01a000,0x2000):0;
+    j->board.drive_base=cam_board_map((tele||uw)?0x12060000:back?0x13800000:0x13040000,0x1000);
     j->sensor=(struct cam_probe_bus){
-        .base=cam_board_map(back?0x12450000:0x123d0000,0x80000),
-        .dma=cam_board_map(back?0x163d0000:0x16390000,0x30000),.banks=8,.dma_banks=3,
-        .gate=cam_board_map(0x12650000,0x1000),.gate_bit=back?4:2,
-        .top=j->top,.univpll=j->pll,.mainpll=j->mainpll,.clock_shift=16,.clock_bit=29,
-        .group_gate_mask=0x3f};
+        .base=cam_board_map(uw?0x139d0000:tele?0x124d0000:back?0x12450000:0x123d0000,0x80000),
+        .dma=cam_board_map(uw?0x16480000:tele?0x16420000:back?0x163d0000:0x16390000,0x30000),.banks=8,.dma_banks=3,
+        .gate=cam_board_map(uw?0x13a50000:0x12650000,0x1000),.gate_bit=tele?8:back?4:2,
+        .top=j->top,.univpll=j->pll,.mainpll=j->mainpll,.clock_shift=uw?8:16,.clock_bit=uw?30:29,
+        .group_gate_mask=uw?0x03:0x3f};
     j->ldo=(struct cam_probe_bus){.base=cam_board_map(0x16200000,0x40000),
         .dma=cam_board_map(0x164f0000,0x10000),.banks=4,.dma_banks=1,
         .gate=cam_board_map(0x16300000,0x1000),.gate_bit=1,
         .top=j->top,.univpll=j->pll,.mainpll=j->mainpll,.clock_shift=0,.clock_bit=31,
         .group_gate_mask=0x0d};
-    if(!j->gpio || !j->vlp || !j->top || !j->hwv || !j->pll || !j->mainpll || !j->pmif_p || (back && !j->pmif_m) ||
+    if(!j->gpio || !j->vlp || !j->top || !j->hwv || !j->pll || !j->mainpll || !j->pmif_p || ((back||tele) && !j->pmif_m) ||
        !j->board.drive_base || !j->sensor.base || !j->sensor.dma || !j->sensor.gate ||
        !j->ldo.base || !j->ldo.dma || !j->ldo.gate)return ENOMEM;
     r->mclk_cfg=cam_rr(j->vlp,j->board.clk_off);
@@ -587,7 +617,7 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
     }
     cam_pin_snapshot(j,&j->reset,j->board.reset);
     cam_pin_snapshot(j,&j->mclk,j->board.mclk);
-    j->drive.saved=j->drive.expected=j->drive.prior=cam_rr(j->board.drive_base,0)&7;
+    j->drive.saved=j->drive.expected=j->drive.prior=(cam_rr(j->board.drive_base,0)>>j->board.drive_shift)&7;
     j->drive.valid=true;
     cam_pin_snapshot(j,&j->wake,203);
     if(j->reset.mode || (j->reset.dir?j->reset.dout:cam_pin_get(j->gpio,0x200,j->board.reset)) ||
@@ -642,7 +672,17 @@ static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
         if(!e)e=cam_clock_check(j,false,true);
         if(!e && which==X9_CAMERA_BACK)e=cam_vs_vote(j,true);
         if(!e)e=cam_pins_take(j);
+        if(!e && which==X9_CAMERA_ULTRAWIDE) {
+            /* Select drive while MCLK is disconnected, not a live-bank RMW.
+             * Keep4mA throughout; vendor's final drive step is a10ms settle. */
+            e=cam_drive_write(j,1,false);
+            if(!e)e=cam_pin_write(j,&j->mclk,CAM_PIN_MODE,1,false);
+            if(!e)delay(2000);
+        }
         delay(1000);
+        if(!e && which==X9_CAMERA_ULTRAWIDE) {
+            e=cam_rail_take(j,&j->dovdd);if(!e)delay(1000);
+        }
         /* Journal before writes: an ambiguous write must still be unwound. */
         for(unsigned i=0;i<j->board.wl_count && !e;i++) {
             uint8_t bit=(uint8_t)(1u<<(j->board.wl_channel[i]-1));
@@ -663,28 +703,48 @@ static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
             e=cam_wl_guard(j,false,&v);
             if(!e)e=cam_rail_take(j,&j->dovdd);if(!e)delay(3000);
         }
+        if(!e && which==X9_CAMERA_TELEPHOTO) {
+            e=cam_wl_guard(j,false,&v);
+            if(!e)e=cam_rail_take(j,&j->dovdd);if(!e)delay(3000);
+            if(!e)e=cam_rail_take(j,&j->afvdd);if(!e)delay(1000);
+        }
+        if(!e && which==X9_CAMERA_ULTRAWIDE) {
+            e=cam_wl_guard(j,false,&v);
+            if(!e)e=cam_rail_take(j,&j->dvdd);if(!e)delay(1000);
+            if(!e)e=cam_uw_dvdd_alias(j);
+            if(!e)e=cam_rail_take(j,&j->afvdd);
+        }
         if(!e)e=cam_wl_guard(j,false,&v);
         if(!e)e=cam_clock_check(j,false,true);
-        if(!e)e=cam_drive_write(j,1,false); /* DT encoded 4mA */
+        if(!e && which!=X9_CAMERA_ULTRAWIDE)e=cam_drive_write(j,1,false); /* DT encoded 4mA */
         if(!e)e=cam_clock_check(j,false,true);
         if(!e)e=cam_pins_guard(j,false);
-        if(!e)e=cam_pin_write(j,&j->mclk,CAM_PIN_MODE,1,false);
-        if(!e)delay(which==X9_CAMERA_BACK?6000:1000);
+        if(!e && which!=X9_CAMERA_ULTRAWIDE)e=cam_pin_write(j,&j->mclk,CAM_PIN_MODE,1,false);
+        if(!e && which!=X9_CAMERA_ULTRAWIDE)delay(which==X9_CAMERA_FRONT?1000:6000);
         if(!e)e=cam_wl_guard(j,false,&v);
         if(!e)e=cam_clock_check(j,false,true);
         if(!e)e=cam_pins_guard(j,false);
         if(!e)e=cam_pin_write(j,&j->reset,CAM_PIN_DOUT,1,false);
-        if(!e)delay(4000);
+        if(!e)delay((which==X9_CAMERA_TELEPHOTO || which==X9_CAMERA_ULTRAWIDE)?2000:4000);
+        if(!e && which==X9_CAMERA_ULTRAWIDE) {e=cam_drive_check(j,false);if(!e)delay(10000);}
         if(!e)e=cam_wl_guard(j,false,&v); /* after reset settle, before the first sensor request */
     }
     if(!e) {
         r->stage=X9_CAM_STAGE_ID;uint8_t hi=0,lo=0;
-        const uint8_t high[2]={0,0x16},low[2]={0,0x17};
-        uint8_t slave=which==X9_CAMERA_BACK?0x1a:0x10;
-        e=cam_bus_transfer(&j->sensor,slave,high,2,&hi);
+        const uint16_t id_reg=sensors[which-1].id_reg;
+        const uint8_t high[2]={(uint8_t)(id_reg>>8),(uint8_t)id_reg},
+            low[2]={(uint8_t)((id_reg+1)>>8),(uint8_t)(id_reg+1)};
+        uint8_t slave=cam_sensor_slave(which);
+        if(which==X9_CAMERA_ULTRAWIDE) {
+            const uint8_t page[]={0xfc,0xfc,0x40,0};
+            j->page_pending=true;
+            e=cam_bus_transfer_n(&j->sensor,slave,page,4,NULL,0);
+            if(!e) {j->page_pending=false;j->page_known=true;j->sensor_page=0x4000;}
+        }
+        if(!e)e=cam_bus_transfer(&j->sensor,slave,high,2,&hi);
         if(!e)e=cam_bus_transfer(&j->sensor,slave,low,2,&lo);
         if(!e)r->chip_id=((uint32_t)hi<<8)|lo;
-        if(!e && r->chip_id!=(which==X9_CAMERA_BACK?0x9186:0x0615))e=ENODEV;
+        if(!e && r->chip_id!=sensors[which-1].chip_id)e=ENODEV;
         if(!e)r->flags|=X9_CAM_PROBE_MATCHED;
     }
     r->i2c_status[0]=j->sensor.last_status;

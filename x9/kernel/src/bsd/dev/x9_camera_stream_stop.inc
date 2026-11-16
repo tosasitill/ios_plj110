@@ -111,7 +111,7 @@ static int cam_stream_close_begin_locked(uint64_t epoch)
     cam_stream_close.checking=true;
     e=cam_stream_close_guard_locked(epoch);if(e)goto out;
     ap=(struct cam_sensor_ap){&cam_journal.sensor,
-        cam_stream_close.request.frame.sensor==X9_CAMERA_BACK?0x1a:0x10};
+        cam_sensor_slave(cam_stream_close.request.frame.sensor)};
     /* OFF ACK is necessary, not sufficient even for control stop. Read
      * fresh sensor state again; no command, reset, retry or new credit. */
     for(unsigned sample=0;sample<2 && !e;sample++) {
