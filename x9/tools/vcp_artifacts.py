@@ -281,6 +281,149 @@ def rv55_init_evidence(dram):
     return result
 
 
+def rv55_reset_evidence(dram, init):
+    """Captured a003 request, candidate null-decode path and shared suffix.
+
+    RESET is not an empty START. Standard instructions prove its selector and
+    error ACK framing, but the edge into the candidate body is vendor encoded.
+    The generic decoder has an explicit null-input branch to an indirect codec
+    callback. Captured H265 table members expose two distinct null-input
+    wrappers; neither static table contents nor a named flush log proves the
+    selected runtime route, DPB preservation, DMA drain or buffer retirement.
+    """
+    result = dict(profile_match=False, runtime_reset_route_proven=False,
+                  runtime_reset_ack_success_proven=False,
+                  runtime_drain_type_selection_proven=False,
+                  runtime_codec_callback_selection_proven=False,
+                  runtime_dpb_reference_preservation_proven=False,
+                  runtime_producer_exclusion_proven=False,
+                  runtime_dma_retirement_proven=False)
+    if not init['profile_match']:
+        return result
+    spans = (
+        ('reset_a003_standard_selector', 0x305d70, 0x305d78),
+        ('reset_reply_zero40', 0x30626c, 0x30627c),
+        ('reset_request_word16_log_argument', 0x30628c, 0x306294),
+        ('reset_request_alias_and_instance_check', 0x3062ae, 0x3062d6),
+        ('reset_visible_error_status_minus14', 0x306304, 0x30630c),
+        ('reset_b003_reply_and_ack_helper', 0x30630c, 0x306320),
+        ('reset_candidate_instance_pair_fields', 0x306df4, 0x306e14),
+        ('reset_candidate_codec_member_address', 0x306e38, 0x306e48),
+        ('reset_candidate_null_decode_and_standard_suffix_jump', 0x306eae, 0x306ebe),
+        ('reset_suffix_postdecode_helper', 0x307864, 0x30786c),
+        ('reset_suffix_word16_labels_and_vendor_selection', 0x307874, 0x30789c),
+        ('reset_suffix_inner_mutex_argument_and_call', 0x3078b8, 0x3078c8),
+        ('reset_suffix_descriptor_loop_setup_and_pair_gate', 0x3078c8, 0x3078e6),
+        ('reset_suffix_descriptor_strides_loop_and_unlock', 0x307938, 0x30794a),
+        ('reset_suffix_saved_decode_result_operation_call', 0x30795a, 0x307978),
+        ('reset_other_chunk_null_decode_ex_call_and_result', 0x307832, 0x30784a),
+        ('generic_create_ops_destination_and_selector_call', 0x27000a, 0x270026),
+        ('generic_decode_arguments_and_named_log', 0x270224, 0x27023a),
+        ('generic_decode_null_input_standard_branch', 0x270246, 0x270248),
+        ('generic_decode_indirect_callback_and_saved_result', 0x2702bc, 0x2702cc),
+        ('generic_decode_null_input_eof_flags_and_followup', 0x2702d4, 0x2702fc),
+        ('generic_decode_vendor_result_remap_and_return', 0x27030a, 0x270326),
+        ('generic_decode_ex_alternate_callback_gate_and_call', 0x27038e, 0x2703a4),
+        ('generic_decode_ex_legacy_callback_fallback', 0x2703fa, 0x270408),
+        ('postdecode_helper_instance_member_and_zero_mode_gates', 0x30b4ea, 0x30b50c),
+        ('postdecode_helper_conditional_codec_query', 0x30b546, 0x30b552),
+        ('h265_decode_wrapper_saved_arguments_magic_and_null_branch', 0x2cd1d2, 0x2cd1ea),
+        ('h265_decode_null_wrapper_arguments_and_common_call', 0x2cd2a8, 0x2cd2c0),
+        ('h265_decode_ex_wrapper_magic_and_null_branch', 0x2cd926, 0x2cd93c),
+        ('h265_decode_ex_null_wrapper_arguments_and_common_call', 0x2cda02, 0x2cda18),
+        ('h265_decode_two_adapters_distinct_modes_and_same_tail', 0x2d3946, 0x2d3956),
+        ('h265_common_decode_saved_arguments', 0x2f8fa8, 0x2f8fbe),
+        ('h265_common_decode_input_pointer_reload_vendor_gate', 0x2f9082, 0x2f9088),
+    )
+    ops_address = 0x3356b0
+    ops = span(dram, ops_address - 0x200000, 64)
+    remap_address = 0x2710b0
+    remap = span(dram, remap_address - 0x200000, 32)
+    labels = ((0x30e007, 'reset_flush'), (0x30e014, 'reset_drain_eos'),
+              (0x30e025, 'reset_drain'), (0x30e032, 'descriptor_dump'),
+              (0x270bda, 'generic_decode'), (0x270c83, 'generic_decode_eof'),
+              (0x2cdd78, 'h265_decode'), (0x2cde32, 'h265_decode_ex'),
+              (0x2cde44, 'h265_decode_ex_flush'))
+    result.update(profile_match=True, profile='captured RV55 RESET/null-decode boundary',
+        request=dict(message=0xa003, selector_edge=0x305d74,
+            selector_target=0x30626c, alias_offset=8, alias_load=0x3062ae,
+            word16_loads=[0x306290, 0x307874],
+            word16_meaning_and_runtime_selection_proven=False,
+            instance_check_call=0x3062c2, instance_check_target=0x30a1f0,
+            unresolved_incoming_edge=0x3062d2,
+            unresolved_incoming_edge_raw_hex=span(dram, 0x3062d2 - 0x200000, 4).hex(),
+            candidate_body=0x306df4,
+            candidate_body_incoming_edge_proven=False,
+            candidate_address_from_standard_b_immediate_hypothesis_only=True,
+            candidate_codec_owner_offset=5008,
+            candidate_null_decode_call=0x306eb4, candidate_null_decode_target=0x270222,
+            candidate_null_decode_arguments=dict(a1=0, a2=0),
+            candidate_result_stack_offset=80, candidate_result_store=0x306eb8,
+            candidate_standard_jump=0x306eba, candidate_suffix=0x307864),
+        ack=dict(message=0xb003, reply_stack_offset=184, reply_bytes=40,
+            status_stack_offset=200, status_offset=16,
+            visible_error_status=-14, visible_error_store=0x30630a,
+            ack_helper_call=0x30631c, ack_helper=0x30b55e,
+            reply_emission_is_not_success_drain_or_dma_retirement=True),
+        suffix=dict(entry=0x307864, postdecode_call=0x307868,
+            postdecode_helper=0x30b4e6, postdecode_argument1=0,
+            request_word16_reload=0x307874, xor2_instruction=0x307890,
+            label_vendor_selection_instructions=[0x307894, 0x307898],
+            labels_do_not_prove_flush_drain_eos_selection=True,
+            descriptor_dump_mutex_owner_offset=6536,
+            descriptor_dump_lock_call=0x3078c4, descriptor_dump_unlock_call=0x307946,
+            descriptor_dump_loop_entries=64, token_pair_stride=8,
+            descriptor_stride=464, descriptor_loop_branch=0x307940,
+            descriptor_dump_is_not_free_or_retirement=True,
+            result_reload=0x30795a, operation_call=0x307964,
+            operation=0x30a432, operation_argument2_register='s0',
+            other_chunk_null_decode_ex_call=0x30783c,
+            other_chunk_null_decode_ex_target=0x270326,
+            other_chunk_incoming_edge_and_request_type_proven=False,
+            all_vendor_edges_and_reaching_definitions_proven=False),
+        codec=dict(generic_decode=0x270222, name_address=0x270bda,
+            null_input_branch=0x270246, null_input_branch_target=0x2702bc,
+            input_saved_register='s1', output_saved_register='s2',
+            callback_pointer_owner_offset=24, codec_context_owner_offset=80,
+            indirect_callback=0x2702c4,
+            callback_arguments=dict(a0='owner[80]', a1='s1', a2='s2'),
+            callback_result_saved=0x2702c6,
+            eof_label_address=0x270c83,
+            eof_software_flag_offsets=[1764, 1765], eof_followup_call=0x2702f8,
+            eof_software_flags_are_not_dpb_or_dma_receipts=True,
+            return_remap=dict(address=remap_address, raw_hex=remap.hex(),
+                words=list(struct.unpack('<8I', remap)),
+                vendor_index_selection_proven=False),
+            generic_decode_ex=0x270326,
+            alternate_callback_owner_offset=56, alternate_indirect_call=0x2703a0,
+            legacy_fallback_indirect_call=0x270404,
+            captured_h265_ops=dict(address=ops_address, raw_hex=ops.hex(),
+                words=list(struct.unpack('<16I', ops)),
+                legacy_decode_table_offset=8, legacy_decode=0x2cd1ce,
+                alternate_decode_table_offset=40, alternate_decode=0x2cd924,
+                table_copy_owner_offset=16,
+                table_identity_and_static_copy_are_not_runtime_selection=True),
+            legacy_h265_null_branch=0x2cd1e8, legacy_h265_null_target=0x2cd290,
+            legacy_h265_common_call=0x2cd2b4, legacy_h265_common=0x2d3946,
+            alternate_h265_null_branch=0x2cd93a, alternate_h265_null_target=0x2cd9de,
+            alternate_h265_common_call=0x2cda0c, alternate_h265_common=0x2d394e,
+            common_decoder=0x2f8fa2,
+            legacy_adapter=dict(a6='incoming a5', a5=0, jump=0x2d394a),
+            alternate_adapter=dict(a5=1, a6=0, jump=0x2d3952),
+            adapters_have_distinct_mode_arguments=True,
+            common_input_argument_saved_stack_offset=192,
+            common_input_argument_reload=0x2f9082,
+            common_input_vendor_gate=0x2f9084,
+            null_decode_downstream_path_and_dpb_preservation_proven=False),
+        labels=[dict(name=name, link_address=address,
+            value=cstring(dram, address - 0x200000)) for address, name in labels],
+        instruction_evidence=[dict(name=name, segment='DRAM', link_address=start,
+            end_exclusive=end, payload_offset=start - 0x200000,
+            raw_hex=span(dram, start - 0x200000, end - start).hex())
+            for name, start, end in spans])
+    return result
+
+
 def rv55_start_evidence(dram, init):
     """START framing only; custom decode/ACK ownership is not inferred."""
     result = dict(profile_match=False, runtime_start_proven=False,
@@ -3358,6 +3501,8 @@ def firmware(blob):
                     service_payloads.get('tinysys-vcp-RV55_A'),
                     service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
                 service_start_evidence=rv55_start_evidence(
+                    service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
+                service_reset_evidence=rv55_reset_evidence(
                     service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
                 service_vp_evidence=rv55_vp_evidence(
                     service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
