@@ -30,7 +30,7 @@ def serial_property():
     return serial.ljust(32, b'\0')
 
 
-def product_properties():
+def product_properties(island=False):
     if len(PRODUCT_ID) != 20:
         raise ValueError('MobileGestalt product-id must contain 20 bytes')
     return [
@@ -39,7 +39,9 @@ def product_properties():
         ('product-id', PRODUCT_ID),
         ('compatible-device-fallback', _cstr('iPhone9,2')),
         ('artwork-device-idiom', _cstr('phone')),
-        ('artwork-device-subtype', struct.pack('<I', 2436)),
+        # 20H392 SBUIIsSystemApertureEnabled recognises 2556/2796, not
+        # D22's 2436. Artwork only: do not spoof ProductType/board/canvas.
+        ('artwork-device-subtype', struct.pack('<I', 2556 if island else 2436)),
         ('artwork-scale-factor', struct.pack('<I', 3)),
         # Current framebuffer supports BGRA8/sRGB, not the D22AP P3 path.
         ('artwork-display-gamut', _cstr('sRGB')),

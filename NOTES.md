@@ -158,6 +158,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 状态栏 / 原生灵动岛（候选实现，未上机）
+
+- 单代理 `feat/statusbar-island`，隔离树 `.worktrees/statusbar-island`，基线 **39a02fa8**；不碰 root checkout 的 SMS 未提交交接。scratch `x9/out/statusbar-island-20261116/`。用户要求：识别/启用路径、参考 GitHub 强开灵动岛、状态栏整个下移20像素。
+- **观察**：最新 `330.txt` 同时有 `X9 STATUSBAR: ... DynamicSplitMedium ... errno=0` 和 SpringBoard `WARNING: Using overridden ...`；已是岛式两侧状态栏，但不证明原生岛。当前 ADT artwork-device-subtype=2436，兼容身份D22/iPhone10,3。20H392 `SBUIIsSystemApertureEnabled` **1a345a39c** 在SpringBoard检查有效subtype2556/2796；`SBSIsSystemApertureAvailable` **191555160** 的once body **1915551a0** 还检查FeatureFlags `SpringBoard/Jindo`，随后读MG `oPeik/9e8lQWMszEjbPzng.ArtworkDeviceSubType` 并比较2556/2796。root克隆的原件SpringBoard.plist里Jindo=FeatureComplete，非运行时flag返回证明。
+- **参考/候选**：DynamicCowTS@372fed4738b576a190a78325203d8e48fe16fa03只改相同cache字段（2556 Pro/2796 Pro Max），不照搬其MDC/TrollStore利用或分辨率修改。增加默认关闭 `x9_ui=1`：ADT只改subtype2556，不改ProductType/board/画布；独立UI epoch一次重建MG缓存（显式x9_mgwipe=0可禁止）；hash-addressed自有statusbar dylib仅注入SpringBoard，AppSync/任何既有DYLD链优先、不覆盖。不写Apple二进制或GPT。
+- **偏移路径**：20H392 UIKitCore UUID 1242978a-2c2c-3781-8d6c-9777edce2804，`-[UIStatusBar_Modern layoutSubviews]` **189244f3c** 每次把内层_UIStatusBar.frame重置为wrapper.bounds；hook原函数之后整体加 **20/nativeScale = 6.666667pt @3x**。布局不累加、不逐图标修改，不动桌面/触摸映射/画布。仅竖屏主屏；原生SystemAperture窗口不随该状态栏hook挪动；App内自绘bar尚未扩大注入，必须先证明桌面/锁屏剪裁、手势与计时器/音乐的原生岛。
+- **验证里程碑**：iOS arm64 dylib编译/签名实际exit0（86112B）；kern_exec.c真实overlay单文件实际exit0（148条既有风格warnings，无error）。4项离线tests在匹配Xcode15/MacOS SDK下实际exit0（第一次用了CLT MacOSX27 SDK与旧linker，失败保留，不算通过）；prepare-local --check exit0。仍未完整kernel/boot构建、无CI run ID、无fastboot/设备写入。进一步产物和确切commit随后补录。
+
+
 #### 2026-11-16 远端仅保留本地同名分支（实际删除完成）
 
 - **用户范围/基线**：单代理 `feat/remote-local-prune-20261116`，main输入 **3e4d50e7**。真实ls-remote的26条远端heads与本地10条heads按名称比较（排除本轮临时分支）；用户明确要求删除远端独有分支，不自动push本地独有分支，也不合入未知旧生产delta。根活动SMS的未提交NOTES从未由本轮切换/写入/恢复。

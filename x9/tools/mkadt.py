@@ -61,7 +61,7 @@ def node(name, props=(), children=()):
 
 
 def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_window="legacy512", wlan=False,
-          baseband=False, torch=False, haptic=False, bluetooth=False, als=False):
+          baseband=False, torch=False, haptic=False, bluetooth=False, als=False, island=False):
     if ram_window not in RAM_WINDOWS:
         raise ValueError("unknown captured X9 RAM window")
     phys_base, mem_size = RAM_WINDOWS[ram_window]
@@ -177,7 +177,7 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
             node('als', [ph(), ('device_type', cstr('als'))])])])] if als else []))
     fb = node('sweet-fbcon', [ph(), ('reg', u64(FB, FB_SIZE)),
         ('width', u32(FB_W)), ('height', u32(FB_H)), ('stride', u32(FB_STRIDE))])
-    product = node('product', [ph()] + product_properties())
+    product = node('product', [ph()] + product_properties(island=island))
     if haptic:
         # HakiOS D22 Actuator discovery. Physical READY is separately gated
         # by the native HAL; these are capabilities, not Apple GPIO/MMIO.
@@ -222,10 +222,11 @@ def main():
     ap.add_argument('--haptic', action='store_true', help='enable closed-loop/native Actuator discovery')
     ap.add_argument('--bluetooth', action='store_true', help='publish /arm-io/bluetooth for bluetoothd')
     ap.add_argument('--als', action='store_true', help='publish the D22 AOP ALS path for MobileGestalt')
+    ap.add_argument('--island', action='store_true', help='opt-in 2556 artwork subtype for native iOS 16 SystemAperture')
     ap.add_argument('--dump', action='store_true')
     a = ap.parse_args()
     root = build(timebase=a.timebase, console_base=a.console_base, console_size=a.console_size, ram_window=a.ram_window,
-                 baseband=a.baseband, torch=a.torch, haptic=a.haptic, bluetooth=a.bluetooth, als=a.als)
+                 baseband=a.baseband, torch=a.torch, haptic=a.haptic, bluetooth=a.bluetooth, als=a.als, island=a.island)
     a.out.parent.mkdir(parents=True, exist_ok=True)
     blob = adt.serialize(root)
     a.out.write_bytes(blob)

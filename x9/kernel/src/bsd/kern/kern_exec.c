@@ -393,6 +393,7 @@ static int x9_torch_exec_env(struct image_params *, int);
 static int x9_camera_exec_env(struct image_params *, int);
 #include "x9_appsync_exec.inc"
 static int x9_appsync_exec_env(struct image_params *, int);
+static int x9_ui_exec_env(struct image_params *, int);
 #endif
 
 /*
@@ -5841,6 +5842,8 @@ exec_extract_strings(struct image_params *imgp)
 	if (error) goto bad;
 	error = x9_appsync_exec_env(imgp, new_ptr_size);
 	if (error) goto bad;
+	error = x9_ui_exec_env(imgp, new_ptr_size);
+	if (error) goto bad;
 #endif
 	if (imgp->ip_argspace < new_ptr_size) {
 		error = E2BIG;
@@ -6984,6 +6987,7 @@ sweet_x9_prepare_wallpaper_collections(proc_t p,user_addr_t scratch,user_addr_t 
 #include "x9_torch_install.inc"
 #include "x9_camera_install.inc"
 #include "x9_appsync_env.inc"
+#include "x9_ui_install.inc"
 #include "x9_microphone_install.inc"
 #include "x9_haptic_install.inc"
 #include "x9_speaker_install.inc"
@@ -8619,23 +8623,41 @@ sweet_x9_wipe_gestalt_cache(proc_t p, user_addr_t scratch, user_addr_t end)
 	 * Epoch 2026-11-16 (log 328): /arm-io/aop/iop-aop-nub/als for MG
 	 * ambient-light-sensor; the flash/haptics answers rebuild with it. */
 	static const char epoch_dir[] = "/private/var/x9/mg";
-	static const char epoch_path[] = "/private/var/x9/mg/refresh-als-20261116";
-	static const uint8_t epoch_data[] =
+	const bool island = sweet_x9_arg("x9_ui", 0) == 1;
+	const char *epoch_path = island ? "/private/var/x9/mg/refresh-ui2556-20261116" :
+	                                "/private/var/x9/mg/refresh-als-20261116";
+	const char *epoch_data = island ?
+	    "x9 MobileGestalt cache rebuilt for ADT artwork subtype 2556 and AOP ALS\n" :
 	    "x9 MobileGestalt cache rebuilt for ADT AOP ambient light sensor\n";
 	uint8_t epoch_sha[32];
-	int mode = sweet_x9_arg("x9_mgwipe", 0);
+	/* Opt-in x9_ui=1 requires regenerated artwork answers exactly once.
+	 * Explicit x9_mgwipe=0 still suppresses ALL cache writes for diagnostics. */
+	int mode = sweet_x9_arg("x9_mgwipe", island ? 2 : 0);
 	if (mode != 1 && mode != 2) {
 		return 0;
 	}
 	if (!sweet_x9_ufs_root_writable()) {
 		return EROFS;
 	}
+	/* Explicit one-shot rollback (x9_ui=0 x9_mgwipe=1) invalidates the
+	 * old enabled epoch too. Otherwise re-enabling after rollback would keep
+	 * the newly regenerated 2436 cache because a stale 2556 marker survives.
+	 */
+	if (mode == 1 && !island) {
+		static const char old_ui_epoch[] = "/private/var/x9/mg/refresh-ui2556-20261116";
+		if (!proc_is64bit(p) || scratch > end || sizeof(old_ui_epoch) > end - scratch) return E2BIG;
+		error = copyout(old_ui_epoch, scratch, sizeof(old_ui_epoch));
+		if (error) return error;
+		error = unlink(p, &u, &rv);
+		printf("X9 MGWIPE: rollback UI epoch errno=%d\n", error);
+		if (error && error != ENOENT) return error;
+	}
 	if (mode == 2) {
 		SHA256_CTX epoch_hash;
 		SHA256_Init(&epoch_hash);
-		SHA256_Update(&epoch_hash, epoch_data, sizeof(epoch_data) - 1);
+		SHA256_Update(&epoch_hash, epoch_data, strlen(epoch_data));
 		SHA256_Final(epoch_sha, &epoch_hash);
-		error = x9_bbfw_equal(epoch_path, epoch_sha, sizeof(epoch_data) - 1);
+		error = x9_bbfw_equal(epoch_path, epoch_sha, strlen(epoch_data));
 		if (!error) {
 			printf("X9 MGWIPE: epoch already rebuilt; cache kept\n");
 			return 0;
@@ -8679,7 +8701,7 @@ sweet_x9_wipe_gestalt_cache(proc_t p, user_addr_t scratch, user_addr_t end)
 		error = x9_bbfw_directory(p, scratch, end, epoch_dir);
 		if (!error) {
 			error = x9_bbfw_write(p, scratch, end, epoch_path, epoch_data,
-			    sizeof(epoch_data) - 1, epoch_sha, &created);
+			    strlen(epoch_data), epoch_sha, &created);
 		}
 		printf("X9 MGWIPE: epoch marker created=%d errno=%d\n", created, error);
 	}
@@ -8918,6 +8940,8 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 if(speaker_error)printf("X9 SPEAKER HAL: unavailable errno=%d; continuing boot without output publication\n",speaker_error);
 	 int bt_root_error=x9_bluetooth_root(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(bt_root_error)printf("X9 BT ROOT: not applied errno=%d; continuing boot\n",bt_root_error);
+	 int ui_error=x9_ui_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+	 if(ui_error)printf("X9 UI: bridge unavailable errno=%d; continuing boot\n",ui_error);
 	}
 	sweet_x9_init_stage="objc-trampolines";
 	error=sweet_x9_prepare_objc_trampolines(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
