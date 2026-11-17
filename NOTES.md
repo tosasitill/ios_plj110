@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机继续：ISP8s 默认 DDR/COH/BW 请求与独立最终关闭复位
+
+- **范围/依据**：单代理在既有相机树/分支，起点`465811bd` clean，上一回合归类progress（r30源码/整包/推送）。最新实机仍`~/350.txt`，没有r30运行证据。按同一ISP8s `mtk_cam-sv.c:1920..1923/2140..2205`默认SW-mode和`:1261..1304/797..969`正常关闭路径推进；没有执行测试脚本/套件、ADB、boot、分区操作或修改共享输入。
+- **六条启动RMW**：新增`x9_camera_sv_qos.inc`，DDR+150、COH+280、BW_QOS+158依Android顺序分别SET bit4→OR_CQ bit1。冷基线拒绝继承的timer/mode/OR_CQ/SET/CLEAR/SW_R请求；所有真实RMW输入、完整输出和issued在store之前记账，保留Android第二次RMW中真实读出的SET/SW_R位，不另造重试。OR_CQ普通控制实际外bank两次目标读回，inner仅记录实际传播、不杜撰inner命令ACK。只有已发SET的SET/SW_R与已发OR_CQ字段允许变化，其余含CLEAR保持严格；SW_R仅原始状态观察，**不据字段名宣称DMA/供电请求已验收**。原geometry/FIFO/FBC/地址恢复不回写这三个命令字，运行中的普通完整寄存器守卫继续逐字核对。
+- **关闭依据与时机**：同源ISP8s没有显式三个CLEAR关闭写者，`central_common_disable()`实际调用`sv_reset()`。新增`x9_camera_sv_shutdown.inc`，放在原自然帧/RAW/CPU/worker/GIC/FBC退休与SMMU恢复、SV普通配置恢复、OUTMUX/PHY/MAC恢复之后，SMI/MM撤引用之前。此时sensor已进入CLOSING并由`cam_cold_isolate()`真实拉低reset、断开MCLK引脚，不能再调用要求未close的AP I2C读；新guard检查实际pin隔离、独立native退休授权、GIC全idle、源输入不变及全部七通道双outstanding零。首次reset前再次真实核对原自然FBC、RET/CANCELLED slot与S1 raw状态；reset不会制造自然帧完成或让未提交credit通过。
+- **正常reset实现**：按同源DCM inhibit1、四条outer/inner CAM/SOF_SUB RMW、inner CQ subsample RMW，接DMA0/CQ0/STG0→DMA1/STG1/CQ1，各poll ACK bit1/100ms（DMA→STG→CQ），然后原9条CQ0x11/DCM0/central DCM0/SW_CTL1/DMA0/STG0/CQ0x10/CQ0/SW_CTL0。共21条store逐条先记账；持central reset期间保持原连续尾序列，不插入引擎读/传感器I2C。没有引入另版本第二SOF CLEAR或Android错误debug sweep；ACK超时不重发，保留依赖。
+- **释放/归档条件**：只在三个请求完整raw字都实读回本次冷基线、各stop/DCM/reset实读零、两份完整CAMSV post配置稳定且源输入仍未变后，标记QoS退休并更新receiver的实际SV expected（原before与原自然FBC/IRQ/DMA历史不改）。新增SMI close独立QoS release guard，final reset或readback失败不能绕过它撤电。epoch recycle另要求这份完整reset/QoS回执，并把两个新journal和原历史一同永久存档，原8-epoch pin预算不变。**这里实现了待验证的同源关闭序列，不假定SW_CTL一定清除软件请求；若实机不回冷值，实际EBUSY并保留SMI/MM**。
+- **编译里程碑**：初版正常Builder `compile_one(sweet_x9_camera.o)` **actual exit0/True，184 warnings**；日志`x9/out/camera-qos-shutdown-compile-r1-20261117-console.log`、输出`x9/out/x9-camera-qos-shutdown-compile-r1-20261117/`。随后补OR_CQ目标等待、移声明消掉两条新warning并补注释/交接，最终由正常整包编译。没有CI run ID、成功产物二次检查或硬件效果；下一固定clean源码构建唯一r31。完整目标仍active，真实MM/RAW/handler/预览、四摄拍照/视频及AF/OIS等尚未验收。
+
 #### 2026-11-17 相机继续：ISP8s 冷复位与完整恢复后的 receive/TG 观察器生命周期
 
 - **位置/范围**：单代理续用 `.worktrees/camera-integration` / `feat/camera-integration`，起点 `993909e0` clean；主 checkout 在其它任务且 NOTES 有未提交修改，本轮未触碰。最新设备证据仍 `~/350.txt`：MM stage1/0514失败；r28b/r29以及本轮代码均无新上机结果。未执行测试脚本/套件、ADB/boot/分区操作或并行代理。

@@ -72,6 +72,10 @@ struct x9_camera_sv_hw_status {
  * sampled complete outer/inner targets prove configuration consumption;
  * no inner data writes, force-load, FBC, address, IRQ, CQ or DMA enable.
  * CQI threshold configuration never starts a CQ fetch or changes its base.
+ * The same config lifetime separately journals ISP8s default DDR/COH/BW
+ * software SET/OR_CQ requests. Command/SW_R observations are kept outside
+ * ordinary restore fields; only normal final reset plus actual cold request
+ * readback can release them, after natural frame/translation retirement.
  * The separate normal IRQ begin path, AFTER an actual S1 lease/RAW arm,
  * journals A0 base low/high and the frame's tag0 FH_SPARE, then initializes
  * tag0 FBC_EN without RCNT, reset, lock, subsampling or valid/sub ratio.
@@ -117,6 +121,9 @@ struct x9_camera_sv_hw_status {
  * Sensor close retires this journal BEFORE OUTMUX/PHY/MAC/SMI/MM. Pending
  * writes require their actual targets, not cancellation by a prior value.
  * This state is neither GIC/IRQ history nor producer/DMA/cache/worker drain.
+ * After ordinary SV and source-component restoration, a separate final
+ * sv_reset journal holds SMI/MM until DMA/STG/CQ ACK and request cold
+ * readback. Its reset FBC readings never replace this natural frame history.
  * This private status adds no ioctl, READY or ownership claim. */
 #endif
 #endif

@@ -109,8 +109,8 @@
 - 已修正 native CMDQ 开启顺序；普通 wrapper 用 DT resource1 `309e0000`，
   保存/验证/退休完整原值；secure WPCFG/AID-SID 策略尚无运行验证，不能由普通寄存器匹配推定。
 - CAMSV 已接入 MT6993 默认静态 FIFO 的完整 DMA/CQI 阈值；后续仍需核对 Android
-  runtime resume 的局部 reset、DDR/BW_QOS/COH 软件请求及其关闭顺序。
-  SET/CLEAR/SW_R 不是普通几何字段，未确认语义前不猜写或按完整 RW 字还原。
+  runtime resume 的局部 reset、DDR/BW_QOS/COH 软件请求及其关闭顺序（本轮实现见下，尚未实跑）。
+  SET/CLEAR/SW_R 独立记账，不作为普通几何字段按完整 RW 字还原。
 - **本轮冷复位源码已补齐（2026-11-17，r30整包exit0，未上机）**：在 native SMI 完整取时钟后、
   MAC/PHY/OUTMUX 和全部 request/FBC 之前，按 ISP8s `sv_reset_by_camsys_top()` 执行
   CQ stop0→1/ACK bit1→0，以及 MRAW+0xa4 的0→0x30→0连续脉冲。
@@ -119,6 +119,13 @@
 - **SID来源已核清**：live DT `mm-smmu-cam` 的 `iommus=<MM_SMMU 0x80>` 由
   `arm_smmu_of_xlate()` 原样使用；CAMSV的`mediatek,smmu-dma-axid`列表仅注册fault callback，
   不是SID或需要手动执行的路由写表。`mtk_smmu_aid2sid()`仅在DEBUG配置编译，未新增该SMC。
+- **DDR/COH/BW与normal reset源码接入（2026-11-17，尚未整包/上机）**：
+  按ISP8s默认SW-mode依次执行DDR SET/OR_CQ、COH SET/OR_CQ、BW_QOS SET/OR_CQ，
+  保留六次真实RMW输入/输出，SET/CLEAR/SW_R不按普通保存字回写；SW_R仅原始观察，不当DMA授权。
+  在自然RAW/CPU/worker/GIC/FBC退休和SMMU恢复、SV及OUTMUX/PHY/MAC恢复、sensor reset/MCLK
+  真实隔离之后，独立执行`sv_reset()`的DMA/STG/CQ stop/ACK与central reset。
+  两份完整post配置、三个请求都实际恢复到本次冷基线，才允许撤SMI/MM；
+  复位前自然FBC和复位后读数各自存档，后者不替代自然DONE/退休。
 - 期望：CAMSV 收到帧中断、DMA 写出、`X9 CAMERA` 帧计数增加，Camera.app 出画面。
 
 ## 7. 阶段 E：收尾

@@ -200,7 +200,8 @@ static int cam_smi_clocks_close_locked(uint64_t epoch)
     if(!cam_smi.held)return 0;
     if(epoch!=cam_smi.epoch || cam_smi.close_attempted)return ESTALE;
     cam_smi.close_attempted=true;
-    e=cam_smi_pending_retire();if(!e)e=cam_smi_clock_only_guard();
+    e=cam_sv_qos_release_guard(epoch);
+    if(!e)e=cam_smi_pending_retire();if(!e)e=cam_smi_clock_only_guard();
     /* Port controls retire while BOTH supplier and consumer clocks remain
      * held. A pending A0 write is qualified by its own sole close below.
      * Native AP budget withdraw precedes A0 restore. Port idle here is only

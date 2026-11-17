@@ -247,6 +247,7 @@ static int cam_sv_power_guard(void)
     e=cam_mm_guard(&cam_mm,true);if(e)return e;
     return cam_smi_clock_guard();
 }
+#include "x9_camera_sv_qos.inc"
 static int cam_sv_inactive(const uint32_t *v)
 {
     /* Commands/foreign IRQ/DMA enables remain off; only this request's exact
@@ -474,8 +475,11 @@ static int cam_sv_guard_impl(void)
                !(n==pending_reg && cam_sv.expected[1][n]==cam_sv.pending_next))allowed=true;
             e=cam_sv_receive_observe_word(bank,n,v[n],&allowed);if(e)return e;
             e=cam_sv_gate_observe_word(bank,n,v[n],&allowed);if(e)return e;
+            e=cam_sv_qos_observe(bank,cam_sv.offset[n],v[n],&allowed);if(e)return e;
             if(cam_sv_dma_stop_compare_allowed(bank,cam_sv.offset[n],v[n]))allowed=true;
             if(!allowed)return ESTALE;
+            if(cam_sv_qos_index(cam_sv.offset[n])<CAM_SV_QOS_COUNT)
+                cam_sv.expected[bank][n]=v[n]; /* actual command/status sample */
         }
         if(!bank && pending_reg<CAM_SV_MAX_REGS && v[pending_reg]==cam_sv.pending_next)
             cam_sv.pending_seen=true;
@@ -714,6 +718,7 @@ static int cam_sv_open_locked(uint64_t epoch)
      * staged geometry/addresses/other tags/CQ or request policy. */
     if(memcmp(cam_sv.before[0],cam_sv.before[1],cam_sv.count*sizeof(uint32_t)))return cam_sv_fault(EBUSY);
     memcpy(cam_sv.expected,cam_sv.before,sizeof(cam_sv.expected));
+    e=cam_sv_qos_capture();if(e)return cam_sv_fault(e);
     for(unsigned slot=0;slot<CAM_SV_FIELDS;slot++)cam_sv.status.before[slot]=cam_sv.before[0][cam_sv.field[slot]];
     for(unsigned bank=0;bank<2;bank++)cam_sv.status.db_before[bank]=cam_sv.before[bank][cam_sv.db_reg];
     for(unsigned i=0;i<X9_CAM_SV_RECEIVE_FIELDS;i++) {
@@ -738,6 +743,7 @@ static int cam_sv_open_locked(uint64_t epoch)
     }
     e=cam_sv_environment();
     for(unsigned slot=0;slot<CAM_SV_CONFIG_FIELDS && !e;slot++)e=cam_sv_field_write(slot,cam_sv.target[slot]);
+    if(!e)e=cam_sv_qos_start();
     if(!e)e=cam_sv.dirty?cam_sv_commit():cam_sv_target_observe();
     if(!e) {
         cam_sv.status.flags|=X9_CAM_SV_HW_CONFIGURED;
@@ -1118,8 +1124,13 @@ static int cam_sv_close_locked(uint64_t epoch)
     }
     if(!e)e=cam_sv_environment();
     if(!e) {
-        for(unsigned bank=0;bank<2;bank++)if(memcmp(cam_sv.expected[bank],cam_sv.before[bank],
-            cam_sv.count*sizeof(uint32_t)))e=cam_sv_fault(ESTALE);
+        for(unsigned bank=0;bank<2;bank++)for(unsigned n=0;n<cam_sv.count;n++) {
+            /* SW requests stay asserted through natural frame/translation
+             * retirement. Final normal reset owns their independent release;
+             * ordinary config restoration must never replay saved SET words. */
+            if(cam_sv_qos_index(cam_sv.offset[n])<CAM_SV_QOS_COUNT)continue;
+            if(cam_sv.expected[bank][n]!=cam_sv.before[bank][n])e=cam_sv_fault(ESTALE);
+        }
     }
     if(!e) {
         cam_sv.held=false;cam_sv.dirty=0;cam_sv.db_phase=CAM_SV_DB_IDLE;cam_sv.db_issued=false;

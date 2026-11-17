@@ -41,6 +41,8 @@ struct cam_rx_maps;
 static int cam_irq_prepare_locked(uint64_t);
 static int cam_irq_cold_reset_guard_locked(uint64_t,const struct cam_rx_maps *);
 static int cam_sv_cold_reset_retirement_guard(uint64_t);
+static int cam_sv_shutdown_locked(uint64_t);
+static int cam_sv_qos_release_guard(uint64_t);
 static int cam_irq_guard_locked(uint64_t);
 static int cam_irq_close_locked(uint64_t);
 static int cam_irq_credit_guard_locked(uint64_t);
@@ -305,6 +307,7 @@ static int cam_rx_session_close(struct x9_camera_receiver *r)
     if(!off)off=cam_out_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_phy_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_mac_close_locked(cam_rx_live.sensor_epoch);
+    if(!off)off=cam_sv_shutdown_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_smi_clocks_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_mm.active?cam_rx_session_guard():0;
     if(!off)off=cam_mm_session_close(cam_rx_live.epoch,&cam_rx_live.status.mm);

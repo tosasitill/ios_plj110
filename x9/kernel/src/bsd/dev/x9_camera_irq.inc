@@ -236,6 +236,7 @@ static void cam_repeat_stop_locked(uint64_t);
 #include "x9_camera_dma_stop.inc"
 #include "x9_camera_credit_retire.inc"
 #include "x9_camera_native_repeat.inc"
+#include "x9_camera_sv_shutdown.inc"
 /* Under spin, after actual IAR and only while accepting. Ordinary FIRST/FH
  * reads select exactly the vendor bank. No multi-tag fallback or status sweep. */
 static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
