@@ -96,9 +96,10 @@
 - 期望：`MM:` flags 出现 POWER 和 CLOCKS，blockers 里清掉 POWER/CLOCKS/RATE/SMI。
 
 - 2026-11-17静态修正L19/P0 OSTD：DT `w-hrt-ostdl=3`为`OSTDL_3`，不是`OSTDL_2`。
-  按interconnect v2先取RAW `max(avg,peak)`、截断MB/s，再`ceil(MBps/512)*3`、默认1/上限64；
+  按ISP8s `to_qos_icc`先把RAW字节需求/1024成ICC KB/s，v2取`max(avg,peak)`，
+  再/1000与`ceil(MBps/512)*3`、默认1/上限64；
   有限请求无max-BW哨兵策略。MMPC channel10/7静态上界供给与端口OSTD分离。
-  单对象actual exit0/182 warnings，确切r35整包与实机状态见NOTES；不作带宽硬件通过结论。
+  单对象actual exit0/182 warnings，确切r35/r36整包与实机状态见NOTES；不作带宽硬件通过结论。
 
 ## 5. 阶段 C：传感器配置（NATIVE CONFIG stage）
 - 安卓 hhmain：`hhmainmipiraw_Sensor.c`（open/init 表、mode 表、`hhmain_Sensor_setting.h`）。核对 iOS 的

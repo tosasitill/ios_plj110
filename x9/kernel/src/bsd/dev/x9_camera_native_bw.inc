@@ -146,9 +146,10 @@ static int cam_native_bw_take_locked(uint64_t epoch)
     cam_native_bw.units[1]=(uint32_t)((cam_native_bw.peak*10+margin-1)/margin);
     if(!cam_native_bw.units[0] || !cam_native_bw.units[1] ||
        cam_native_bw.units[0]>1023 || cam_native_bw.units[1]>1023)return ERANGE;
-    /* mtk-interconnect/core.c aggregate_requests_v2 uses max(avg,peak).
-     * Bps_to_icc then icc_to_MBps truncate to decimal MB/s BEFORE
-     * SHIFT_ROUND. MT6993 L19/P0 is write/bw_ratio9; live DT policy3
+    /* ISP8s calc_bw -> to_qos_icc truncates B/s /1024 to ICC KB/s,
+     * unlike generic Bps_to_icc's /1000. aggregate_requests_v2 then
+     * takes max(avg,peak); icc_to_MBps truncates /1000 BEFORE SHIFT_ROUND.
+     * MT6993 L19/P0 is write/bw_ratio9; live DT policy3
      * means OSTDL_3: ceil(mix_MBps/512)*3, not ceil(mix_MBps/256).
      * The 10/7 channel occupancy above does not enter per-port OSTD.
      * This finite single-path supplier never requests MTK_MMQOS_MAX_BW,
@@ -156,7 +157,7 @@ static int cam_native_bw_take_locked(uint64_t epoch)
      * starts at1 for sub-MB/s demand, then clamps at max_ratio64. */
     mix=cam_native_bw.peak>cam_native_bw.average?
         cam_native_bw.peak:cam_native_bw.average;
-    cam_native_bw.mix_mbps=(uint32_t)(mix/1000000ull);
+    cam_native_bw.mix_mbps=(uint32_t)((mix/1024ull)/1000ull);
     cam_native_bw.ostd=cam_native_bw.mix_mbps?
         ((cam_native_bw.mix_mbps+511u)>>9)*3u:1u;
     if(cam_native_bw.ostd>64)cam_native_bw.ostd=64;

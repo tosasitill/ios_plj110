@@ -160,13 +160,20 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
-#### 2026-11-17 相机主链继续：修正 L19/P0 的 MMQoS OSTD 枚举与取整（待 r35 整包）
+#### 2026-11-17 相机主链继续：追到 ISP8s caller 的 KB/s 换算（待 r36 整包）
+
+- **源码事实与修正**：沿`isp8s/cam/mtk_cam-dvfs_qos.c:435..440/789..792/1322..1357`追完整`calc_bw → to_qos_icc → mtk_icc_set_bw`，相机专用`mtk_cam-dvfs_qos.h:87..90`明确为`kBps_to_icc(Bps/1024)`，不是通用`Bps_to_icc(Bps/1000)`。r35已正确修枚举3/ratio9/乘3顺序，但caller换算仍应修正。native现按同源helper先/1024，再按MMQoS/1000，然后`ceil(mix_MBps/512)*3`，默认1/上限64；`max`可在此单路径单调取整前取，无需重新估计线时。完整RAW需求仍保留原preview最小帧周期/实际stride的上界，不假装与Android纳秒linet四舍五入逐字节相等。
+- **channel与端口区分**：MMPC AP供给保留原字节域10/7、16MB/s向上取整的静态上界，可能高于Android /1024后再逐步向下取整的动态channel需求；没有据此改用更小预算，也不将该余量喂给端口OSTD。真实posted-write、mask事务、A0 idle/guard/restore与所有权限保持。没有测试脚本、额外设备操作或产物复查。
+- **待构建/运行边界**：r35正常整包exit0原件保留，固定新源码后编唯一r36并记录终态；本机无CI run ID。默认后/前准入、GPU280无需mailbox。最新实机仍350；MM_2 ACK、CMDQ消费、RAW/SOF/DONE和实际预览尚无新日志，不能宣称完整代码或相机验收完成。下一源码项继续核实际启用的CAMSV通道（含STG/CQI是否可达），再沿IRQ/FBC/cache/worker/handler检查，不凭Android多引擎统计扩native端口权限。
+
+#### 2026-11-17 相机主链继续：修正 L19/P0 的 MMQoS OSTD 枚举与取整（r35 整包成功，由 r36 后续修正）
 
 - **起点/范围**：单代理在既有相机工作树/分支，源码`d5da42e7`、r34交接补记`c4a7a892`已提交推送（actual exit0）。最新运行仍`~/350.txt`，r28b..r34均无新MM/RAW/预览结果；主checkout、共享输入与设备未改，未跑测试脚本/套件。
 - **确定源码错误**：`x9_camera_native_bw.inc`将live DT `w-hrt-ostdl=3`错当`OSTDL_2`并用`ceil(peak_Bps/256000000)`。Android `drivers/interconnect/mediatek/mmqos-mtk.c:268..274/1395..1441`明确枚举3为`OSTDL_3`，write路径先对整MB/s按ratio向上取整，再乘3；`mmqos-mt6993.c:262..263/831`确认L19/P0 write、bw_ratio9、max_ratio64。不能据静态公式错误认定它导致日志350的旧MM电源失败。
 - **完整输入链/修正**：`drivers/misc/mediatek/mtk-interconnect/core.c:224..265 aggregate_requests_v2`使用`max(v2_avg_bw,v2_peak_bw)`，只有`MTK_MMQOS_MAX_BW`哨兵才设置`v2_max_ostd`；同目录`mtk-interconnect.h:16`的`Bps_to_icc`与`mmqos-mtk.c:58 icc_to_MBps`依次整除1000，等价先截断成十进制MB/s。native finite RAW需求因此改为`mix_MBps=floor(max(avg,peak)/1000000)`、非零时`ceil(mix_MBps/512)*3`，否则保留源码默认1，最后clamp64。无哨兵、不引入display/max-BW override；A0原posted-write/idle/lease/关闭恢复均保留。
 - **channel余量边界**：本机DT `mmqos-state=13f42d`含`SRT_DATA_BW(bit14)`；`mmqos-mtk.c:1117..1129/567..579`对SRT/HRT乘10/7再向下换16MB/s units。现有native是同单位的静态上界供给，保留原向上取整以覆盖RAW上界，不把它误称逐整数位复制动态ICC请求；端口OSTD不再混入这个channel余量。`MMQOS TAKE`追加`mix_MBps`与原OSTD目标，便于真实上机核对，不改公开ABI或权限。
 - **正常编译实绩**：Builder `compile_one(sweet_x9_camera.o)` **actual exit0/True，182 warnings**（session52161终态），日志`x9/out/camera-mmqos-ostd-compile-r1-20261117-console.log`，输出`x9/out/x9-camera-mmqos-ostd-compile-r1-20261117/compile.exit=0`。随后固定clean源码构建唯一r35；整包SHA/结果/push待补。本机无CI run ID，没有额外测试或成功产物二次检查。
+- **r35构建终态与替代原因**：源码 **`2bb51eda81b22d2396dab31641164bba36702098` / tracked clean**，正常完整构建 **actual exit0**（session60748终态），104/104 overlay +3 prebuilt，Image32231424 B / boot15101952 B；路径`x9/out/x9-camera-mmqos-ostd-r35-20261117/boot.img`，原控制台`x9/out/camera-mmqos-ostd-r35-20261117-console.log`，source/input/command/exit/build.log同目录保留。layout检查exit0。本轮继续追到ISP8s实际调用发现相机侧helper使用/1024而非通用/1000，该候选不作为最终供测版本，由下述r36修正；未上机，无CI run ID。
 - **下一主链项/未闭**：继续核Android实际CAMSV MMQoS输入、MM clocks/SMI→SMMU→CAMSV IRQ/FBC→RAW cache/worker→PixelBufferHandler。Android动态路径还对SMMU stash/CQI单独记需求，native当前是单图像、无CQ运行路径；是否存在实际未覆盖consumer须从可达硬件配置核定，不能见源码字段就添加其它端口票。secure WPCFG/实际CMDQ消费、SOF/DONE、预览/照片/视频与AF/OIS/ISP色彩标定等仍无新验收，完整目标保持active。
 
 #### 2026-11-17 相机主链继续：本次 FDT 的 SMMU TCU 预取策略（r34 整包成功，未上机）

@@ -12,11 +12,13 @@ Android ISP8s runtime 冷复位、默认 DDR/COH/BW 请求与最终关闭复位�
 没有因此宣告完整硬件初始化或实际画面已经通过。
 
 native 单路 MMQoS 的 L19/P0 OSTD 按 Android interconnect v2 计算：
-先取实际 RAW demand 的 `max(avg,peak)`，经 ICC 单位换算截断到十进制 MB/s，
+先按 ISP8s `calc_bw → to_qos_icc` 把 RAW 字节需求整除1024转换成 ICC KB/s，
+取 `max(avg,peak)`，再经 MMQoS `icc_to_MBps` 整除1000，
 再按 `bw_ratio=9` 与本机 `w-hrt-ostdl=3`（`OSTDL_3`）取
 `ceil(mix_MBps/512)*3`，不足1MB/s保留默认1，上限64。
 原实现将枚举3误认作`OSTDL_2`，已修正；有限带宽请求不套用 display/max-BW override。
-MMPC channel 的10/7 occupancy与16MB/s向上取整静态供给单独保留，不参与端口OSTD计算。
+MMPC channel 的10/7 occupancy与16MB/s向上取整静态供给单独保留，不参与端口OSTD计算；
+它仍为字节需求的保守上界，可能高于Android按KB/s逐步向下取整的动态供给。
 `X9 CAMERA MMQOS TAKE` 同时记录 `mix_MBps` 与实际目标 OSTD，仍需新实机日志验证。
 
 传感器会话另按 Android `get_sensor_cali/set_sensor_cali` 接入本模组 EEPROM 校准载荷：
