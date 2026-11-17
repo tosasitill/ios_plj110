@@ -20,7 +20,7 @@ static struct {
     uint64_t epoch,pclk,average,peak;
     uint32_t before[CAM_NATIVE_BW_WORDS],expected[CAM_NATIVE_BW_WORDS];
     uint32_t mask_before,mask_expected,prior,next,current[2],ll,fl,ostd;
-    uint32_t units[2];
+    uint32_t units[2],mix_mbps;
     unsigned pending;
     bool held,complete,restoring,close_attempted,conflict;
 } cam_native_bw;
@@ -106,7 +106,7 @@ static int cam_native_bw_take_locked(uint64_t epoch)
     struct cam_sensor_ap ap;
     uint8_t hi,lo;
     uint32_t ll,fl,min_fl;
-    uint64_t pclk,period,margin;
+    uint64_t pclk,period,margin,mix;
     int e;
     if(cam_native_bw.held)return EBUSY;
     if(!cam_native_clock_request.epoch || epoch!=cam_smi.epoch ||
@@ -144,12 +144,22 @@ static int cam_native_bw_take_locked(uint64_t epoch)
     margin=16000000ull*7;
     cam_native_bw.units[0]=(uint32_t)((cam_native_bw.average*10+margin-1)/margin);
     cam_native_bw.units[1]=(uint32_t)((cam_native_bw.peak*10+margin-1)/margin);
-    /* MT6993 L19/P0 bw_ratio9, w-hrt-ostdl=OSTDL_2 (DT3):
-     * ceil(peak MB/s /2^(9-1)); clamp max_ratio64, minimum1. */
-    cam_native_bw.ostd=(uint32_t)((cam_native_bw.peak+256000000ull-1)/256000000ull);
     if(!cam_native_bw.units[0] || !cam_native_bw.units[1] ||
-       cam_native_bw.units[0]>1023 || cam_native_bw.units[1]>1023 ||
-       !cam_native_bw.ostd || cam_native_bw.ostd>64)return ERANGE;
+       cam_native_bw.units[0]>1023 || cam_native_bw.units[1]>1023)return ERANGE;
+    /* mtk-interconnect/core.c aggregate_requests_v2 uses max(avg,peak).
+     * Bps_to_icc then icc_to_MBps truncate to decimal MB/s BEFORE
+     * SHIFT_ROUND. MT6993 L19/P0 is write/bw_ratio9; live DT policy3
+     * means OSTDL_3: ceil(mix_MBps/512)*3, not ceil(mix_MBps/256).
+     * The 10/7 channel occupancy above does not enter per-port OSTD.
+     * This finite single-path supplier never requests MTK_MMQOS_MAX_BW,
+     * so no v2_max_ostd/display-policy override applies. Same source
+     * starts at1 for sub-MB/s demand, then clamps at max_ratio64. */
+    mix=cam_native_bw.peak>cam_native_bw.average?
+        cam_native_bw.peak:cam_native_bw.average;
+    cam_native_bw.mix_mbps=(uint32_t)(mix/1000000ull);
+    cam_native_bw.ostd=cam_native_bw.mix_mbps?
+        ((cam_native_bw.mix_mbps+511u)>>9)*3u:1u;
+    if(cam_native_bw.ostd>64)cam_native_bw.ostd=64;
     e=cam_smi_a0_guard();if(!e)e=cam_smi_a0_idle();if(e)return e;
     e=cam_sensor_ap_read(&ap,0x0100,&lo);if(!e && lo)e=EBUSY;
     if(!e)e=cam_sensor_ap_read(&ap,0x0104,&lo);if(!e && lo)e=EBUSY;
@@ -182,11 +192,11 @@ static int cam_native_bw_take_locked(uint64_t epoch)
     if(!e)e=cam_smi_a0_write(CAM_SMI_A0_NONSEC,8,0);
     if(!e)e=cam_native_bw_guard();
     printf("X9 CAMERA MMQOS TAKE: epoch=%llu LL/FL=%u/%u pclk=%llu bytes=%u stride=%u "
-        "avg/peak=%llu/%llu units/current=%u/%u:%u/%u OSTD=%u errno=%d "
+        "avg/peak=%llu/%llu units/current=%u/%u:%u/%u mix_MBps=%u OSTD=%u errno=%d "
         "(MMPC V2 AP floor; HRT A0 only, not DMA/SID lease)\n",
         epoch,ll,min_fl,pclk,plan.bytes,plan.stride,cam_native_bw.average,cam_native_bw.peak,
         cam_native_bw.units[0],cam_native_bw.units[1],cam_native_bw.current[0],
-        cam_native_bw.current[1],cam_native_bw.ostd,e);
+        cam_native_bw.current[1],cam_native_bw.mix_mbps,cam_native_bw.ostd,e);
     return e;
 }
 static int cam_native_bw_close_locked(void)

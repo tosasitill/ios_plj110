@@ -95,6 +95,11 @@
 - SMI larb：camsv 的 `mediatek,larbs = <0x195 0x190 0x192>`。查 larb 上电和 common 配置（`$R/drivers/memory/mtk-smi*.c` 或 `misc/mediatek/smi`）。
 - 期望：`MM:` flags 出现 POWER 和 CLOCKS，blockers 里清掉 POWER/CLOCKS/RATE/SMI。
 
+- 2026-11-17静态修正L19/P0 OSTD：DT `w-hrt-ostdl=3`为`OSTDL_3`，不是`OSTDL_2`。
+  按interconnect v2先取RAW `max(avg,peak)`、截断MB/s，再`ceil(MBps/512)*3`、默认1/上限64；
+  有限请求无max-BW哨兵策略。MMPC channel10/7静态上界供给与端口OSTD分离。
+  单对象actual exit0/182 warnings，确切r35整包与实机状态见NOTES；不作带宽硬件通过结论。
+
 ## 5. 阶段 C：传感器配置（NATIVE CONFIG stage）
 - 安卓 hhmain：`hhmainmipiraw_Sensor.c`（open/init 表、mode 表、`hhmain_Sensor_setting.h`）。核对 iOS 的
   `X9_HHMAIN_INIT_COUNT` 初始化表、preview 模式（分辨率、lane 数、MIPI 速率、PLL）是否逐字一致。

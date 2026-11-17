@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机主链继续：修正 L19/P0 的 MMQoS OSTD 枚举与取整（待 r35 整包）
+
+- **起点/范围**：单代理在既有相机工作树/分支，源码`d5da42e7`、r34交接补记`c4a7a892`已提交推送（actual exit0）。最新运行仍`~/350.txt`，r28b..r34均无新MM/RAW/预览结果；主checkout、共享输入与设备未改，未跑测试脚本/套件。
+- **确定源码错误**：`x9_camera_native_bw.inc`将live DT `w-hrt-ostdl=3`错当`OSTDL_2`并用`ceil(peak_Bps/256000000)`。Android `drivers/interconnect/mediatek/mmqos-mtk.c:268..274/1395..1441`明确枚举3为`OSTDL_3`，write路径先对整MB/s按ratio向上取整，再乘3；`mmqos-mt6993.c:262..263/831`确认L19/P0 write、bw_ratio9、max_ratio64。不能据静态公式错误认定它导致日志350的旧MM电源失败。
+- **完整输入链/修正**：`drivers/misc/mediatek/mtk-interconnect/core.c:224..265 aggregate_requests_v2`使用`max(v2_avg_bw,v2_peak_bw)`，只有`MTK_MMQOS_MAX_BW`哨兵才设置`v2_max_ostd`；同目录`mtk-interconnect.h:16`的`Bps_to_icc`与`mmqos-mtk.c:58 icc_to_MBps`依次整除1000，等价先截断成十进制MB/s。native finite RAW需求因此改为`mix_MBps=floor(max(avg,peak)/1000000)`、非零时`ceil(mix_MBps/512)*3`，否则保留源码默认1，最后clamp64。无哨兵、不引入display/max-BW override；A0原posted-write/idle/lease/关闭恢复均保留。
+- **channel余量边界**：本机DT `mmqos-state=13f42d`含`SRT_DATA_BW(bit14)`；`mmqos-mtk.c:1117..1129/567..579`对SRT/HRT乘10/7再向下换16MB/s units。现有native是同单位的静态上界供给，保留原向上取整以覆盖RAW上界，不把它误称逐整数位复制动态ICC请求；端口OSTD不再混入这个channel余量。`MMQOS TAKE`追加`mix_MBps`与原OSTD目标，便于真实上机核对，不改公开ABI或权限。
+- **正常编译实绩**：Builder `compile_one(sweet_x9_camera.o)` **actual exit0/True，182 warnings**（session52161终态），日志`x9/out/camera-mmqos-ostd-compile-r1-20261117-console.log`，输出`x9/out/x9-camera-mmqos-ostd-compile-r1-20261117/compile.exit=0`。随后固定clean源码构建唯一r35；整包SHA/结果/push待补。本机无CI run ID，没有额外测试或成功产物二次检查。
+- **下一主链项/未闭**：继续核Android实际CAMSV MMQoS输入、MM clocks/SMI→SMMU→CAMSV IRQ/FBC→RAW cache/worker→PixelBufferHandler。Android动态路径还对SMMU stash/CQI单独记需求，native当前是单图像、无CQ运行路径；是否存在实际未覆盖consumer须从可达硬件配置核定，不能见源码字段就添加其它端口票。secure WPCFG/实际CMDQ消费、SOF/DONE、预览/照片/视频与AF/OIS/ISP色彩标定等仍无新验收，完整目标保持active。
+
 #### 2026-11-17 相机主链继续：本次 FDT 的 SMMU TCU 预取策略（r34 整包成功，未上机）
 
 - **范围/起点**：用户目标明确继续MM时钟→SMMU→RAW/SOF/DONE→实际预览，直至剩余代码闭合；本轮沿此主链，未转去马达。单代理续用相机工作树/分支，起点`84eb3625` clean。上一回合属progress（r33源码、整包、推送）；最新实机仍`~/350.txt`，r28b..r33均未有新运行证据。主checkout/共享输入未改，未运行测试脚本/套件或操作设备。
