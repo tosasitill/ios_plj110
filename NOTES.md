@@ -3035,3 +3035,17 @@ transfer code). Static audit finds no missing step. Signature (bus + EEPROM + AF
   id=0615`, NATIVE REGISTER errno=0 IDs=9186/0615. Repeated at 12.7 s (id 9186).
 - Next blocker: Camera.app start at 16.3 s: `NATIVE CONFIG sensor=1 stage=1 errno=5`, `MM: flags=19
   stage/slot=1/0 errno=5 blockers=1ff smc=c2000514/0`, start errno=5 (MM/camsys stage, before CSI/DMA).
+
+## MM stage failure analysis after log 350 (static, 2026-11-17)
+- Failing call: x9_mm_power_acquire -> SMC 0xc2000514 x1=0x803 (smmu-secure PM_GET, MM_SMMU). a0 came back
+  0xc2000514 = x0 untouched = "not supported" (pkvm_smmu_hyp.c treats a0==sip_id as "smc fail because not
+  support"). Code matches smmu-secure.c exactly (cmd = id | type<<8 | sec<<11), so the path itself is wrong.
+- Android on MT6993: MM SMMU plat flags SMMU_SEC_EN|SMMU_HYP_EN (pKVM owns it). smi-dbg has hwccf-support,
+  so mtk_smi_pm_ops is NOT registered. pKVM EL2 uses SMC 0xC2000831 HYP_SMMU_PM_GET(0)/PUT(1), smmu_id MM=0,
+  which only takes a keep-on semaphore and returns nonzero if MM is off; it does not power MM.
+- MM power on Android = HWCCF: mminfra-util (DT mminfra-mtcmos-voter 0x37 = HW_CCF_BACKUP_GRP_0, data bits
+  MM_0=1 MM_1=2 MM_AO=0 MM_2=3, ack regs 0x31b5009c..a8 mask 0xc0000000) votes MM HWV 0x31c00000:
+  XPU0 B1 SET 0x20724 / CLR 0x20728, DONE 0x1136c, STA 0x1135c, EN 0x11358. Camera nodes have no
+  power-domains; seninf-core is hwccf-apply (clock votes trigger MTCMOS via HWCCF).
+- Next: replace the unsupported 0x514 acquisition with the Android HWCCF mminfra path (needs care: MM infra
+  shared with display/GPU).
