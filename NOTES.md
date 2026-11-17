@@ -3011,3 +3011,8 @@ transfer code). Static audit finds no missing step. Signature (bus + EEPROM + AF
 - r25: r23b required cam_native_sensor.sensor!=0, but a clean close zeroes it; clear a clean ENXIO whenever
   no session is open and it is not this sensor's own error. Front (LDO1/LDO3 + DOVDD, i2c2) now really probes.
 - Image: x9/out/x9-camera-front-r25-20261117/boot.img
+
+## Camera log 348 (r25) -> r26 (2026-11-17)
+- 348: back NACK unchanged (pad ok). Front failed EIO in 3 ms: cam_sensor_session_fault latched cam_probe_latched on the clean ENXIO, and open refuses while latched.
+- r26: after a successful restore, a clean ENXIO unlatches (cam_resources_latched still blocks).
+- Image: x9/out/x9-camera-front-r26-20261117/boot.img

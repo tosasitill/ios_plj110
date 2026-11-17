@@ -234,6 +234,14 @@ static int cam_sensor_session_close_locked(uint64_t epoch,struct x9_camera_probe
     else {
         cam_sensor_live.phase=CAM_SENSOR_EMPTY;cam_sensor_live.epoch=0;
         cam_sensor_session_active=false;
+        /* Log 348: a clean ID NACK (ENXIO) latched cam_probe_latched via
+         * session_fault, so the next sensor failed with EIO without power.
+         * The restore just succeeded (every rail/pin/clock back at entry),
+         * so a clean NACK leaves nothing retained: unlatch. */
+        if(cam_sensor_live.error==ENXIO && !cam_resources_latched) {
+            cam_probe_latched=false;
+            cam_sensor_live.error=0;
+        }
     }
     /* off is the unwind result, not the earlier open/configuration error. */
     return off;
