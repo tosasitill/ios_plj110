@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机静态复查：FSM高位排除，SMMU/CAMSV后续阶段闭合（不出镜像）
+
+- **范围/边界**：继续不出探针镜像、不上机、不 OTA/ADB/flash/reboot。只读复查`hwccf.h`、`hwccf_api.c`、原ATF `37f4/385c/3a70/3ba4`、DPC `0x31c10000`用法、Android `arm-smmu-v3.c`、`mtk_cam_sv_ddren_qos_coh_config()`、SENINF runtime_resume和native对应阶段；没有改源码。单对象`compile_one(sweet_x9_camera.o)`复核`exit=0/True/182既有warnings`，脚本/日志在`x9/out/camera-mm-time-static-r2-20261117/`，没有整包/boot.img。
+- **`fsm=80000001`排除**：`hwccf.h:64..67`只定义`CCF_STATUS bit0=idle`；`hwccf_api.c:325`判据为`(val & 0xffff)<=1`。DPC v3对同一`0x31c10000`实测掩位为`value & 0xfffe`，注释是“all fsm idle”；bit31不在这两种判据里，原ATF `3b84`对`0x31c10000`也只看`0xfffe`。因此日志低16位=1满足idle，bit31不能解释为BACKUP1失败，也不能触发清W1C/额外投票/延长等待。
+- **ATF低级判据补充**：`37f4/385c`的VOTE路径仅等AP EN→写HWV命令→等global EN→等STA；资源地址若属于CG/MTCMOS/MUX，另有`3a70/3ba4`的附加等待，但BACKUP GRP0只走`385c`。这再次证明native对MM_2 bit3没有少做ATF类型资源的附加步骤，`sta=8`仍是唯一确定的未完成条件。
+- **SMMU阶段静态闭合**：Android `arm_smmu_device_reset()`在`arm-smmu-v3.c:3977`先写`CR0=CMDQEN`并等CR0ACK，随后`CFGI_ALL`、可选`TLBI_EL2_ALL`、`TLBI_NSNH_ALL`，再开EVTQ/SMMU。`x9_camera_native_smmu.inc:236..257`按`CMDQEN → CFGI/CD → TLBI → CMDQEN|EVTQEN → 全使能`实现，并在提交命令前要求`CR0ACK.CMDQEN`。这不是缺少代码；没有新实机日志时不能说SMMU已经启动成功。
+- **CAMSV QoS/时钟静态闭合**：`x9_camera_sv_qos.inc`已按ISP8s `mtk_cam_sv_ddren_qos_coh_config()`的SW-mode顺序写DDR SET/OR_CQ、COH SET/OR_CQ、BW_QOS SET/OR_CQ，记录原始RMW、`SW_R`只作观察，并要求两次OR_CQ采样；`x9_camera_sv_reset.inc`已按ISP8s resume的CQ stop/ACK与MRAW `0→3<<(id*2+4)→0`脉冲实现。SENINF runtime_resume源码要求先core PM、CAM/SENINF/CAMTG/CAMTM clocks、TSREC clock/common reg、vcore/byteclk/phya选择再disable all outmux；native `cam_mm_descs[]`/`x9_camera_native_clock.inc`/`x9_camera_native_rate.inc`分别有对应域/AL/MUX、实测时钟和带宽/电压资格检查。由于MM_2尚未通过，这些只是后续阶段无已知源码缺口的静态结论，不是已生效证据。
+- **当前进度不变**：最早失败仍在MM_2 `stage=4 sta=8 errno=60`；不能把SMMU/QoS/SENINF的静态闭合当成越过MM、拿到RAW或显示画面。下一步继续只按源码/日志解释bit3 busy，不延长/绕过STA，不出镜像，不反复上机。
+
 #### 2026-11-17 相机静态复查：ATF 21424/37f4/385c 的 HWCCF bit3 判据闭合（不出镜像）
 
 - **范围/边界**：继续遵守不出镜像、不上机、不 OTA/ADB/flash/reboot；本轮只读反汇编原ATF `tee.img.atf.original.bin`中的`28d48/28f08 → 21424 → 37f4 → 385c`，并对照`hwccf.h`的`HWV_XPU_0=0/CCF_XPU()`和`x9_mm_power.c`。没有改源码、没有编译、没有构建、没有操作设备；只更新三份handoff并 commit/push。
