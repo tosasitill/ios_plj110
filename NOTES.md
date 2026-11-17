@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机主链继续：媒体 PTS 沿用同请求 SOF（bridge编译成功，整包待记）
+
+- **起点/范围**：单代理在既有相机工作树/`feat/camera-integration`，`588e6871` clean。最新实机仍`~/350.txt`；r28b–r37无新MM/RAW/预览运行证据。未触主checkout或共享`.local`输入，未运行测试脚本/套件或操作设备。
+- **Android可达链**：`.local/references/oppo-modules-dt-mt6993/vendor/mediatek/kernel_modules/mtkcam/camsys/isp8s/cam/`中，`mtk_cam-sv.c:3643..3694`正常SOF handler取`ktime_get_boottime_ns()`并push FIFO，`:3870`thread交`mtk_cam_ctrl_isr_event(CAMSV)`；`mtk_cam-ctrl.c:1242..1302`CAMSV FRAME_START调用`ctrl_vsync_preprocess`，`:1010..1012`保存first SOF的`sof_ts_ns/sof_ts_mono_ns`，`:1095..1130`发VSYNC/SOF事件，`:648..675`复制runtime info给state；`mtk_cam-job.c:4358..4394`正常singleframe进入PROCESSING时将这两个SOF复制为job timestamp，`mtk_cam.c:1137..1138/993..1007`buffer done使用job时间而非重新取DONE。不是未调用的`job_utils::_set_timestamp`或其它硬件的推定。
+- **确定缺口/修正**：当前native RAW v2已提供同请求真实SOF并保留DONE，worker也验证两者前进，但`camera_device.c`的metadata/handler/per-output单调门仍用DONE。现在统一使用`hakios_camera_sof_time(f)`，保留DONE头合同、双时间合法/单调检查、still not-before与跨冷切镜不复位的输出PTS门。没有生成时间、按帧率补点或倒算物理曝光开始；没有在未确认Apple sample-buffer时间合同前加入重定时。首handler新日志`PTS=SOF=... DONE=... host units`只在实际callback后输出。
+- **间隔含义**：切镜`source_gap`现取前后确实调用handler的帧SOF；另记`done_gap`（旧镜头最后已读RAW到新handler帧的DONE）与`start_to_RAW`（新镜头选择完成后至该DONE）。不混作物理曝光/屏幕显示缺口，未调用handler的过渡RAW不更新source基线。
+- **编译/其余核查**：正常`x9/camera/build.py --developer-dir <local.json> --vendor-root .local/vendor/oppo-camera-imgsensor-common --out x9/out/x9-camera-sof-pts-bridge-r1-20261117` **actual exit0**，bridge159616B，原控制台`x9/out/camera-sof-pts-bridge-r1-20261117-console.log`；只有原unused helper及static initializer warning。`prepare-local.py --check`通过，日志`x9/out/camera-sof-pts-layout-20261117.log`。S1 DEVICE交接CIVAC、完成后CPU交接IVAC及逐页cache line边界/DSB路径已读，未发现有确定源码证据的新cache修正。STG/CQI仍不凭统计或阈值表擅自启用；AF/OIS、ISP光学校准、原生多摄UI/同步源和硬件VENC仍未闭。下一固定clean源码r38整包，完成后补实际SHA/exit/路径/push；本机无CI run ID，整体目标仍active。
+
 #### 2026-11-17 相机主链继续：补齐主/长焦 sensor open 的 VCM 模式激活（r37 整包成功，未上机）
 
 - **起点/范围**：单代理继续相机工作树/分支，`544497bc` clean。上一回合属progress（MMQoS源码、r36整包与推送）。最新实机仍`~/350.txt`，r28b..r36均无新MM/RAW/预览结果；未触主checkout、共享`.local`输入、ADB/设备/分区，未跑测试脚本或套件。

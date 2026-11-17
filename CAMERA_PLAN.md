@@ -18,6 +18,11 @@
   native SMMU 首次 CR0 原误写4（EVTQ），已按 Android 改8（CMDQ）再12/13；
   接入 MT6993 普通 wrapper、34个 CAMSV DMA/CQI 默认阈值，修复 prior snapshot padding 和四摄 IRQ slot 越界。
   确切提交/构建结果见 NOTES 最新交接；不能把这些源码修复当 RAW/预览通过。
+- **媒体时间修正（bridge编译成功，待整包/上机）**：Android ISP8s CAMSV SOF 经 controller
+  `sof_ts_ns` 进入 job timestamp，buffer done 沿用请求时间。bridge 的 metadata、
+  PixelBufferHandler 与 per-output 单调门已统一为同帧 SOF；120B RAW `time` 仍是 DONE，
+  SOF/DONE 双重顺序和 still not-before 门保留。首 handler 记录两者 host units；
+  切镜 source_gap 为实际 handler 帧的 SOF 间隔，done_gap/start_to_RAW 为独立 DONE 间隔。
 
 ## 1. 工作规则（用户要求，务必遵守）
 1. **先按安卓源码梳理完整流程，再对照 iOS 找缺失，静态证实后才出镜像**；不要一轮轮试错。

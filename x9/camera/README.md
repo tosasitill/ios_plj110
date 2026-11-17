@@ -36,6 +36,13 @@ ACK及最终开关读数；没有假设校准 SRAM 可读，也不替代光学�
 关闭在原 native 退休检查通过后、reset/MM/rails 释放前恢复借用模式，失败保留依赖且不重发。
 此路径没有位置/PID存储命令，`NO_FOCUS`保持；前摄地址冲突和完整马达初始化/归位/FOCUS仍未闭合。
 
+媒体时间按 ISP8s 正常 CAMSV SOF→controller runtime info→job timestamp→buffer done
+链路取同请求 SOF；bridge 的 metadata、PixelBufferHandler 参数和各输出单调门统一使用
+RAW v2 中的真实 SOF 观察值。RAW `time` 仍为 DONE，保留独立 SOF/DONE 顺序检查。
+这是 IRQ 观察时间，不是精确曝光开始，也不从曝光或帧率倒算。首次 handler 日志记录
+`PTS=SOF=... DONE=... host units`。切镜 `source_gap` 使用前后实际 handler 帧的 SOF，
+`done_gap/start_to_RAW` 单独报告 DONE 观察间隔；这些数值尚无本机运行结果。
+
 | 路径 | 源码能力与边界 |
 |---|---|
 | 原生采集 | `x9_camera=2` 才准入；真实 ID/probe/close、PHY/CSI/CAMSV、IRQ、SID80、RAW 与退休守卫必须逐项成功，不以注册代替画面 |

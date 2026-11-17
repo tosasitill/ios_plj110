@@ -450,7 +450,7 @@ struct output {
 	uint64_t        revision;               /* config/handler/enable admission, monotonic within this object */
 	bool            said_shape;
 	uint64_t        delivered, refused;
-	uint64_t        last_pts_units;         /* real host timestamp per output, across rear switches */
+	uint64_t        last_pts_units;         /* real SOF host timestamp per output, across rear switches */
 	CVPixelBufferRef held[HELD];            /* the pictures given last, kept from the pool (see deliver) */
 	unsigned        held_next;
 	bool            said_pool;
@@ -1377,6 +1377,9 @@ frame_metadata(const struct isp *isp, const struct hakios_camera_frame *f, const
 	CFMutableDictionaryRef m;
 	double exposure = f->exposure_lines * (double)f->line_ns / 1e9, analog = f->gain_unity ? (double)f->gain / f->gain_unity : 1;
 	double total = analog * isp->digital, fps = f->frame_lines && f->line_ns ? 1e9 / ((double)f->frame_lines * f->line_ns) : 30;
+	/* ISP8s keeps the request's SOF timestamp through buffer completion.
+	 * Use our same-frame IRQ observation, not DONE latency or an exposure estimate. */
+	CMTime frame_pts = CMClockMakeHostTimeFromSystemUnits(hakios_camera_sof_time(f));
 	/* (green's level for a second at 1x, a quarter of it: a room's 70 or so, daylight's tens of thousands) */
 	double lux = exposure > 0 && total > 0 ? st->mean[1] / (exposure * total) / 4 : 0;
 
@@ -1386,7 +1389,7 @@ frame_metadata(const struct isp *isp, const struct hakios_camera_frame *f, const
 	m = (CFMutableDictionaryRef)new_dict();
 	if (m == NULL) return NULL;
 	md_put(m, MD_PORT, CFRetain(port));
-	md_put(m, MD_PTS, CMTimeCopyAsDictionary(CMClockMakeHostTimeFromSystemUnits(f->time), NULL));
+	md_put(m, MD_PTS, CMTimeCopyAsDictionary(frame_pts, NULL));
 	md_put(m, MD_EXPOSURE, number_f(exposure));
 	md_put(m, MD_AGC, number_i((int64_t)(analog * 256 + 0.5)));
 	md_put(m, MD_ISP_DGAIN, number_i((int64_t)(isp->digital * 256 + 0.5)));
@@ -1412,7 +1415,7 @@ frame_metadata(const struct isp *isp, const struct hakios_camera_frame *f, const
 	md_put(m, MD_ZOOM, number_f(applied_zoom));
 	CMTime pts;
 
-	if (!metadata_time(m, port, &pts) || CMTimeCompare(pts, CMClockMakeHostTimeFromSystemUnits(f->time)) != 0) {
+	if (!metadata_time(m, port, &pts) || CMTimeCompare(pts, frame_pts) != 0) {
 		CFRelease(m);
 		return NULL;
 	}
@@ -1474,12 +1477,13 @@ deliver(struct stream *s, const struct output_snapshot *snapshot, const struct i
     CFDictionaryRef metadata)
 {
 	CMTime pts;
+	uint64_t sof_time = hakios_camera_sof_time(f);
 	CVPixelBufferRef pb;
 	struct render_job job = { .isp = isp, .f = f, .raw = raw, .pieces = 8,
 	    .still = snapshot->still };
 
 	if (!metadata_time(metadata, s->port, &pts) ||
-	    CMTimeCompare(pts, CMClockMakeHostTimeFromSystemUnits(f->time)) != 0) return false;
+	    CMTimeCompare(pts, CMClockMakeHostTimeFromSystemUnits(sof_time)) != 0) return false;
 	pb = output_buffer(s, snapshot);
 	if (pb == NULL) {
 		return false;
@@ -1539,17 +1543,17 @@ deliver(struct stream *s, const struct output_snapshot *snapshot, const struct i
 	 * Output mutations reject while admitted; Stop closes admission and cannot declare retirement until it is over. */
 	pthread_mutex_lock(&s->lock);
 	if (!s->running || !s->graph_running || s->callback_active || !snapshot_current(s, snapshot) ||
-	    f->time <= s->out[snapshot->slot].last_pts_units ||
+	    sof_time <= s->out[snapshot->slot].last_pts_units ||
 	    (snapshot->still && (s->stills_wanted == 0 || s->stills_head == NULL ||
 	    s->stills_head->ticket != snapshot->still_ticket || s->stills_consumed + 1 != snapshot->still_ticket ||
 	    s->stills_head->run_epoch != snapshot->run_epoch ||
-	    hakios_camera_sof_time(f) < s->stills_head->not_before))) {
+	    sof_time < s->stills_head->not_before))) {
 		pthread_mutex_unlock(&s->lock);
 		CVPixelBufferRelease(pb);
 		return false;
 	}
 	s->callback_active = true;
-	s->out[snapshot->slot].last_pts_units = f->time;
+	s->out[snapshot->slot].last_pts_units = sof_time;
 	pthread_mutex_unlock(&s->lock);
 	((pixel_buffer_handler)snapshot->handler)(pb, pts);
 
@@ -1595,8 +1599,9 @@ deliver(struct stream *s, const struct output_snapshot *snapshot, const struct i
 	still_release(completed_request);
 	if (release != NULL) CVPixelBufferRelease(release);
 	if (!keep) CVPixelBufferRelease(pb);
-	if (first) say("%s: first picture given (%ux%u %c%c%c%c)", snapshot->name, width, height,
-	    pf >> 24, pf >> 16 & 255, pf >> 8 & 255, pf & 255);
+	if (first) say("%s: first picture given (%ux%u %c%c%c%c) PTS=SOF=%llu DONE=%llu host units",
+	    snapshot->name, width, height, pf >> 24, pf >> 16 & 255, pf >> 8 & 255, pf & 255,
+	    (unsigned long long)sof_time, (unsigned long long)f->time);
 	if (photographs) say("photograph given: ticket=%llu count=%llu", (unsigned long long)snapshot->still_ticket,
 	    (unsigned long long)photographs);
 	return true; /* actual invocation, not a graph/storage completion claim */
@@ -1905,6 +1910,7 @@ worker(void *context)
     uint64_t last_sequence=0,last_time=0,last_sof=0;
     uint32_t candidate_sensor = 0;
     uint64_t candidate_since = 0, switched_at = 0, old_done = 0;
+    uint64_t last_delivered_sof = 0, old_delivered_sof = 0;
     double previous_exposure_ns = 0, previous_gain = 1, previous_green = 0;
     double transition_green = 0;
     bool seed_pending = false, seed_observed = true, switch_gap_pending = false;
@@ -1985,7 +1991,8 @@ worker(void *context)
                 memset(&af,0,sizeof(af));lux=cct=-1;
                 transition_green=previous_green;transition_frames=8;
                 seed_pending=previous_exposure_ns>0;seed_observed=!seed_pending;
-                switched_at=mach_absolute_time();old_done=last_time;switch_gap_pending=true;
+                switched_at=mach_absolute_time();old_done=last_time;
+                old_delivered_sof=last_delivered_sof;switch_gap_pending=true;
                 candidate_sensor=0;
                 say("rear lens switched %u -> %u: %.2fx (base %.2fx), physical close/start; no fusion",
                     old_sensor,choice.sensor,choice.requested_zoom,choice.base_zoom);
@@ -2142,11 +2149,15 @@ worker(void *context)
 		if (metadata != NULL) {
 			CFRelease(metadata);
 		}
-		if (invoked && switch_gap_pending) {
-			say("rear switch first real handler: sensor=%u source_gap=%.1f ms start_to_RAW=%.1f ms; "
-			    "same graph/host clock, no duplicate frame", f->sensor,
-			    old_done ? elapsed_ms(f->time, old_done) : 0, elapsed_ms(f->time, switched_at));
-			switch_gap_pending=false;
+		if (invoked) {
+			last_delivered_sof = hakios_camera_sof_time(f);
+			if (switch_gap_pending) {
+				say("rear switch first real handler: sensor=%u source_gap=%.1f ms (handler SOF observations) "
+				    "done_gap=%.1f ms start_to_RAW=%.1f ms (DONE observations); same graph/host clock",
+				    f->sensor, old_delivered_sof ? elapsed_ms(last_delivered_sof, old_delivered_sof) : 0,
+				    old_done ? elapsed_ms(f->time, old_done) : 0, elapsed_ms(f->time, switched_at));
+				switch_gap_pending=false;
+			}
 		}
 		if (transition_frames && --transition_frames == 0) {
 			pthread_mutex_lock(&s->lock);

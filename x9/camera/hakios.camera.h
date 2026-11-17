@@ -42,7 +42,8 @@ struct hakios_camera_frame {
 	/* X9 v2 uses three former reserved words, keeping the 120B wire layout.
 	 * The explicit magic rejects DONE-only v1; no stale-header fallback.
 	 * Split words avoid an unaligned uint64_t at offset100. SOF is observed
-	 * by the sole IRQ owner for this frame, NOT the physical exposure start. */
+	 * by the sole IRQ owner for this frame, NOT the physical exposure start.
+	 * The bridge uses SOF for media PTS; time remains the DONE observation. */
 	uint32_t        sof_time_lo, sof_time_hi, timing_flags;
 	uint32_t        reserved[2];
 };
