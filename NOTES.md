@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 首次预览主链复核：沿用 r39，下一步取得新运行日志
+
+- **本轮范围**：在`feat/camera-integration`、`35023dc7` clean起点只读核查首次预览必经代码，未继续扩展FOCUS/AF、录像或新增硬件配置。未改主checkout、共享`.local`输入或设备，未运行测试脚本/套件，也未重复构建、解包/hash或检查成功镜像。本轮只有本段交接及`CAMERA_PLAN.md`更新，无新源码候选/CI run ID。
+- **审查记录（源码事实，非运行通过）**：检查`start()`的power→configure→capture→0100→core STREAMING发布；`cam_native_capture_prepare/capture`的独立S1 namespace与首request；`cam_irq_begin_locked`的cache→地址/FH→FBC→GIC→单RCNT→receive/TG/source顺序；冷reset的post样本更新、repeat/AE的no-credit边界、IRQ worker等待core发布与SOF/DONE/FBC/cache交付；core staging/header peek与完整read，再到bridge的帧校验、软件ISP、输出admission和真实PixelBufferHandler。另核build.py每次编入camera bridge及PID1安装/mediaserverd注入路径。该审查范围内未得到新的确定代码缺陷，不能将“未发现”写成整条硬件链已通过。
+- **最新运行仍旧**：按Mac`~/[0-9][0-9][0-9].txt`实际mtime重新检查，最新仍`350.txt`（2958194 B，2026-11-17 13:06:33本地时间）。原日志`:1219`为4.566s `NATIVE REGISTER errno=0 IDs=9186/0615`，`:5172`为16.300s `NATIVE CONFIG stage=1 completed=0 errno=5`；`:2797`记录camera包含在同一DYLD注入键。它只证明旧r27已到物理sensor配置入口，未提供r28b–r39的MM_2、SMMU、RAW、handler或预览结果。
+- **下一具体动作**：候选仍为下面r39的完整绝对路径，GPU280无需mailbox，默认后/前摄。由用户手动`fastboot boot .worktrees/camera-integration/x9/out/x9-camera-vcm-lifecycle-r39-20261117/boot.img`，打开Camera.app并移动画面，保存本次新`~/NNN.txt`及是否出画面的观察。收到后按**最早失败阶段**定位：MM POWER GET/ACK→CAMSV COLD RESET/CONFIG、MMQOS、NATIVE CONFIG→NATIVE SMMU started/CMDQ→FIRST ARM→真实SOF/DONE/RAW→`first picture given ... PTS=SOF=... DONE=...`。handler日志只说明回调已执行，成功预览仍须实际画面；没有新运行前不把AF旁支或反复出包当作首次预览进展，整体目标未完成。
+
 #### 2026-11-17 相机主链继续：AK7316M/T normal lens生命周期与实际停流后的模式恢复（r39整包成功，未上机）
 
 - **起点/范围**：上一goal turn属progress（SOF PTS代码、r38整包和push）。本轮单代理继续既有相机工作树/`feat/camera-integration`，`c8283cf5` tracked clean；最新实机仍`~/350.txt`，r28b–r38没有新MM/RAW/预览运行证据。未改主checkout/共享输入，未操作设备、ADB、boot或分区；未运行测试脚本/套件。

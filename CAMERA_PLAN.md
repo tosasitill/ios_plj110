@@ -5,6 +5,11 @@
   `x9/out/x9-camera-vcm-lifecycle-r39-20261117/boot.img`（源码 **8640f9a3**，本机整包 exit0，未上机）。
   最新设备日志350对应此前 `x9-camera-wlgroup-r27-20261117`（bbd3c57b），不要混作 r39 运行结果。
   r39沿用默认后/前双摄准入，未加`x9_camera_lenses=1`；长焦OB/VCM已编入但尚未获运行验收。
+- **下一执行项（2026-11-17主链复核）**：首request/S1/cache→FBC/GIC/接收门→sensor stream→
+  SOF/DONE/RAW→bridge handler及安装路径已继续读源码，本轮未发现新的确定修正，未新增镜像。
+  先由用户手动启动上述r39、打开Camera.app并提供新日志和实际画面观察；
+  按最早失败阶段修复，不继续以FOCUS/AF旁支替代首次预览。最新实际日志仍350，
+  callback、编译成功均不等于成功预览。详见NOTES最新交接。
 - **传感器 ID 已通**（log 350）：后摄 hhmain `0x9186`（i2c4/0x1a），前摄 hhfront `0x0615`（i2c2/0x10），
   第一次就读到。根因是 WL28681C 的 pinctrl `reset_high` 组（GPIO203/187/202）里 GPIO187 从没拉高。
 - **当前阻塞**：打开 Camera.app 时 `NATIVE CONFIG sensor=1 stage=1 errno=5`，
