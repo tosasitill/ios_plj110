@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机静态复查：ATF 21424/37f4/385c 的 HWCCF bit3 判据闭合（不出镜像）
+
+- **范围/边界**：继续遵守不出镜像、不上机、不 OTA/ADB/flash/reboot；本轮只读反汇编原ATF `tee.img.atf.original.bin`中的`28d48/28f08 → 21424 → 37f4 → 385c`，并对照`hwccf.h`的`HWV_XPU_0=0/CCF_XPU()`和`x9_mm_power.c`。没有改源码、没有编译、没有构建、没有操作设备；只更新三份handoff并 commit/push。
+- **ATF地址映射已闭合**：对`type=1`（AP）选用MM HWV基址`0x31c00000`；resource `0x37=B0(BACKUP_GRP0)`时，VOTE(`w2=0`)写`base+0x30724`，UNVOTE(`w2=1`)写`base+0x30728`，并把`base+0x11358/+0x1135c/+0x1136c`作为global EN/STA/DONE传给`37f4`。`CCF_XPU(HWV_XPU_0)+XPU_B0_SET/CLR`按`hwccf.h`正是`0x20724/0x20728`，与native `MM_POWER_SET/CLR`及Android v1 wrapper一致。`28d48/28f08`使用的都是AP XPU0 bank，不是固件私有XPU3 bank。
+- **ATF等待判据**：`37f4/385c`先写AP SET/CLR，再最多`0x2710(10000)`次每次1us等AP EN bit3；随后`218b0`写`0x31c3748=2`触发HWV FSM；再最多10000次等`+0x11358`的bit3；最后最多10000次等`+0x1135c`的bit3清零。`DONE`虽作为参数传入（`w4=0x1136c`），这条AP BACKUP路径没有轮询DONE；`STA`清零才是完成条件。超时分别返回`-0x1000/-0x1001/-0x1002`；成功返回0。`28f08`丢弃`21424`返回值并最终置`w0=0`，所以外层PUT的0不能证明内部成功。
+- **与native的逐项结论**：native `mm_vote_take()`同样在SET后等AP EN `1250×2us`，在global EN和STA处各`10000×1us`，最终把`sta=8`判为ETIMEDOUT；没有遗漏ATF/Android的额外HWV写。`218b0`的FSM触发是写SET/CLR后由HWCCF API在硬件内部处理的过渡，native没有、也不应另造一个任意CMD寄存器写。ATF路径没要求DONE，native不轮询DONE正确；ATF路径同样要求STA清零，native不能忽略或绕过。
+- **当前唯一确定失败仍是硬件状态**：日志356 `ap=8/global=8/sta=8/done=fffffff7/all_sta=0/fsm=80000001/mt0sta=0/mt1sta=0/errno=60`说明AP EN和global EN已到、最终STA bit3未清；Android v1 IRQ voter与ATF原始实现都会在此判失败。没有源码依据增加额外投票、清W1C、改bank、延长10ms或跳到RAW。下一步仍按静态复查追“为什么同一bit3在AP/global已置后仍保持busy”，并只在源码明确时补错误判定或缺失代码。
+
 #### 2026-11-17 相机静态复查：重复票语义与 ATF bit3 事务收束（不出镜像）
 
 - **范围/边界**：继续按用户要求只做静态复查，不出探针镜像、不上机、不 OTA/ADB/flash/reboot。只读复查了`hwccf_api.c`的三套 voter、`mtk-mminfra-util.c`、live DT、`x9_mm_power.c`、日志351–356，以及原ATF中已记录的`28d48/28f08/21424`路径；本轮没有改源码、没有编译、没有运行测试、没有操作设备。只更新`NOTES.md`、`CAMERA_PLAN.md`、`x9/camera/README.md`三份handoff。
