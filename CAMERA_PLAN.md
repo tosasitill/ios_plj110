@@ -111,6 +111,14 @@
 - CAMSV 已接入 MT6993 默认静态 FIFO 的完整 DMA/CQI 阈值；后续仍需核对 Android
   runtime resume 的局部 reset、DDR/BW_QOS/COH 软件请求及其关闭顺序。
   SET/CLEAR/SW_R 不是普通几何字段，未确认语义前不猜写或按完整 RW 字还原。
+- **本轮冷复位源码已补齐（2026-11-17，候选待构建）**：在 native SMI 完整取时钟后、
+  MAC/PHY/OUTMUX 和全部 request/FBC 之前，按 ISP8s `sv_reset_by_camsys_top()` 执行
+  CQ stop0→1/ACK bit1→0，以及 MRAW+0xa4 的0→0x30→0连续脉冲。
+  三条GIC必须无enable/pending/active，sensor standby、输入和全部CAMSV0通道outstanding为0；
+  局部reset不代替实际RAW/DONE/退休。保留独立前后快照，失败锁存并保留依赖。
+- **SID来源已核清**：live DT `mm-smmu-cam` 的 `iommus=<MM_SMMU 0x80>` 由
+  `arm_smmu_of_xlate()` 原样使用；CAMSV的`mediatek,smmu-dma-axid`列表仅注册fault callback，
+  不是SID或需要手动执行的路由写表。`mtk_smmu_aid2sid()`仅在DEBUG配置编译，未新增该SMC。
 - 期望：CAMSV 收到帧中断、DMA 写出、`X9 CAMERA` 帧计数增加，Camera.app 出画面。
 
 ## 7. 阶段 E：收尾

@@ -9,6 +9,12 @@
 LCK_MTX_DECLARE(camera_smmu_lock,&camera_group);
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 #define CAM_SMMU_MAGIC 0x583943414d4d5531ull
+/* live.dts mm-smmu-cam uses iommus=<MM_SMMU 0x80>; generic
+ * arm_smmu_of_xlate passes that ID unchanged. CAMSV0's separate
+ * mediatek,smmu-dma-axid=<262 260 1c0 3a0> registers fault callbacks
+ * (mtk_cam-sv.c:4282+), not STE indices or an AID->SID programming list.
+ * smmu-secure.c's aid2sid is CONFIG_MTK_IOMMU_DEBUG-only. Do not turn
+ * the CAMSV fault-source IDs into a new secure mapping/SMC sequence. */
 enum { CAM_SMMU_SID=0x80, CAM_SMMU_DISPLAY=0x90, CAM_SMMU_ASID=1,
     CAM_SMMU_STES=256, CAM_SMMU_STE_WORDS=8,
     CAM_SMMU_CR1=(2u<<10)|(2u<<4), /* NC, outer-shareable table/queue */

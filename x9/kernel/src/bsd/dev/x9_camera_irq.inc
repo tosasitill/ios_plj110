@@ -493,6 +493,26 @@ static int cam_irq_topology(void)
     if(!cam_irq.gic)cam_irq.gic=ml_io_map(q.gicd_base,q.gicd_bytes);
     return cam_irq_mapping();
 }
+/* Runtime-resume reset runs before the dormant worker/request is prepared.
+ * Use the same DT/controller admission without publishing an IRQ owner,
+ * changing a route or clearing pending history. camera_control_lock held. */
+static int cam_irq_cold_reset_guard_locked(uint64_t epoch,const struct cam_rx_maps *m)
+{
+    int e=0;
+    if(!epoch || !m || epoch!=cam_rx_live.sensor_epoch)return ESTALE;
+    lck_mtx_lock(&camera_irq_lock);
+    if(cam_irq.prepared || cam_irq.owns || cam_irq.accepting || cam_irq.busy ||
+       cam_irq.count || cam_irq.error || cam_irq.dirty_route || cam_irq.dirty_priority ||
+       cam_irq.uncertain_route || cam_irq.uncertain_priority)e=EBUSY;
+    if(!e) {
+        cam_irq.view[0]=m->sv[0];cam_irq.view[1]=m->sv[1];
+        e=cam_irq_topology();
+    }
+    if(!e)e=cam_irq_controller();
+    if(!e)e=cam_irq_idle();
+    lck_mtx_unlock(&camera_irq_lock);
+    return e;
+}
 /* Called by the actual inactive CAMSV geometry path. No enable, status-read,
  * prior mutation or ownership flag. A missing live topology is not READY. */
 static int cam_irq_prepare_locked(uint64_t epoch)

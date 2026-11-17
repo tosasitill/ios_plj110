@@ -37,7 +37,10 @@ static int cam_sv_gate_sample_word(unsigned,vm_offset_t,unsigned,uint32_t);
 static int cam_sv_open_locked(uint64_t);
 static int cam_sv_close_locked(uint64_t);
 static void cam_sv_status_copy(uint64_t,struct x9_camera_sv_hw_status *);
+struct cam_rx_maps;
 static int cam_irq_prepare_locked(uint64_t);
+static int cam_irq_cold_reset_guard_locked(uint64_t,const struct cam_rx_maps *);
+static int cam_sv_cold_reset_retirement_guard(uint64_t);
 static int cam_irq_guard_locked(uint64_t);
 static int cam_irq_close_locked(uint64_t);
 static int cam_irq_credit_guard_locked(uint64_t);
@@ -291,9 +294,11 @@ static int cam_rx_session_close(struct x9_camera_receiver *r)
      * inactive CAMSV geometry/DB policy, OUTMUX with MAC/async clocks held,
      * restores/stops analog, then
      * restores MAC/async, then optional SMI clocks. The receiver must still
-     * match the initially captured disabled controls. Unconsumed SMI clock
+     * match consumed disabled controls (native cold reset has its own
+     * retained pre/post snapshots). Unconsumed SMI clock
      * requests or new owners retain the MM and sensor dependencies too. */
-    off=cam_irq_close_locked(cam_rx_live.sensor_epoch);
+    off=cam_sv_cold_reset_retirement_guard(cam_rx_live.sensor_epoch);
+    if(!off)off=cam_irq_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_smi_retirement_guard(cam_rx_live.sensor_epoch);
     if(!off)off=cam_phy_retirement_guard(cam_rx_live.sensor_epoch);
     if(!off)off=cam_sv_close_locked(cam_rx_live.sensor_epoch);

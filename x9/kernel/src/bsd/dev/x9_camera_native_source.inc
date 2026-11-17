@@ -1,5 +1,6 @@
 /* Connect native config to the existing MT6993 hardware implementations.
- * No new ioctl, fake frame, reset, assumed grant or public-lock recursion.
+ * No new ioctl, fake frame, assumed grant or public-lock recursion.
+ * The normal ISP8s runtime-resume reset precedes all request/credit stores.
  * Include after receiver.inc and before native sensor callbacks.
  */
 #include "x9_camera_native_source.h"
@@ -26,6 +27,8 @@ static int cam_native_source_standby_locked(uint64_t epoch)
     if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=EBUSY;
     return e?e:cam_sensor_ap_guard(&ap);
 }
+
+#include "x9_camera_sv_reset.inc"
 
 static void cam_native_source_snapshot_locked(void)
 {
@@ -224,6 +227,7 @@ static int cam_native_source_prepare_locked(uint64_t epoch,
     if(!e){s->completed|=1u<<s->stage;s->stage=X9_CAM_NATIVE_SOURCE_SMI;
         e=cam_smi_clocks_open_locked(epoch,s->sensor);}
     if(!e)e=cam_native_source_standby_locked(epoch);
+    if(!e)e=cam_sv_cold_reset_locked(epoch);
     if(!e){s->completed|=1u<<s->stage;s->stage=X9_CAM_NATIVE_SOURCE_MAC;
         e=cam_mac_open_locked(epoch,&mac);}
     if(!e)e=cam_native_source_standby_locked(epoch);

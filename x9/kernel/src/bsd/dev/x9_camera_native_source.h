@@ -32,6 +32,10 @@ struct x9_camera_native_source_status {
  * helper, not the standalone session functions (which acquire that lock).
  * This runs actual MM/SMI/MAC/PHY/OUTMUX preparation after the sensor's
  * verified preview configuration, before core sets capture/stream attempted.
+ * After SMI clocks, the normal ISP8s cold-resume CQ stop/ACK and CAMSV0
+ * MRAW reset pulse precede MAC/PHY/OUTMUX, geometry and every FBC request.
+ * Its independent pre/post snapshots are archived with the retired epoch;
+ * reset failure retains supplier references and cannot authorize cleanup.
  * There is one attempt per cold sensor epoch. No automatic unwind or retry;
  * native power(false) owns the original sensor-close journal.
  * CONFIGURED means inactive register consumption only. The two real CSI

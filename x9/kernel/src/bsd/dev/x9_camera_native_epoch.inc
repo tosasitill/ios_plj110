@@ -20,6 +20,7 @@ struct cam_native_epoch_receipt {
     __typeof__(cam_stream_close) stream_close;
     __typeof__(cam_dma_stop) dma_stop;
     __typeof__(cam_sv) sv;
+    __typeof__(cam_sv_reset) sv_reset;
     __typeof__(cam_sv_gate) gate;
     __typeof__(cam_sensor_live) sensor;
     __typeof__(cam_rx_live) rx;
@@ -111,7 +112,7 @@ static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu 
     lck_mtx_unlock(&camera_s1_lock);lck_mtx_unlock(&camera_camsv_lock);
     if(!e) {
         h->epoch=epoch;h->smmu=m;h->source=cam_source;h->stream_close=cam_stream_close;
-        h->dma_stop=cam_dma_stop;h->sv=cam_sv;h->gate=cam_sv_gate;
+        h->dma_stop=cam_dma_stop;h->sv=cam_sv;h->sv_reset=cam_sv_reset;h->gate=cam_sv_gate;
         h->sensor=cam_sensor_live;h->rx=cam_rx_live;h->mm_live=cam_mm_live;h->mm=cam_mm;
         h->smi=cam_smi;h->a0=cam_smi_a0;h->shared=cam_smi_shared;
         h->phy=cam_phy;h->mac=cam_mac;h->out=cam_out;

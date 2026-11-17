@@ -154,6 +154,17 @@ static void cam_sv_gate_fault(int);
 static void cam_sv_gate_observed(unsigned,const uint32_t *);
 static int cam_sv_gate_observe_word(unsigned,unsigned,uint32_t,bool *);
 static bool cam_sv_gate_off_ready(void);
+/* After full original-control consumption, receiver/supplier close still
+ * samples the physical engine. Its old receive/TG observers must stop
+ * interpreting those reads as a live request. Keep all history for the
+ * later immutable epoch archive; partial restores never qualify here. */
+static bool cam_sv_controls_restored(void)
+{
+    return !cam_sv.held && cam_sv.close_attempted && !cam_sv.terminal && !cam_sv.error &&
+        !cam_sv.dirty && !cam_sv.commit_pending && cam_sv.pending_slot>CAM_SV_FIELDS &&
+        !cam_sv.request_held && !cam_sv.request_ready && !cam_sv.request_slot &&
+        (cam_sv.status.flags&X9_CAM_SV_HW_RESTORED) && !cam_sv.status.restore_errno;
+}
 static unsigned cam_sv_find(unsigned offset)
 {
     for(unsigned n=0;n<cam_sv.count;n++)if(cam_sv.offset[n]==offset)return n;
@@ -295,6 +306,7 @@ static uint32_t cam_sv_fbc_compare_word(unsigned bank,uint32_t value)
  * any counter change, including after both banks accepted original EN. */
 static uint32_t cam_sv_fbc_history_compare_word(unsigned bank,uint32_t value)
 {
+    if(!cam_sv.held)return value;
     if(bank<2 && cam_sv.credit_retired && cam_sv.close_attempted &&
        cam_sv.credit_restore_issued && !cam_sv.terminal && !cam_sv.error &&
        (value==cam_sv.target[CAM_SV_FBC] || value==cam_sv.before[bank][cam_sv.field[CAM_SV_FBC]]))return 0;
@@ -325,7 +337,7 @@ static uint32_t cam_sv_receive_compare_word(unsigned bank,uint32_t value)
 {
     unsigned i=X9_CAM_SV_RECEIVE_FIELDS-1;
     uint32_t bit=1u<<i;
-    if(bank<2 && !cam_sv.terminal &&
+    if(bank<2 && cam_sv.held && !cam_sv.terminal &&
        cam_sv.credit_phase==X9_CAM_SV_CREDIT_ACCEPTED && (cam_sv.receive_issued&bit) &&
        (cam_sv.receive_phase==X9_CAM_SV_RECEIVE_PENDING ||
         cam_sv.receive_phase==X9_CAM_SV_RECEIVE_QUIESCING) &&
@@ -338,6 +350,7 @@ static int cam_sv_receive_sample_word(unsigned bank,vm_offset_t view,uint32_t va
     uint32_t bit=1u<<i,next,prior,*seen;
     bool off;
     if(!(cam_sv.receive_issued&bit))return 0; /* cold admission stays strict */
+    if(cam_sv_controls_restored())return 0; /* exact raw comparison; no live exception */
     if(bank>=2 || view!=cam_sv.view[bank] || !cam_sv.held || !cam_sv.request_held ||
        cam_sv.terminal || cam_sv.credit_phase!=X9_CAM_SV_CREDIT_ACCEPTED)
         return cam_sv_fault(ESTALE);

@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机继续：ISP8s 冷复位与完整恢复后的 receive/TG 观察器生命周期
+
+- **位置/范围**：单代理续用 `.worktrees/camera-integration` / `feat/camera-integration`，起点 `993909e0` clean；主 checkout 在其它任务且 NOTES 有未提交修改，本轮未触碰。最新设备证据仍 `~/350.txt`：MM stage1/0514失败；r28b/r29以及本轮代码均无新上机结果。未执行测试脚本/套件、ADB/boot/分区操作或并行代理。
+- **Android依据/实现**：ISP8s `mtk_cam-sv.c:4509..4580` 的正常 runtime resume 在 larbs/clocks后调用 `sv_reset_by_camsys_top(:696..784)`；`:727..747` 为 CQ stop0→1/ACK bit1/100ms→0，`:771..779` 为 MRAW `SW_RST_1` 的0→`3<<(id*2+4)`→0。live DT `camsv1@3a600000` 的id=0、SCQ=3a602000，regs.h给MRAW=3a680000/+a4。新增 `x9_camera_sv_reset.inc` 在 native SMI clocks成功后、MAC/PHY/OUTMUX/geometry/request/FBC之前执行上述正常冷复位。三条真实GIC无enable/pending/active，sensor仍standby、全部输入/receive IRQ/其它stop关闭，DT七个CAMSV0通道external/internal outstanding零才进入。MRAW连续三写之间不插入I2C或引擎读；每条store先记账，不因timeout重发。没有移植serror调试DEADBEEF/selector写。
+- **证据/失败生命周期**：保留独立reset前、过程末值和两份reset后RX快照；只有全部完成、两份SV稳定且源输入未改，才发布本次实际SV默认值给receiver expected，原RX before不改。reset部分失败保留错误和MM/SMI依赖，receiver close先查独立reset完成记录；不以关闭电源清掉未消费的reset请求。新增 `X9 CAMERA CAMSV COLD RESET ... issued/ack/ack_samples/post_samples/complete/errno`。exported epoch最终物理关闭时，reset记录和原全部SV/IRQ/FBC历史一并复制进不可变receipt；没有松动8个永久pin上限。
+- **另一个确定代码缺陷**：原 `cam_sv_close_locked()` 成功后置`held=false/request_held=false`，但保留`receive_issued`和TG恢复历史；后续 `cam_out_close`/SMI/MM的`cam_rx_session_guard→cam_rx_sample`会进入旧receive/TG采样器，因`!held`必返ESTALE，关闭链及下个epoch无法推进。新增`cam_sv_controls_restored()`只在完整恢复、无dirty/pending/commit/request/error且RESTORED成立后退出旧live采样器；此时FBC/TG历史比较不再归一化，按raw值精确比较。部分恢复/在途帧仍走原严格守卫，所有原始字段留给epoch archive，不清零伪造退休。
+- **SID与DDR核查实绩**：live DT `mm-smmu-cam` 的`iommus=<0x25b 0x80>`由`arm_smmu_of_xlate`原样采纳；`mtk_cam-sv.c:4282..4297`的`mediatek,smmu-dma-axid`只注册fault callback，不能把262/260/1c0/3a0当STE索引或secure路由表。`smmu-secure.c:218+` 的`mtk_smmu_aid2sid`在`CONFIG_MTK_IOMMU_DEBUG`内且仅debug switch调用；未新增AID-SID SMC。ISP8s全树对DDR/COH/BW_QOS仅有SET写者和SW_R字段定义；ISP8第二次SOF的DDR/BW_QOS CLEAR属于不同硬件模式且没有COH对应，不擅自移植为ISP8s关闭序列。三个软件请求及normal `sv_reset`关闭仍待闭合，不能称全部相机代码完成。引用列表留本树`x9/out/camera-aid-sid-refs-20261117.txt`、`camera-ddr-isp8s-refs-20261117.txt`。
+- **当前编译**：初版冷复位正常Builder `compile_one(sweet_x9_camera.o)` **actual exit0/True，183 warnings**，原日志`x9/out/camera-resume-reset-compile-r1-20261117-console.log`，输出`x9/out/x9-camera-resume-reset-compile-r1-20261117/`；随后调整为连续reset脉冲、保留双post样本，并加入完整恢复观察器修复，最终由整包正常编译。下一固定clean源码SHA构建唯一r30；无CI run ID或实机验证，整包/发布结果待下一条补记。
+
 #### 2026-11-17 相机继续全链核查：CMDQ 启动、普通 wrapper、CAMSV FIFO 与四摄 slot
 
 - **位置/证据**：单代理继续 `.worktrees/camera-integration` / `feat/camera-integration`，基线 `94f43c8a` clean。已读 NOTES、CAMERA_PLAN、x9/AGENTS；最新设备证据仍是 `~/350.txt`，本轮无设备/ADB/debugfs/分区动作，不修改主 checkout 或共享输入。
