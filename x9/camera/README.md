@@ -12,6 +12,8 @@
 
 BACKUP_GRP0是共享资源：DPC/VMM也会以同一resource55投其它bit，但v1 wrapper只按resource选择同一组寄存器。MM_2由DT给的`vote_bit=3`；日志356的`ap/global/sta=8`未显示其它bit参与，且两个v1 retrigger handler要么只接受CG资源（backup SET直接bypass），要么要求`mtcmos_sta!=0 && all_mtcmos_sta==0`（日志全0）。没有源码依据把`sta=8`归因于共享FSM retrigger，native继续只CLR自己新增的bit3。
 
+这些共享票在Android里属于后续runtime PM：`mtk_cam.c`的CAMSYS CAM_SEL、`mtk_imgsys-sys.c`/`mtk_imgsys-cmdq.c`的IMG/IPE_SEL都在resume/suspend成对调用`vmm_enable/disable_cvfs()`，再经`hwccf_irq_voter_ctrl/multi_voter_ctrl`投bit14/15/16；DPC的bit0属于显示runtime路径。356在MM_2 acquire就返回errno60，尚未到这些阶段，不能提前补票来替代STA bit3。
+
 `fsm=80000001`的高位bit31也不是失败条件：`hwccf_api.c:325`只看低16位，DPC和原ATF对同一`0x31c10000`只掩`0xfffe`。SMMU冷启动顺序（`CMDQEN+ACK→CFGI_ALL/TLBI→EVTQ/SMMU`）、CAMSV DDR/COH/BW_QOS的SW-mode SET/OR_CQ写回采样、SENINF core PM/clocks/vcore/PHY源选择/outmux disable，均已在native源码中有对应实现或资格检查。当前没有越过MM_2，因此这些不能当实际生效或画面通过证据。
 
 静态复查补充：`hwccf_drv_probe()`只做syscon→regmap、MMUP GPR映射和回调注册，不写HWCCF控制寄存器；参考树里的`HWCCF_INIT_DONE_REG`没有probe使用点。native的`0x31c00000+0x22000`覆盖所有已用XPU/诊断偏移，`0x31a04000+0x1000`和`0x31b50000+0x1000`覆盖MMUP dummy read与ACK。351–356从WL/EEPROM、校准FIFO推进到MM_2，355/356在`apply/mode/VCM INIT`通过后稳定停在`sta=8`。没有漏掉的Android HWCCF probe初始化或MMIO映射错误；`CCF_BACKUP1_VIP_STA_CLR`/`CCF_INT_STATUS`只是寄存器定义，v1 IRQ voter成功路径不清W1C，不能拿来伪造通过。Android SMI的MM_2入口同样只是`mtk_mminfra_on_off()`，larb/common resume不外加剧BACKUP1 bit3动作。新增只读`en6`日志用于观察`HWCCF_REG_EN6/block_voting`，不调用freeze/unfreeze、不绕过STA；单对象编译exit0，没有镜像。`ack2=c2f10152`和`infra=e3fc0000`按DT/HWV mask检查均满足，唯一硬失败仍是`STA bit3`。
