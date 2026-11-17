@@ -113,6 +113,7 @@ static int cam_sensor_ap_write_word(void *context,uint16_t reg,uint16_t v)
     if(!e && reg==0xfcfc) {j->sensor_page=v;j->page_known=true;j->page_pending=false;}
     return e;
 }
+#include "x9_camera_sensor_calibration.inc"
 static int cam_sensor_session_match(uint64_t epoch)
 {
     if(!epoch || epoch!=cam_sensor_live.epoch)return ESTALE;
@@ -188,7 +189,11 @@ static int cam_sensor_session_configure_locked(uint64_t epoch,struct x9_camera_c
     ap=(struct cam_sensor_ap){&cam_journal.sensor,cam_sensor_slave(which)};
     io=(struct cam_sensor_io){.context=&ap,.read=cam_sensor_ap_read,.write=cam_sensor_ap_write,
         .read_word=cam_sensor_ap_read_word,.write_word=cam_sensor_ap_write_word};
-    e=cam_sensor_configure(&io,which,r);
+    r->stage=X9_CAM_CFG_EEPROM;
+    e=cam_cal_preload(which);
+    if(!e && cam_cal_profiles[which-1].header)io.calibrate=cam_cal_apply;
+    if(!e)e=cam_sensor_configure(&io,which,r);
+    if(!e)e=cam_cal_mode_check(which,r);
     if(!e)e=cam_sensor_ap_guard(&ap); /* supplies still match after final readback */
     if(e){cam_sensor_session_fault(e);r->flags|=X9_CAM_CFG_LATCHED;}
     else cam_sensor_live.phase=CAM_SENSOR_CONFIGURED;

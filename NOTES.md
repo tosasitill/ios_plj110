@@ -160,6 +160,16 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机继续：按本模组 EEPROM 补齐 sensor QSC/SPC/LRC（构建中）
+
+- **工作位置/运行证据**：单代理续用 `.worktrees/camera-integration` / `feat/camera-integration`，基线 `6e9802f4` clean。主checkout在SMS分支且NOTES有未提交修改，未触碰。最新运行依据仍`~/350.txt`，r28b..r31及本轮均无新上机结果。没有ADB/设备/分区动作、并行代理、测试脚本/套件或成功产物二次检查。
+- **确定缺口/Android依据**：`.local/vendor/oppo-camera-imgsensor-common/hhmain_mipi_raw/hhmainmipiraw_Sensor.c:131..149/2990..3089/3349..3410`、`hhfront_mipi_raw/hhfrontmipiraw_Sensor.c:103..118/881..911/1202..1338`、`hhtele_mipi_raw/hhtelemipiraw_Sensor.c:114..131/2041..2140/2400..2475`：正常open的init后、preview前调用`set_sensor_cali`，使用`get_sensor_cali`从本模组EEPROM取得的QSC/SPC/LRC。原移植仅加载init/preview，漏了此调用。ISP8s `adaptor-subdrv-ctrl.c:476..508`按EEPROM+6四个little-endian字节匹配header；live DT的main/tele EEPROM地址50、front54与上述源码一致。
+- **实现/数据范围**：新增`x9_camera_sensor_calibration.inc`，复用本会话既有AP FIFO/rails/pins/clock/receiver守卫，维持WRRD最多2B，不扩FIFO/DMA权限。main header015e012c：EEPROM1e30/3072B→sensor c000、7c20/384B→d200与d300各192B；tele header01b1012f：2210/3072B→c000、2e20/384B→d200/d300；front header01510008：c90/1560B→c500、14b0/260B→7a98与7b1c各130B。两遍完整payload及每遍前后header必须一致，才开始任何sensor表写；不扫描地址、不写EEPROM数据/写保护、不带其它模组缓存、不猜checksum、不使用固定校准字节。原payload与实际读取/写入ACK进度留在独立epoch journal，未打印数据内容。
+- **顺序/失败语义**：同一mode2/mode3 sensor-session先preload，再原init/fab patch→main镜像（仅main原set_sensor_cali有此写）→QSC→enable→SPC/LRC→原preview→原镜像/稳定controls→最终QSC开关读回。main/tele enable3206，front3621；**front preview原3621=0必须保留**，不因open校准曾写1而强行改回。没有假定sensor校准SRAM可读/已物理生效，`X9_CAM_CFG_MODULE_ACKED=512`仅表示完整校准事务ACK，不清factory blocker。追加config stage EEPROM/CALIBRATION/CAL_MODE，720B config与120B RAW ABI不变。校准preload与含校准的整个byte配置各15s软件预算，逐事务首错即停、不重发；保留原AP不确定请求/冷关闭规则。ACK后总预算超时仍保留真实ACK计数。原standby日志不再笼统称无校准，明确没有光学验收。
+- **生命周期**：校准成功不改变capture/stream/IRQ/RAW/DMA权限；自然退休和整个物理关闭后，native epoch receipt再归档校准payload/journal，recycle要求对应sensor/epoch完整无错，八个exported epoch pin上限及旧backing保留不变。超广角banked校准未接入，日志显式unsupported；软件ISP仍无本机LSC/CCM，不能把sensor QSC/SPC/LRC载入称为色彩/画质通过。
+- **AF/OIS定向核查**：本轮在`.local/references/oppo-modules-dt-mt6993/vendor/oplus/kernel/camera/lens/`找到真实驱动（先前只查MTK树未找到不代表缺源码）。live DT front=i2c2/dw9800s_24081@09、main=i2c4/ak7316m_24085@0c、tele=i2c7/ak7316t_24085@2d、UW=i2c9/jd5516w_24085@0c。**front驱动init却强制client->addr=18>>1=0c，与DT09不同**，没有新运行证据不能猜目标。main/tele sensor open还有原02=00/3ms的AF激活；本轮未实现马达供电/激活/归位、FOCUS命令或帧绑定，kernel仍NO_FOCUS。后续应按这组源与实际bus/ACK证据补齐，不能用bridge旧PM8008i范围代替X9驱动。
+- **编译里程碑**：初版正常Builder `compile_one(sweet_x9_camera.o)` **actual exit0/True，189 warnings**，原日志`x9/out/camera-module-cal-compile-r1-20261117-console.log`，输出`x9/out/x9-camera-module-cal-compile-r1-20261117/`。随后消除本文件7条新warning、补header末采样/ACK计数及文档，最终由正常整包编译；`prepare-local.py --check` **exit0**，日志`x9/out/camera-module-cal-layout-20261117.log`。下一固定clean源码提交后构建唯一r32；实际整包SHA/结果/路径与push实绩待下一条补记。本机编译无CI run ID；没有新的MM/RAW/handler/预览、照片/视频/切镜或校准效果证据，完整相机仍未完成。
+
 #### 2026-11-17 相机继续：ISP8s 默认 DDR/COH/BW 请求与独立最终关闭复位
 
 - **范围/依据**：单代理在既有相机树/分支，起点`465811bd` clean，上一回合归类progress（r30源码/整包/推送）。最新实机仍`~/350.txt`，没有r30运行证据。按同一ISP8s `mtk_cam-sv.c:1920..1923/2140..2205`默认SW-mode和`:1261..1304/797..969`正常关闭路径推进；没有执行测试脚本/套件、ADB、boot、分区操作或修改共享输入。

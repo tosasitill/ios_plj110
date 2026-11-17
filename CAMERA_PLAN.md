@@ -98,6 +98,10 @@
 - 安卓 hhmain：`hhmainmipiraw_Sensor.c`（open/init 表、mode 表、`hhmain_Sensor_setting.h`）。核对 iOS 的
   `X9_HHMAIN_INIT_COUNT` 初始化表、preview 模式（分辨率、lane 数、MIPI 速率、PLL）是否逐字一致。
 - 注意 subdrv 的 `i2c_burst_write_support`、写 group hold、stream on（0x0100）顺序。
+- 2026-11-17静态补齐主/前/长焦 `get_sensor_cali/set_sensor_cali`：
+  模组本地EEPROM header与两遍完整payload一致后，init/fab patch→QSC→enable→SPC/LRC→preview；
+  前摄preview最终3621=0仍按源码保留。`MODULE_ACKED`只指事务ACK，非光学校准通过。
+  超广角banked校准、AF/OIS和ISP颜色/镜头校准未闭；精确构建结果见NOTES。
 - 期望：`NATIVE CONFIG ... completed=1 errno=0`。
 
 ## 6. 阶段 D：SENINF / CSI 接收 / CAMSV DMA

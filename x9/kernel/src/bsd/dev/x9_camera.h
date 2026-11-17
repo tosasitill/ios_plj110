@@ -280,14 +280,16 @@ struct x9_camera_receiver {
 #define X9_CAM_CFG_LATCHED 64u
 #define X9_CAM_CFG_FAB_READ 128u /* 3 fab bytes read + exit write ACK; not calibration. */
 #define X9_CAM_CFG_FAB_B4 256u /* ready=1, fab=b4/01; requires two init patches. */
-#define X9_CAM_CFG_NEED_FACTORY 1u /* QSC/LRC/actuator work not performed. */
+#define X9_CAM_CFG_MODULE_ACKED 512u /* Module QSC/SPC/LRC ACKs; not optical validation. */
+#define X9_CAM_CFG_NEED_FACTORY 1u /* Actuator/ISP tuning and remaining calibration. */
 #define X9_CAM_CFG_NEED_RECEIVER 2u
 #define X9_CAM_CFG_NEED_DMA_MAP 4u
 #define X9_CAM_CFG_NEED_DRAIN 8u
 enum x9_camera_config_stage { X9_CAM_CFG_NONE, X9_CAM_CFG_TABLE_CHECK,
     X9_CAM_CFG_COLD, X9_CAM_CFG_IDLE, X9_CAM_CFG_INIT, X9_CAM_CFG_PREVIEW,
     X9_CAM_CFG_MIRROR, X9_CAM_CFG_READBACK, X9_CAM_CFG_RESTORE, X9_CAM_CFG_DONE,
-    X9_CAM_CFG_FAB, X9_CAM_CFG_FAB_EXIT, X9_CAM_CFG_FAB_PATCH }; /* Append only. */
+    X9_CAM_CFG_FAB, X9_CAM_CFG_FAB_EXIT, X9_CAM_CFG_FAB_PATCH,
+    X9_CAM_CFG_EEPROM, X9_CAM_CFG_CALIBRATION, X9_CAM_CFG_CAL_MODE }; /* Append only. */
 #define X9_CAM_CFG_SAMPLES 48u
 struct x9_camera_config_sample { uint32_t reg, expected, observed; };
 struct x9_camera_config {

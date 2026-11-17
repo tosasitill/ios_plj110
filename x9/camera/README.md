@@ -2,13 +2,22 @@
 
 ## 当前状态（2026-11-17）
 
-**日志 `~/350.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615` 并完成 native 注册；尚无真实预览、拍照、录像或切镜验收。** GPIO187 的 WL reset_high 组修复解决了原 ID NACK。Camera.app 随后在 MM 上电时被不支持的 `0xc2000514` SMC 阻断；源码 `06166db7` 已按 Android 时钟/SMI 路线改为 HWCCF MM_2 bit3 引用。最新候选为 **`x9/out/x9-camera-normal-start-r29-20261117/boot.img`**（源码 **eebb907d**，整包 exit0，未上机），还包含后续 SMMU/CAMSV 修复，待用户验证电源、CSI/SMMU、RAW 与实际画面。原生单路采集、四颗物理镜头接线、后置变焦路由和 iOS 软件视频配置仍处于源码/构建阶段。
+**日志 `~/350.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615` 并完成 native 注册；尚无真实预览、拍照、录像或切镜验收。** GPIO187 的 WL reset_high 组修复解决了原 ID NACK。Camera.app 随后在 MM 上电时被不支持的 `0xc2000514` SMC 阻断；源码 `06166db7` 已按 Android 时钟/SMI 路线改为 HWCCF MM_2 bit3 引用。后续候选还包含 SMMU/CAMSV 修复，待用户验证电源、CSI/SMMU、RAW 与实际画面。最新候选的确切源码与构建结果见 `NOTES.md` §5。原生单路采集、四颗物理镜头接线、后置变焦路由和 iOS 软件视频配置仍处于源码/构建阶段。
 
 后续源码核查又修正了 SMMU 的 CMDQ 使能顺序（8→12→13）、接入 DT 对应的普通
 wrapper 和34个 CAMSV DMA/CQI FIFO 默认配置，修复退休快照未初始化 padding，以及四摄使用
 两元素 IRQ slot 的越界。配置与原值恢复仍受真实电源/请求/退休守卫约束；确切新候选见 NOTES。
-Android runtime reset、DDR/BW_QOS/COH 命令生命周期和 secure/AID→SID 策略仍在核对，
+Android ISP8s runtime 冷复位、默认 DDR/COH/BW 请求与最终关闭复位已接入独立 journal，
+均未上机。SID80 的 DT 来源已核定；secure 平台策略与实际 DMA 路由仍需运行证据，
 没有因此宣告完整硬件初始化或实际画面已经通过。
+
+传感器会话另按 Android `get_sensor_cali/set_sensor_cali` 接入本模组 EEPROM 校准载荷：
+主摄/长焦 `0x50` 的3072B QSC与384B SPC，前摄 `0x54` 的1560B QSC与260B LRC。
+两个完整读取轮次及各轮前后 header 必须匹配，才在 init/fab patch 后、preview 前写入传感器；
+不写 EEPROM 数据，不使用其它模组缓存或固定标定。最终模式保持原 preview 的开关策略，
+前摄 `0x3621=0` 不被强行改回1。`MODULE_ACKED` 与 `SENSOR CAL` 日志只证明这些事务的
+ACK及最终开关读数；没有假设校准 SRAM 可读，也不替代光学效果、ISP LSC/CCM、AF/OIS验收。
+超广角的 banked 校准仍未接入，factory blocker 保留。mode2与mode3的同一sensor-session共用此路径。
 
 | 路径 | 源码能力与边界 |
 |---|---|

@@ -1,7 +1,9 @@
 /* Common bounded sensor table/readback path. No MMIO or platform registration.
  * Expected controls are public hhmain/hhfront preview mode facts, not a copied
  * vendor initialization program. Generated register tables stay out of git.
- * Front fab read follows hhfront Imx615_fab_read; no QSC/LRC or AF/OIS access.
+ * Front fab read follows hhfront Imx615_fab_read. An optional owned-session
+ * callback applies the module's preloaded QSC/SPC/LRC after init and before
+ * preview, just as set_sensor_cali does. No AF/OIS access here.
  * Read-port exit is attempted once before reset/power restore, even on timeout. */
 _Static_assert(sizeof(struct x9_camera_config)==720,"camera config ABI");
 struct cam_sensor_io {
@@ -10,6 +12,7 @@ struct cam_sensor_io {
     int (*write)(void *, uint16_t, uint8_t);
     int (*read_word)(void *, uint16_t, uint16_t *);
     int (*write_word)(void *, uint16_t, uint16_t);
+    int (*calibrate)(struct cam_sensor_io *, uint32_t, struct x9_camera_config *);
     uint64_t deadline;
 };
 struct cam_sensor_tables { const uint16_t *init, *preview; uint32_t ni, np; };
@@ -176,7 +179,9 @@ static int cam_sensor_load_table(struct cam_sensor_io *io, const uint16_t *p,
 static int cam_sensor_configure(struct cam_sensor_io *io, uint32_t which,
                                  struct x9_camera_config *r)
 {
-    uint64_t span;nanoseconds_to_absolutetime(5000000000ULL,&span);
+    /* Byte FIFO calibration needs more transactions than Android's DMA
+     * bursts. This bounds software work, not sensor settling or frame time. */
+    uint64_t span;nanoseconds_to_absolutetime(io->calibrate?15000000000ULL:5000000000ULL,&span);
     io->deadline=mach_absolute_time()+span;
     if(which==X9_CAMERA_ULTRAWIDE)return cam_uw_configure(io,r);
     struct cam_sensor_tables t=cam_sensor_tables(which);uint8_t v=0;
@@ -202,6 +207,7 @@ static int cam_sensor_configure(struct cam_sensor_io *io, uint32_t which,
             cam_sensor_sample(r,&n,0x574b,1);cam_sensor_sample(r,&n,0x5765,0x33);
         }
     }
+    if(!e && io->calibrate)e=io->calibrate(io,which,r);
     if(!e){r->stage=X9_CAM_CFG_PREVIEW;e=cam_sensor_load_table(io,t.preview,t.np,r);}
     if(e)return e;
     r->stage=X9_CAM_CFG_MIRROR;r->table_index=0;
