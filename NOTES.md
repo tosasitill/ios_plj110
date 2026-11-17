@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机主链继续：日志355，校准链闭合，失败前进到MM_2（源码无新改动）
+
+- **起点/范围**：用户把误写的255更正为355。工作树`b2fff359` tracked clean；`~/355.txt`已只读保存到私有`.local/x9/logs/355.txt`（不入git）。本轮只读核查日志与MM上电源码，没有改源码、编译、构建、运行测试、操作设备或触碰共享输入；构建的r43候选仍是最新供测版本。
+- **355运行证据**：`:747` `NATIVE REGISTER errno=0 IDs=9186/0615`；`:4677`主摄sensor-open完成；`:5310` EEPROM preload `read=3456/3456 ... preloaded=1 errno=0`。**新的通过里程碑**：`:6042` `phase=apply ... writes=250 acked=250 ... applied=1 errno=0`：r43按Android `2B reg+14B payload`、总16B FIFO消息形状完成3456B校准写；`:6116` `phase=mode ... mode=1/1 errno=0`；同一行`VCM INIT ... complete=1 errno=0`。这证明之前的逐字节事务和18B消息偏离均已修正；ACK仍不是光学校准或物理SRAM可读证明。
+- **新的最早失败**：`:6122` `X9 MM POWER GET: client=1 backend=hwccf MM_2 bit=3 stage=4 owned=1 held=0 ap=8 global=8 sta=8 done=fffffff7 ack2=c2f10152 infra=e3fc0000 errno=60`，紧接`:6123` `NATIVE CONFIG ... stage=1 completed=0 ... errno=60`，VCM release errno=60、DRAIN restore=60 latched=1、start errno=60。没有本次MM之后的clock/SMI/SMMU/CAMSV/SOF/DONE/RAW/handler或真实画面证据；日志无唯一构建标识，不能独立核定源码SHA。
+- **当前定位**：`x9_mm_power.c:mm_vote_take()`在stage4执行`mm_wait(hwv, MM_POWER_STA, MM_POWER_BIT, 0, 10000)`；日志的`sta=8`表示10ms等待结束时bit3仍置位，因此返回ETIMEDOUT。stage1的初始STA idle已过、AP SET已写、AP EN与global EN均为8，说明单调到STA idle这一步，不是旧的`c2000514` SMC失败，也不是校准/I2C失败。源码对照显示`mtk-mminfra-util.c:mminfra2_onoff()`实际只调用`hwccf_irq_voter_ctrl(MM_HWCCF, voter55, HWCCF_VOTE, bit3)`，而`mtk_mminfra_is_on()`读取的是DT `mm-mtcmos-base/mask`；本机当前把SPM HWV的SET/EN/global/STA与MM2 ACK组合成多个阶段，与源码的voter完成语义并非同一件事。这里区分**观察**（sta=8导致stage4 timeout）和**推断**（阶段模型可能偏离hwccf voter完成语义）；不把推断当实机结论。
+- **本轮处理/下一步**：由于用户明确要求按源码和日志、不猜测，本轮没有继续改MM电源。当前候选仍为`x9/out/x9-camera-cal-burst-fifo-r43-20261117/boot.img`（已push源码`b2fff359`，本机整包exit0）。若继续修MM，必须先逐行对齐`hwccf_api.c`的`_v1_hwccf_irq_voter_nowait/_wait_done`与`mminfra2_onoff`的真实投票/等待/ACK路径，再出一个新候选；不能仅延长10ms或忽略STA。
+
 #### 2026-11-17 相机主链继续：日志354，回到Android FIFO消息形状（r43整包成功，未上机）
 
 - **起点/范围**：用户指定「354」并明确要求完全按Android流程、不猜测。工作树从`4d2f6757` tracked clean起步；`~/354.txt`已只读保存到私有`.local/x9/logs/354.txt`（不入git）。只读核查日志、源码与Android参考；未触主checkout、设备、ADB、分区或共享`.local`输入；未运行测试脚本/套件，构建成功后没有解包/hash/反汇编等二次检查。

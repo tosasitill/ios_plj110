@@ -2,7 +2,7 @@
 
 ## 当前状态（2026-11-17）
 
-**最新日志 `~/354.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615`、完成 native 注册、主摄 sensor-open 与 EEPROM 校准 preload（3456/3456 B）；尚无真实预览、拍照、录像或切镜验收。** r42的burst在`reg=c000`第一笔返回`errno=22`、`writes/acked=2/1`：这是本地传输层把写方向限制为4B、传入18B消息导致START前的EINVAL，不是传感器NACK。严格按Android：`adaptor_i2c_wr_seq_p8()`每次只发一条`2B寄存器+连续payload`消息、`reg += payload`，MTK `i2c-mt65xx.c:1967`在`msg.len<=fifo_size(16)`时走FIFO。r43改为每笔2B寄存器+14B payload、总长16B，仍在已拥有AP FIFO内，不启用DMA/APDMA/SCP、不跨block、不写EEPROM；日志`writes/acked`计事务数（预期约249），ACK不是光学校准证明。r43整包成功、未上机，详见`NOTES.md` §5；日志本身没有唯一构建SHA。
+**最新日志 `~/355.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615`、完成 native 注册、sensor-open 与 EEPROM 校准 preload（3456/3456 B）；r43的校准apply/mode与VCM init也已经通过：`phase=apply writes=250 acked=250 applied=1 errno=0`、`phase=mode mode=1/1 errno=0`、`VCM INIT complete=1 errno=0`。** 当前最早失败前进到MM_2：`X9 MM POWER GET ... stage=4 ... ap=8 global=8 sta=8 done=fffffff7 ack2=c2f10152 infra=e3fc0000 errno=60`，随后 NATIVE CONFIG stage1 errno60。失败点是`x9_mm_power.c:mm_vote_take()`在stage4等待`MM_POWER_STA` bit3 idle超时；不是旧的`c2000514` SMC失败，也不是I2C/校准失败。按用户要求本轮没有猜测修改MM代码；下一步必须逐行对齐Android `mminfra2_onoff`、`hwccf_irq_voter_ctrl`、`_v1_hwccf_irq_voter_nowait/_wait_done`的真实投票/等待/ACK语义。尚无真实预览、拍照、录像或切镜验收；详见`NOTES.md` §5。
 
 后续源码核查又修正了 SMMU 的 CMDQ 使能顺序（8→12→13）、接入 DT 对应的普通
 wrapper 和34个 CAMSV DMA/CQI FIFO 默认配置，修复退休快照未初始化 padding，以及四摄使用
