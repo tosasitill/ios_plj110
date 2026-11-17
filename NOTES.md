@@ -2940,3 +2940,15 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - r21: banks=1/dma_banks=1, 0x1000 maps (vendor uses channel 0 only); sensor bus max_hz=1 MHz so the
   inherited ~378 kHz LS timing is borrowed (like i2c12); removed fmeter, SID3 dump, WL status dump.
 - Image: x9/out/x9-camera-ch0-r21b-20261117/boot.img
+
+## Camera log 344 (r21) -> r22 (2026-11-17)
+- 344: no hang (ran to 46 s, Camera.app opened at 35 s, no DeviceLost). i2c4 borrowed inherited
+  timing (hz=378182). ID still NACK x10 -> SCL rate is not the cause.
+- Checked: oplus ois_power@33 is only an SCP OIS power/pinctrl helper; vendor i2c-mt65xx uses
+  ch_offset_i2c=0 without ch-offset-i2c (no multi-host shadow path) -> AP channel 0 is right.
+- Remaining Android difference = timing/state: Android sensor starts from a long full power-off
+  (WL default-on rails cleaned up by late_cleanup long before first open); iOS cleared WL
+  default-on rails and re-powered after only 150 ms.
+- r22: WL entry clear settle 150 ms -> 1 s; after 10 NACKs keep power and poll 0x1a ID every
+  10 ms for 300 ms (X9 CAMERA ID LATE). Only 0x1a reads added.
+- Image: x9/out/x9-camera-settle-r22-20261117/boot.img

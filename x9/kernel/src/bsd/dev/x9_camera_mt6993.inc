@@ -784,7 +784,12 @@ static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
             e=cam_bus_transfer(&j->ldo,0x35,tx,2,NULL);
             if(!e)e=cam_wl_read(j,3,&j->wl_enable);
             if(!e && (j->wl_enable&j->board.wl_mask))e=EIO;
-            if(!e)delay(150000);
+            /* Android: WL default-on rails stay up after probe, then
+             * regulator_late_cleanup turns them off tens of seconds before
+             * the first camera open, so the sensor starts from a long full
+             * power-off. 150 ms (logs 335-344) may not let a half
+             * back-powered sensor reach POR. Wait 1 s like a real off. */
+            if(!e)delay(1000000);
             r->wl_enable=j->wl_enable;
         }
         for(unsigned i=0;i<j->board.wl_count && !e;i++)
@@ -881,6 +886,21 @@ static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
             if(!e && (((uint32_t)hi<<8)|lo)==sensors[which-1].chip_id)break;
             if(e && (e!=ENXIO || cam_bus_unretired(&j->sensor)))break;
             if(attempt<10)delay(1000);
+        }
+        if(e==ENXIO && !cam_bus_unretired(&j->sensor)) {
+            /* Late-ready check (Sony NVM load after XCLR can exceed the
+             * vendor retry window): keep everything powered, re-read only
+             * the ID register at 0x1a every 10 ms for 300 ms. */
+            unsigned late=0;
+            for(late=1;late<=30;late++) {
+                delay(10000);
+                e=cam_bus_transfer(&j->sensor,slave,high,2,&hi);
+                if(!e)e=cam_bus_transfer(&j->sensor,slave,low,2,&lo);
+                if(!e && (((uint32_t)hi<<8)|lo)==sensors[which-1].chip_id)break;
+                if(e && (e!=ENXIO || cam_bus_unretired(&j->sensor)))break;
+            }
+            printf("X9 CAMERA ID LATE: sensor=%u polls=%u id=%02x%02x errno=%d (10 ms polls after vendor retries)\n",
+                which,late>30?30:late,hi,lo,e);
         }
         printf("X9 CAMERA ID: sensor=%u slave=%02x attempts=%u id=%02x%02x errno=%d status=%08x\n",
             which,slave,attempt>10?10:attempt,hi,lo,e,j->sensor.last_status);
