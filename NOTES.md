@@ -160,7 +160,7 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
-#### 2026-11-17 相机继续：按本模组 EEPROM 补齐 sensor QSC/SPC/LRC（构建中）
+#### 2026-11-17 相机继续：按本模组 EEPROM 补齐 sensor QSC/SPC/LRC（r32 整包成功，未上机）
 
 - **工作位置/运行证据**：单代理续用 `.worktrees/camera-integration` / `feat/camera-integration`，基线 `6e9802f4` clean。主checkout在SMS分支且NOTES有未提交修改，未触碰。最新运行依据仍`~/350.txt`，r28b..r31及本轮均无新上机结果。没有ADB/设备/分区动作、并行代理、测试脚本/套件或成功产物二次检查。
 - **确定缺口/Android依据**：`.local/vendor/oppo-camera-imgsensor-common/hhmain_mipi_raw/hhmainmipiraw_Sensor.c:131..149/2990..3089/3349..3410`、`hhfront_mipi_raw/hhfrontmipiraw_Sensor.c:103..118/881..911/1202..1338`、`hhtele_mipi_raw/hhtelemipiraw_Sensor.c:114..131/2041..2140/2400..2475`：正常open的init后、preview前调用`set_sensor_cali`，使用`get_sensor_cali`从本模组EEPROM取得的QSC/SPC/LRC。原移植仅加载init/preview，漏了此调用。ISP8s `adaptor-subdrv-ctrl.c:476..508`按EEPROM+6四个little-endian字节匹配header；live DT的main/tele EEPROM地址50、front54与上述源码一致。
@@ -169,6 +169,8 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **生命周期**：校准成功不改变capture/stream/IRQ/RAW/DMA权限；自然退休和整个物理关闭后，native epoch receipt再归档校准payload/journal，recycle要求对应sensor/epoch完整无错，八个exported epoch pin上限及旧backing保留不变。超广角banked校准未接入，日志显式unsupported；软件ISP仍无本机LSC/CCM，不能把sensor QSC/SPC/LRC载入称为色彩/画质通过。
 - **AF/OIS定向核查**：本轮在`.local/references/oppo-modules-dt-mt6993/vendor/oplus/kernel/camera/lens/`找到真实驱动（先前只查MTK树未找到不代表缺源码）。live DT front=i2c2/dw9800s_24081@09、main=i2c4/ak7316m_24085@0c、tele=i2c7/ak7316t_24085@2d、UW=i2c9/jd5516w_24085@0c。**front驱动init却强制client->addr=18>>1=0c，与DT09不同**，没有新运行证据不能猜目标。main/tele sensor open还有原02=00/3ms的AF激活；本轮未实现马达供电/激活/归位、FOCUS命令或帧绑定，kernel仍NO_FOCUS。后续应按这组源与实际bus/ACK证据补齐，不能用bridge旧PM8008i范围代替X9驱动。
 - **编译里程碑**：初版正常Builder `compile_one(sweet_x9_camera.o)` **actual exit0/True，189 warnings**，原日志`x9/out/camera-module-cal-compile-r1-20261117-console.log`，输出`x9/out/x9-camera-module-cal-compile-r1-20261117/`。随后消除本文件7条新warning、补header末采样/ACK计数及文档，最终由正常整包编译；`prepare-local.py --check` **exit0**，日志`x9/out/camera-module-cal-layout-20261117.log`。下一固定clean源码提交后构建唯一r32；实际整包SHA/结果/路径与push实绩待下一条补记。本机编译无CI run ID；没有新的MM/RAW/handler/预览、照片/视频/切镜或校准效果证据，完整相机仍未完成。
+- **整包/推送终态**：固定源码 **`01f0985b20d71bb3b6d01031fc6877856afd35aa` / tracked clean**，固定Python3.13正常`build.py all --boot-config x9/build/boot-device.json --boot-arg x9_motion=3 --name x9-camera-module-cal-r32-20261117` **actual exit0**，104/104 overlay +3 prebuilt，相机182 warnings，kernel/bridge/shim/boot成功，原日志 **Image32231424 B / boot15101952 B**。候选 **`/Users/tosasitill/ios_plj110/.worktrees/camera-integration/x9/out/x9-camera-module-cal-r32-20261117/boot.img`**；控制台`x9/out/camera-module-cal-r32-20261117-console.log`，输出目录保留`source-head.txt/source-status.txt/boot-input.json/build-command.txt/full-build.exit/build.log`。源码push **actual exit0 `6e9802f4..01f0985b`** 至相机分支。本机编译无CI run ID，GPU280无需mailbox；未上机、未运行测试或二次检查成功产物。
+- **下一确定代码缺口**：`hhtele_set_gain():2462..2517`在preview/normal_video按实际gain code `>0x3df8`选择36db OB表，否则30db；`open/control`重置`wr_ob_type=0`。当前native AE仅更新曝光/增益/帧长，既漏首次SET_GAIN选择也漏阈值切换。表源在同文件1591/1602，需通过现有生成器提取，不能直接复制厂商表到tracked overlay。先追`set_group_hold/set_i2c_buffer/commit_i2c_buffer`，按真实发送顺序接入CPU/no-credit边界；不把初始preview表值当已应用30db，不提前修改下一帧metadata。AF/OIS等上述边界仍未闭。
 
 #### 2026-11-17 相机继续：ISP8s 默认 DDR/COH/BW 请求与独立最终关闭复位
 
