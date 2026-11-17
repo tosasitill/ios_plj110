@@ -2996,3 +2996,8 @@ transfer code). Static audit finds no missing step. Signature (bus + EEPROM + AF
   179/54/144 match its linear ranges. Regs 0x14-0x1e never compared with Android.
 - MT6661 BUCK5 range 0-1.2 V (5 mV): vosel be = 0.95 V; DA 0x16c5 only bit0 (EN) defined in vendor header;
   bit4 (iOS 13 vs Android 03) undocumented.
+- WL full compare with saved Android capture (0x00-0x1e, camera off/on): identical to iOS except enable
+  ee (Android) vs ca (iOS); extra LDO3 (0x706 = avdd of the sensors at DT 9065/9503) and LDO6 (0x723 = avdd
+  of the sensor at 9573) are other cameras the OPPO app powers together. 0x14-0x1e = 00 both. WL ruled out.
+- Android debugfs now Permission denied (SELinux Enforcing, ksu) even after mount; BUCK5 OP_EN 16a4-16a6
+  not captured. Static audit has no further lead.
