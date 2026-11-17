@@ -3016,3 +3016,14 @@ transfer code). Static audit finds no missing step. Signature (bus + EEPROM + AF
 - 348: back NACK unchanged (pad ok). Front failed EIO in 3 ms: cam_sensor_session_fault latched cam_probe_latched on the clean ENXIO, and open refuses while latched.
 - r26: after a successful restore, a clean ENXIO unlatches (cam_resources_latched still blocks).
 - Image: x9/out/x9-camera-front-r26-20261117/boot.img
+
+## Camera log 349 (r26) -> r27: WL reset_high group GPIO187/202 (2026-11-17)
+- 349: front really probed for the first time: MCLK pin 72 toggles (edges 3150), reset 170 high, WL 0x85,
+  DOVDD DA verified, i2c2 borrowed timing -> front NACK x10 + 30 late, exactly like the back.
+  Two different sensors on two buses fail together -> shared cause (DOVDD proven by DA wait; WL regs = Android).
+- Android oplus wl28681c probe selects pinctrl "reset_high" = state_reset_high_a2: pinmux <0xcb00 0xbb00 0xca00>
+  = GPIO203 + GPIO187 + GPIO202, mode0 output-high; "reset_low" drives only 203, so 187/202 stay high for the
+  whole boot. No other DT node uses 187/202. iOS only ever drove 203 (code comment "never 187/202") -> missing.
+- r27: before the WL ID check, drive 187/202 mode0, DOUT=1, DIR=1, keep high (no restore, as Android). Logs
+  X9 CAMERA WL GROUP with prior/after mode/dir/dout/din.
+- Image: x9/out/x9-camera-wlgroup-r27-20261117/boot.img

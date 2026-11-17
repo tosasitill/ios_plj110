@@ -10,7 +10,7 @@
  * UNIVPLL programming is read-only; hardware autolink owns its wake/sleep.
  * Idle AP I2C may initialize channel0 timing. Disabled, unvoted shared rails
  * may be claimed; live rails are only borrowed at their exact voltage.
- * WL wake touches only GPIO203, never 187/202 or the chip's UVP control.
+ * WL wake drives the Android reset_high group GPIO203/187/202 (187/202 kept high).
  * Do NOT route SCP pins, retune PLLs, clear inherited IRQs or reset a bus.
  * Writes are confined to the selected CAMTG/AP vote, guarded I2C parent PDN
  * and per-I2C gate bits,

@@ -218,10 +218,33 @@ static int cam_routes_restore(struct cam_probe_journal *j)
     }
     return 0;
 }
+/* Android wl28681c probe selects pinctrl "reset_high" = state_reset_high_a2:
+ * pinmux <0xcb00 0xbb00 0xca00> = GPIO203, GPIO187, GPIO202, mode0,
+ * output-high, and never lowers 187/202 ("reset_low" drives only 203).
+ * Both sensors (back i2c4, front i2c2) NACK with MCLK/XCLR proven at the
+ * pads (logs 347/349) while 187/202 were never driven. Drive them like
+ * Android, once, and keep them high (no restore, as in Android). */
+static void cam_wl_group_high(struct cam_probe_journal *j)
+{
+    static const unsigned pins[]={187,202};
+    for(unsigned i=0;i<2;i++) {
+        unsigned n=pins[i];
+        unsigned m0=cam_pin_mode(j->gpio,n),d0=cam_pin_get(j->gpio,0,n),
+            o0=cam_pin_get(j->gpio,0x100,n),i0=cam_pin_get(j->gpio,0x200,n);
+        int e=0;
+        if(m0)e=cam_pin_mux(j->gpio,n,0);
+        if(!e)e=cam_pin_bit(j->gpio,0x100,n,1);
+        if(!e)e=cam_pin_bit(j->gpio,0,n,1);
+        printf("X9 CAMERA WL GROUP: pin=%u mode=%u->%u dir=%u->%u dout=%u->%u din=%u->%u errno=%d (Android reset_high a2)\n",
+            n,m0,cam_pin_mode(j->gpio,n),d0,cam_pin_get(j->gpio,0,n),o0,cam_pin_get(j->gpio,0x100,n),
+            i0,cam_pin_get(j->gpio,0x200,n),e);
+    }
+}
 static int cam_wake_take(struct cam_probe_journal *j)
 {
     struct cam_probe_pin *p=&j->wake;
     int e=cam_pins_guard(j,false);if(!e)e=cam_pin_check(j,p,false);if(e)return e;
+    cam_wl_group_high(j);
     /* Vendor pinctrl state = GPIO mode0 output-high; an input that
      * reads high via its pull is not a reason to refuse (log 333: GPIO171
      * entry mode0 input). Mode is journaled and restored like DIR/DOUT. */
