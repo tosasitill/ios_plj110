@@ -141,8 +141,7 @@ static int cam_native_unstarted_retire_locked(uint64_t epoch,struct x9_camera_sm
     }
     if(!e) {
         struct cam_native_snapshot prior;
-        memcpy(prior.word,m->native_prior_word,sizeof(prior.word));
-        memcpy(prior.base,m->native_prior_base,sizeof(prior.base));
+        cam_native_prior(m,&prior);
         lck_mtx_lock(&camera_smmu_lock);
         e=cam_native_match(m,&prior);
         if(!e){delay(1);e=cam_native_match(m,&prior);}
@@ -180,8 +179,7 @@ int x9_camera_native_smmu_retirement_check(uint64_t epoch,struct x9_camera_smmu 
     if(!e && !m->native_unstarted_retired)e=cam_smmu_storage(m);
     if(!e) {
         struct cam_native_snapshot prior;
-        memcpy(prior.word,m->native_prior_word,sizeof(prior.word));
-        memcpy(prior.base,m->native_prior_base,sizeof(prior.base));
+        cam_native_prior(m,&prior);
         e=cam_native_match(m,&prior);
     }
     lck_mtx_unlock(&camera_smmu_lock);return e;

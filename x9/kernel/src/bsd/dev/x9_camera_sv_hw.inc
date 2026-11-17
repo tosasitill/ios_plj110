@@ -16,6 +16,7 @@
  */
 #include "x9_camera_sv_hw.h"
 enum { CAM_SV_MAX_REGS=352, CAM_SV_FIELDS=X9_CAM_SV_HW_FIELDS,
+    CAM_SV_GEOMETRY_FIELDS=X9_CAM_SV_HW_GEOMETRY_FIELDS,
     CAM_SV_CONFIG_FIELDS=X9_CAM_SV_HW_CONFIG_FIELDS,
     CAM_SV_ADDR_LO=CAM_SV_CONFIG_FIELDS, CAM_SV_ADDR_HI, CAM_SV_FH, CAM_SV_FBC,
     CAM_SV_DB_IDLE=0, CAM_SV_DB_DOWN, CAM_SV_DB_UP, CAM_SV_DB_POLICY };
@@ -62,24 +63,67 @@ static const unsigned cam_sv_dma_group[]={0x1200,0x1600,0x1800,0x1900,0x1b00,0x1
  * Do not copy the generic vendor clear loop beyond C's legal slots into
  * the LEN aperture. These are configuration reads, never a DMA grant. */
 static const unsigned cam_sv_dma_tags[]={8,6,3,8,6,3};
-struct cam_sv_field { unsigned offset; uint32_t mask; };
+/* ISP8s mtk_cam_sv_dev_config always calls dmao_common_config(0,0,0).
+ * mt6993 get_sv_dma_th_setting selects static CAMSV0 IMG FIFO1536,
+ * LEN FIFO36 and CQI FIFO64; the shipped disable_camsv_df_mode default is1.
+ * FIFO_THRESHOLD deliberately multiplies BEFORE the ratio's division.
+ * Do not pre-evaluate 40/100 or 1/10 as integer zero, or use ISP8/ISP7 data.
+ * These are ordinary RW configuration words, not FIFO monitor/IRQ status,
+ * SRAM allocation commands, resets, CQ starts or DMA enables. */
+#define CAM_SV_THRESHOLD(size,hi,lo) \
+    (((((size)*(hi)/100u)&0xfffu)<<16)|(((size)*(lo)/100u)&0xfffu))
+#define CAM_SV_IMG_URGENT (0x80000000u|CAM_SV_THRESHOLD(1536u,40u,30u))
+#define CAM_SV_LEN_URGENT (0x80000000u|CAM_SV_THRESHOLD(36u,100u,80u))
+#define CAM_SV_CQI_URGENT (0x80000000u|CAM_SV_THRESHOLD(64u,40u,30u))
+#define CAM_SV_CQI_ULTRA (0x10000000u|CAM_SV_THRESHOLD(64u,20u,10u))
+#define CAM_SV_CQI_DVFS (0x80000000u|CAM_SV_THRESHOLD(64u,10u,0u))
+struct cam_sv_field { unsigned offset; uint32_t mask,initial; };
 static const struct cam_sv_field cam_sv_fields[CAM_SV_FIELDS]={
-    {0x548,UINT32_MAX},{0x54c,UINT32_MAX},{0x554,0xff1fefdf},
-    {0x1210,0xffff001f},{0x1b8,0xff},{0x1bc,0xff},{0x1c0,0xff},
-    {0x1c4,0xff},{0x1cc,0xff},{0x1c8,0xff},
+    {0x548,UINT32_MAX,0},{0x54c,UINT32_MAX,0},{0x554,0xff1fefdf,0},
+    {0x1210,0xffff001f,0},{0x1b8,0xff,0},{0x1bc,0xff,0},{0x1c0,0xff,0},
+    {0x1c4,0xff,0},{0x1cc,0xff,0},{0x1c8,0xff,0},
+    /* Normal writer order CON3/2/1/4, IMG then LEN for all three cores.
+     * All other image/LEN tags stay disabled, just as before. */
+    {0x1008,UINT32_MAX,CAM_SV_IMG_URGENT},{0x1004,UINT32_MAX,0x80000000u},
+    {0x1000,UINT32_MAX,0x80000000u},{0x100c,UINT32_MAX,0x80000000u},
+    {0x1018,UINT32_MAX,CAM_SV_LEN_URGENT},{0x1014,UINT32_MAX,0x80000000u},
+    {0x1010,UINT32_MAX,0x80000000u},{0x101c,UINT32_MAX,0x80000000u},
+    {0x10e8,UINT32_MAX,CAM_SV_IMG_URGENT},{0x10e4,UINT32_MAX,0x80000000u},
+    {0x10e0,UINT32_MAX,0x80000000u},{0x10ec,UINT32_MAX,0x80000000u},
+    {0x10f8,UINT32_MAX,CAM_SV_LEN_URGENT},{0x10f4,UINT32_MAX,0x80000000u},
+    {0x10f0,UINT32_MAX,0x80000000u},{0x10fc,UINT32_MAX,0x80000000u},
+    {0x1128,UINT32_MAX,CAM_SV_IMG_URGENT},{0x1124,UINT32_MAX,0x80000000u},
+    {0x1120,UINT32_MAX,0x80000000u},{0x112c,UINT32_MAX,0x80000000u},
+    {0x1138,UINT32_MAX,CAM_SV_LEN_URGENT},{0x1134,UINT32_MAX,0x80000000u},
+    {0x1130,UINT32_MAX,0x80000000u},{0x113c,UINT32_MAX,0x80000000u},
+    /* CQI1/2 CON0/1/2/3/4. CQ base/size/start/thread controls are untouched. */
+    {0x2620,UINT32_MAX,0x10000040u},{0x2624,UINT32_MAX,CAM_SV_CQI_ULTRA},
+    {0x2628,UINT32_MAX,CAM_SV_CQI_ULTRA},{0x262c,UINT32_MAX,CAM_SV_CQI_URGENT},
+    {0x2630,UINT32_MAX,CAM_SV_CQI_DVFS},
+    {0x26a0,UINT32_MAX,0x10000040u},{0x26a4,UINT32_MAX,CAM_SV_CQI_ULTRA},
+    {0x26a8,UINT32_MAX,CAM_SV_CQI_ULTRA},{0x26ac,UINT32_MAX,CAM_SV_CQI_URGENT},
+    {0x26b0,UINT32_MAX,CAM_SV_CQI_DVFS},
     /* WDMA address words, not burst/stride or a CPU-PA alias. The vendor
      * writer stores full low/high words; FH_SPARE is a 32-bit request cookie
      * read by the normal SOF/hybrid handlers, never capture_id truncation. */
-    {0x1200,UINT32_MAX},{0x1204,UINT32_MAX},{0x57c,UINT32_MAX},
-    {0x540,CAM_SV_FBC_MASK}
+    {0x1200,UINT32_MAX,0},{0x1204,UINT32_MAX,0},{0x57c,UINT32_MAX,0},
+    {0x540,CAM_SV_FBC_MASK,0}
 };
 _Static_assert(CAM_SV_FBC+1==CAM_SV_FIELDS,"CAMSV request fields");
-_Static_assert(CAM_SV_FIELDS<32,"CAMSV dirty bitmap");
+_Static_assert(CAM_SV_CONFIG_FIELDS-CAM_SV_GEOMETRY_FIELDS==34,"CAMSV DMA/CQI defaults");
+_Static_assert(CAM_SV_FIELDS<64,"CAMSV dirty bitmap");
+#undef CAM_SV_THRESHOLD
+#undef CAM_SV_IMG_URGENT
+#undef CAM_SV_LEN_URGENT
+#undef CAM_SV_CQI_URGENT
+#undef CAM_SV_CQI_ULTRA
+#undef CAM_SV_CQI_DVFS
 static struct {
     vm_offset_t view[2];
     unsigned count, offset[CAM_SV_MAX_REGS], field[CAM_SV_FIELDS], db_reg;
     uint32_t before[2][CAM_SV_MAX_REGS], expected[2][CAM_SV_MAX_REGS];
-    uint32_t target[CAM_SV_FIELDS], dirty, pending_next;
+    uint32_t target[CAM_SV_FIELDS], pending_next;
+    uint64_t dirty;
     unsigned pending_slot, db_phase;
     uint64_t epoch, sequence, command, completed;
     bool held, close_attempted, terminal, pending_seen, commit_pending, db_issued;
@@ -511,7 +555,7 @@ static int cam_sv_post(unsigned slot,uint32_t next)
     if(cam_sv.pending_slot<=CAM_SV_FIELDS)return EBUSY;
     if(next==cam_sv.expected[0][reg])return 0;
     cam_sv.pending_slot=slot;cam_sv.pending_next=next;cam_sv.pending_seen=false;
-    if(slot<CAM_SV_FIELDS)cam_sv.dirty|=1u<<slot;
+    if(slot<CAM_SV_FIELDS)cam_sv.dirty|=1ull<<slot;
     else cam_sv.db_issued=true;
     if(slot==CAM_SV_FBC && cam_sv.credit_retired) {
         cam_sv.credit_restore_issued=true; /* BEFORE the original EN control store */
@@ -669,6 +713,8 @@ static int cam_sv_open_locked(uint64_t epoch)
     cam_sv.target[2]=plan.format;cam_sv.target[3]=plan.dma_basic;
     cam_sv.target[4]=1;cam_sv.target[5]=cam_sv.target[6]=cam_sv.target[7]=0;
     cam_sv.target[8]=cam_sv.target[9]=1;
+    for(unsigned slot=CAM_SV_GEOMETRY_FIELDS;slot<CAM_SV_CONFIG_FIELDS;slot++)
+        cam_sv.target[slot]=cam_sv_fields[slot].initial;
     /* Initial geometry setup never publishes a buffer/cookie. Keep the
      * address/FH/FBC fields exactly at this cold epoch's captured priors. */
     for(unsigned slot=CAM_SV_CONFIG_FIELDS;slot<CAM_SV_FIELDS;slot++)
@@ -685,7 +731,12 @@ static int cam_sv_open_locked(uint64_t epoch)
         e=cam_irq_prepare_locked(epoch); /* dormant; no GIC/source enable */
     }
     if(e)cam_sv_fault(e);
-    cam_sv_status();return e;
+    cam_sv_status();
+    printf("X9 CAMERA CAMSV CONFIG: sensor=%u epoch=%llu flags=%x dirty=%llx "
+        "geometry=%u dma_cqi=%u errno=%d (Android ISP8s static FIFO; source off)\n",
+        sensor,epoch,cam_sv.status.flags,cam_sv.dirty,CAM_SV_GEOMETRY_FIELDS,
+        CAM_SV_CONFIG_FIELDS-CAM_SV_GEOMETRY_FIELDS,e);
+    return e;
 }
 /* Normal composer FBC_EN initialization, AFTER the exact address/FH target
  * has reached both banks. This helper never submits the later 8080 command;
@@ -796,7 +847,7 @@ static int cam_sv_request_prepare_locked(uint64_t epoch,struct x9_camera_camsv_s
     else cam_sv.request_ready=true;
     cam_sv_status();
     printf("X9 CAMERA REQUEST: sensor=%u epoch=%llu generation=%llu capture_id=%llu "
-        "inner=%x ready=%u errno=%d dirty=%x command=%llu/%llu "
+        "inner=%x ready=%u errno=%d dirty=%llx command=%llu/%llu "
         "fbc_empty=%u counters=%x/%x (actual S1 address/FH/FBC_EN, no RCNT/source/DMA)\n",
         cam_sv.status.sensor,epoch,r.frame.generation,r.frame.capture_id,r.inner_sequence,
         cam_sv.request_ready,e,cam_sv.dirty,cam_sv.command,cam_sv.completed,
@@ -1023,7 +1074,7 @@ static int cam_sv_close_locked(uint64_t epoch)
     /* Consume FBC's original control in BOTH banks before changing any
      * address/cookie, not merely post its outer disable before those writes.
      * Source/DMA/CMOS/VF are still off; this is not a producer-drain path. */
-    if(!e && (cam_sv.dirty&(1u<<CAM_SV_FBC))) {
+    if(!e && (cam_sv.dirty&(1ull<<CAM_SV_FBC))) {
         uint32_t prior=cam_sv.before[0][cam_sv.field[CAM_SV_FBC]];
         e=cam_sv_field_write(CAM_SV_FBC,prior);
         if(!e)e=cam_sv_commit();
@@ -1036,7 +1087,7 @@ static int cam_sv_close_locked(uint64_t epoch)
     if(!e && cam_sv.credit_retired)e=cam_sv_gate_restore_locked(epoch);
     for(unsigned i=CAM_SV_FBC;i && !e;i--) {
         unsigned slot=i-1;
-        if(cam_sv.dirty&(1u<<slot))e=cam_sv_field_write(slot,cam_sv.before[0][cam_sv.field[slot]]);
+        if(cam_sv.dirty&(1ull<<slot))e=cam_sv_field_write(slot,cam_sv.before[0][cam_sv.field[slot]]);
     }
     if(!e)e=cam_sv.dirty?cam_sv_commit():cam_sv_target_observe();
     /* FBC is the last geometry/request field and is restored FIRST, before FH/address and
@@ -1065,7 +1116,7 @@ static int cam_sv_close_locked(uint64_t epoch)
     } else cam_sv_fault(e);
     cam_sv.status.restore_errno=e;cam_sv_status();
     printf("X9 CAMERA CAMSV CLOSE: sensor=%u epoch=%llu flags=%x errno=%u restore=%d "
-        "dirty=%x pending=%u commit=%u dbphase=%u sequence=%llu/%llu terminal=%u "
+        "dirty=%llx pending=%u commit=%u dbphase=%u sequence=%llu/%llu terminal=%u "
         "DB=%x/%x (inactive/spent FBC geometry/address/FH restore, NOT AXI/map drain)\n",
         cam_sv.status.sensor,epoch,cam_sv.status.flags,cam_sv.status.last_errno,e,cam_sv.status.dirty,
         cam_sv.status.pending,cam_sv.status.commit_pending,cam_sv.status.db_phase,cam_sv.status.command,

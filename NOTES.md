@@ -160,6 +160,17 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机继续全链核查：CMDQ 启动、普通 wrapper、CAMSV FIFO 与四摄 slot
+
+- **位置/证据**：单代理继续 `.worktrees/camera-integration` / `feat/camera-integration`，基线 `94f43c8a` clean。已读 NOTES、CAMERA_PLAN、x9/AGENTS；最新设备证据仍是 `~/350.txt`，本轮无设备/ADB/debugfs/分区动作，不修改主 checkout 或共享输入。
+- **确定缺陷一**：Android `arm-smmu-v3-common.h:80..86` 定义 CMDQEN=bit3、EVTQEN=bit2；`arm_smmu_device_reset()` 在 CFGI_ALL/SYNC 前先使能 CMDQ。原 native 首次 `CR0=4` 只开启 EVTQ，随后提交命令必然无正常消费。已改具名位 **8→12→13**，提交 PROD 前还要求实际 CR0ACK.CMDQEN；全启用/退休比较使用同一常量。已核查部分启动失败：`native_setup_issued` 后仍禁止进入 never-exposed 回收，不重发、伪造 CONS 或释放不确定资源。
+- **普通 SMMU wrapper 缺口**：按 `mtk_smmu_hw_init/smmu_init_wpcfg()`、`mt6993_data_mm` 与 live DT `iommu@30800000`，接入第二 resource **`309e0000`** 的 GLB_CTL0/TCU_CTL1/TCU_CTL10/TCU_CTL0：DCM/CFG_TAB/EXTRA_DCM、MM STD_AXI_MODE_DIS、AXSLC=e0 与 SB_ONLY、GID8、QoS5、stash3。四个普通 RW 字完整双采样，按 Android 顺序 masked 写；CMDQ/live 同时核对 wrapper，已发 store 前记账，部分失败保留 MM/backing。正常退休在实际 OFF/RAW/worker/GIC/A0 资格与 CR0/ACK=0、原 normal bases/cursors 恢复后，才逆序恢复本次改过的 wrapper；fresh-token reopen 同时核对其原值。没有猜加另一条 SMC、secure WPCFG/AID-SID/DVM/MPAM/ELA 初始化；这些平台策略及真实 DMA 路由仍需运行证据，**普通 wrapper 配置不是 firmware grant**。
+- **确定缺陷二**：`cam_native_snapshot` 的 17×u32 与 u64 base 之间原有4B padding；退休/重开仅 memcpy 数组，随后全结构 memcmp 会读取未初始化栈字节并可能误报 ESTALE。统一 `cam_native_prior()` 先 bzero 再复制所有字段（含本轮 wrapper），覆盖正常退休、never-exposed、retirement_check 与 reopen 全部构造点。
+- **CAMSV 缺口**：Android ISP8s `mtk_cam_sv_dev_config()` 必调 `mtk_cam_sv_dmao_common_config(0,0,0)`，原 native 只有几何/stride，34个 DMA/CQI 阈值只被快照而没有初始化。按 **mt6993** 默认静态 FIFO（DF默认关闭，IMG1536/LEN36/CQI64）及原 `FIFO_THRESHOLD` 乘后除法，接入全部三core IMG/LEN CON3/2/1/4 和两CQI CON0..4，保留既有 outer→inner 消费/DB、pending、首错与逆序恢复。私有字段48、dirty扩为64bit；公开 RAW/ioctl ABI 不变。不启动 CQ/其它tag、不将 FIFO 配置当帧证据。新增 `X9 CAMERA CAMSV CONFIG ... geometry=10 dma_cqi=34` 日志。
+- **确定缺陷三**：四摄接线已存在，但 `cam_irq.slots` 仍为2元素，prepare用 `sensor-1` 会令 sensor3/4 越界；reopen另硬编码 `which>=2`。已统一 `X9_CAMERA_SENSOR_COUNT` 分配/边界，并在 prepare 索引前验证 sensor。历史完整 slot 仍保存，不解除8个 exported epoch pin 上限。
+- **编译里程碑**：正常 Builder `compile_one(sweet_x9_camera.o)` **exit0/True，182 warnings，无 error**；原日志 `x9/out/camera-normal-start-compile-r1-20261117-console.log`、目录 `x9/out/x9-camera-normal-start-compile-r1-20261117/`。该次已含 SMMU/CAMSV主改动，随后四摄slot与配置日志改动将由最终整包正常编译。没有运行测试脚本/套件，也没有对成功产物二次检查。最终源码 SHA、整包路径/结果和 push 实绩在下条补记。
+- **继续项/未验证边界**：不能称全部相机代码完成。下一继续对照 Android `mtk_camsv_runtime_resume/sv_reset_by_camsys_top`、`mtk_cam_sv_ddren_qos_coh_config()` 的普通/命令寄存器生命周期（尤其 DDR/BW_QOS/COH SET/CLEAR 与 SW_R），以及 secure/AID→SID 平台策略；不能只凭字段名发 reset/clear。RAW→原 IRQ SOF/DONE→FBC→cache→kernel staging→iOS RAW10→PixelBufferHandler 已追到现成调用链，没有另造 adapter 或假帧。**还没有 MM_2 ACK、CMDQ消费、物理 RAW、预览/照片/视频或四摄切换的新实机结果**；后续候选仍需用户手动 boot 验证。
+
 #### 2026-11-17 相机 log350 续接：MM_2 HWCCF 电源入口替换，r28b 已构建待上机
 
 - **工作位置/基线**：现有 `.worktrees/camera-integration` / `feat/camera-integration`，起点 `0430c9a3`；先读本文件与 `CAMERA_PLAN.md`。主 checkout 的 SMS 未提交交接和其它功能树未动。本轮没有设备操作、Android debugfs 读取、共享输入修改或合 main。

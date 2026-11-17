@@ -12,6 +12,10 @@
   - 返回值 a0 = `0xc2000514`（调用号原样返回）= 固件不支持（见 `pkvm_smmu_hyp.c:get_target_smmu_hw_semaphore`）。
 - 不要再查的东西（都已和安卓逐字节对上）：传感器供电/时序、WL 全部寄存器、BUCK5/VS voter、
   MCLK（内部 + 引脚翻转）、XCLR 引脚、I2C 引脚/速率/格式、DOVDD DA。
+- **继续静态核查的新增修复（2026-11-17）**：MM_2 已改 HWCCF，尚无新启动证据；
+  native SMMU 首次 CR0 原误写4（EVTQ），已按 Android 改8（CMDQ）再12/13；
+  接入 MT6993 普通 wrapper、34个 CAMSV DMA/CQI 默认阈值，修复 prior snapshot padding 和四摄 IRQ slot 越界。
+  确切提交/构建结果见 NOTES 最新交接；不能把这些源码修复当 RAW/预览通过。
 
 ## 1. 工作规则（用户要求，务必遵守）
 1. **先按安卓源码梳理完整流程，再对照 iOS 找缺失，静态证实后才出镜像**；不要一轮轮试错。
@@ -24,7 +28,7 @@
    **禁止 glob 读全部 regmap（会重启手机）**。读之前先告诉用户读什么。debugfs 需要
    `su -c setenforce 0` + 推送脚本 `sh` 执行，读完 `setenforce 1`。
 6. 构建（Mac，zsh 要包 `bash -c`）：
-   `cd ~/ios_plj110/.worktrees/camera-integration && export PATH=/opt/homebrew/opt/llvm/bin:$PATH:/opt/homebrew/bin && python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --boot-arg x9_motion=3 --name <唯一名>`
+   `cd ~/ios_plj110/.worktrees/camera-integration && export PATH=/opt/homebrew/opt/llvm/bin:/opt/homebrew/bin:$PATH && /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --boot-arg x9_motion=3 --name <唯一名>`
    （失败后目录残留，要换新名字。）
 7. 卡死时先查 io_submap（8 MiB）耗尽和 panic，不要先怀疑别的。
 
@@ -65,7 +69,7 @@
   - MM HWV 基址 `0x31c00000`（DT `mm_hwv`）：XPU0 B1 SET `+0x20724`、CLR `+0x20728`，DONE `+0x1136c`，STA `+0x1135c`，GLB_EN `+0x11358`。
 - 相机节点没有 power-domains；`seninf-core` 是 `hwccf-apply`，cam 时钟一投票，HWCCF 就自动开对应的 MTCMOS。
 
-**要做**
+**原调查清单（MM_2 已实现，以下保留未完成观察项）**
 1. 确认相机要投哪几位：
    - 读 `hwccf_api.c` 的 `_v1_hwccf_irq_voter_nowait/_wait_done`（行 776、993），弄清写 SET 后 DONE/STA/EN 的握手。
    - 查安卓谁对 MM_0/1/2/AO 投票：cmdq 用 MM_AO；看 VCP/vmm notifier（`$R/drivers/misc/mediatek/vmm/mtk-vmm-notifier-mt6993.c`）、
@@ -74,7 +78,7 @@
 2. 确认屏幕是否已经让 mminfra 一直开着：只读 MM HWV `+0x1135c/+0x11358`、`0x31b5009c..a8`。
    安卓开相机前后各读一次也行，但 `mm_hwv` 不在安全读名单里，读之前先问用户。
 3. 改 `x9_mm_power.c`：去掉 `0x514` GET/PUT，改为 HWCCF 投票。
-   - 上电：写 SET，等 DONE bit，确认 STA 不忙，并确认 ack mask 置位。
+   - 上电：写 SET，等 AP EN/global EN，确认 STA 不忙和 ACK mask；v1 **不等 DONE=1**。
    - 释放：写 CLR，只撤自己投的那一位，不碰屏幕/GPU 的票。
    - 是否还需要 `0x831` 拿信号量：只有在访问 SMMU 寄存器（`cam_smmu_observe`）前才需要；
      先静态确认安卓 EL1 是否会直接摸 MM SMMU。
@@ -101,6 +105,11 @@
   CSI 口、lane 数、settle、outmux 路由、camsv 通道。
 - SMMU 映射：安卓 MM SMMU 是 dma 模式（`mtk,iommu-dma-range`）。iOS 要么配 SMMU 页表，要么确认 bypass 合法。
   `x9_camera_smmu.inc` 里 `SMMU_SECURE` 相关的假设要重新核对（pKVM 平台）。
+- 已修正 native CMDQ 开启顺序；普通 wrapper 用 DT resource1 `309e0000`，
+  保存/验证/退休完整原值；secure WPCFG/AID-SID 策略尚无运行验证，不能由普通寄存器匹配推定。
+- CAMSV 已接入 MT6993 默认静态 FIFO 的完整 DMA/CQI 阈值；后续仍需核对 Android
+  runtime resume 的局部 reset、DDR/BW_QOS/COH 软件请求及其关闭顺序。
+  SET/CLEAR/SW_R 不是普通几何字段，未确认语义前不猜写或按完整 RW 字还原。
 - 期望：CAMSV 收到帧中断、DMA 写出、`X9 CAMERA` 帧计数增加，Camera.app 出画面。
 
 ## 7. 阶段 E：收尾

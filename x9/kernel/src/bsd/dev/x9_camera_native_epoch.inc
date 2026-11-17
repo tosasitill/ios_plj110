@@ -116,7 +116,7 @@ static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu 
         h->smi=cam_smi;h->a0=cam_smi_a0;h->shared=cam_smi_shared;
         h->phy=cam_phy;h->mac=cam_mac;h->out=cam_out;
         h->previous=cam_native_epochs;cam_native_epochs=h;cam_native_epoch_count++;
-        /* The permanent thread/maps, monotonic last_epoch, and both slots
+        /* The permanent thread/maps, monotonic last_epoch, and all sensor slots
          * stay intact. Selected RETIRED slot is NOT made EMPTY here. */
         old=cam_irq_spin_take();
         bzero(&cam_irq_fbc,sizeof(cam_irq_fbc));bzero(&cam_repeat,sizeof(cam_repeat));
@@ -182,9 +182,9 @@ static int cam_native_reopen_locked(uint64_t epoch,struct x9_camera_smmu *previo
     lck_mtx_lock(&camera_irq_lock);
     e=cam_native_reopen_dormant_locked(epoch,token);
     struct cam_native_snapshot prior;
-    memcpy(prior.word,previous->native_prior_word,sizeof(prior.word));
-    memcpy(prior.base,previous->native_prior_base,sizeof(prior.base));
-    struct x9_camera_smmu probe={0};probe.mmio=previous->mmio;probe.native_power=token;
+    cam_native_prior(previous,&prior);
+    struct x9_camera_smmu probe={0};probe.mmio=previous->mmio;
+    probe.native_wp=previous->native_wp;probe.native_power=token;
     /* Fresh token, never the released historical token. Entire normal bank
      * must still be the actual consumed prior, not merely own-base equality. */
     if(!e)e=cam_native_match(&probe,&prior);
@@ -192,7 +192,8 @@ static int cam_native_reopen_locked(uint64_t epoch,struct x9_camera_smmu *previo
     lck_mtx_lock(&camera_camsv_lock);lck_mtx_lock(&camera_s1_lock);
     struct cam_native_epoch_receipt *slot_history=NULL;
     unsigned which=cam_sv.status.sensor-1;
-    if(!e && (which>=2 || cam_irq.slot!=&cam_irq.slots[which] || cam_irq.slot->last_errno))e=ESTALE;
+    if(!e && (which>=X9_CAMERA_SENSOR_COUNT ||
+       cam_irq.slot!=&cam_irq.slots[which] || cam_irq.slot->last_errno))e=ESTALE;
     if(!e && (cam_irq.slot->state==X9_CAMSV_RETIRED || cam_irq.slot->state==X9_CAMSV_CANCELLED)) {
         for(struct cam_native_epoch_receipt *h=cam_native_epochs;h;h=h->previous) {
             if(h->smmu->map!=cam_irq.slot->dma.backing)continue;

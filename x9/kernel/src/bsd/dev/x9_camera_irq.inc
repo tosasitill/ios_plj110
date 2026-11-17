@@ -46,7 +46,7 @@ static struct {
     uint8_t priority_before[3];
     uint32_t dirty_route,dirty_priority,uncertain_route,uncertain_priority;
     bool prepared,thread_started,close_attempted;
-    struct x9_camera_camsv_slot slots[2], *slot;
+    struct x9_camera_camsv_slot slots[X9_CAMERA_SENSOR_COUNT], *slot;
     /* All fields below protected by spin, including first fault. No hard-IRQ
      * access to slot/PTE/RAW, owner callbacks, power APIs or sleeping locks. */
     struct x9_camera_camsv_request request;
@@ -498,7 +498,8 @@ static int cam_irq_topology(void)
 static int cam_irq_prepare_locked(uint64_t epoch)
 {
     int e;
-    if(!epoch||cam_irq.prepared||epoch<=cam_irq.last_epoch)return ESTALE;
+    if(!epoch||cam_irq.prepared||epoch<=cam_irq.last_epoch||
+       !x9_camera_sensor_valid(cam_sv.status.sensor))return ESTALE;
     e=cam_irq.error;if(e)return e;
     e=cam_sv_environment();if(e)return e;
     lck_mtx_lock(&camera_irq_lock);

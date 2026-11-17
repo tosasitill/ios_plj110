@@ -35,14 +35,16 @@
 #define X9_CAM_SV_GATE_RESTORED 6u
 #define X9_CAM_SV_GATE_FIELDS 3u
 #define X9_CAM_SV_GATE_STEPS 8u
-#define X9_CAM_SV_HW_CONFIG_FIELDS 10u
-/* Geometry fields0..9 followed by A0 base low/high, tag0 FH_SPARE and FBC0.
+#define X9_CAM_SV_HW_GEOMETRY_FIELDS 10u
+#define X9_CAM_SV_HW_CONFIG_FIELDS 44u
+/* Geometry fields0..9, Android DMA/CQI thresholds10..43, then
+ * A0 base low/high, tag0 FH_SPARE and FBC0.
  * This result is kernel-private, not the userspace frame/ioctl ABI. */
-#define X9_CAM_SV_HW_FIELDS 14u
+#define X9_CAM_SV_HW_FIELDS 48u
 struct x9_camera_sv_hw_status {
-    uint64_t sensor_epoch, command, completed;
+    uint64_t sensor_epoch, command, completed, dirty;
     uint32_t sensor, flags, last_errno, restore_errno;
-    uint32_t dirty, pending, commit_pending, db_phase, db_issued, terminal;
+    uint32_t pending, commit_pending, db_phase, db_issued, terminal;
     uint32_t sampled, db_before[2], db_after[2];
     uint32_t before[X9_CAM_SV_HW_FIELDS], target[X9_CAM_SV_HW_FIELDS];
     uint32_t after[2][X9_CAM_SV_HW_FIELDS];
@@ -63,10 +65,13 @@ struct x9_camera_sv_hw_status {
     uint32_t gate_restore_attempted, gate_restore_issued, gate_restore_seen, gate_restore_samples;
 };
 /* configure_outmux invokes the real locked engine after OUTMUX consumption.
- * It writes only tag0 packed RAW10 geometry, A0 stride/burst, group0 and
- * first/last tag, then follows the upstream DB_EN down/up sequence. Only
+ * It writes tag0 packed RAW10 geometry, A0 stride/burst, group0 and
+ * first/last tag, and the normal CAMSV0 DMA/CQI FIFO threshold configuration
+ * from mtk_cam_sv_dmao_common_config/get_sv_dma_th_setting (MT6993 defaults,
+ * static FIFO mode), then follows the upstream DB_EN down/up sequence. Only
  * sampled complete outer/inner targets prove configuration consumption;
  * no inner data writes, force-load, FBC, address, IRQ, CQ or DMA enable.
+ * CQI threshold configuration never starts a CQ fetch or changes its base.
  * The separate normal IRQ begin path, AFTER an actual S1 lease/RAW arm,
  * journals A0 base low/high and the frame's tag0 FH_SPARE, then initializes
  * tag0 FBC_EN without RCNT, reset, lock, subsampling or valid/sub ratio.

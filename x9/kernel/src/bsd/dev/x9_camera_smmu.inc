@@ -13,7 +13,11 @@ enum { CAM_SMMU_SID=0x80, CAM_SMMU_DISPLAY=0x90, CAM_SMMU_ASID=1,
     CAM_SMMU_STES=256, CAM_SMMU_STE_WORDS=8,
     CAM_SMMU_CR1=(2u<<10)|(2u<<4), /* NC, outer-shareable table/queue */
     CAM_SMMU_CR2=6, /* private TLB maintenance + report invalid SID, !E2H */
-    CAM_SMMU_CR0=13, /* SMMUEN|CMDQEN|EVTQEN, !PRI/ATS */
+    /* arm-smmu-v3-common.h: CR0_CMDQEN is bit3, EVTQEN is bit2.
+     * device_reset enables CMDQ alone before its first CFGI_ALL + SYNC. */
+    CAM_SMMU_CR0_CMDQEN=1u<<3, CAM_SMMU_CR0_EVTQEN=1u<<2,
+    CAM_SMMU_CR0_SMMUEN=1u<<0,
+    CAM_SMMU_CR0=CAM_SMMU_CR0_CMDQEN|CAM_SMMU_CR0_EVTQEN|CAM_SMMU_CR0_SMMUEN,
     CAM_SMMU_CMD_SYNC=0x46, CAM_SMMU_CFGI_STE=3, CAM_SMMU_CFGI_CD=5,
     CAM_SMMU_TLBI_NH_ASID=0x11 };
 struct cam_smmu_cmd { uint64_t word[2]; };
@@ -42,9 +46,12 @@ struct x9_camera_smmu {
     struct x9_camera_smmu *native_previous;
     uint32_t native_ste_phase,native_retire_error,native_prior_word[17];
     uint64_t native_retire_epoch,native_prior_base[3];
+    vm_offset_t native_wp;
+    uint32_t native_prior_wp[4],native_wp_expected[4],native_wp_issued;
 };
 static struct x9_camera_smmu *cam_smmu_namespace;
 static int cam_smmu_shared_check_locked(struct x9_camera_smmu *);
+static int cam_native_wp_guard(struct x9_camera_smmu *);
 
 static bool cam_smmu_capable(uint32_t idr0,uint32_t idr1,uint32_t idr5)
 {
@@ -282,6 +289,7 @@ static int cam_smmu_live(struct x9_camera_smmu *m)
     if(!m->exported)return ENXIO;
     if(m->native) {
         int e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);
+        if(!e)e=cam_native_wp_guard(m);
         if(e)return e;
     }
     if(cam_smmu_rr(m,0)!=m->idr0 || cam_smmu_rr(m,4)!=m->idr1 ||
@@ -405,6 +413,10 @@ static int cam_smmu_submit(struct x9_camera_smmu *m,const struct cam_smmu_cmd *c
     if(m->pending || m->prod!=m->cons)return EBUSY;
     if(count+1>ring || count>2)return EINVAL;
     e=cam_smmu_storage(m);if(!e)e=cam_smmu_live(m);
+    /* A matching normal-bank snapshot alone is insufficient during cold
+     * startup: CMDQ must be acknowledged enabled before publishing PROD.
+     * Otherwise a disabled queue can only time out, leaving backing pinned. */
+    if(!e && !(cam_smmu_rr(m,0x24)&CAM_SMMU_CR0_CMDQEN))e=ENXIO;
     if(e)return cam_smmu_latch(m,e);
     m->batch_start=old;m->batch_count=count+1;
     for(unsigned i=0;i<=count;i++) {
