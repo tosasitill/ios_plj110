@@ -424,7 +424,7 @@ B4/01 分支在 init 后、preview 前仅写 `0x574b=1`、`0x5765=0x33`，并纳
 | sensor PLL `0306/030e` | `016e / 0226` | `010e / 0438` |
 | vendor nominal pclk | 2196000000 | 864000000 |
 
-标称 pclk、sensor PLL 读回或 `VERIFIED` **不是实测 lane/trio 速率、PHY 校准或 rate lease**。主 preview 的图像为 **VC1/DT2b/4096×3072**，另有 **VC3/DT30/4096×768 PDAF**；前摄图像为 **VC0/DT2b/3264×2448**。这来自两枚 sensor 的 `mode_struct[0].frame_desc_prev`，不是其它 custom mode 的推断；写表不代表接收器已过滤出图像通道。前摄 fab 分支已接入，但 vendor open 中的主摄 AF 激活/QSC 与 QSC/LRC 标定仍未执行，因此只称 **未标定 nominal standby**，不能称厂商完整 open 或成像质量验证。blockers `1=factory/calibration`、`2=receiver`、`4=DMA mapping`、`8=drain` 不因读回成功清除。
+标称 pclk、sensor PLL 读回或 `VERIFIED` **不是实测 lane/trio 速率、PHY 校准或 rate lease**。主 preview 的图像为 **VC1/DT2b/4096×3072**，另有 **VC3/DT30/4096×768 PDAF**；前摄图像为 **VC0/DT2b/3264×2448**。这来自两枚 sensor 的 `mode_struct[0].frame_desc_prev`，不是其它 custom mode 的推断；写表不代表接收器已过滤出图像通道。前摄 fab 分支、主/长焦 sensor-open 的 VCM 模式激活与本模组 QSC/SPC/LRC 载入现已接入，准确范围和候选结果见顶部当前状态及 NOTES；它们只说明源码/事务路径，不证明光学效果、完整马达初始化或厂商成像质量。blockers `1=factory/calibration`、`2=receiver`、`4=DMA mapping`、`8=drain` 不因读回成功清除。
 
 成功后器件已 reset/恢复原供电，**配置不持久、READY/supported仍0、不能拍摄**。未来 mode2 的 start 共用同一 preflight/表加载/稳定读回，再交由真实 capture provider 建立 CSI/DMA，最后才 stream-on；目前无该 provider。
 

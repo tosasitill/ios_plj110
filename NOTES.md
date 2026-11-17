@@ -160,7 +160,7 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
-#### 2026-11-17 相机主链继续：补齐主/长焦 sensor open 的 VCM 模式激活（待 r37 整包）
+#### 2026-11-17 相机主链继续：补齐主/长焦 sensor open 的 VCM 模式激活（r37 整包成功，未上机）
 
 - **起点/范围**：单代理继续相机工作树/分支，`544497bc` clean。上一回合属progress（MMQoS源码、r36整包与推送）。最新实机仍`~/350.txt`，r28b..r36均无新MM/RAW/预览结果；未触主checkout、共享`.local`输入、ADB/设备/分区，未跑测试脚本或套件。
 - **主链核查事实**：当前开源`mtk_cam-sv.c`的STG路径只有reset、dump与寄存器定义，未见可移植配置写者；native持续检查central STG triggers为0、CQ SUB_THR0未enable，CQI阈值配置不代表CQ取指。不因Android动态统计里有stash/CQI就增加端口或推定完整STG生命周期。现有真实SOF/hybrid状态读取、FBC/CPU cache/worker→staging→软件ISP/PixelBufferHandler已接线，没有由这轮源码检查取得实际画面证据。
@@ -168,6 +168,7 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **实现/边界**：新增`x9_camera_sensor_open.inc`，独立固定main/tele helper复用原AP FIFO、rails/pins/clock/receiver守卫；不扩大通用sensor/EEPROM slave和寄存器范围。仅配置阶段按两者原顺序重读真实16/17 ID、发一次02=00并等待3ms；ID-only注册不触发VCM。实际模式稳定样本只接受源驱动使用的00/20/40，保存原值；attempt/issued在可能START前记账，ACK在后置预算检查前记录，观察active与整个open完成分开。1s软件总预算，源3ms等待不猜其它芯片时序；失败不重发或把晚到readback改成功。新增append-only `CFG_OPEN` stage，720B config/120B RAW/ioctl ABI保持。
 - **关闭/归档**：原native实际退休guard与capture=false通过后，仍在sensor close标记、reset隔离、receiver/MM/rails恢复之前确认mode00并唯一恢复本次借用原模式；原本00只观察不写。此原值恢复是native资源journal约定，不冒充Android common_close原有VCM写者。mode命令不确定或恢复失败保留低层依赖；若激活完整观察后才发生sensor ID/table错误，可独立恢复模式但不清原错误。完整journal随exported epoch归档，recycle要求对应epoch/sensor和实际mode恢复，不放宽8个pin上限。没有位置、PID/NVM存储、前/UW猜地址或FOCUS能力；完整VCM init/归位、前摄09/0c冲突、AF/OIS与光学校准仍未完成。
 - **编译里程碑**：正常Builder `compile_one(sweet_x9_camera.o)` **actual exit0/True，182 warnings**（session15835终态），日志`x9/out/camera-sensor-open-compile-r1-20261117-console.log`，输出`x9/out/x9-camera-sensor-open-compile-r1-20261117/compile.exit=0`。随后补窄helper的命令单次检查、稳定原模式采样和文档，由固定clean源码正常整包编译唯一r37；SHA/实际结果/push待补。本机无CI run ID，不复查成功产物。
+- **r37整包/推送终态**：固定源码 **`306ee6953a5da6f9693c5d1e07f66a5b489e5b20` / tracked clean**，固定Python3.13正常`build.py all --boot-config x9/build/boot-device.json --boot-arg x9_motion=3 --name x9-camera-sensor-open-r37-20261117` **actual exit0**（session5609终态），104/104 overlay +3 prebuilt，相机182 warnings，原日志Image32231424 B / boot15106048 B。候选 **`/Users/tosasitill/ios_plj110/.worktrees/camera-integration/x9/out/x9-camera-sensor-open-r37-20261117/boot.img`**，原控制台`x9/out/camera-sensor-open-r37-20261117-console.log`，输出目录保留`source-head.txt/source-status.txt/boot-input.json/build-command.txt/full-build.exit/build.log`。layout检查exit0，日志`x9/out/camera-sensor-open-layout-20261117.log`。源码push **actual exit0 `544497bc..306ee695`**（session9582终态），本机无CI run ID，GPU280无需mailbox。默认后/前双摄，未加`x9_camera_lenses=1`；未上机、跑测试或二次检查成功产物。用户从主checkout手动`fastboot boot .worktrees/camera-integration/x9/out/x9-camera-sensor-open-r37-20261117/boot.img`；最新实机350不能混作r37运行结果。
 - **下一验收/后续工作**：默认后/前准入，main应有`SENSOR OPEN ... sensor=1 AF=c issued/acked=1/1 id=9186 bytes=2 complete=1 errno=0`；原mode恢复单独看`SENSOR OPEN RESTORE ... restored=1 errno=0`。长焦同源顺序已编入，但默认双摄不要求tele日志。仍需用户新启动日志按最早MM_2 ACK→SMI/reset/QoS→SMMU/CMDQ→RAW/SOF/DONE/cache/handler推进；不能把本轮open补齐称完整代码或相机已完成。
 
 #### 2026-11-17 相机主链继续：追到 ISP8s caller 的 KB/s 换算（r36 整包成功，未上机）
