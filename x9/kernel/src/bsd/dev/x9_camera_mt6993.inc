@@ -36,6 +36,9 @@ static const unsigned cam_i2c_saved_regs[] = {
     CAM_I2C_IO, CAM_I2C_MIS
 };
 #define CAM_I2C_SAVED_COUNT (sizeof(cam_i2c_saved_regs)/sizeof(cam_i2c_saved_regs[0]))
+/* i2c-mt65xx.c mt6991_compat, also selected by this board's I2C nodes.
+ * Each WRRD leg may use all16 FIFO bytes without enabling APDMA. */
+#define CAM_I2C_FIFO_BYTES 16u
 struct cam_probe_bus {
     vm_offset_t base, dma, gate, top, univpll, mainpll;
     uint32_t gate_bit, saved[CAM_I2C_SAVED_COUNT], last_status, clock_shift, clock_bit, clock_source;

@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机主链继续：日志351，AP FIFO等待及EEPROM分块修正（r40整包成功，未上机）
+
+- **起点/范围**：用户指定看`~/351.txt`，随后继续未完成的相机主线。相机工作树起点`08a894f8` tracked clean；原始日志已只读复制到私有`.local/x9/logs/351.txt`（不入git）。未触主checkout、设备、ADB、分区或共享`.local`输入；未运行测试脚本/套件，构建成功后没有解包/hash/反汇编等二次检查。
+- **351运行证据**：`:801` `NATIVE REGISTER errno=0 IDs=9186/0615`；`:4492`主摄ID成功，`:4530` `SENSOR OPEN ... AF=c prior=20 mode=0 issued/acked=1/1 complete=1 errno=0`。最早失败在`:7001` `AP REQUEST gate=1 errno=60 status=0 start=ffffffff fifo=1 request=1`，紧接`SENSOR CAL phase=preload ... read=3246/0 bytes=3456 pass=0 block=1 offset=174 reg=7cce errno=60`，随后`OPEN RESTORE errno=22`、`DRAIN restore=22 retained=1`。没有该次MM_2、SMMU、RAW、SOF/DONE或handler记录；`gate=1`是WL28681C所在i2c12守卫总线，`reg=7cce`只是校准进度而非失败WL寄存器。`start=ffffffff`是未采样START的日志占位，不是实际硬件读数，不能当作失电证据。日志没有唯一构建标识，不能独立核定其精确源码SHA。
+- **Android对照与确定差异**：本机`live.dts`的i2c4/i2c2/i2c12均`mediatek,mt6991-i2c`，对应`i2c-mt65xx.c:737..748`的`mt6991_compat.fifo_size=16`。同一文件`:137`定义`I2C_POLLING_TIMEOUT=50ms`，`:2256..2265`在其FIFO polling路径循环读INTR_STAT并在超时后补最后一次采样；`:2355..2362`才从DATA_PORT逐字节取RX。原实现把完成观察限为5ms/1000次且先查绝对时间再读状态，线程调度恢复后可能丢掉已经粘住的terminal；校准读每笔仅2字节，使电源守卫读取次数增多。这些是源码确定差异，不把50ms、FIFO容量或旧日志解释为已证明硬件正常。
+- **实现/边界**：`x9_camera_i2c_xfer.inc`的观察预算改为50ms，先读STAT再判断时间，退出补一次STAT；仅在真实terminal且停止START、稳定控制、其他bank/APDMA空闲、FIFO数量与本次RX长度精确相符后完成W1C/收尾。无terminal仍ETIMEDOUT并锁存，不做reset、resume、W1C、FIFO清理重试或把late status改成功。sensor/VCM调用仍保持原寄存器和1B RX范围；只有EEPROM按`CAM_I2C_FIFO_BYTES=16`分块，且不跨一个校准block。保留两遍完整payload、各轮前后header、QSC/SPC/LRC范围及失败不重发。`AP WAIT`在无terminal或观察耗时达到50ms时记录真实START、polls、elapsed_us和bus，`AP REQUEST`明示sensor/WL，避免再用`ffffffff`占位猜硬件。
+- **编译/构建实绩**：正常Builder`compile_one(sweet_x9_camera.o)` **actual exit0/True，182 warnings**（session83450终态），日志`x9/out/camera-i2c-poll-fifo-compile-r2-20261117-console.log`；r1为加bus标识前的同类通过记录。固定工作树修改后执行正常`build.py all --boot-config x9/build/boot-device.json --boot-arg x9_motion=3 --name x9-camera-i2c-poll-fifo-r40-20261117` **actual exit0**（session87184终态），104/104 overlay +3 prebuilt，Image32247808 B / boot15110144 B。候选 **`/Users/tosasitill/ios_plj110/.worktrees/camera-integration/x9/out/x9-camera-i2c-poll-fifo-r40-20261117/boot.img`**，原控制台`x9/out/camera-i2c-poll-fifo-r40-20261117-console.log`。GPU280无需mailbox；默认后/前双摄，未加`x9_camera_lenses=1`。本机无CI run ID。
+- **提交/上机判定**：先提交下列工作树修改并将固定SHA补记本条后push。用户从主checkout手动fastboot boot上述r40并打开Camera.app，新日志重点看：`AP WAIT ... status=... start=... elapsed_us=... bus=WL/sensor`、`AP REQUEST ... errno=0`或资格失败、`SENSOR CAL phase=preload ... read=3456/3456 ... preloaded=1`，再按`VCM INIT`→`NATIVE CONFIG`→MM/SMMU→RAW/handler顺序推进。即使这些通过也只说明离开已定位的AP/校准阻塞，成功预览仍需实际画面与对应运行证据；整体目标保持未完成。
+
 #### 2026-11-17 首次预览主链复核：沿用 r39，下一步取得新运行日志
 
 - **本轮范围**：在`feat/camera-integration`、`35023dc7` clean起点只读核查首次预览必经代码，未继续扩展FOCUS/AF、录像或新增硬件配置。未改主checkout、共享`.local`输入或设备，未运行测试脚本/套件，也未重复构建、解包/hash或检查成功镜像。本轮只有本段交接及`CAMERA_PLAN.md`更新，无新源码候选/CI run ID。

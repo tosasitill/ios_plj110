@@ -60,7 +60,7 @@ static int cam_cal_read(uint64_t end,uint16_t reg,uint8_t *bytes,unsigned count)
     const struct cam_cal_profile *p=&cam_cal_profiles[cam_sensor_cal.sensor-1];
     const uint8_t tx[2]={(uint8_t)(reg>>8),(uint8_t)reg};
     int e=cam_cal_guard(end);
-    if(!count || count>2 || !bytes)return EINVAL;
+    if(!count || count>CAM_I2C_FIFO_BYTES || !bytes)return EINVAL;
     cam_sensor_cal.reg=reg;
     /* This is only the EEPROM address-pointer read used by Android, never
      * its programming/write-protection commands or an arbitrary slave. */
@@ -110,9 +110,13 @@ static int cam_cal_preload(uint32_t which)
         for(unsigned b=0;b<3 && !e;b++) {
             const struct cam_cal_block *d=&p->block[b];
             cam_sensor_cal.block=b;
-            for(unsigned n=0;n<d->bytes && !e;n+=2) {
-                uint8_t bytes[2]={0};
-                unsigned count=d->bytes-n>1?2:1;
+            /* Android adaptor_i2c_rd_p8 performs sequential EEPROM reads.
+             * Bound each chunk by the actual16-byte AP FIFO and this
+             * calibration block; never cross a gap into another region. */
+            for(unsigned n=0;n<d->bytes && !e;n+=CAM_I2C_FIFO_BYTES) {
+                uint8_t bytes[CAM_I2C_FIFO_BYTES]={0};
+                unsigned count=d->bytes-n;
+                if(count>CAM_I2C_FIFO_BYTES)count=CAM_I2C_FIFO_BYTES;
                 cam_sensor_cal.offset=n;e=cam_cal_read(end,(uint16_t)(d->eeprom+n),bytes,count);
                 if(!e) {
                     cam_sensor_cal.read_bytes[pass]+=count;
