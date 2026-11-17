@@ -2,7 +2,7 @@
 
 ## 0. 现状（已证实）
 - 分支 `feat/camera-integration`，worktree `~/ios_plj110/.worktrees/camera-integration`，最新候选
-  `x9/out/x9-camera-normal-start-r29-20261117/boot.img`（源码 **eebb907d**，本机整包 exit0，未上机）。
+  `x9/out/x9-camera-resume-reset-r30-20261117/boot.img`（源码 **64b34fcb**，本机整包 exit0，未上机）。
   最新设备日志350对应此前 `x9-camera-wlgroup-r27-20261117`（bbd3c57b），不要混作 r29 运行结果。
 - **传感器 ID 已通**（log 350）：后摄 hhmain `0x9186`（i2c4/0x1a），前摄 hhfront `0x0615`（i2c2/0x10），
   第一次就读到。根因是 WL28681C 的 pinctrl `reset_high` 组（GPIO203/187/202）里 GPIO187 从没拉高。
@@ -111,7 +111,7 @@
 - CAMSV 已接入 MT6993 默认静态 FIFO 的完整 DMA/CQI 阈值；后续仍需核对 Android
   runtime resume 的局部 reset、DDR/BW_QOS/COH 软件请求及其关闭顺序。
   SET/CLEAR/SW_R 不是普通几何字段，未确认语义前不猜写或按完整 RW 字还原。
-- **本轮冷复位源码已补齐（2026-11-17，候选待构建）**：在 native SMI 完整取时钟后、
+- **本轮冷复位源码已补齐（2026-11-17，r30整包exit0，未上机）**：在 native SMI 完整取时钟后、
   MAC/PHY/OUTMUX 和全部 request/FBC 之前，按 ISP8s `sv_reset_by_camsys_top()` 执行
   CQ stop0→1/ACK bit1→0，以及 MRAW+0xa4 的0→0x30→0连续脉冲。
   三条GIC必须无enable/pending/active，sensor standby、输入和全部CAMSV0通道outstanding为0；
