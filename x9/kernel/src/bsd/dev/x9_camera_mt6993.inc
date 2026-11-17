@@ -447,6 +447,16 @@ static int cam_vs_vote(struct cam_probe_journal *j, bool on)
         }
         printf("X9 CAMERA BUCK5: en=%02x->%02x da=%02x->%02x vosel=%02x->%02x errno=%d (Android always-on: 01/03/be)\n",
             en0,ben,da0,bda,vs0,bvs,e);
+        /* Log 342: DA 0x16c5 reads 13 here, Android 03 (camera off and on).
+         * Read-only dump of the BUCK5 control/status and voter blocks for a
+         * byte-for-byte diff against the Android regmap capture. */
+        static const uint16_t blk[]={0x1680,0x1690,0x16a0,0x16b0,0x16c0,0x1780,0x1790,0x17a0,0x17b0,0x17c0};
+        for(unsigned b=0;!e && b<sizeof(blk)/sizeof(blk[0]);b++) {
+            uint8_t v16[16]={0};
+            for(unsigned i=0;i<16;i++)(void)cam_pmic_r(j,3,blk[b]+i,&v16[i]);
+            printf("X9 CAMERA SID3 %04x: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",blk[b],
+                v16[0],v16[1],v16[2],v16[3],v16[4],v16[5],v16[6],v16[7],v16[8],v16[9],v16[10],v16[11],v16[12],v16[13],v16[14],v16[15]);
+        }
     }
     X9PMIFRelease();return e;
 }

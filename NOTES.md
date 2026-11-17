@@ -2907,3 +2907,11 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - r19: cam_vs_vote(on) reads BUCK5; if EN bit0 clear, set VOSEL be (only while off), EN|=1, wait DA,
   never disable (always-on like Android). Logs X9 CAMERA BUCK5. Fmeter line kept.
 - Image: x9/out/x9-camera-buck5-r19-20261117/boot.img
+
+## Camera log 342 (r19) -> r20 SID3 dump (2026-11-17)
+- 342: BUCK5 already on in iOS: en=01 vosel=be, but DA 0x16c5=13 vs Android 03 (bit4 extra,
+  undecoded in vendor headers; likely a HW low-power/mode status). BUCK5-off hypothesis disproven.
+  ID still NACK; fmeter camtg4=23968 kHz. No freeze.
+- r20 (read-only): dump SID3 0x1680-0x16cf and 0x1780-0x17cf after the vote (X9 CAMERA SID3 xxxx)
+  to diff against Android (have 1680-168f, 16c0-16cf, 1780-179f captured).
+- Image: x9/out/x9-camera-sid3dump-r20-20261117/boot.img
