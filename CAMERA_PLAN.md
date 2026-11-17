@@ -2,9 +2,9 @@
 
 ## 0. 现状（已证实）
 - 分支 `feat/camera-integration`，worktree `~/ios_plj110/.worktrees/camera-integration`，最新候选
-  `x9/out/x9-camera-sensor-open-r37-20261117/boot.img`（源码 **306ee695**，本机整包 exit0，未上机）。
-  最新设备日志350对应此前 `x9-camera-wlgroup-r27-20261117`（bbd3c57b），不要混作 r37 运行结果。
-  r37沿用默认后/前双摄准入，未加`x9_camera_lenses=1`；长焦OB已编入但尚未获运行验收。
+  `x9/out/x9-camera-sof-pts-r38-20261117/boot.img`（源码 **d7a572b8**，本机整包 exit0，未上机）。
+  最新设备日志350对应此前 `x9-camera-wlgroup-r27-20261117`（bbd3c57b），不要混作 r38 运行结果。
+  r38沿用默认后/前双摄准入，未加`x9_camera_lenses=1`；长焦OB已编入但尚未获运行验收。
 - **传感器 ID 已通**（log 350）：后摄 hhmain `0x9186`（i2c4/0x1a），前摄 hhfront `0x0615`（i2c2/0x10），
   第一次就读到。根因是 WL28681C 的 pinctrl `reset_high` 组（GPIO203/187/202）里 GPIO187 从没拉高。
 - **当前阻塞**：打开 Camera.app 时 `NATIVE CONFIG sensor=1 stage=1 errno=5`，
@@ -18,7 +18,7 @@
   native SMMU 首次 CR0 原误写4（EVTQ），已按 Android 改8（CMDQ）再12/13；
   接入 MT6993 普通 wrapper、34个 CAMSV DMA/CQI 默认阈值，修复 prior snapshot padding 和四摄 IRQ slot 越界。
   确切提交/构建结果见 NOTES 最新交接；不能把这些源码修复当 RAW/预览通过。
-- **媒体时间修正（bridge编译成功，待整包/上机）**：Android ISP8s CAMSV SOF 经 controller
+- **媒体时间修正（r38整包成功，待上机）**：Android ISP8s CAMSV SOF 经 controller
   `sof_ts_ns` 进入 job timestamp，buffer done 沿用请求时间。bridge 的 metadata、
   PixelBufferHandler 与 per-output 单调门已统一为同帧 SOF；120B RAW `time` 仍是 DONE，
   SOF/DONE 双重顺序和 still not-before 门保留。首 handler 记录两者 host units；
