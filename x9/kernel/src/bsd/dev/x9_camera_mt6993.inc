@@ -712,6 +712,45 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
 /* Shared cold power engine: leaves a matched sensor and its exact journal
  * powered on. The session layer owns admission, lifetime and ONE unwind.
  * No CSI/SMMU/DMA dependency is established here. */
+/* Log 340 diagnostic (user-approved): vendor clk-fmeter-mt6993.c
+ * cksys_vlp_fqmtr()+fqmtr_cal(CKMTR_VLP, cali 0, div 1, load 0x3ff).
+ * VLP 0x1c200000: FENC mon 0x270, FQMTR DBGMUX sel 0x344[22:16];
+ * CKMTR 0x1c201000 CON0..CON6 = +0x00..+0x18. Only debug meter registers
+ * are written and all are restored. Returns kHz, 0 on timeout,
+ * 0xffffffff if the clock's FENC is off. */
+static uint32_t cam_fmeter_vlp(unsigned id, unsigned fenc_bit)
+{
+    static vm_offset_t vlp,mtr;
+    if(!vlp)vlp=ml_io_map(0x1c200000,0x1000);
+    if(!mtr)mtr=ml_io_map(0x1c201000,0x1000);
+    if(!vlp || !mtr)return 0;
+    unsigned n=0;
+    while(!(cam_rr(vlp,0x270)&(1u<<fenc_bit))){if(++n>1000)return 0xffffffffu;}
+    uint32_t dbg=cam_rr(vlp,0x344);
+    cam_rw(vlp,0x344,dbg&~(0x7fu<<16));
+    cam_rw(vlp,0x344,(dbg&~(0x7fu<<16))|(id<<16));
+    uint32_t c0=cam_rr(mtr,0),c1=cam_rr(mtr,4),c2=cam_rr(mtr,8),c3=cam_rr(mtr,0xc);
+    uint32_t freq=0;
+    cam_rw(mtr,0xc,c3&~1u);
+    for(n=0;(cam_rr(mtr,0x18)&1) && n<2000;n++)delay(1);
+    if(!(cam_rr(mtr,0x18)&1)) {
+        cam_rw(mtr,0,cam_rr(mtr,0)&~((1u<<15)|(1u<<8)|(1u<<4)));
+        cam_rw(mtr,0,cam_rr(mtr,0)|(1u<<15)|(1u<<12));
+        cam_rw(mtr,0,(cam_rr(mtr,0)&0xffffu)|(0x410u<<16));
+        cam_rw(mtr,4,cam_rr(mtr,4)&~(0x3ffu<<16));
+        cam_rw(mtr,4,cam_rr(mtr,4)|(0x3ffu<<16));
+        cam_rw(mtr,8,cam_rr(mtr,8)&~((0xffu<<24)|(1u<<4)|(1u<<3)|(1u<<2)|3u));
+        cam_rw(mtr,8,cam_rr(mtr,8)|(1u<<24));
+        cam_rw(mtr,0,cam_rr(mtr,0)|(1u<<4));
+        for(n=0;(cam_rr(mtr,0x18)&1) && n<2000;n++)delay(1);
+        cam_rw(mtr,0,cam_rr(mtr,0)&~(1u<<4));
+        uint32_t cal=cam_rr(mtr,4)&0xffffu,load=(cam_rr(mtr,4)>>16)&0x3ffu,div=(cam_rr(mtr,8)>>24)&0xffu;
+        freq=(uint32_t)(26000ull*cal*(div+1)/(load+1));
+    }
+    cam_rw(mtr,0,c0);cam_rw(mtr,4,c1);cam_rw(mtr,8,c2);cam_rw(mtr,0xc,c3);
+    cam_rw(vlp,0x344,dbg);
+    return freq;
+}
 static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
 {
     struct cam_probe_journal *j=&cam_journal;
@@ -826,10 +865,14 @@ static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
         if(!e && which==X9_CAMERA_ULTRAWIDE) {e=cam_drive_check(j,false);if(!e)delay(10000);}
         if(!e)e=cam_wl_guard(j,false,&v); /* after reset settle, before the first sensor request */
         if(!e) {
-            uint8_t st[8]={0};static const uint8_t regs[8]={3,0x0b,0x0c,0x0d,0x0e,0x0f,0x11,0x12};
-            for(unsigned i=0;i<8;i++)(void)cam_wl_read(j,regs[i],&st[i]);
-            printf("X9 CAMERA WL STATUS: en=%02x 0b=%02x 0c=%02x 0d=%02x 0e=%02x 0f=%02x 11=%02x 12=%02x (Android streaming: ee 00 00 00 00 00 07 01)\n",
-                st[0],st[1],st[2],st[3],st[4],st[5],st[6],st[7]);
+            uint8_t st[12]={0};static const uint8_t regs[12]={3,0x0b,0x0c,0x0d,0x0e,0x0f,0x11,0x12,1,2,0x10,0x13};
+            for(unsigned i=0;i<12;i++)(void)cam_wl_read(j,regs[i],&st[i]);
+            printf("X9 CAMERA WL STATUS: en=%02x 0b=%02x 0c=%02x 0d=%02x 0e=%02x 0f=%02x 11=%02x 12=%02x 01=%02x 02=%02x 10=%02x 13=%02x (Android streaming: ee 00 00 00 00 00 07 01 03 7f 7f 05)\n",
+                st[0],st[1],st[2],st[3],st[4],st[5],st[6],st[7],st[8],st[9],st[10],st[11]);
+            if(which==X9_CAMERA_BACK) {
+                uint32_t ref=cam_fmeter_vlp(1,31),tg4=cam_fmeter_vlp(25,7),tg3=cam_fmeter_vlp(24,8);
+                printf("X9 CAMERA FMETER: ref26m=%u kHz camtg4=%u kHz camtg3=%u kHz (expect 26000/24000; ffffffff=FENC off, 0=timeout)\n",ref,tg4,tg3);
+            }
         }
     }
     if(!e) {

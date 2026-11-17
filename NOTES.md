@@ -2870,3 +2870,15 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - r17: write WL 0x11=0x07 after WL ID check, before any channel enable (X9 CAMERA WL UVP);
   read-only X9 CAMERA WL STATUS (03,0b-0f,11,12) right before the ID read.
 - Image: x9/out/x9-camera-uvp-r17-20261117/boot.img
+
+## Camera log 340 (r17) -> r18 fmeter diagnostic (2026-11-17)
+- 340: WL reg11 was 06 (UVP on) -> 07; WL status en=ca, 0b-0f=00. ID still NACK x10. No freeze
+  (ran 75 s): the 339 freeze was the r16 diag. GPIO203 was output LOW at iOS entry (WL freshly reset).
+- Re-checked vs vendor: hhmain pw_seq, get_imgsensor_id (0x0016/17, 0x9186, addr 0x34/0x35),
+  i2c4 DT (plain mt6991-i2c, 1 MHz), CAMTG4 is MUX_GENERIC_HWV (HWV grp6 SET bit7 -> PDN bit7=0;
+  iOS CFG=07 so PDN already 0), set_mclk = clk_prepare_enable+set_parent. RT5133 unused by camera.
+  Nothing left to compare statically except whether MCLK really toggles.
+- r18 (user-approved diagnostic): vendor fqmtr_cal on VLP CKMTR (0x1c201000; dbgmux 0x1c200344)
+  measures ref 26M (id1), CAMTG4 (id25), CAMTG3 (id24) right before the ID read
+  (X9 CAMERA FMETER); WL STATUS also prints regs 01/02/10/13 (Android 03 7f 7f 05).
+- Image: x9/out/x9-camera-fmeter-r18-20261117/boot.img
