@@ -2939,4 +2939,4 @@ Model now (as Android, one shared AFE, one owner per shared bit):
   the silent hangs (336/339/343, io_submap exhaustion pattern) and of a disturbed bus.
 - r21: banks=1/dma_banks=1, 0x1000 maps (vendor uses channel 0 only); sensor bus max_hz=1 MHz so the
   inherited ~378 kHz LS timing is borrowed (like i2c12); removed fmeter, SID3 dump, WL status dump.
-- Image: x9/out/x9-camera-ch0-r21-20261117/boot.img
+- Image: x9/out/x9-camera-ch0-r21b-20261117/boot.img
