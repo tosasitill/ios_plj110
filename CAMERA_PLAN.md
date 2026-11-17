@@ -49,6 +49,10 @@
   `smc_get/put` 为兼容字段，此后恒0；实际电源观察看新增 `X9 MM POWER GET/PUT` 日志。
 - 电源与完整相机两个对象已编译 exit0。整包结果和实机结果见 `NOTES.md` 当前交接；本节后面的
   阶段 B–E 仍须按真实新日志推进，尚无 r28 MM/RAW/预览成功证据。
+- 源码 `06166db7`，104/104 overlay 与 kernel 链接完成；首轮 r28 在 Python3.15 的隔离环境缺 LZ4
+  而打包失败，保留目录。改用固定 Python3.13 重做 boot，**r28b exit0**：
+  `x9/out/x9-camera-mm-hwccf-r28b-20261117/boot.img`（15085568 B），沿用 GPU280 无需 mailbox。
+  本轮下一动作是用户手动 boot r28b / Camera.app 场景；尚无本候选的 MM/RAW/预览运行结果。
 
 **已查清（static）**
 - 安卓 MT6993 的 MM SMMU 由 pKVM 管（plat flags `SMMU_SEC_EN|SMMU_HYP_EN`）。smi-dbg 有 `hwccf-support`，
