@@ -3001,3 +3001,13 @@ transfer code). Static audit finds no missing step. Signature (bus + EEPROM + AF
   of the sensor at 9573) are other cameras the OPPO app powers together. 0x14-0x1e = 00 both. WL ruled out.
 - Android debugfs now Permission denied (SELinux Enforcing, ksu) even after mount; BUCK5 OP_EN 16a4-16a6
   not captured. Static audit has no further lead.
+
+## Android BUCK5 live compare + r25 front probe (2026-11-17)
+- Android SID3 (permissive, restored to Enforcing after) camera off/on: 0244=be 1687=01 16a0-af and 16c0-cf
+  identical off/on except 16c1-16c4 (be e1 on), 16c5=03, 178a 00->04. iOS r20 dump (343): 16c0-cf identical
+  to Android-on (16c5=03; the 13 in X9 CAMERA BUCK5 is a transient). Only 16a7 (A 02 / iOS 00) and 16ad
+  (A 3d / iOS 3f) differ: BUCK5 HW op-mode config, same with camera off and on in Android -> not camera.
+  BUCK5 (0.95 V) cannot feed any sensor rail. PMIC ruled out.
+- r25: r23b required cam_native_sensor.sensor!=0, but a clean close zeroes it; clear a clean ENXIO whenever
+  no session is open and it is not this sensor's own error. Front (LDO1/LDO3 + DOVDD, i2c2) now really probes.
+- Image: x9/out/x9-camera-front-r25-20261117/boot.img

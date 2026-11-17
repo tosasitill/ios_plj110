@@ -39,8 +39,10 @@ static int cam_native_sensor_power(const struct x9_camera_sensor *s,int on)
         /* A clean ID NACK (ENXIO) of ANOTHER sensor whose session already
          * closed (epoch 0) must not block probing the next sensor. Any
          * other sticky fault still blocks. */
-        if(cam_native_sensor.error==ENXIO && cam_native_sensor.sensor &&
-           cam_native_sensor.sensor!=s->sensor)cam_native_sensor.error=0;
+        /* Log 347: a clean close zeroes .sensor, so r23b never matched.
+         * epoch==0 here (checked above) means the NACKing session closed. */
+        if(cam_native_sensor.error==ENXIO && cam_native_sensor.sensor!=s->sensor)
+            cam_native_sensor.error=0;
         if(cam_native_sensor.error)return cam_native_sensor.error;
         cam_native_sensor.sensor=s->sensor;
         cam_native_sensor.configured=cam_native_sensor.prepared=false;
