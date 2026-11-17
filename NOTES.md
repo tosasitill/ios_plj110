@@ -2925,3 +2925,18 @@ Model now (as Android, one shared AFE, one owner per shared bit):
   camera code finished at 3.3 s, Camera.app not opened. 336 (WiFi), 339 (GPU), 343 (modem) all
   stop at different places -> invisible panic pattern; need disk panic logs (pull_ios_logs from Android).
 - No new image.
+
+## Android full camera off/on diff (safe regmaps) -> r21 (2026-11-17)
+- Safe snapshot (SPMI 0-03/0-06, WL 12-0035, pins, clk, regulator_summary; NOT all regmaps:
+  globbing every debugfs regmap rebooted the phone). Regulator consumers for 4-001a on open:
+  dvdd=wl ldo2 1160, avdd=wl ldo4 2804, avdd1=wl ldo7 1804, dovdd=ln60_7 1800, afvdd=ldc0_3 3000
+  = exactly iOS. Extra pins on open: SCP_SCL4/SDA4_OIS (218/219), SCP_SPI2 (164-167),
+  CMMCLK3/5 (192/209), CONN (232-234): not sensor0. kmsg do_hw_power_on order = pw_seq.
+- Remaining Android difference: I2C speed (DT i2c4 clock-frequency 1 MHz; iOS retimed to 98 kHz).
+- Found in iOS: sensor/ldo bus mapped ALL channel banks (i2c4 0x80000 + dma 0x30000, i2c2 same,
+  i2c12 0x40000+0x10000 = ~1.7 MB io_submap) and cam_bus_other_idle read channels 1..7 of the
+  AOV/SCP-shared i2c4 on EVERY transfer (r16 diag: reading ch3 stalled 1.3 s). Suspected cause of
+  the silent hangs (336/339/343, io_submap exhaustion pattern) and of a disturbed bus.
+- r21: banks=1/dma_banks=1, 0x1000 maps (vendor uses channel 0 only); sensor bus max_hz=1 MHz so the
+  inherited ~378 kHz LS timing is borrowed (like i2c12); removed fmeter, SID3 dump, WL status dump.
+- Image: x9/out/x9-camera-ch0-r21-20261117/boot.img

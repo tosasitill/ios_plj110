@@ -447,16 +447,6 @@ static int cam_vs_vote(struct cam_probe_journal *j, bool on)
         }
         printf("X9 CAMERA BUCK5: en=%02x->%02x da=%02x->%02x vosel=%02x->%02x errno=%d (Android always-on: 01/03/be)\n",
             en0,ben,da0,bda,vs0,bvs,e);
-        /* Log 342: DA 0x16c5 reads 13 here, Android 03 (camera off and on).
-         * Read-only dump of the BUCK5 control/status and voter blocks for a
-         * byte-for-byte diff against the Android regmap capture. */
-        static const uint16_t blk[]={0x1680,0x1690,0x16a0,0x16b0,0x16c0,0x1780,0x1790,0x17a0,0x17b0,0x17c0};
-        for(unsigned b=0;!e && b<sizeof(blk)/sizeof(blk[0]);b++) {
-            uint8_t v16[16]={0};
-            for(unsigned i=0;i<16;i++)(void)cam_pmic_r(j,3,blk[b]+i,&v16[i]);
-            printf("X9 CAMERA SID3 %04x: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",blk[b],
-                v16[0],v16[1],v16[2],v16[3],v16[4],v16[5],v16[6],v16[7],v16[8],v16[9],v16[10],v16[11],v16[12],v16[13],v16[14],v16[15]);
-        }
     }
     X9PMIFRelease();return e;
 }
@@ -692,14 +682,17 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
     j->pmif_m=(back||tele)?cam_board_map(0x1c01a000,0x2000):0;
     j->board.drive_base=cam_board_map((tele||uw)?0x12060000:back?0x13800000:0x13040000,0x1000);
     j->sensor=(struct cam_probe_bus){
-        .base=cam_board_map(uw?0x139d0000:tele?0x124d0000:back?0x12450000:0x123d0000,0x80000),
-        .dma=cam_board_map(uw?0x16480000:tele?0x16420000:back?0x163d0000:0x16390000,0x30000),.banks=8,.dma_banks=3,
+        .base=cam_board_map(uw?0x139d0000:tele?0x124d0000:back?0x12450000:0x123d0000,0x1000),
+        .dma=cam_board_map(uw?0x16480000:tele?0x16420000:back?0x163d0000:0x16390000,0x1000),.banks=1,.dma_banks=1,
         .gate=cam_board_map(uw?0x13a50000:0x12650000,0x1000),.gate_bit=tele?8:back?4:2,
         .top=j->top,.univpll=j->pll,.mainpll=j->mainpll,.clock_shift=uw?8:16,.clock_bit=uw?30:29,
-        .group_gate_mask=uw?0x03:0x3f,.vendor_reset=true};
+        .group_gate_mask=uw?0x03:0x3f,.vendor_reset=true,
+        /* Android DT i2c4/i2c2 clock-frequency = 1 MHz: keep the inherited
+         * LK/SCP LS timing (~378 kHz) instead of retiming to 98 kHz. */
+        .max_hz=1000000};
     j->ldo=(struct cam_probe_bus){.max_hz=400000, /* live DT i2c12 clock-frequency */
-        .base=cam_board_map(0x16200000,0x40000),
-        .dma=cam_board_map(0x164f0000,0x10000),.banks=4,.dma_banks=1,
+        .base=cam_board_map(0x16200000,0x1000),
+        .dma=cam_board_map(0x164f0000,0x1000),.banks=1,.dma_banks=1,
         .gate=cam_board_map(0x16300000,0x1000),.gate_bit=1,
         .top=j->top,.univpll=j->pll,.mainpll=j->mainpll,.clock_shift=0,.clock_bit=31,
         .group_gate_mask=0x0d};
@@ -750,45 +743,6 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
 /* Shared cold power engine: leaves a matched sensor and its exact journal
  * powered on. The session layer owns admission, lifetime and ONE unwind.
  * No CSI/SMMU/DMA dependency is established here. */
-/* Log 340 diagnostic (user-approved): vendor clk-fmeter-mt6993.c
- * cksys_vlp_fqmtr()+fqmtr_cal(CKMTR_VLP, cali 0, div 1, load 0x3ff).
- * VLP 0x1c200000: FENC mon 0x270, FQMTR DBGMUX sel 0x344[22:16];
- * CKMTR 0x1c201000 CON0..CON6 = +0x00..+0x18. Only debug meter registers
- * are written and all are restored. Returns kHz, 0 on timeout,
- * 0xffffffff if the clock's FENC is off. */
-static uint32_t cam_fmeter_vlp(unsigned id, unsigned fenc_bit)
-{
-    static vm_offset_t vlp,mtr;
-    if(!vlp)vlp=ml_io_map(0x1c200000,0x1000);
-    if(!mtr)mtr=ml_io_map(0x1c201000,0x1000);
-    if(!vlp || !mtr)return 0;
-    unsigned n=0;
-    while(!(cam_rr(vlp,0x270)&(1u<<fenc_bit))){if(++n>1000)return 0xffffffffu;}
-    uint32_t dbg=cam_rr(vlp,0x344);
-    cam_rw(vlp,0x344,dbg&~(0x7fu<<16));
-    cam_rw(vlp,0x344,(dbg&~(0x7fu<<16))|(id<<16));
-    uint32_t c0=cam_rr(mtr,0),c1=cam_rr(mtr,4),c2=cam_rr(mtr,8),c3=cam_rr(mtr,0xc);
-    uint32_t freq=0;
-    cam_rw(mtr,0xc,c3&~1u);
-    for(n=0;(cam_rr(mtr,0x18)&1) && n<2000;n++)delay(1);
-    if(!(cam_rr(mtr,0x18)&1)) {
-        cam_rw(mtr,0,cam_rr(mtr,0)&~((1u<<15)|(1u<<8)|(1u<<4)));
-        cam_rw(mtr,0,cam_rr(mtr,0)|(1u<<15)|(1u<<12));
-        cam_rw(mtr,0,(cam_rr(mtr,0)&0xffffu)|(0x410u<<16));
-        cam_rw(mtr,4,cam_rr(mtr,4)&~(0x3ffu<<16));
-        cam_rw(mtr,4,cam_rr(mtr,4)|(0x3ffu<<16));
-        cam_rw(mtr,8,cam_rr(mtr,8)&~((0xffu<<24)|(1u<<4)|(1u<<3)|(1u<<2)|3u));
-        cam_rw(mtr,8,cam_rr(mtr,8)|(1u<<24));
-        cam_rw(mtr,0,cam_rr(mtr,0)|(1u<<4));
-        for(n=0;(cam_rr(mtr,0x18)&1) && n<2000;n++)delay(1);
-        cam_rw(mtr,0,cam_rr(mtr,0)&~(1u<<4));
-        uint32_t cal=cam_rr(mtr,4)&0xffffu,load=(cam_rr(mtr,4)>>16)&0x3ffu,div=(cam_rr(mtr,8)>>24)&0xffu;
-        freq=(uint32_t)(26000ull*cal*(div+1)/(load+1));
-    }
-    cam_rw(mtr,0,c0);cam_rw(mtr,4,c1);cam_rw(mtr,8,c2);cam_rw(mtr,0xc,c3);
-    cam_rw(vlp,0x344,dbg);
-    return freq;
-}
 static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
 {
     struct cam_probe_journal *j=&cam_journal;
@@ -902,16 +856,6 @@ static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
         if(!e)delay((which==X9_CAMERA_TELEPHOTO || which==X9_CAMERA_ULTRAWIDE)?2000:4000);
         if(!e && which==X9_CAMERA_ULTRAWIDE) {e=cam_drive_check(j,false);if(!e)delay(10000);}
         if(!e)e=cam_wl_guard(j,false,&v); /* after reset settle, before the first sensor request */
-        if(!e) {
-            uint8_t st[12]={0};static const uint8_t regs[12]={3,0x0b,0x0c,0x0d,0x0e,0x0f,0x11,0x12,1,2,0x10,0x13};
-            for(unsigned i=0;i<12;i++)(void)cam_wl_read(j,regs[i],&st[i]);
-            printf("X9 CAMERA WL STATUS: en=%02x 0b=%02x 0c=%02x 0d=%02x 0e=%02x 0f=%02x 11=%02x 12=%02x 01=%02x 02=%02x 10=%02x 13=%02x (Android streaming: ee 00 00 00 00 00 07 01 03 7f 7f 05)\n",
-                st[0],st[1],st[2],st[3],st[4],st[5],st[6],st[7],st[8],st[9],st[10],st[11]);
-            if(which==X9_CAMERA_BACK) {
-                uint32_t ref=cam_fmeter_vlp(1,31),tg4=cam_fmeter_vlp(25,7),tg3=cam_fmeter_vlp(24,8);
-                printf("X9 CAMERA FMETER: ref26m=%u kHz camtg4=%u kHz camtg3=%u kHz (expect 26000/24000; ffffffff=FENC off, 0=timeout)\n",ref,tg4,tg3);
-            }
-        }
     }
     if(!e) {
         r->stage=X9_CAM_STAGE_ID;uint8_t hi=0,lo=0;
