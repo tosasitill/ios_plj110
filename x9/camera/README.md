@@ -6,7 +6,7 @@
 
 重复票语义复核：`_v1_hwccf_irq_voter_nowait()`的重复票`goto skip`只跳过nowait里的prepoll/SET/EN，外层`_v1_hwccf_irq_voter_ctrl()`仍调用`_v1_hwccf_irq_voter_wait_done()`继续等`all_en`和`STA`；`_v1_mm_hwccf_voter_ctrl()`的单函数skip不能混入这条组合语义。三套路径最终都要求`STA bit3=0`，因此`ap=8/global=8/sta=8`不是等待步长或重复票造成的假失败。原ATF中`28d48/28f08`对resource55/bit3的VOTE/UNVOTE与native同一资源；`28f08`丢弃内部HWCCF返回值并总返回0，外层PM成功不能证明内部成功，也无法替代native的最终STA判定。未据此改代码、清状态或延长等待。
 
-原ATF `21424(type1,0x37,bit3)`继续闭合到`37f4/385c`：AP使用MM HWV `0x31c00000`，VOTE/UNVOTE写`+0x30724/+0x30728`（对应`XPU_B0_SET/CLR`）。复查`385c/3988`确认它检查AP EN并等global EN `+0x11358`，VOTE路径没有再次轮询STA；此前“ATF也最终等STA”的旧表述不准确。native按Android v1 voter的`wait_done()`仍要求STA bit3 idle，不能放宽。`21564`的`0x31c3748=2`只在VM型资源`0x38/0x39`成功后写，MM BACKUP0 `0x37`不写。新增只读`int=CCF_INT_STATUS&BIT(5)`用于观察backup1 timeout，不写W1C；`sta=8`仍按源码失败，不清W1C、不改bank、不延长。
+原ATF `21424(type1,0x37,bit3)`继续闭合到`37f4/385c/3988`：AP使用MM HWV `0x31c00000`，VOTE/UNVOTE写`+0x30724/+0x30728`（对应`XPU_B0_SET/CLR`）。按物理地址逐指令复核：`385c`检查并等待AP EN和global EN；`3988`再以`0x2710×1us`等待`w19/w20`清零，而`37f4`传入的是`0x1135c/STA`与bit3，所以ATF VOTE路径最终仍要求STA bit3清零。此前“3988只等global EN/没有再轮询STA”的表述错误，以此纠正。native按Android v1 voter的`wait_done()`同样要求STA bit3 idle，不能放宽。`21564`的`0x31c3748=2`只在VM型资源`0x38/0x39`成功后写，MM BACKUP0 `0x37`不写。新增只读`int=CCF_INT_STATUS&BIT(5)`用于观察backup1 timeout，不写W1C；`sta=8`仍按源码失败，不清W1C、不改bank、不延长。
 
 `CCF_INT_STATUS(0x50)`的bit5/bit21分别在`hwccf.h:150/167`命名为VIP/AP backup1 timeout；参考树只在`hwccf_dbg.c:172`和`clkchk-mt6993.c:3572/3876`的debug dump列出`0x50`，v1 IRQ voter没有读取或清除该寄存器。新增的`int=`只用于下一次日志诊断，不能替代`CCF_BACKUP1_STA`判据，也不能在尚无新日志时宣称硬件已置位timeout。
 
