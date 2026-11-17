@@ -1,4 +1,4 @@
-# X9 后摄出图：交接计划（2026-11-17，接 log 355）
+# X9 后摄出图：交接计划（2026-11-17，接 log 356）
 
 ## 0. 现状（已证实）
 - 分支 `feat/camera-integration`，worktree `~/ios_plj110/.worktrees/camera-integration`，最新候选
@@ -7,14 +7,16 @@
   日志351的preload阻塞已由r40修复；最新日志354确认EEPROM两遍读完整通过，但日志没有唯一构建标识，
   不能仅据此独立核定精确源码SHA。r41沿用默认后/前双摄准入，未加`x9_camera_lenses=1`；
   长焦OB/VCM已编入但尚未获运行验收。
-- **已通过（日志355）**：17.248s EEPROM preload完整；21.686s `phase=apply ... writes=250 acked=250 applied=1 errno=0`；
-  22.299s `phase=mode ... mode=1/1 errno=0`与`VCM INIT ... complete=1 errno=0`。sensor校准链按Android FIFO
+- **已通过（日志355/356）**：356 `:5255` EEPROM preload完整；`:5823` `phase=apply ... writes=250 acked=250 applied=1 errno=0`；
+  `:6081` `phase=mode ... mode=1/1 errno=0`与`VCM INIT ... complete=1 errno=0`。sensor校准链按Android FIFO
   消息形状闭合。ACK仍是事务收据，不代表光学校准效果。
-- **当前最早失败（日志355）**：22.478s `X9 MM POWER GET ... MM_2 bit=3 stage=4 ... ap=8 global=8 sta=8 done=fffffff7 ack2=c2f10152 infra=e3fc0000 errno=60`，
-  NATIVE CONFIG stage1 errno60、VCM release errno60、DRAIN latched=1。失败点是`x9_mm_power.c:mm_vote_take()`的
-  stage4 `MM_POWER_STA` bit3 idle等待超时；AP SET/EN与global EN已为8，不是旧的`c2000514` SMC失败，也不是I2C失败。
-  源码对照确认native地址/顺序/预算与Android v1 IRQ voter一致，`done`不是该路径成功条件；r44只增加
-  `all_sta/fsm/mt0sta/mt1sta`只读日志来判定下一步，不延长或绕过STA。尚无MM之后/RAW/handler证据。
+- **当前最早失败（日志356）**：22.131s `X9 MM POWER GET ... MM_2 bit=3 stage=4 ... ap=8 global=8 sta=8 done=fffffff7 ack2=c2f10152 infra=e3fc0000 all_sta=0 fsm=80000001 mt0sta=0 mt1sta=0 errno=60`，
+  紧接 NATIVE CONFIG stage1 errno60、VCM release errno60。失败点是`x9_mm_power.c:mm_vote_take()`的
+  stage4 `CCF_BACKUP1_STA` bit3 idle等待超时；AP SET/EN与global EN已为8，不是旧的`c2000514` SMC失败，也不是I2C失败。
+  `all_sta/mt0sta/mt1sta`为0排除普通嵌套MTCMOS未完成解释；`fsm=80000001`按`hwccf_api.c:325`的
+  `(val & 0xffff) <= 0x1`判据仍是idle，bit31不参与该判定。源码对照确认native地址/顺序/预算与Android v1 IRQ voter一致，
+  `done`不是该路径成功条件；失败后Android只assert+返回，CG47 retrigger回调对BACKUP资源直接bypass。r44只增加
+  `all_sta/fsm/mt0sta/mt1sta`只读日志，不延长或绕过STA。尚无MM之后/RAW/handler证据。
 - **传感器 ID 已通**（log 350）：后摄 hhmain `0x9186`（i2c4/0x1a），前摄 hhfront `0x0615`（i2c2/0x10），
   第一次就读到。根因是 WL28681C 的 pinctrl `reset_high` 组（GPIO203/187/202）里 GPIO187 从没拉高。
 - **此前阻塞（日志350；351尚未走到这里）**：打开 Camera.app 时 `NATIVE CONFIG sensor=1 stage=1 errno=5`，

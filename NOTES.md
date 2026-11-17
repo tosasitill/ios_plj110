@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机主链继续：日志356闭合r44诊断，MM_2仍停在STA未清
+
+- **起点/范围**：用户要求切到相机分支、按handoff继续并“完全按照安卓流程”。工作树在`97124a0f` tracked clean；`~/356.txt`只读保存到`.local/x9/logs/356.txt`（不入git）。本轮只读核查351–356、`hwccf_api.c/hwccf.h`、`mtk-mminfra-util.c`和native电源代码，没有改上电流程、编译、构建、跑测试、boot/reboot/flash、操作ADB/分区或设备。
+- **运行观察**：`:741` `NATIVE REGISTER errno=0 IDs=9186/0615`；`:5255` EEPROM两遍读取`read=3456/3456 preloaded=1 errno=0`；`:5823` `phase=apply ... writes=250 acked=250 applied=1 errno=0`；`:6081` `phase=mode ... mode=1/1 errno=0`与`VCM INIT ... complete=1 errno=0`。这与355相同，继续确认校准FIFO消息形状和VCM init通过；ACK仍只是事务收据，不证明光学效果。
+- **356的r44新证据/最早失败**：`:6086` `X9 MM POWER GET: client=1 backend=hwccf MM_2 bit=3 stage=4 owned=1 held=0 ap=8 global=8 sta=8 done=fffffff7 ack2=c2f10152 infra=e3fc0000 all_sta=0 fsm=80000001 mt0sta=0 mt1sta=0 errno=60`，紧接`:6087` `NATIVE CONFIG ... stage=1 completed=0 errno=60`、`:6088` VCM release errno60。失败仍是`x9_mm_power.c:mm_vote_take()` stage4的`CCF_BACKUP1_STA` bit3在10ms末尾未清；`all_sta=0/mt0sta=0/mt1sta=0`排除了普通MTCMOS0/1 status显示“嵌套电源未完成”的解释。
+- **源码判定**：`hwccf.h:64..67`只把`CCF_STATUS` bit0定义为`hwccf_idle`；`hwccf_api.c:325`的FSM判据是`(val & 0xffff) <= 0x1`，所以`fsm=80000001`的bit31不在该判据内，低16位为1仍是idle，不能把bit31单独当失败。`hwccf_api.c:1190..1239`确认BACKUP_GRP0使用`XPU_B0_SET/CLR/DONE/STA/GLB_EN`；`:776..870`为pre-poll STA→SET→poll EN；`:993..1050`为poll GLB_EN→poll STA清；`:1093..1125`把两步串在同一个v1 ctrl内。`v1_hwccf_irq_voter_ctrl`失败后只`configASSERT(0)`返回，不做额外补救。注册在v1 ops的`_v1_mm_hwccf_mtcmos_fsm_err_handle`（`:1314..1412`）在`GET_ID_FROM_SET_ADDR`非CG或超过`HW_CCF_CG_GRP_51`时直接bypass，CG47 retrigger不适用于本资源；因此不新增该流程。结论：native顺序/地址/预算与源码一致，硬件STA未清是下一步的唯一确定失败点，不延长、不忽略STA、不清W1C、不改投票顺序。
+- **当前进度**：已完成传感器ID→sensor-open→EEPROM preload→calibration apply/mode→VCM init。未完成MM_2→MM clocks/SMI/SMMU→CAMSV/IRQ/SOF/DONE→RAW staging→iOS handler→可见预览→画面正确性；目前仍不能宣称预览成功。下一步继续围绕`0x1135c/0x20724/0x2072c/0x11358/0x1136c`和v1 voter源码查污染/资格，不把诊断候选称为MM修复。
+
 #### 2026-11-17 相机主链继续：MM_2源码对齐与可判定诊断（r44整包成功，未上机）
 
 - **范围**：用户说「继续」后，只读对照`hwccf_api.c:776..1125/1190..1239`、`hwccf.h:50..55/116..124/697..707`、`mtk-mminfra-util.c:55..126/250..360`与live DT。确认`mediatek,mt6993-mm_hwv`使用v1 ops；`HW_CCF_BACKUP_GRP_0(55)`映射`XPU_B0_SET=0x20724`、`B0_EN=0x2072c`、`B0_DONE=0x1136c`、`B0_STA=0x1135c`、`B0_GLB_EN=0x11358`，与native地址一致。v1 IRQ voter顺序是pre-poll STA bit3清→写SET→poll EN→wait_done先poll all_en→再poll STA清；native `x9_mm_power.c`已按此顺序，10ms预算也与`MTK_WAIT_GHWV_*`同量级。355的`ap=8 global=8 sta=8`就是最后STA未清；`done=fffffff7`只作诊断，Android该路径不把DONE当成功条件。因此本轮没有延长、忽略STA、清DONE或改投票顺序，避免偏离源码。
