@@ -2,7 +2,7 @@
 
 ## 当前状态（2026-11-17）
 
-**日志 `~/350.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615` 并完成 native 注册；尚无真实预览、拍照、录像或切镜验收。** GPIO187 的 WL reset_high 组修复解决了原 ID NACK。Camera.app 随后在 MM 上电时被不支持的 `0xc2000514` SMC 阻断；源码 `06166db7` 已按 Android 时钟/SMI 路线改为 HWCCF MM_2 bit3 引用，候选 `x9/out/x9-camera-mm-hwccf-r28b-20261117/boot.img` 已构建，待用户上机验证电源、CSI/SMMU、RAW 与实际画面。原生单路采集、四颗物理镜头接线、后置变焦路由和 iOS 软件视频配置仍处于源码/构建阶段。
+**日志 `~/350.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615` 并完成 native 注册；尚无真实预览、拍照、录像或切镜验收。** GPIO187 的 WL reset_high 组修复解决了原 ID NACK。Camera.app 随后在 MM 上电时被不支持的 `0xc2000514` SMC 阻断；源码 `06166db7` 已按 Android 时钟/SMI 路线改为 HWCCF MM_2 bit3 引用。最新候选为 **`x9/out/x9-camera-normal-start-r29-20261117/boot.img`**（源码 **eebb907d**，整包 exit0，未上机），还包含后续 SMMU/CAMSV 修复，待用户验证电源、CSI/SMMU、RAW 与实际画面。原生单路采集、四颗物理镜头接线、后置变焦路由和 iOS 软件视频配置仍处于源码/构建阶段。
 
 后续源码核查又修正了 SMMU 的 CMDQ 使能顺序（8→12→13）、接入 DT 对应的普通
 wrapper 和34个 CAMSV DMA/CQI FIFO 默认配置，修复退休快照未初始化 padding，以及四摄使用

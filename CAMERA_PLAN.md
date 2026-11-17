@@ -1,8 +1,9 @@
 # X9 后摄出图：交接计划（2026-11-17，接 log 350）
 
 ## 0. 现状（已证实）
-- 分支 `feat/camera-integration`，worktree `~/ios_plj110/.worktrees/camera-integration`，最新镜像
-  `x9/out/x9-camera-wlgroup-r27-20261117/boot.img`（commit bbd3c57b，notes 至 90c96dd9）。
+- 分支 `feat/camera-integration`，worktree `~/ios_plj110/.worktrees/camera-integration`，最新候选
+  `x9/out/x9-camera-normal-start-r29-20261117/boot.img`（源码 **eebb907d**，本机整包 exit0，未上机）。
+  最新设备日志350对应此前 `x9-camera-wlgroup-r27-20261117`（bbd3c57b），不要混作 r29 运行结果。
 - **传感器 ID 已通**（log 350）：后摄 hhmain `0x9186`（i2c4/0x1a），前摄 hhfront `0x0615`（i2c2/0x10），
   第一次就读到。根因是 WL28681C 的 pinctrl `reset_high` 组（GPIO203/187/202）里 GPIO187 从没拉高。
 - **当前阻塞**：打开 Camera.app 时 `NATIVE CONFIG sensor=1 stage=1 errno=5`，
@@ -56,7 +57,7 @@
 - 源码 `06166db7`，104/104 overlay 与 kernel 链接完成；首轮 r28 在 Python3.15 的隔离环境缺 LZ4
   而打包失败，保留目录。改用固定 Python3.13 重做 boot，**r28b exit0**：
   `x9/out/x9-camera-mm-hwccf-r28b-20261117/boot.img`（15085568 B），沿用 GPU280 无需 mailbox。
-  本轮下一动作是用户手动 boot r28b / Camera.app 场景；尚无本候选的 MM/RAW/预览运行结果。
+  r28b 已由含后续静态修复的 **r29** 候选替代；两者都没有新的 MM/RAW/预览运行结果。
 
 **已查清（static）**
 - 安卓 MT6993 的 MM SMMU 由 pKVM 管（plat flags `SMMU_SEC_EN|SMMU_HYP_EN`）。smi-dbg 有 `hwccf-support`，
