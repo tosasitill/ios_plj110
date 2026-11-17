@@ -2896,3 +2896,14 @@ Model now (as Android, one shared AFE, one owner per shared bit):
   INCK -> XCLR, >=0.6-10 ms after XCLR). MT8189 "CMMCLK gating" thread = just pinmux name.
 - Still unverified: MCLK at the PAD (fmeter measures inside VLP), BUCK5 (WL NLDO input) actually on.
 - No new image this round.
+
+## Android BUCK5 / MCLK pad check -> r19 (2026-11-17)
+- Android live (adb regmap 0-03, camera off and on identical): MT6661 SID3 BUCK5
+  EN 0x1687=01, DA 0x16c5=03, VOSEL 0x244=be. DT mt6661_3_buck5 = regulator-always-on.
+  178a 00->04 (sensor0 vs-voter) and 1787 08->88 only stack on the SW enable.
+- MCLK pad: GPIO208 DIN sampled via debugfs pins: off 0x200 zeros; on 83 ones/117 zeros (toggling).
+  GPIO171 reset 1 when on.
+- iOS never enables BUCK5 in SW (only votes). BUCK5 = WL28681C NLDO (DVDD) input per the vs-voter.
+- r19: cam_vs_vote(on) reads BUCK5; if EN bit0 clear, set VOSEL be (only while off), EN|=1, wait DA,
+  never disable (always-on like Android). Logs X9 CAMERA BUCK5. Fmeter line kept.
+- Image: x9/out/x9-camera-buck5-r19-20261117/boot.img

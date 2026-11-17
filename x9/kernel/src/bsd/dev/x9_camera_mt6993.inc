@@ -376,7 +376,7 @@ static int cam_pmic_xfer_locked(struct cam_probe_journal *j, unsigned sid,
     if(write && !(uw_rail || (j->board.sensor==X9_CAMERA_TELEPHOTO && sid==j->afvdd.sid &&
         (reg==j->afvdd.sel_reg || ((reg==j->afvdd.en_reg+1 || reg==j->afvdd.en_reg+2) && *v==1))) || (sid==3 && (reg==0x24a ||
         ((reg==0x2048 || reg==0x2049) && *v==1) ||
-        ((reg==0x178b || reg==0x178c) && *v==4))) ||
+        ((reg==0x178b || reg==0x178c) && *v==4) || reg==0x244 || reg==0x1687)) ||
         (sid==6 && (reg==0x1e61 || ((reg==0x1f08 || reg==0x1f09) && *v==1)))))return EPERM;
     if(j->pmif_fault)return EIO;
     /* Captured spmi-dev-mask55a8: SID3/5 on P, SID6 on M. */
@@ -419,6 +419,34 @@ static int cam_vs_vote(struct cam_probe_journal *j, bool on)
         if(!e)e=cam_pmic_r(j,3,0x178a,&en);
         if(!e && !!(en&4)!=on)e=EIO;
         if(!e && !on)j->vs_owned=false;
+    }
+    if(!e && on) {
+        /* DT mt6661_3_buck5 is regulator-always-on: Linux enables it at boot
+         * and never disables it. Android live (adb regmap 0-03), camera off
+         * AND on: EN 0x1687=01, DA 0x16c5=03, VOSEL 0x244=be. sensor0's
+         * vs-voter (178a bit2) only stacks on that SW enable. BUCK5 feeds the
+         * WL28681C NLDO (DVDD) input. Logs 335-341: EEPROM/AF (DOVDD/AFVDD)
+         * ACK, only the sensor is silent, MCLK measured 24 MHz, WL regs = Android.
+         * Like Android, enable it and never turn it off. */
+        uint8_t ben=0,bda=0,bvs=0;
+        e=cam_pmic_r(j,3,0x1687,&ben);
+        if(!e)e=cam_pmic_r(j,3,0x16c5,&bda);
+        if(!e)e=cam_pmic_r(j,3,0x244,&bvs);
+        uint8_t en0=ben,da0=bda,vs0=bvs;
+        if(!e && !(ben&1)) {
+            if(bvs!=0xbe){e=cam_pmic_w(j,3,0x244,0xbe);if(!e)e=cam_pmic_r(j,3,0x244,&bvs);}
+            if(!e)e=cam_pmic_w(j,3,0x1687,(uint8_t)(ben|1));
+            for(unsigned n=0;!e && n<20;n++) {
+                delay(100);
+                e=cam_pmic_r(j,3,0x16c5,&bda);
+                if(!e && (bda&1))break;
+            }
+            if(!e)e=cam_pmic_r(j,3,0x1687,&ben);
+            if(!e && (!(ben&1) || !(bda&1)))e=EIO;
+            if(!e)delay(200); /* regulator-enable-ramp-delay 180 us */
+        }
+        printf("X9 CAMERA BUCK5: en=%02x->%02x da=%02x->%02x vosel=%02x->%02x errno=%d (Android always-on: 01/03/be)\n",
+            en0,ben,da0,bda,vs0,bvs,e);
     }
     X9PMIFRelease();return e;
 }
