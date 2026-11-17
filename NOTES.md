@@ -2853,3 +2853,20 @@ Model now (as Android, one shared AFE, one owner per shared bit):
   devices on the bus: EEPROM 0x50, AF 0x0c, alt 0x10, sensor 0x1a with 1-byte reg. Logs
   X9 CAMERA DIAG CSR/CH/PROBE. ACK from EEPROM/AF => sensor problem; NACK all => bus.
 - Image: x9/out/x9-camera-diag-r16-20261117/boot.img
+
+## Camera log 339 (r16 diag) -> r17 (2026-11-17)
+- 339 diag: on i2c4, EEPROM 0x50 ACK (byte 05) and AF 0x0c ACK; sensor 0x1a NACK (2-byte and
+  1-byte reg), 0x10 NACK. Bus/controller/pads/timing proven good; the sensor itself is silent.
+  Froze ~2 s after Camera.app opened (37/38 did not): blamed on the diag (other-channel CSR reads
+  stalled boot 1.3 s). Diag removed in r17.
+- Android live diff camera off->on (adb debugfs regmap): SID3 178a 00->04 (VS voter, iOS does it),
+  1787 08->00 (another voter, not sensor0), DOVDD 2047/2062 and AFVDD 1f07/1f14 (iOS does it),
+  WL 03 80->ee (extra LDO3/LDO6 = front/other sensors, opened together by the Oplus app),
+  CAMTG3/4/5 on (4 = sensor0 per DT clocks <VLP 23>). Sensor0 rails/codes/order/pins
+  (0xd001, 0xab), univpll (CON1 0x180000 = 2496 MHz), GPIO offsets all match Android.
+- Only remaining Android write iOS never did: Oplus wl28681c-regulator.c probe
+  regmap_write(0x11, 0x07) "disable UVP". Android WL regs: 01=03 02=7f 10=7f 11=07 12=01 13=05.
+  UVP trip on a WL output under sensor inrush explains "EEPROM/AF ACK, sensor silent".
+- r17: write WL 0x11=0x07 after WL ID check, before any channel enable (X9 CAMERA WL UVP);
+  read-only X9 CAMERA WL STATUS (03,0b-0f,11,12) right before the ID read.
+- Image: x9/out/x9-camera-uvp-r17-20261117/boot.img
