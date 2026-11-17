@@ -1,0 +1,98 @@
+# X9 后摄出图：交接计划（2026-11-17，接 log 350）
+
+## 0. 现状（已证实）
+- 分支 `feat/camera-integration`，worktree `~/ios_plj110/.worktrees/camera-integration`，最新镜像
+  `x9/out/x9-camera-wlgroup-r27-20261117/boot.img`（commit bbd3c57b，notes 至 90c96dd9）。
+- **传感器 ID 已通**（log 350）：后摄 hhmain `0x9186`（i2c4/0x1a），前摄 hhfront `0x0615`（i2c2/0x10），
+  第一次就读到。根因是 WL28681C 的 pinctrl `reset_high` 组（GPIO203/187/202）里 GPIO187 从没拉高。
+- **当前阻塞**：打开 Camera.app 时 `NATIVE CONFIG sensor=1 stage=1 errno=5`，
+  `MM: stage/slot=1/0 errno=5 blockers=1ff smc=c2000514/0`。
+  - 位置：`x9_camera_resources.inc: cam_receive_power_take()` → `x9_mm_power.c: x9_mm_power_acquire()`
+    → SMC `0xc2000514`，x1=`0x803`（smmu-secure PM_GET, MM_SMMU）。
+  - 返回值 a0 = `0xc2000514`（调用号原样返回）= 固件不支持（见 `pkvm_smmu_hyp.c:get_target_smmu_hw_semaphore`）。
+- 不要再查的东西（都已和安卓逐字节对上）：传感器供电/时序、WL 全部寄存器、BUCK5/VS voter、
+  MCLK（内部 + 引脚翻转）、XCLR 引脚、I2C 引脚/速率/格式、DOVDD DA。
+
+## 1. 工作规则（用户要求，务必遵守）
+1. **先按安卓源码梳理完整流程，再对照 iOS 找缺失，静态证实后才出镜像**；不要一轮轮试错。
+2. 照搬安卓每个驱动 probe 里的**全部**引脚/寄存器设置（整组 pinctrl state、整个 init 序列），
+   不要自定义"不碰 X"之类的排除，除非安卓确实不碰。
+3. 两个独立设备同样失败时，先查它们共用的东西。
+4. 用户回复 "3NN" = 分析 Mac `~/NNN.txt`：先 `cp` 到 `~/ios_plj110/.local/x9/logs/`，修复、编一个镜像、
+   commit、追加 NOTES.md，用中文汇报并给出完整镜像路径。
+5. 安卓侧只读：SPMI PMIC `0-03..0-0d`、`12-0035`、pinctrl pins、clk_summary、regulator_summary；
+   **禁止 glob 读全部 regmap（会重启手机）**。读之前先告诉用户读什么。debugfs 需要
+   `su -c setenforce 0` + 推送脚本 `sh` 执行，读完 `setenforce 1`。
+6. 构建（Mac，zsh 要包 `bash -c`）：
+   `cd ~/ios_plj110/.worktrees/camera-integration && export PATH=/opt/homebrew/opt/llvm/bin:$PATH:/opt/homebrew/bin && python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --boot-arg x9_motion=3 --name <唯一名>`
+   （失败后目录残留，要换新名字。）
+7. 卡死时先查 io_submap（8 MiB）耗尽和 panic，不要先怀疑别的。
+
+## 2. 参考源码位置（Mac）
+- `R=~/ios_plj110/.local/references/oppo-modules-dt-mt6993/kernel/kernel_device_modules-6.12`
+- 安卓设备树：`~/ios_plj110/.local/x9/modem/live.dts`
+- 关键文件：
+  - MM 电源：`$R/drivers/misc/mediatek/mminfra/mtk-mminfra-util.c`、`$R/drivers/misc/mediatek/hwccf/{src/hwccf_api.c,include/hwccf.h,include/hwccf_provider_data.h}`
+  - SMMU：`$R/drivers/iommu/arm/arm-smmu-v3/mtk-smmu-v3.c`（`mt6993_data_mm`、`mtk_smmu_power_get`）、
+    `$R/drivers/misc/mediatek/iommu/smmu-secure.c`、`$R/drivers/misc/mediatek/pkvm_smmu/hyp/`
+  - SMI：`$R/drivers/misc/mediatek/smi/`（larb/common 上电、`mtk-smi-dbg.c`）
+  - 相机：`~/ios_plj110/.local/references/oppo-modules-dt-mt6993/vendor/mediatek/kernel_modules/mtkcam/`
+    （`imgsensor/src-isp8s/`、seninf、camsys/camsv）
+
+## 3. 阶段 A：修 MM 上电（当前阻塞）
+**已查清（static）**
+- 安卓 MT6993 的 MM SMMU 由 pKVM 管（plat flags `SMMU_SEC_EN|SMMU_HYP_EN`）。smi-dbg 有 `hwccf-support`，
+  所以 `mtk_smi_pm_ops` 不注册。
+- pKVM 用 SMC `0xC2000831`：x1=0 GET / 1 PUT，x2=smmu_id（MM=0）。它**只拿保持上电的信号量**，
+  MM 关着时返回非 0，不负责上电。
+- MM 真正上电走 HWCCF：mminfra-util，DT `mminfra-mtcmos-voter = <0x37…>`。
+  - `0x37 = 55 = HW_CCF_BACKUP_GRP_0`；`mminfra-mtcmos-data = <1 2 0 3>`，即 MM_0=bit1、MM_1=bit2、MM_AO=bit0、MM_2=bit3。
+  - 应答寄存器 `mm-mtcmos-base 0x31b5009c/a0/a4/a8`，mask `0xc0000000`。
+  - MM HWV 基址 `0x31c00000`（DT `mm_hwv`）：XPU0 B1 SET `+0x20724`、CLR `+0x20728`，DONE `+0x1136c`，STA `+0x1135c`，GLB_EN `+0x11358`。
+- 相机节点没有 power-domains；`seninf-core` 是 `hwccf-apply`，cam 时钟一投票，HWCCF 就自动开对应的 MTCMOS。
+
+**要做**
+1. 确认相机要投哪几位：
+   - 读 `hwccf_api.c` 的 `_v1_hwccf_irq_voter_nowait/_wait_done`（行 776、993），弄清写 SET 后 DONE/STA/EN 的握手。
+   - 查安卓谁对 MM_0/1/2/AO 投票：cmdq 用 MM_AO；看 VCP/vmm notifier（`$R/drivers/misc/mediatek/vmm/mtk-vmm-notifier-mt6993.c`）、
+     SMI larb runtime PM、`mtk-cam` 的 pm_runtime 链。
+   - 之前反汇编 ATF 的笔记写的是 PM 路径投 group0x37 bit3（MM_2）。
+2. 确认屏幕是否已经让 mminfra 一直开着：只读 MM HWV `+0x1135c/+0x11358`、`0x31b5009c..a8`。
+   安卓开相机前后各读一次也行，但 `mm_hwv` 不在安全读名单里，读之前先问用户。
+3. 改 `x9_mm_power.c`：去掉 `0x514` GET/PUT，改为 HWCCF 投票。
+   - 上电：写 SET，等 DONE bit，确认 STA 不忙，并确认 ack mask 置位。
+   - 释放：写 CLR，只撤自己投的那一位，不碰屏幕/GPU 的票。
+   - 是否还需要 `0x831` 拿信号量：只有在访问 SMMU 寄存器（`cam_smmu_observe`）前才需要；
+     先静态确认安卓 EL1 是否会直接摸 MM SMMU。
+4. 编镜像，日志看 `X9 CAMERA MM:` 的 stage 能否越过 RECEIVE(1)，进入 MAP(2) 和 TAKE(3)。
+
+## 4. 阶段 B：MM 时钟 / SMI / larb（stage MAP→TAKE）
+- 对照安卓 `seninf-core` 的 clocks 列表（DT 19312 行）：
+  - `clk_cam_seninf, clk_cam_cam, clk_cam_camtg, clk_top_seninf..5, clk_top_camtm, clk_top_ap_step0..3, clk_hw_ccf_csi_bs, mmdvfs_mux`；
+  - 以及 camsv 节点的 larb/CG 时钟（`cam_main_larb19/14/29_con, camsv_top_con, seninf_camtm_con, camsv_a_con`）。
+- 逐项核对 `x9_camera_mm.inc` 的 `cam_mm_descs` slot 顺序、投票位和父时钟，是否和安卓 clk 驱动
+  （`$R/drivers/clk/mediatek/clk-mt6993-*.c`）一致。
+- SMI larb：camsv 的 `mediatek,larbs = <0x195 0x190 0x192>`。查 larb 上电和 common 配置（`$R/drivers/memory/mtk-smi*.c` 或 `misc/mediatek/smi`）。
+- 期望：`MM:` flags 出现 POWER 和 CLOCKS，blockers 里清掉 POWER/CLOCKS/RATE/SMI。
+
+## 5. 阶段 C：传感器配置（NATIVE CONFIG stage）
+- 安卓 hhmain：`hhmainmipiraw_Sensor.c`（open/init 表、mode 表、`hhmain_Sensor_setting.h`）。核对 iOS 的
+  `X9_HHMAIN_INIT_COUNT` 初始化表、preview 模式（分辨率、lane 数、MIPI 速率、PLL）是否逐字一致。
+- 注意 subdrv 的 `i2c_burst_write_support`、写 group hold、stream on（0x0100）顺序。
+- 期望：`NATIVE CONFIG ... completed=1 errno=0`。
+
+## 6. 阶段 D：SENINF / CSI 接收 / CAMSV DMA
+- 安卓 seninf：`mtkcam/.../seninf`（csi phy 配置、`mtk-iomem-ver`、端口映射；sensor0 endpoint 连哪个 csi 口，看 DT `remote-endpoint`）。
+- 核对 iOS 的 `x9_camera_phy.inc / x9_camera_mac.inc / x9_camera_outmux.inc / x9_camera_native_source.inc`：
+  CSI 口、lane 数、settle、outmux 路由、camsv 通道。
+- SMMU 映射：安卓 MM SMMU 是 dma 模式（`mtk,iommu-dma-range`）。iOS 要么配 SMMU 页表，要么确认 bypass 合法。
+  `x9_camera_smmu.inc` 里 `SMMU_SECURE` 相关的假设要重新核对（pKVM 平台）。
+- 期望：CAMSV 收到帧中断、DMA 写出、`X9 CAMERA` 帧计数增加，Camera.app 出画面。
+
+## 7. 阶段 E：收尾
+- 前摄同样流程（i2c2/0x10、MCLK 引脚 72、复位脚 170、WL LDO1/LDO3）。
+- 清理诊断：`X9 CAMERA PAD`、`ID LATE`、1 s settle 可以保留或删除；r23b/r25/r26 的 latch 调整要保留。
+- 稳定性：确认没有 io_submap 泄漏、没有卡死、相机开关多次正常。
+
+## 8. 每轮汇报模板（中文）
+- 日志结论（关键行）→ 安卓对照（源码文件:行号）→ 根因 → 改动 → 镜像完整路径 → 下一轮看哪些日志行。
