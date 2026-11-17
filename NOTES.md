@@ -2844,3 +2844,12 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - r15: cam_sensor_pads in route take logs i2c12 reference pads + sensor pads (X9 CAMERA PAD) and
   sets back 174/175, front 172/173 to IES1 SMT1 PU1 PD0 RSEL7 (bank5 0x120e0000 SET/CLR).
 - Image: x9/out/x9-camera-pad-r15-20261116/boot.img
+
+## Camera log 338 (r15) -> r16 diagnostic (2026-11-17)
+- 338: sensor pads were already IES1 SMT1 PU1 PD0 RSEL7 at entry (same as Android, same as i2c12):
+  pads ruled out. ID still NACK x10. All statically checkable state matches Android live state.
+- User approved ONE read-only diagnostic image: after the ID NACKs, dump i2c4 debug CSRs
+  (DEBUGSTAT e4, DEBUGCTRL e8, DMA_FSM ec, MCU_INTR 40, other channels) and address the other
+  devices on the bus: EEPROM 0x50, AF 0x0c, alt 0x10, sensor 0x1a with 1-byte reg. Logs
+  X9 CAMERA DIAG CSR/CH/PROBE. ACK from EEPROM/AF => sensor problem; NACK all => bus.
+- Image: x9/out/x9-camera-diag-r16-20261117/boot.img

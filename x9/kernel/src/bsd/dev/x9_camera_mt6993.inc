@@ -712,6 +712,7 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
 /* Shared cold power engine: leaves a matched sensor and its exact journal
  * powered on. The session layer owns admission, lifetime and ONE unwind.
  * No CSI/SMMU/DMA dependency is established here. */
+static void cam_bus_diag(struct cam_probe_journal *j,uint32_t which);
 static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
 {
     struct cam_probe_journal *j=&cam_journal;
@@ -835,6 +836,7 @@ static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
         }
         printf("X9 CAMERA ID: sensor=%u slave=%02x attempts=%u id=%02x%02x errno=%d status=%08x\n",
             which,slave,attempt>10?10:attempt,hi,lo,e,j->sensor.last_status);
+        if(e==ENXIO && !cam_bus_unretired(&j->sensor))cam_bus_diag(j,which);
         if(!e)r->chip_id=((uint32_t)hi<<8)|lo;
         if(!e && r->chip_id!=sensors[which-1].chip_id)e=ENODEV;
         if(!e)r->flags|=X9_CAM_PROBE_MATCHED;
@@ -842,6 +844,37 @@ static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
     r->i2c_status[0]=j->sensor.last_status;
     r->i2c_status[1]=j->ldo.last_status;
     return e;
+}
+/* Log 338 diagnostic (user-approved, read-only): after all sensor ID reads
+ * NACK, dump the i2c engine debug CSRs and address the other devices that
+ * share the bus, still powered/clocked. ACK from EEPROM/AF => bus works and
+ * the sensor itself does not answer; NACK everywhere => bus/controller. */
+static void cam_bus_diag(struct cam_probe_journal *j,uint32_t which)
+{
+    struct cam_probe_bus *b=&j->sensor;
+    printf("X9 CAMERA DIAG CSR: gate=%x start=%x ctrl=%x mask=%x stat=%x multi=%x mcu=%x dbgstat=%x dbgctrl=%x dmafsm=%x fifo=%x delay=%x addr=%x\n",
+        b->gate_bit,cam_rr(b->base,CAM_I2C_START),cam_rr(b->base,CAM_I2C_CTRL),
+        cam_rr(b->base,CAM_I2C_MASK),cam_rr(b->base,CAM_I2C_STAT),cam_rr(b->base,CAM_I2C_MULTI),
+        cam_rr(b->base,0x40),cam_rr(b->base,0xe4),cam_rr(b->base,0xe8),cam_rr(b->base,0xec),
+        cam_rr(b->base,CAM_I2C_FIFO),cam_rr(b->base,0x1c),cam_rr(b->base,CAM_I2C_ADDR));
+    for(unsigned ch=1;ch<b->banks;ch++) {
+        vm_offset_t c=b->base+ch*0x10000;
+        printf("X9 CAMERA DIAG CH: ch=%u start=%x ctrl=%x stat=%x multi=%x timing=%x dbgstat=%x mcu=%x\n",
+            ch,cam_rr(c,CAM_I2C_START),cam_rr(c,CAM_I2C_CTRL),cam_rr(c,CAM_I2C_STAT),
+            cam_rr(c,CAM_I2C_MULTI),cam_rr(c,CAM_I2C_TIMING),cam_rr(c,0xe4),cam_rr(c,0x40));
+    }
+    if(which!=X9_CAMERA_BACK)return;
+    static const struct { uint8_t slave, n, tx[2]; const char *name; } probes[]={
+        {0x50,2,{0x00,0x00},"eeprom"}, {0x0c,1,{0x00,0x00},"af"},
+        {0x10,2,{0x00,0x16},"alt10"}, {0x1a,1,{0x00,0x00},"sensor-1byte"} };
+    for(unsigned i=0;i<sizeof(probes)/sizeof(probes[0]);i++) {
+        if(cam_bus_unretired(b))break;
+        uint8_t v=0;b->failed_status=false;b->last_status=0;
+        int r=cam_bus_transfer(b,probes[i].slave,probes[i].tx,probes[i].n,&v);
+        printf("X9 CAMERA DIAG PROBE: %s slave=%02x errno=%d status=%08x byte=%02x dbgstat=%x\n",
+            probes[i].name,probes[i].slave,r,b->last_status,v,cam_rr(b->base,0xe4));
+        b->failed_status=true;
+    }
 }
 static void cam_sensor_cold_log(const struct x9_camera_probe *r)
 {
