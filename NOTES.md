@@ -2882,3 +2882,17 @@ Model now (as Android, one shared AFE, one owner per shared bit):
   measures ref 26M (id1), CAMTG4 (id25), CAMTG3 (id24) right before the ID read
   (X9 CAMERA FMETER); WL STATUS also prints regs 01/02/10/13 (Android 03 7f 7f 05).
 - Image: x9/out/x9-camera-fmeter-r18-20261117/boot.img
+
+## Camera log 341 (r18 fmeter) (2026-11-17)
+- FMETER: ref26m=26000 (meter valid), camtg4=24019 kHz, camtg3=24019 kHz -> MCLK source runs.
+- WL STATUS full match with Android: en=ca 0b-0f=00 11=07 12=01 01=03 02=7f 10=7f 13=05.
+- ID still NACK x10. Verified also: LN60_7 VOSEL 0x24a[7:4] (0xd -> 1.8 V), LDC0_3 0x1e61/0x1f07;
+  pmic_delayus=0 (no maximum-pmic-delay) so adaptor_pmic_ctrl is a no-op; no MIPI switch.
+- Freeze: NOT camera kernel. At 40.043 s (0.1 s after Camera.app open) GPU MMU fault
+  (CSF BOOT fault mmu=00030002 AS1status=01d003cb AS1addr=3dfcb01c0) -> RENDER submission failed,
+  no reset/retry -> backboardd DeviceLost x23k, UI dead, kernel alive to 149 s. Only in 341.
+  GPU issue for the gpu-wait line of work.
+- Web search (user request): nothing beyond what iOS already does (MCLK before ID, rails ->
+  INCK -> XCLR, >=0.6-10 ms after XCLR). MT8189 "CMMCLK gating" thread = just pinmux name.
+- Still unverified: MCLK at the PAD (fmeter measures inside VLP), BUCK5 (WL NLDO input) actually on.
+- No new image this round.
