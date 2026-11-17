@@ -160,7 +160,7 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
-#### 2026-11-17 相机继续：长焦 OB 选表与 Sony 增益整数顺序（待 r33 整包）
+#### 2026-11-17 相机继续：长焦 OB 选表与 Sony 增益整数顺序（r33 整包成功，未上机）
 
 - **位置/证据**：单代理在既有相机树/分支，源码起点`01f0985b`，r32交接补记已提交推送`19cd31f9`（push actual exit0）。主checkout与共享`.local`输入未改。最新运行依据仍`~/350.txt`，r28b..r32无新实机结果；本轮未操作设备/ADB/分区、运行测试脚本/套件或二次检查成功产物。
 - **确定缺口/实际源码顺序**：Android `hhtele_mipi_raw/hhtelemipiraw_Sensor.c:1591/1602/2462..2517` 的preview/normal_video按`rg_gain>0x3df8`选36db/type1，否则30db/type2；`open/control:2046/2533`重置type0，初始preview八个值不等于优化表。`set_group_hold:2159`仅调用`set_i2c_buffer`，ISP8s `adaptor-subdrv-ctrl.c:312..363`仅在commit发送缓冲；`adaptor-subdrv.h:893`→`adaptor-i2c.c:626..700`的OB表直接发送。因此原线上顺序是**OB八次store在hold/gain/release发送之前**，不能因为C调用先写hold就误判为OB在group内。
@@ -168,6 +168,9 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **取整与生命周期**：核main/front/tele各自`get_gain2reg:3119/1012/2169`均为`unity-floor(unity*BASEGAIN/gain)`，原native写成`floor(unity*(gain-BASEGAIN)/gain)`可少1码，已按三颗真实公式统一修正；UW线性公式保留。完整AE/OB状态（含最后table的逐寄存器尝试/ACK进度、独立serial与切换次数）随实际关闭后的native epoch receipt归档；已started epoch要求对应AE seed，任何同epoch AE error或OB ACK/bound不一致禁止recycle，未seed的never-started不伪造AE记录。原8个exported epoch pin上限不变。
 - **正常编译里程碑**：构建器正常`x9/camera/build.py`（生成表并编bridge/ctl）及Builder `compile_one(sweet_x9_camera.o)` **actual exit0/True，182 warnings**；输出`x9/out/x9-camera-tele-ob-compile-r1-20261117/`、日志`x9/out/camera-tele-ob-compile-r1-20261117-console.log`，`compile.exit=0`。之后仅补公式注释、生成器括号和文档，将由固定clean源码整包编译。下一唯一候选r33；实际SHA/整包/推送结果待下条补记，本机无CI run ID。
 - **下一验证/未闭范围**：仍先靠新启动日志确认MM_2→SMI→cold reset/QoS→CMDQ→RAW/SOF/DONE/handler。长焦真实首次/阈值切换时应有`X9 CAMERA AE ... ob_change=1 ob_writes=8 ob_acks=8 ob_target=1或2 ob_acked=同target ob_bound=同target advances=3 errno=0`；同type不重复发送，失败保留原partial journal/旧frame metadata。上述仅源码期望，无实机结果。AF/OIS/超广角banked校准、ISP颜色/镜头标定、原生虚拟三摄/真正多路无缝、VENC以及预览/照片/视频验收仍未闭；继续推送相机分支，不合main或删除树。
+- **整包/发布终态**：固定源码 **`3945315035c88fc24880909ece8eba25337aeae0` / tracked clean**，固定Python3.13正常`build.py all --boot-config x9/build/boot-device.json --boot-arg x9_motion=3 --name x9-camera-tele-ob-r33-20261117` **actual exit0**（session54398终态），104/104 overlay +3 prebuilt，相机182 warnings；kernel/bridge/shim/boot成功，原日志 **Image32231424 B / boot15101952 B**。候选 **`/Users/tosasitill/ios_plj110/.worktrees/camera-integration/x9/out/x9-camera-tele-ob-r33-20261117/boot.img`**，原控制台`x9/out/camera-tele-ob-r33-20261117-console.log`，输出目录保留`source-head.txt/source-status.txt/boot-input.json/build-command.txt/full-build.exit/build.log`。`prepare-local.py --check` exit0，日志`x9/out/camera-tele-ob-layout-20261117.log`。源码push **actual exit0 `19cd31f9..39453150`**（session40990终态），本机编译无CI run ID；GPU280无需mailbox，未上机、跑测试或二次检查成功产物。
+- **运行顺序/准入边界**：用户从主checkout手动`fastboot boot .worktrees/camera-integration/x9/out/x9-camera-tele-ob-r33-20261117/boot.img`。此候选沿用r32的默认后/前两摄准入，**未添加`x9_camera_lenses=1`**；先取得最早MM/RAW失败的新日志，不能要求默认dual包产生长焦OB日志。长焦OB的运行验收仍需显式四摄/tele准入候选与真实长焦增益请求，代码已编入不等于长焦已运行。
+- **构建期间新增源码事实/下一具体项**：`hhuwide_mipi_raw/hhuwidemipiraw_Sensor.c:3024..3041`的`get_sensor_cali`仅probe EEPROM，`set_sensor_cali`函数直接return；现有这份Android源码**没有banked GGC/校准写表可以继续搬**。保留UW unsupported/factory blocker，不猜该注释下的寄存器。下一可实现项是lens真实运行期初始化→FOCUS→实际关闭归位，源路径已核定为`vendor/oplus/kernel/camera/lens/vcm/v4l2/{ak7316m_24085,ak7316t_24085,dw9800s_24081,jd5516w_24085}/`，不是`proprietary/`。main `ak7316m_24085.c:96..174`的position为SMBus word `swab16(val<<6)`、release有100-step/1ms归位和02=20；init依赖sensor open先激活02=00，后面还需继续读完整init/PID分支，不能只截取激活写即公告AF。front DT09/源码强制0c冲突仍在，未触设备核定；本轮未修改马达逻辑，kernel继续NO_FOCUS。
 
 #### 2026-11-17 相机继续：按本模组 EEPROM 补齐 sensor QSC/SPC/LRC（r32 整包成功，未上机）
 

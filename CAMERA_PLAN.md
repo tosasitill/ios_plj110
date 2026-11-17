@@ -2,8 +2,9 @@
 
 ## 0. 现状（已证实）
 - 分支 `feat/camera-integration`，worktree `~/ios_plj110/.worktrees/camera-integration`，最新候选
-  `x9/out/x9-camera-module-cal-r32-20261117/boot.img`（源码 **01f0985b**，本机整包 exit0，未上机）。
-  最新设备日志350对应此前 `x9-camera-wlgroup-r27-20261117`（bbd3c57b），不要混作 r32 运行结果。
+  `x9/out/x9-camera-tele-ob-r33-20261117/boot.img`（源码 **39453150**，本机整包 exit0，未上机）。
+  最新设备日志350对应此前 `x9-camera-wlgroup-r27-20261117`（bbd3c57b），不要混作 r33 运行结果。
+  r33沿用默认后/前双摄准入，未加`x9_camera_lenses=1`；长焦OB已编入但尚未获运行验收。
 - **传感器 ID 已通**（log 350）：后摄 hhmain `0x9186`（i2c4/0x1a），前摄 hhfront `0x0615`（i2c2/0x10），
   第一次就读到。根因是 WL28681C 的 pinctrl `reset_high` 组（GPIO203/187/202）里 GPIO187 从没拉高。
 - **当前阻塞**：打开 Camera.app 时 `NATIVE CONFIG sensor=1 stage=1 errno=5`，
@@ -101,7 +102,8 @@
 - 2026-11-17静态补齐主/前/长焦 `get_sensor_cali/set_sensor_cali`：
   模组本地EEPROM header与两遍完整payload一致后，init/fab patch→QSC→enable→SPC/LRC→preview；
   前摄preview最终3621=0仍按源码保留。`MODULE_ACKED`只指事务ACK，非光学校准通过。
-  超广角banked校准、AF/OIS和ISP颜色/镜头校准未闭；精确构建结果见NOTES。
+  超广角源码`set_sensor_cali:3037`本身直接return，没有可照搬的banked校准表；
+  保留unsupported/factory blocker。AF/OIS和ISP颜色/镜头校准未闭；精确构建结果见NOTES。
 - 期望：`NATIVE CONFIG ... completed=1 errno=0`。
 - 长焦preview增益路径已静态补齐原`hhtele_set_gain`的30/36db OB选择：
   code `>3df8`选type1，否则type2，新epoch从type0开始，首次同值SET_GAIN也必须选择。
