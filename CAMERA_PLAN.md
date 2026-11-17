@@ -2,9 +2,9 @@
 
 ## 0. 现状（已证实）
 - 分支 `feat/camera-integration`，worktree `~/ios_plj110/.worktrees/camera-integration`，最新候选
-  `x9/out/x9-camera-smmu-policy-r34-20261117/boot.img`（源码 **d5da42e7**，本机整包 exit0，未上机）。
-  最新设备日志350对应此前 `x9-camera-wlgroup-r27-20261117`（bbd3c57b），不要混作 r34 运行结果。
-  r34沿用默认后/前双摄准入，未加`x9_camera_lenses=1`；长焦OB已编入但尚未获运行验收。
+  `x9/out/x9-camera-mmqos-kbps-r36-20261117/boot.img`（源码 **52f5e88e**，本机整包 exit0，未上机）。
+  最新设备日志350对应此前 `x9-camera-wlgroup-r27-20261117`（bbd3c57b），不要混作 r36 运行结果。
+  r36沿用默认后/前双摄准入，未加`x9_camera_lenses=1`；长焦OB已编入但尚未获运行验收。
 - **传感器 ID 已通**（log 350）：后摄 hhmain `0x9186`（i2c4/0x1a），前摄 hhfront `0x0615`（i2c2/0x10），
   第一次就读到。根因是 WL28681C 的 pinctrl `reset_high` 组（GPIO203/187/202）里 GPIO187 从没拉高。
 - **当前阻塞**：打开 Camera.app 时 `NATIVE CONFIG sensor=1 stage=1 errno=5`，

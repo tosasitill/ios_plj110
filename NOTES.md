@@ -160,11 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
-#### 2026-11-17 相机主链继续：追到 ISP8s caller 的 KB/s 换算（待 r36 整包）
+#### 2026-11-17 相机主链继续：追到 ISP8s caller 的 KB/s 换算（r36 整包成功，未上机）
 
 - **源码事实与修正**：沿`isp8s/cam/mtk_cam-dvfs_qos.c:435..440/789..792/1322..1357`追完整`calc_bw → to_qos_icc → mtk_icc_set_bw`，相机专用`mtk_cam-dvfs_qos.h:87..90`明确为`kBps_to_icc(Bps/1024)`，不是通用`Bps_to_icc(Bps/1000)`。r35已正确修枚举3/ratio9/乘3顺序，但caller换算仍应修正。native现按同源helper先/1024，再按MMQoS/1000，然后`ceil(mix_MBps/512)*3`，默认1/上限64；`max`可在此单路径单调取整前取，无需重新估计线时。完整RAW需求仍保留原preview最小帧周期/实际stride的上界，不假装与Android纳秒linet四舍五入逐字节相等。
 - **channel与端口区分**：MMPC AP供给保留原字节域10/7、16MB/s向上取整的静态上界，可能高于Android /1024后再逐步向下取整的动态channel需求；没有据此改用更小预算，也不将该余量喂给端口OSTD。真实posted-write、mask事务、A0 idle/guard/restore与所有权限保持。没有测试脚本、额外设备操作或产物复查。
-- **待构建/运行边界**：r35正常整包exit0原件保留，固定新源码后编唯一r36并记录终态；本机无CI run ID。默认后/前准入、GPU280无需mailbox。最新实机仍350；MM_2 ACK、CMDQ消费、RAW/SOF/DONE和实际预览尚无新日志，不能宣称完整代码或相机验收完成。下一源码项继续核实际启用的CAMSV通道（含STG/CQI是否可达），再沿IRQ/FBC/cache/worker/handler检查，不凭Android多引擎统计扩native端口权限。
+- **r36完整构建/推送终态**：固定源码 **`52f5e88ee60d92efdb68a990afdaf45cabffb0e7` / tracked clean**，固定Python3.13正常`build.py all --boot-config x9/build/boot-device.json --boot-arg x9_motion=3 --name x9-camera-mmqos-kbps-r36-20261117` **actual exit0**（session61261终态），104/104 overlay +3 prebuilt，相机182 warnings，Image32231424 B / boot15101952 B。候选 **`/Users/tosasitill/ios_plj110/.worktrees/camera-integration/x9/out/x9-camera-mmqos-kbps-r36-20261117/boot.img`**，原控制台`x9/out/camera-mmqos-kbps-r36-20261117-console.log`，输出目录保留`source-head.txt/source-status.txt/boot-input.json/build-command.txt/full-build.exit/build.log`。代码两提交`2bb51eda/52f5e88e` push **actual exit0 `c4a7a892..52f5e88e`**（session25797终态）；本机无CI run ID，GPU280无需mailbox。r35原件保留但不作为最新候选，未上机、未跑测试/套件或二次检查成功产物。
+- **运行边界与下一具体项**：默认后/前双摄准入，未加`x9_camera_lenses=1`。用户可从主checkout手动`fastboot boot .worktrees/camera-integration/x9/out/x9-camera-mmqos-kbps-r36-20261117/boot.img`。最新实机仍350；MM_2 ACK、CMDQ消费、RAW/SOF/DONE和实际预览尚无新日志，不能宣称完整代码或相机验收完成。新日志关注`SMMU FDT ... prefetch2`、`NATIVE SMMU ... tcu_pf=2`、`MMQOS TAKE ... mix_MBps=... OSTD=... errno=0`及实际IRQ/RAW/handler。继续核实际启用的CAMSV通道（含STG/CQI是否可达），再沿IRQ/FBC/cache/worker/handler检查；本轮已读Android`mtk_cam-sv.c:3456..3638`与native`cam_irq_sample`，SOF/hybrid基础状态读源一致，未发现新的确定IRQ修正，不凭多引擎统计扩端口权限。
 
 #### 2026-11-17 相机主链继续：修正 L19/P0 的 MMQoS OSTD 枚举与取整（r35 整包成功，由 r36 后续修正）
 
