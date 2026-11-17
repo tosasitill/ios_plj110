@@ -150,6 +150,33 @@ static int cam_cal_write(struct cam_sensor_io *io,uint16_t reg,uint8_t value,
     cam_sensor_cal.acked+=r->written-acked;
     return e;
 }
+/* Android's set_sensor_cali calls subdrv_i2c_wr_seq_p8, which sends the
+ * 16-bit start register followed by consecutive payload bytes in one I2C
+ * message. Adapt the same layout to the already-owned AP FIFO: start
+ * register + at most CAM_I2C_FIFO_BYTES payload bytes, no DMA, no SCP,
+ * no extra bus ownership, no crossing into another calibration block. */
+static int cam_cal_write_seq(struct cam_sensor_io *io,uint16_t reg,
+    const uint8_t *values,unsigned count,struct x9_camera_config *r)
+{
+    struct cam_sensor_ap *ap=io->context;
+    uint8_t tx[2+CAM_I2C_FIFO_BYTES];
+    uint32_t acked=r->written;
+    int e;
+    if(!count || count>CAM_I2C_FIFO_BYTES || !values)return EINVAL;
+    if(cam_sensor_forbidden(reg))return EPERM;
+    e=cam_cal_guard(io->deadline);if(e)return e;
+    tx[0]=(uint8_t)(reg>>8);tx[1]=(uint8_t)reg;
+    memcpy(tx+2,values,count);
+    cam_sensor_cal.reg=reg;
+    cam_sensor_cal.writes++; /* one atomic FIFO transaction, before START */
+    r->reg=reg;r->expected=count;r->observed=UINT32_MAX;
+    r->attempted++;
+    e=cam_bus_transfer(ap->bus,ap->slave,tx,(unsigned)(2+count),NULL);
+    if(!e)r->written++; /* ACK still counts if the budget expired meanwhile. */
+    cam_sensor_cal.acked+=r->written-acked;
+    if(!e && mach_absolute_time()>=io->deadline)e=ETIMEDOUT;
+    return e;
+}
 static int cam_cal_apply(struct cam_sensor_io *io,uint32_t which,struct x9_camera_config *r)
 {
     const struct cam_cal_profile *p=&cam_cal_profiles[which-1];
@@ -180,9 +207,12 @@ static int cam_cal_apply(struct cam_sensor_io *io,uint32_t which,struct x9_camer
     for(unsigned b=0;b<3 && !e;b++) {
         const struct cam_cal_block *d=&p->block[b];
         cam_sensor_cal.block=b;
-        for(unsigned n=0;n<d->bytes && !e;n++) {
+        for(unsigned n=0;n<d->bytes && !e;n+=CAM_I2C_FIFO_BYTES) {
+            unsigned count=d->bytes-n;
+            if(count>CAM_I2C_FIFO_BYTES)count=CAM_I2C_FIFO_BYTES;
             cam_sensor_cal.offset=n;r->table_index=index+n;
-            e=cam_cal_write(io,(uint16_t)(d->sensor+n),cam_sensor_cal.payload[index+n],r);
+            e=cam_cal_write_seq(io,(uint16_t)(d->sensor+n),
+                cam_sensor_cal.payload+index+n,count,r);
         }
         index+=d->bytes;
         /* Android enables QSC immediately after QSC data, before SPC/LRC. */

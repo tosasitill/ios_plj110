@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机主链继续：日志353，校准sensor写入改顺序burst（r42整包成功，未上机）
+
+- **起点/范围**：用户指定「353」继续主线。工作树从`4f0413ee` tracked clean起步；`~/353.txt`已只读复制到私有`.local/x9/logs/353.txt`（不入git）。只读核查日志、源码与Android参考；未触主checkout、设备、ADB、分区或共享`.local`输入；未运行测试脚本/套件，构建成功后没有解包/hash/反汇编等二次检查。
+- **353运行证据**：`:785/:808`主/前摄ID `9186/0615`，`:810` `NATIVE REGISTER errno=0`；`:4634`主摄sensor-open完成；`:5488` `SENSOR CAL phase=preload ... read=3456/3456 ... preloaded=1 ... errno=0`。`:9932`（33.952s）`SENSOR CAL phase=apply ... writes=2004 acked=2004 ... applied=0 errno=60`，随后OPEN RESTORE errno=0、DRAIN与`start sensor=1 errno=60`。没有本次MM/SMMU/RAW/SOF/DONE/handler或真实预览证据；日志无唯一构建标识，不能独立核定源码SHA。
+- **确定差异/推断**：r41已给apply独立15s预算，但apply在约17.2s内只完成2004笔单寄存器写，全部ACK后才因预算到点失败。Android `hhmainmipiraw_Sensor.c:3040..3083`的`set_sensor_cali`使用`subdrv_i2c_wr_seq_p8`；`adaptor-i2c.c:358..413`实现为16-bit起始寄存器加连续payload字节的单条I2C消息，每批最多`MAX_VAL_NUM_U8=253`，由MTK I2C控制器在超过16B FIFO时走DMA。native当前把每个校准字节拆成`reg[2]+value[1]`一笔，且每笔完成观察含`delay(5)`与多次状态/控制守卫，导致软件开销主导。选择**观察**：2004/2004 ACK与15s预算结束；**推断**：逐字节事务开销是未能完成的主因，不把它当作硬件ACK失败。
+- **实现/边界**：新增`cam_cal_write_seq()`，只用于校准payload：保留`cam_cal_guard()`、sensor session/epoch/live状态、既有AP总线所有权与控制守卫，按Android形状一次发送16-bit起始寄存器加最多`CAM_I2C_FIFO_BYTES=16`个连续payload字节，不跨校准block，不用DMA/APDMA/SCP，不写EEPROM，不扩大寄存器范围。`cam_sensor_forbidden()`仍拒绝stream/hold/OTP/ID类寄存器；mirror与QSC enable继续走原单字节writer。日志的`writes/acked`现在计**FIFO事务数**而非payload字节数，全部ACK仍不是光学校准或物理SRAM可读的证明。apply独立15s预算成功/失败后恢复configure截止的语义保持；失败仍首错即停、不重发、不掩盖错误。
+- **编译/构建实绩**：正常Builder `compile_one(sweet_x9_camera.o)` **actual exit0/True，182 warnings**，脚本`x9/out/camera-cal-burst-compile-r1-20261117/kernel-unit.py`、日志`x9/out/camera-cal-burst-compile-r1-20261117-console.log`、exit文件`compile.exit=0`。固定工作树修改后正常`build.py all --boot-config x9/build/boot-device.json --boot-arg x9_motion=3 --name x9-camera-cal-burst-r42-20261117` **actual exit0**，104/104 overlay +3 prebuilt，Image32247808 B / boot15110144 B。唯一候选 **`/Users/tosasitill/ios_plj110/.worktrees/camera-integration/x9/out/x9-camera-cal-burst-r42-20261117/boot.img`**，原控制台`x9/out/camera-cal-burst-r42-20261117-console.log`。GPU280无需mailbox；默认后/前双摄，未加`x9_camera_lenses=1`。本机无CI run ID；仍未上机，目标保持未完成。
+- **下一上机判定**：用户从主checkout手动fastboot boot r42并打开Camera.app。新日志先看`SENSOR CAL phase=apply ... writes≈217 acked≈217 applied=1 errno=0`（mirror+QSC+payload+SPC/LRC+enable的事务计数；不是旧3458字节计数）与`phase=mode ... errno=0`，再看`VCM INIT`/`NATIVE CONFIG ... completed=1 errno=0`，随后才按MM/SMMU/RAW/SOF/DONE/handler推进。若burst产生`AP REQUEST`/NACK/EIO，应保留真实失败状态，不继续盲目加大预算或启用DMA。
+
 #### 2026-11-17 相机主链继续：日志352，校准apply独立预算（r41整包成功，未上机）
 
 - **起点/范围**：用户指定「看352」并继续剩余部分。相机工作树从`8951dfb4` tracked clean起步；`~/352.txt`已只读保存到私有`.local/x9/logs/352.txt`（不入git）；只读检查源码、日志与现有文档。未触主checkout、设备、ADB、分区或共享`.local`输入；未运行测试脚本/套件，构建成功后没有解包/hash/反汇编等二次检查。

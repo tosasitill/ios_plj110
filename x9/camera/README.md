@@ -2,7 +2,7 @@
 
 ## 当前状态（2026-11-17）
 
-**最新日志 `~/352.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615`、完成 native 注册、主摄 sensor-open 与 EEPROM 校准 preload（3456/3456 B）；尚无真实预览、拍照、录像或切镜验收。** 当前最早失败发生在校准 apply：1562/1562 次sensor写均已ACK，但 `errno=60`、`applied=0`、`start sensor=1 errno=60`。这不是新的WL/I2C失败：352中AP WAIT观察到真实terminal `status=1`、START已停止，apply附近没有AP REQUEST失败。时间线指向 init/calibration/preview 共用15s configure预算在apply末段耗尽；r41已给calibration apply独立有界预算，成功/失败后恢复configure预算，不重试、不扩大寄存器范围、不写EEPROM、不把ACK当光学校准通过。r41整包成功、未上机，详见`NOTES.md` §5；日志本身没有唯一构建SHA。
+**最新日志 `~/353.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615`、完成 native 注册、主摄 sensor-open 与 EEPROM 校准 preload（3456/3456 B）；尚无真实预览、拍照、录像或切镜验收。** r41给calibration apply独立15s预算后，353仍在`writes/acked=2004/2004`时`errno=60`、`applied=0`：每笔I2C只写一个寄存器字节，完成观察与守卫开销使15s内无法写完3456B；全部ACK表明不是新的WL/I2C硬件失败。Android `set_sensor_cali`实际用`subdrv_i2c_wr_seq_p8`发送起始寄存器加连续payload。r42仅在已有sensor AP I2C与16B FIFO内改成顺序burst，不启用DMA/APDMA/SCP、不跨校准block、不写EEPROM、不扩大寄存器范围；日志的`writes/acked`改计FIFO事务数（预期约217），ACK仍不是光学校准证明。r42整包成功、未上机，详见`NOTES.md` §5；日志本身没有唯一构建SHA。
 
 后续源码核查又修正了 SMMU 的 CMDQ 使能顺序（8→12→13）、接入 DT 对应的普通
 wrapper 和34个 CAMSV DMA/CQI FIFO 默认配置，修复退休快照未初始化 padding，以及四摄使用

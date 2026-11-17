@@ -39,7 +39,9 @@ static int cam_bus_terminal_check(struct cam_probe_bus *b,uint32_t status)
 }
 /* WRRD: up to four TX bytes followed by up to16 FIFO data bytes.
  * FIFO_DATA is byte-accessed upstream even with 32-bit CSR. The EEPROM
- * reader uses sequential reads; sensor/VCM callers retain their own narrow
+ * reader uses sequential reads; calibration sensor writes use the same
+ * sequential-write shape as Android's adaptor_i2c_wr_seq_p8, bounded to
+ * the mt6991 AP FIFO. Sensor/VCM callers retain their own narrow
  * register/length checks. No DMA, extra write leg or automatic retry. */
 static int cam_bus_transfer_n(struct cam_probe_bus *b,uint8_t slave,
                             const uint8_t *tx,unsigned count,uint8_t *rx,unsigned rx_count)
