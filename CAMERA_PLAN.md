@@ -18,6 +18,7 @@
   `done`不是该路径成功条件；失败后Android只assert+返回，CG47 retrigger回调对BACKUP资源直接bypass。r44只增加
   `all_sta/fsm/mt0sta/mt1sta`只读日志，不延长或绕过STA。尚无MM之后/RAW/handler证据。
 - **静态复查新增（不出镜像）**：按用户要求只做静态复查，未出探针镜像/未上机。已确认dummy read地址、BACKUP_GRP0 bank映射、FSM idle判据、VMM bit范围及CG retrigger资格均与native现状一致；唯一源码差异是IRQ voter的EN等待步长。现在`x9_mm_power.c`按Android `MTK_WAIT_GHWV_IRQ_VOTE_CNT/US`把EN vote/unvote改为`1250*2us`，prepoll/global/STA/ACK仍`10000*1us`；不改STA成功条件、不清W1C、不延长最终等待。单对象编译exit0。
+- **静态复查收束（不出镜像）**：重复票语义已复核：`_v1_hwccf_irq_voter_nowait`的`goto skip`只跳过nowait内部prepoll/SET/EN，外层`_v1_hwccf_irq_voter_ctrl`仍调用`wait_done`继续等`all_en`/`STA`；`_v1_mm_hwccf_voter_ctrl`则是单函数skip。不能用“重复票跳过后续等待”放宽native判据。原ATF反汇编确认`28d48/28f08`分别以resource55/bit3做VOTE/UNVOTE，后者丢弃内部返回值并总返回0；这与日志356中AP vote仍置位一致，但不能推出额外补救、不能绕过最终STA。三套Android voter路径对`ap=8 global=8 sta=8`都会失败。仍不出镜像、不上机；下一步只查硬件STA bit3未清的源码级原因，不能跳RAW。
 - **传感器 ID 已通**（log 350）：后摄 hhmain `0x9186`（i2c4/0x1a），前摄 hhfront `0x0615`（i2c2/0x10），
   第一次就读到。根因是 WL28681C 的 pinctrl `reset_high` 组（GPIO203/187/202）里 GPIO187 从没拉高。
 - **此前阻塞（日志350；351尚未走到这里）**：打开 Camera.app 时 `NATIVE CONFIG sensor=1 stage=1 errno=5`，

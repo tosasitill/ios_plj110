@@ -4,6 +4,8 @@
 
 静态复查补充：按用户要求本阶段不出探针镜像、不反复上机测试，只按Android源码补确定差异。`x9_mm_power.c`的BACKUP1 IRQ vote/unvote EN等待已改为Android `MTK_WAIT_GHWV_IRQ_VOTE_CNT=1250` × `MTK_WAIT_GHWV_IRQ_VOTE_US=2`；prepoll/global/STA/ACK仍保持`10000*1us`，最终STA未清仍按源码失败，不清W1C、不绕过、不改投票顺序。单对象编译exit0；没有boot.img，未上机。
 
+重复票语义复核：`_v1_hwccf_irq_voter_nowait()`的重复票`goto skip`只跳过nowait里的prepoll/SET/EN，外层`_v1_hwccf_irq_voter_ctrl()`仍调用`_v1_hwccf_irq_voter_wait_done()`继续等`all_en`和`STA`；`_v1_mm_hwccf_voter_ctrl()`的单函数skip不能混入这条组合语义。三套路径最终都要求`STA bit3=0`，因此`ap=8/global=8/sta=8`不是等待步长或重复票造成的假失败。原ATF中`28d48/28f08`对resource55/bit3的VOTE/UNVOTE与native同一资源；`28f08`丢弃内部HWCCF返回值并总返回0，外层PM成功不能证明内部成功，也无法替代native的最终STA判定。未据此改代码、清状态或延长等待。
+
 **最新日志 `~/356.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615`、完成 native 注册、sensor-open 与 EEPROM 校准 preload（3456/3456 B）；r44的校准apply/mode与VCM init继续通过：`phase=apply writes=250 acked=250 applied=1 errno=0`、`phase=mode mode=1/1 errno=0`、`VCM INIT complete=1 errno=0`。** 当前最早失败仍是MM_2：`X9 MM POWER GET ... stage=4 ... ap=8 global=8 sta=8 done=fffffff7 ack2=c2f10152 infra=e3fc0000 all_sta=0 fsm=80000001 mt0sta=0 mt1sta=0 errno=60`，随后 NATIVE CONFIG stage1 errno60。按Android `hwccf_api.c`的v1 IRQ voter源码对照，native的地址、顺序和10ms预算一致，`done`不是该路径的成功条件；失败就是最后`STA` bit3未清。`fsm=80000001`的bit31不属于`hwccf_api.c:325`的`(val & 0xffff) <= 0x1` FSM idle判据；`all_sta/mt0sta/mt1sta=0`排除普通嵌套MTCMOS未完成解释。Android v1 ctrl失败后只assert+返回，注册的CG47 retrigger对BACKUP资源直接bypass，不能照搬。r44新增的`all_sta/fsm/mt0sta/mt1sta`只读日志不改变投票/等待/写入语义，不忽略`sta=8`。尚无真实预览、拍照、录像或切镜验收；详见`NOTES.md` §5。
 
 后续源码核查又修正了 SMMU 的 CMDQ 使能顺序（8→12→13）、接入 DT 对应的普通

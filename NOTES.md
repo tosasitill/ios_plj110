@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机静态复查：重复票语义与 ATF bit3 事务收束（不出镜像）
+
+- **范围/边界**：继续按用户要求只做静态复查，不出探针镜像、不上机、不 OTA/ADB/flash/reboot。只读复查了`hwccf_api.c`的三套 voter、`mtk-mminfra-util.c`、live DT、`x9_mm_power.c`、日志351–356，以及原ATF中已记录的`28d48/28f08/21424`路径；本轮没有改源码、没有编译、没有运行测试、没有操作设备。只更新`NOTES.md`、`CAMERA_PLAN.md`、`x9/camera/README.md`三份handoff。
+- **重复投票语义纠正**：前一条handoff写“Android重复投票直接goto skip且跳过后续等待”不严谨。`_v1_hwccf_irq_voter_nowait()`的`goto skip`只跳过nowait里的dummy read之后的prepoll/SET/EN；`_v1_hwccf_irq_voter_ctrl()`随后无条件调用`_v1_hwccf_irq_voter_wait_done()`，后者仍执行ON的`all_en`与`STA`等待。`_v1_mm_hwccf_voter_ctrl()`同样在重复票时`goto skip`，但它是一条完整voter ctrl，不拆分nowait/wait_done。放宽投票的时钟路径不应把这两套skip混为一谈；当前native“EN已置则借用并继续global/STA”在`wait_done`语义上更接近irq voter组合，不能据“跳过后续等待”再改代码。
+- **三套源码路径的失败判据收束**：`_v1_irq_nowait`在SET前要求`STA bit3=0`，SET后等AP `EN bit3=1`；`_v1_irq_wait_done`在ON时等`GLB_EN bit3=1`，再等`STA bit3=0`，不等`DONE`。`_v1_mm_voter_ctrl`在is_set时额外要求`CCF_STATUS & 0xffff <= 1`，SET/EN/all_en/STA顺序与irq组合相同。`_v1_hwccf_irq_voter_ctrl`失败只assert+返回，BACKUP的CG47 retrigger bypass。日志356的`ap=8 global=8 sta=8 done=fffffff7`在任何一套路径里都会停在最终STA，不是等待步长或重复票语义造成的假失败。
+- **ATF路径原始数据**：对原ATF `tee.img.atf.original.bin`做只读反汇编，`28d48`在first reference时以`w0=1,w1=0x37,w2=0,w3=3`调用`21424`，即`HWCCF_VOTE/BACKUP_GRP_0/bit3`；`28f08`在last reference时以`w0=1,w1=0x37,w2=1,w3=3`调用同一函数，即`HWCCF_UNVOTE/bit3`。`28d48`只在`w0`的bit31置位时转发错误；`28f08`在`bl 21424`后直接恢复`w0=0`返回，因此外层PM返回0不能证明内部HWCCF成功。这个源码事实与356的`ap`仍置位吻合：可能是先前事务遗留或当前硬件状态未清，但不能仅据返回0断言取消仍能成功。
+- **ATF限制/不能推出的结论**：原始反汇编没有提供`21424`的C源码级错误语义，也没有显示它会清除或修正`CCF_BACKUP1_STA` bit3；不能把“有ATF投票”当成额外补救、不能读/写ATF私有XPU3 bank、不能延长/绕过native最终STA。native只投AP XPU0 bit3，与Android `mminfra2_onoff()`一致。ATF返回的bit31检查只说明错误转发很窄，不能据非零低bits推断成功或失败类型。
+- **阶段B静态边界**：`clk-mt6993-pd.c`给出`cam_vcore(bit16,parent=mm_infra0) -> cam_main(bit15) -> cam_mraw(bit8)`，CAM/CAMSV下级再挂在其后；live DT的`seninf-core`列出SENINF/CAM/CAMTG/top/clk_hw_ccf_csi_bs/mm_dvfs_mux，camsv1列出`cam_main_larb19/14/29_con`、`camsv_top_con`、`seninf_camtm_con`、`camsv_a_con`及三个中断。现有`cam_mm_descs[]`已有16/15/8域和寄存器访问级CAM/CAMSV CG；这些是后续阶段清单，不是已生效证据。当前还没有MM成功，不能把阶段B/C/D写成已通过；下一步仍先在源码层面解释硬件`STA bit3`为何10ms未清，不能跳到RAW或补画面数据。
+
 #### 2026-11-17 相机静态复查：按Android修正MM IRQ vote步长，不出测试镜像
 
 - **范围/边界**：用户明确要求“不出探针镜像，现在只开始静态复查，严格按照安卓日志和源码跑一遍我们的启动/上电/预览，遇到可能出错的地方就打印对应错误，不用反复测试；缺失代码严格按安卓逻辑补全”。本轮只读核查351–356日志、`hwccf_api.c/hwccf.h`、`mtk-mminfra-util.c`、`mtk-vmm-notifier-mt6993.c`、live DT和相机native启动/上电/采集链；只改一处源码常量语义，没有编译boot.img、没有生成探针镜像、没有boot/reboot/flash/ADB/设备操作、没有跑测试脚本。
