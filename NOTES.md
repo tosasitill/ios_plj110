@@ -2982,3 +2982,7 @@ Source: mtkcam imgsensor src-isp8s adaptor-drv.c/adaptor-hw.c/adaptor-i2c.c + op
 iOS matches every step (order, values, delays, pins, transfer format; EEPROM 0x50 / AF 0x0c ACK with the same
 transfer code). Static audit finds no missing step. Signature (bus + EEPROM + AF ACK, sensor NACK) is the Sony
 "no INCK at pad or XCLR low" pattern; iOS MCLK was only proven at the mux (fmeter), never at pad 208.
+
+## r24 pad check (user-approved diagnostic, 2026-11-17)
+- Read-only DIN sampling before the ID read: GPIO208 (MCLK) 4096 samples, ones/edges; GPIO171 (XCLR) 64 samples; plus MODE. Log X9 CAMERA PAD.
+- Image: x9/out/x9-camera-pad-r24-20261117/boot.img

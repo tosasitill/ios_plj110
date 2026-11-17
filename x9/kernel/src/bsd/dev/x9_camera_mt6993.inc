@@ -861,6 +861,20 @@ static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
         if(!e)delay((which==X9_CAMERA_TELEPHOTO || which==X9_CAMERA_ULTRAWIDE)?2000:4000);
         if(!e && which==X9_CAMERA_ULTRAWIDE) {e=cam_drive_check(j,false);if(!e)delay(10000);}
         if(!e)e=cam_wl_guard(j,false,&v); /* after reset settle, before the first sensor request */
+        if(!e) {
+            /* User-approved read-only pad check (Android measured GPIO208 DIN
+             * toggling): sample DIN of MCLK and XCLR right before the ID read.
+             * Reads only the GPIO DIN bank (0x200) and MODE; no writes. */
+            unsigned m=j->board.mclk,rs=j->board.reset,prev=cam_pin_get(j->gpio,0x200,m);
+            unsigned ones=prev,edges=0,rhi=0;
+            for(unsigned n=1;n<4096;n++) {
+                unsigned b=cam_pin_get(j->gpio,0x200,m);
+                ones+=b;edges+=b!=prev;prev=b;
+            }
+            for(unsigned n=0;n<64;n++)rhi+=cam_pin_get(j->gpio,0x200,rs);
+            printf("X9 CAMERA PAD: mclk=%u mode=%u din_ones=%u/4096 edges=%u reset=%u mode=%u din_high=%u/64 (Android: mclk toggles, reset 1)\n",
+                m,cam_pin_mode(j->gpio,m),ones,edges,rs,cam_pin_mode(j->gpio,rs),rhi);
+        }
     }
     if(!e) {
         r->stage=X9_CAM_STAGE_ID;uint8_t hi=0,lo=0;
