@@ -6,7 +6,9 @@
 
 重复票语义复核：`_v1_hwccf_irq_voter_nowait()`的重复票`goto skip`只跳过nowait里的prepoll/SET/EN，外层`_v1_hwccf_irq_voter_ctrl()`仍调用`_v1_hwccf_irq_voter_wait_done()`继续等`all_en`和`STA`；`_v1_mm_hwccf_voter_ctrl()`的单函数skip不能混入这条组合语义。三套路径最终都要求`STA bit3=0`，因此`ap=8/global=8/sta=8`不是等待步长或重复票造成的假失败。原ATF中`28d48/28f08`对resource55/bit3的VOTE/UNVOTE与native同一资源；`28f08`丢弃内部HWCCF返回值并总返回0，外层PM成功不能证明内部成功，也无法替代native的最终STA判定。未据此改代码、清状态或延长等待。
 
-原ATF `21424(type1,0x37,bit3)`继续闭合到`37f4/385c`：AP使用MM HWV `0x31c00000`，VOTE/UNVOTE写`+0x30724/+0x30728`（对应`XPU_B0_SET/CLR`），等AP EN、global EN `+0x11358`和STA `+0x1135c` bit3清零；DONE虽传入但不轮询。复查`21564`确认`0x31c3748=2`只在VM型资源`0x38/0x39`成功后写，MM BACKUP0 `0x37`不写该命令；此前笔记对MM路径的描述以此为准。native对该资源、地址、等待顺序和最终STA判据均已一致，没有可补的ATF专有HWV动作；`sta=8`仍按源码失败，不清W1C、不改bank、不延长。
+原ATF `21424(type1,0x37,bit3)`继续闭合到`37f4/385c`：AP使用MM HWV `0x31c00000`，VOTE/UNVOTE写`+0x30724/+0x30728`（对应`XPU_B0_SET/CLR`）。复查`385c/3988`确认它检查AP EN并等global EN `+0x11358`，VOTE路径没有再次轮询STA；此前“ATF也最终等STA”的旧表述不准确。native按Android v1 voter的`wait_done()`仍要求STA bit3 idle，不能放宽。`21564`的`0x31c3748=2`只在VM型资源`0x38/0x39`成功后写，MM BACKUP0 `0x37`不写。新增只读`int=CCF_INT_STATUS&BIT(5)`用于观察backup1 timeout，不写W1C；`sta=8`仍按源码失败，不清W1C、不改bank、不延长。
+
+`CCF_INT_STATUS(0x50)`的bit5/bit21分别在`hwccf.h:150/167`命名为VIP/AP backup1 timeout；参考树只在`hwccf_dbg.c:172`和`clkchk-mt6993.c:3572/3876`的debug dump列出`0x50`，v1 IRQ voter没有读取或清除该寄存器。新增的`int=`只用于下一次日志诊断，不能替代`CCF_BACKUP1_STA`判据，也不能在尚无新日志时宣称硬件已置位timeout。
 
 `fsm=80000001`的高位bit31也不是失败条件：`hwccf_api.c:325`只看低16位，DPC和原ATF对同一`0x31c10000`只掩`0xfffe`。SMMU冷启动顺序（`CMDQEN+ACK→CFGI_ALL/TLBI→EVTQ/SMMU`）、CAMSV DDR/COH/BW_QOS的SW-mode SET/OR_CQ写回采样、SENINF core PM/clocks/vcore/PHY源选择/outmux disable，均已在native源码中有对应实现或资格检查。当前没有越过MM_2，因此这些不能当实际生效或画面通过证据。
 

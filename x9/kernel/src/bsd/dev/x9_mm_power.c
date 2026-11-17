@@ -30,6 +30,8 @@ LCK_MTX_DECLARE(mm_power_lock, &mm_power_group);
 #define MM_POWER_ALL_STA 0x13704u
 #define MM_POWER_FSM 0x10000u
 #define MM_POWER_REG_EN6 0x152cu
+#define MM_POWER_INT_STATUS 0x50u
+#define MM_POWER_INT_BACKUP1_TIMEOUT (1u << 5)
 #define MM_POWER_ACK 0xa8u
 #define MM_POWER_ACK_MASK 0xc0000000u
 static struct { uint64_t token; uint32_t client, children; } parents[MM_POWER_PARENTS];
@@ -63,14 +65,15 @@ static void mm_log(const char *op, uint32_t client, unsigned stage, int error)
 {
     printf("X9 MM POWER %s: client=%u backend=hwccf MM_2 bit=3 stage=%u "
         "owned=%u held=%u ap=%x global=%x sta=%x done=%x ack2=%x "
-        "infra=%x all_sta=%x fsm=%x mt0sta=%x mt1sta=%x en6=%x errno=%d\n",
+        "infra=%x all_sta=%x fsm=%x mt0sta=%x mt1sta=%x en6=%x int=%x errno=%d\n",
         op, client, stage, vote_owned, vote_held,
         mm_read(hwv, MM_POWER_EN), mm_read(hwv, MM_POWER_GLOBAL),
         mm_read(hwv, MM_POWER_STA), mm_read(hwv, MM_POWER_DONE),
         mm_read(power_ack, MM_POWER_ACK), mm_read(hwv, 0x12900),
         mm_read(hwv, MM_POWER_ALL_STA), mm_read(hwv, MM_POWER_FSM),
         mm_read(hwv, 0x1131c), mm_read(hwv, 0x11334),
-        mm_read(hwv, MM_POWER_REG_EN6), error);
+        mm_read(hwv, MM_POWER_REG_EN6),
+        mm_read(hwv, MM_POWER_INT_STATUS) & MM_POWER_INT_BACKUP1_TIMEOUT, error);
 }
 static int mm_vote_take(uint32_t client)
 {
