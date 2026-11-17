@@ -2915,3 +2915,13 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - r20 (read-only): dump SID3 0x1680-0x16cf and 0x1780-0x17cf after the vote (X9 CAMERA SID3 xxxx)
   to diff against Android (have 1680-168f, 16c0-16cf, 1780-179f captured).
 - Image: x9/out/x9-camera-sid3dump-r20-20261117/boot.img
+
+## Camera log 343 (r20 SID3 dump) (2026-11-17)
+- SID3 dump: 1680-168f, 16c0-16cf, 1780-179f byte-identical to Android (16c5=03 in the dump;
+  the earlier single-read 13 was transient). PMIC/BUCK5/voter side fully ruled out.
+  (Android 1690-16bf, 17a0-17cf not captured; iOS: 1690 00 a6 00 00 06 17 87 84 07 0a 00 ba ...)
+- ID still NACK; fmeter camtg4=24019.
+- Silent hang at 26.56 s (log cut mid-line, no desktop, USB dropped) during modem bring-up;
+  camera code finished at 3.3 s, Camera.app not opened. 336 (WiFi), 339 (GPU), 343 (modem) all
+  stop at different places -> invisible panic pattern; need disk panic logs (pull_ios_logs from Android).
+- No new image.
