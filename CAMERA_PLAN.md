@@ -2,7 +2,7 @@
 
 ## 0. 现状（已证实）
 - 分支 `feat/camera-integration`，worktree `~/ios_plj110/.worktrees/camera-integration`，最新候选
-  `x9/out/x9-camera-i2c-poll-fifo-r40-20261117/boot.img`（工作树上述修改提交后固定SHA，本机整包 exit0，未上机）。
+  `x9/out/x9-camera-i2c-poll-fifo-r40-20261117/boot.img`（源码 **ac41d1d2**，本机整包 exit0，未上机）。
   日志350对应此前 `x9-camera-wlgroup-r27-20261117`（bbd3c57b）。
   新日志351已执行sensor-open与EEPROM preload，但日志没有唯一构建标识，不能仅据此独立核定精确源码SHA。
   r39沿用默认后/前双摄准入，未加`x9_camera_lenses=1`；长焦OB/VCM已编入但尚未获运行验收。
