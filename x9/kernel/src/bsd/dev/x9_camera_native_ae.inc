@@ -1,21 +1,12 @@
 /* Real AP group-held controls at the repeat CPU/no-credit boundary. Neither
  * queued commands nor register ACKs change the applied frame metadata. The
- * hhmain/hhfront modes declare ae_effective_frame=2, frame_time_delay_frame=3:
+ * hhmain/hhfront/hhtele modes declare ae_effective_frame=2, frame_time_delay_frame=3:
  * after release/readback, observe THREE actual sensor frame-counter advances
  * with no available credit before binding these controls to a later request.
  * Settling packets never become RAW frames. Source stays genuinely running;
  * no estimated SOF, fake completion, stream restart or blind group retry.
  */
 #include "x9_camera_native_ae.h"
-struct cam_native_ae_controls { uint32_t lines,gain,frame_lines; };
-static struct {
-    uint64_t epoch,queued_serial,applied_serial;
-    uint32_t sensor,writes,advances;
-    uint8_t counter;
-    bool seeded,pending,hold_attempted,release_attempted,hold_ack,release_ack;
-    int error;
-    struct cam_native_ae_controls applied,wanted;
-} cam_native_ae;
 
 static int cam_native_ae_fault(int e)
 {
@@ -106,9 +97,11 @@ static int cam_native_ae_queue_locked(uint64_t epoch,uint32_t lines,uint32_t gai
     if(!session.capture || !session.stream)return ENXIO;
     if(gain<1024 || gain>65536)return EINVAL;
     s=&sensors[cam_native_ae.sensor-1];
+    /* All three Sony get_gain2reg implementations subtract the truncated
+     * quotient. Truncating unity*(gain-1024)/gain instead loses one code. */
     c=(struct cam_native_ae_controls){.lines=lines,.frame_lines=frame_lines,
         .gain=s->gain_linear?(uint32_t)((uint64_t)s->gain_unity*gain/1024):
-            (uint32_t)((uint64_t)s->gain_unity*(gain-1024)/gain)};
+            s->gain_unity-(uint32_t)((uint64_t)s->gain_unity*1024/gain)};
     if(cam_native_ae_validate(s,c))return EINVAL;
     if(cam_native_ae.queued_serial==UINT64_MAX)return EOVERFLOW;
     cam_native_ae.wanted=c;cam_native_ae.queued_serial++;cam_native_ae.pending=true;
@@ -120,6 +113,44 @@ static int cam_native_ae_boundary(uint64_t epoch,uint64_t end)
     if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
     if(!e)e=cam_repeat_cpu_boundary_locked(epoch);
     return e;
+}
+/* hhtele_set_gain queues hold/gain/release through set_i2c_buffer, but its
+ * subdrv_i2c_wr_regs_u8 OB table is sent immediately, BEFORE commit sends
+ * that group. Preserve that wire order; do not invent an OB group latch.
+ * Only this no-credit boundary owns the eight generated OB writes. */
+static int cam_native_ae_ob_apply(struct cam_sensor_ap *ap,uint64_t epoch,
+    uint64_t end,uint32_t type)
+{
+    const uint16_t *p=cam_tele_ob_table(type);
+    int e=cam_native_ae_boundary(epoch,end);
+    if(!e && (cam_native_ae.sensor!=X9_CAMERA_TELEPHOTO || !p ||
+       !cam_native_ae.pending || cam_native_ae.hold_attempted ||
+       cam_native_ae.ob_acked_type!=cam_native_ae.ob_applied_type))e=ESTALE;
+    if(!e)e=cam_tele_ob_preflight();
+    if(!e && cam_native_ae.ob_transactions==UINT64_MAX)e=EOVERFLOW;
+    if(e)return e;
+    cam_native_ae.ob_prior_type=cam_native_ae.ob_acked_type;
+    cam_native_ae.ob_target_type=type;
+    cam_native_ae.ob_serial=cam_native_ae.queued_serial;
+    cam_native_ae.ob_transactions++;
+    cam_native_ae.ob_writes=cam_native_ae.ob_acks=0;
+    bzero(cam_native_ae.ob_regs,sizeof(cam_native_ae.ob_regs));
+    bzero(cam_native_ae.ob_values,sizeof(cam_native_ae.ob_values));
+    for(unsigned i=0;i<8 && !e;i++) {
+        uint8_t tx[3]={(uint8_t)(p[i*2]>>8),(uint8_t)p[i*2],(uint8_t)p[i*2+1]};
+        e=cam_native_ae_boundary(epoch,end);
+        if(!e)e=cam_sensor_ap_guard(ap);
+        if(e)break;
+        cam_native_ae.ob_regs[i]=p[i*2];cam_native_ae.ob_values[i]=(uint8_t)p[i*2+1];
+        cam_native_ae.ob_writes++; /* BEFORE possible posted START. */
+        e=cam_bus_transfer(ap->bus,ap->slave,tx,sizeof(tx),NULL);
+        if(!e) {
+            cam_native_ae.ob_acks++;
+            if(cam_native_ae.ob_acks==8)cam_native_ae.ob_acked_type=type;
+            e=cam_native_ae_boundary(epoch,end); /* retain ACK even on timeout */
+        }
+    }
+    return e; /* No guessed OB SRAM readback or write retry. */
 }
 /* Narrow owned AE transaction; generic table write retains its 0104 ban. */
 static int cam_native_ae_write(struct cam_sensor_ap *ap,uint64_t epoch,uint64_t end,
@@ -153,6 +184,8 @@ static int cam_native_ae_next_locked(uint64_t epoch,struct x9_camera_completed_f
     struct cam_sensor_ap ap={&cam_journal.sensor,cam_sensor_slave(cam_native_ae.sensor)};
     const uint16_t regs[]={0x0340,0x0341,0x0202,0x0203,0x0204,0x0205};
     uint64_t span,end;
+    uint32_t ob_type;
+    bool ob_change;
     uint8_t values[6],byte=0,previous=0;
     int e;
     if(!f)return EINVAL;
@@ -163,7 +196,9 @@ static int cam_native_ae_next_locked(uint64_t epoch,struct x9_camera_completed_f
     if(e)return cam_native_ae_fault(e);
     if(!cam_native_ae.pending)return cam_native_ae_snapshot_locked(epoch,f);
     c=cam_native_ae.wanted;
-    if(!memcmp(&c,&cam_native_ae.applied,sizeof(c))) {
+    ob_type=cam_native_ae.sensor==X9_CAMERA_TELEPHOTO?(c.gain>0x3df8?1u:2u):0;
+    ob_change=ob_type && ob_type!=cam_native_ae.ob_acked_type;
+    if(!memcmp(&c,&cam_native_ae.applied,sizeof(c)) && !ob_change) {
         cam_native_ae.pending=false;cam_native_ae.applied_serial=cam_native_ae.queued_serial;
         return cam_native_ae_snapshot_locked(epoch,f);
     }
@@ -173,7 +208,8 @@ static int cam_native_ae_next_locked(uint64_t epoch,struct x9_camera_completed_f
     values[0]=(uint8_t)(c.frame_lines>>8);values[1]=(uint8_t)c.frame_lines;
     values[2]=(uint8_t)(c.lines>>8);values[3]=(uint8_t)c.lines;
     values[4]=(uint8_t)(c.gain>>8);values[5]=(uint8_t)c.gain;
-    e=cam_native_ae_write(&ap,epoch,end,0x0104,1);
+    if(ob_change)e=cam_native_ae_ob_apply(&ap,epoch,end,ob_type);
+    if(!e)e=cam_native_ae_write(&ap,epoch,end,0x0104,1);
     if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);
     if(!e && byte!=1)e=ESTALE;
     for(unsigned i=0;i<6 && !e;i++)e=cam_native_ae_write(&ap,epoch,end,regs[i],values[i]);
@@ -200,15 +236,21 @@ static int cam_native_ae_next_locked(uint64_t epoch,struct x9_camera_completed_f
     if(!e && memcmp(&observed,&c,sizeof(c)))e=ESTALE;
     if(!e)e=cam_native_ae_boundary(epoch,end);
     if(!e) {
+        cam_native_ae.ob_applied_type=ob_type;
         cam_native_ae.applied=c;cam_native_ae.pending=false;
         cam_native_ae.applied_serial=cam_native_ae.queued_serial;
         e=cam_native_ae_snapshot_locked(epoch,f);
     }
     printf("X9 CAMERA AE: epoch=%llu serial=%llu writes=%u hold=%u/%u release=%u/%u "
-        "advances=%u counter=%x lines=%u gain_code=%u frame_lines=%u errno=%d "
+        "advances=%u counter=%x lines=%u gain_code=%u frame_lines=%u "
+        "ob_change=%u ob_prior=%u ob_target=%u ob_acked=%u ob_bound=%u "
+        "ob_writes=%u ob_acks=%u ob_serial=%llu ob_transactions=%llu errno=%d "
         "(no-credit settling; request metadata only after actual counter progress)\n",
         epoch,cam_native_ae.queued_serial,cam_native_ae.writes,cam_native_ae.hold_attempted,
         cam_native_ae.hold_ack,cam_native_ae.release_attempted,cam_native_ae.release_ack,
-        cam_native_ae.advances,cam_native_ae.counter,c.lines,c.gain,c.frame_lines,e);
+        cam_native_ae.advances,cam_native_ae.counter,c.lines,c.gain,c.frame_lines,
+        ob_change,cam_native_ae.ob_prior_type,ob_type,cam_native_ae.ob_acked_type,
+        cam_native_ae.ob_applied_type,cam_native_ae.ob_writes,cam_native_ae.ob_acks,
+        cam_native_ae.ob_serial,cam_native_ae.ob_transactions,e);
     return e?cam_native_ae_fault(e):0;
 }

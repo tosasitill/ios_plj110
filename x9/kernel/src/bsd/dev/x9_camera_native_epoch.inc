@@ -26,6 +26,8 @@ struct cam_native_epoch_receipt {
     __typeof__(cam_sv_gate) gate;
     __typeof__(cam_sensor_live) sensor;
     __typeof__(cam_sensor_cal) calibration;
+    struct cam_native_ae_state ae;
+    bool ae_captured;
     __typeof__(cam_rx_live) rx;
     __typeof__(cam_mm_live) mm_live;
     __typeof__(cam_mm) mm;
@@ -84,6 +86,10 @@ static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu 
        (cam_cal_profiles[cam_sensor_cal.sensor-1].header &&
         (!cam_sensor_cal.preloaded || !cam_sensor_cal.applied || !cam_sensor_cal.mode_checked)))
         return ESTALE;
+    if(!m->native_unstarted_retired && (!cam_native_ae.seeded ||
+       cam_native_ae.epoch!=epoch || cam_native_ae.sensor!=cam_sv.status.sensor))return ESTALE;
+    if(cam_native_ae.epoch==epoch && (cam_native_ae.error ||
+       cam_native_ae.ob_acked_type!=cam_native_ae.ob_applied_type))return ESTALE;
     vm_offset_t receipt_va=0;
     if(kmem_alloc(kernel_map,&receipt_va,round_page(sizeof(struct cam_native_epoch_receipt)),
        KMA_DATA|KMA_ZERO,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS)return ENOMEM;
@@ -126,6 +132,7 @@ static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu 
         h->dma_stop=cam_dma_stop;h->sv=cam_sv;h->sv_reset=cam_sv_reset;h->gate=cam_sv_gate;
         h->sv_qos=cam_sv_qos;h->sv_shutdown=cam_sv_shutdown;
         h->sensor=cam_sensor_live;h->calibration=cam_sensor_cal;
+        if(cam_native_ae.epoch==epoch){h->ae=cam_native_ae;h->ae_captured=true;}
         h->rx=cam_rx_live;h->mm_live=cam_mm_live;h->mm=cam_mm;
         h->smi=cam_smi;h->a0=cam_smi_a0;h->shared=cam_smi_shared;
         h->phy=cam_phy;h->mac=cam_mac;h->out=cam_out;

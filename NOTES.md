@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机继续：长焦 OB 选表与 Sony 增益整数顺序（待 r33 整包）
+
+- **位置/证据**：单代理在既有相机树/分支，源码起点`01f0985b`，r32交接补记已提交推送`19cd31f9`（push actual exit0）。主checkout与共享`.local`输入未改。最新运行依据仍`~/350.txt`，r28b..r32无新实机结果；本轮未操作设备/ADB/分区、运行测试脚本/套件或二次检查成功产物。
+- **确定缺口/实际源码顺序**：Android `hhtele_mipi_raw/hhtelemipiraw_Sensor.c:1591/1602/2462..2517` 的preview/normal_video按`rg_gain>0x3df8`选36db/type1，否则30db/type2；`open/control:2046/2533`重置type0，初始preview八个值不等于优化表。`set_group_hold:2159`仅调用`set_i2c_buffer`，ISP8s `adaptor-subdrv-ctrl.c:312..363`仅在commit发送缓冲；`adaptor-subdrv.h:893`→`adaptor-i2c.c:626..700`的OB表直接发送。因此原线上顺序是**OB八次store在hold/gain/release发送之前**，不能因为C调用先写hold就误判为OB在group内。
+- **实现**：扩展既有`x9/camera/build.py`从tele的Sensor.c提取两份八对OB表、保留原notice/source SHA manifest，缺vendor输入生成count0且不可用，不把厂商表值放进tracked overlay。生成器与kernel sensor preflight均限制精确寄存器顺序，byte值检查保留。native AE在真实RAW/CPU/no-credit PARKED边界依据实际gain code首次选表/跨阈值切换；首次同值增益也不能走原memcmp快退。只由专用OB路径发八条窄写，原AE writer及generic stream/hold/OTP限制不放宽；先OB→原hold/帧长/曝光/增益/release→稳定controls→三个真实0005计数前进→下一request metadata。每条尝试在可能START之前记录，真实ACK在后置预算检查之前计数；首错停、不重发或猜OB可读。`ob_acked`与`ob_bound`独立，不能以ACK替代画质/生效验收。
+- **取整与生命周期**：核main/front/tele各自`get_gain2reg:3119/1012/2169`均为`unity-floor(unity*BASEGAIN/gain)`，原native写成`floor(unity*(gain-BASEGAIN)/gain)`可少1码，已按三颗真实公式统一修正；UW线性公式保留。完整AE/OB状态（含最后table的逐寄存器尝试/ACK进度、独立serial与切换次数）随实际关闭后的native epoch receipt归档；已started epoch要求对应AE seed，任何同epoch AE error或OB ACK/bound不一致禁止recycle，未seed的never-started不伪造AE记录。原8个exported epoch pin上限不变。
+- **正常编译里程碑**：构建器正常`x9/camera/build.py`（生成表并编bridge/ctl）及Builder `compile_one(sweet_x9_camera.o)` **actual exit0/True，182 warnings**；输出`x9/out/x9-camera-tele-ob-compile-r1-20261117/`、日志`x9/out/camera-tele-ob-compile-r1-20261117-console.log`，`compile.exit=0`。之后仅补公式注释、生成器括号和文档，将由固定clean源码整包编译。下一唯一候选r33；实际SHA/整包/推送结果待下条补记，本机无CI run ID。
+- **下一验证/未闭范围**：仍先靠新启动日志确认MM_2→SMI→cold reset/QoS→CMDQ→RAW/SOF/DONE/handler。长焦真实首次/阈值切换时应有`X9 CAMERA AE ... ob_change=1 ob_writes=8 ob_acks=8 ob_target=1或2 ob_acked=同target ob_bound=同target advances=3 errno=0`；同type不重复发送，失败保留原partial journal/旧frame metadata。上述仅源码期望，无实机结果。AF/OIS/超广角banked校准、ISP颜色/镜头标定、原生虚拟三摄/真正多路无缝、VENC以及预览/照片/视频验收仍未闭；继续推送相机分支，不合main或删除树。
+
 #### 2026-11-17 相机继续：按本模组 EEPROM 补齐 sensor QSC/SPC/LRC（r32 整包成功，未上机）
 
 - **工作位置/运行证据**：单代理续用 `.worktrees/camera-integration` / `feat/camera-integration`，基线 `6e9802f4` clean。主checkout在SMS分支且NOTES有未提交修改，未触碰。最新运行依据仍`~/350.txt`，r28b..r31及本轮均无新上机结果。没有ADB/设备/分区动作、并行代理、测试脚本/套件或成功产物二次检查。

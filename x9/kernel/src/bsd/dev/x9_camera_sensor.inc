@@ -41,6 +41,29 @@ static int cam_sensor_validate_table(const uint16_t *p, uint32_t n)
         if(cam_sensor_forbidden(p[i]) || p[i+1]>255)return EINVAL;
     return 0;
 }
+/* Vendor wr_ob_type: 1=36db, 2=30db, 0=not selected since open/control.
+ * Values remain generated GPL artifacts; only this narrow register contract
+ * is part of the overlay. Preview's initial values are NOT either selection. */
+static const uint16_t *cam_tele_ob_table(uint32_t type)
+{
+    return type==1?x9_hhtele_ob_optimize_36db:
+        type==2?x9_hhtele_ob_optimize_30db:NULL;
+}
+static int cam_tele_ob_preflight(void)
+{
+    const uint16_t regs[]={0x3b00,0x3b01,0x38d0,0x38d1,
+        0x38a0,0x38a1,0x38a2,0x38a3};
+    const uint32_t counts[]={X9_HHTELE_OB_OPTIMIZE_36DB_COUNT,
+        X9_HHTELE_OB_OPTIMIZE_30DB_COUNT};
+    for(unsigned i=0;i<2;i++) {
+        const uint16_t *p=cam_tele_ob_table(i+1);
+        int e=cam_sensor_validate_table(p,counts[i]);
+        if(e)return e;
+        if(counts[i]!=16)return EINVAL;
+        for(unsigned j=0;j<8;j++)if(p[j*2]!=regs[j])return EINVAL;
+    }
+    return 0;
+}
 static int cam_sensor_table_value(struct cam_sensor_tables t, uint16_t reg, uint32_t *v)
 {
     bool found=false;
@@ -65,7 +88,9 @@ static int cam_sensor_config_preflight(uint32_t which, struct x9_camera_config *
     r->blockers=X9_CAM_CFG_NEED_FACTORY|X9_CAM_CFG_NEED_RECEIVER|
         X9_CAM_CFG_NEED_DMA_MAP|X9_CAM_CFG_NEED_DRAIN;
     int e=cam_sensor_validate_table(t.init,t.ni);
-    if(!e)e=cam_sensor_validate_table(t.preview,t.np);if(e)return e;
+    if(!e)e=cam_sensor_validate_table(t.preview,t.np);
+    if(!e && which==X9_CAMERA_TELEPHOTO)e=cam_tele_ob_preflight();
+    if(e)return e;
     bool back=which==X9_CAMERA_BACK,tele=which==X9_CAMERA_TELEPHOTO;uint32_t n=0;
 #define CAM_SAMPLE(reg,value) cam_sensor_sample(r,&n,reg,value)
 #define CAM_WORD(reg,value) do { CAM_SAMPLE(reg,(value)>>8); CAM_SAMPLE((reg)+1,(value)&255); } while(0)

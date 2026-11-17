@@ -27,7 +27,7 @@ def sensor_tables(root, out):
              ' * Original licenses/notices follow. Not for git. */']
     manifest = {}
     for sensor in ('hhmain', 'hhfront', 'hhtele', 'hhuwide'):
-        text = ''
+        text = ob_text = ''
         if root:
             p = root / f'{sensor}_mipi_raw/{sensor}_Sensor_setting.h'
             text = p.read_text()
@@ -37,16 +37,27 @@ def sensor_tables(root, out):
             lines.append(text.split('/*****', 1)[0])
             manifest[sensor] = {'source': str(p), 'license': license_id,
                                 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
+            if sensor == 'hhtele':
+                ob_source = root / 'hhtele_mipi_raw/hhtelemipiraw_Sensor.c'
+                ob_text = ob_source.read_text()
+                if not re.search(r'SPDX-License-Identifier:\s*GPL-2\.0\s*(?:\*/)?\s*\n', ob_text):
+                    raise ValueError(f'{ob_source}: unrecognized provenance')
+                lines.append(ob_text.split('/*****', 1)[0])
+                manifest[sensor]['ob'] = {'source': str(ob_source), 'license': 'GPL-2.0',
+                    'sha256': hashlib.sha256(ob_source.read_bytes()).hexdigest()}
         word = sensor == 'hhuwide'
         modes = ('pre_long', 'init_long', 'pre_short', 'init_short', 'preview') if word else ('init', 'preview')
+        if sensor == 'hhtele':
+            modes += ('ob_optimize_30db', 'ob_optimize_36db')
         for mode in modes:
             name = f'{sensor}_{mode}'
             values = []
             if root:
-                stripped = re.sub(r'/\*.*?\*/|//[^\n]*', '', text, flags=re.S)
+                ob = mode.startswith('ob_')
+                stripped = re.sub(r'/\*.*?\*/|//[^\n]*', '', ob_text if ob else text, flags=re.S)
                 original = (f'hhuwide_sensor_init_pre_setting_{mode[4:]}' if mode.startswith('pre_') else
                             f'hhuwide_sensor_init_setting_{mode[5:]}' if mode.startswith('init_') else
-                            'hhuwide_preview_setting') if word else name + '_setting'
+                            'hhuwide_preview_setting') if word else (name if ob else name + '_setting')
                 m = re.search(r'\b' + original + r'\s*\[\s*\]\s*=\s*\{([^{}]*)\}', stripped)
                 if not m or '#' in m[1]:
                     raise ValueError(f'{name}: missing/conditional table')
@@ -56,6 +67,9 @@ def sensor_tables(root, out):
                 values = [int(t, 0) for t in tokens]
                 if not values or len(values) % 2 or len(values) > (8192 if word else 4096):
                     raise ValueError(f'{name}: invalid size')
+                if ob and values[::2] != [0x3b00, 0x3b01, 0x38d0, 0x38d1,
+                                          0x38a0, 0x38a1, 0x38a2, 0x38a3]:
+                    raise ValueError(f'{name}: changed OB register sequence')
                 page = None
                 for reg, val in zip(values[::2], values[1::2]):
                     if word:

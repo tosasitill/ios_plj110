@@ -406,6 +406,8 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
     } else {st.rejected++;st.last_errno=e;}
     lck_mtx_unlock(&camera_lock);return e;
 }
+#include "x9_camera_native_ae.h"
+static struct cam_native_ae_state cam_native_ae;
 #include "x9_camera_camsv.inc"
 #include "x9_camera_irq.inc"
 #include "x9_camera_native_ae.inc"

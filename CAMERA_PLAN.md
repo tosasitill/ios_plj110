@@ -103,6 +103,12 @@
   前摄preview最终3621=0仍按源码保留。`MODULE_ACKED`只指事务ACK，非光学校准通过。
   超广角banked校准、AF/OIS和ISP颜色/镜头校准未闭；精确构建结果见NOTES。
 - 期望：`NATIVE CONFIG ... completed=1 errno=0`。
+- 长焦preview增益路径已静态补齐原`hhtele_set_gain`的30/36db OB选择：
+  code `>3df8`选type1，否则type2，新epoch从type0开始，首次同值SET_GAIN也必须选择。
+  OB表通过生成器提取，在真实no-credit边界先直接发送OB、再发原group控制；
+  ACK与三次真实计数推进后绑定分别记录，未知OB读语义不假定。
+  main/front/tele倒数增益均修正为原`unity-floor(unity*1024/gain)`整数顺序。
+  编译与候选终态见NOTES；没有OB/控制生效/黑电平画质的实机验收。
 
 ## 6. 阶段 D：SENINF / CSI 接收 / CAMSV DMA
 - 安卓 seninf：`mtkcam/.../seninf`（csi phy 配置、`mtk-iomem-ver`、端口映射；sensor0 endpoint 连哪个 csi 口，看 DT `remote-endpoint`）。

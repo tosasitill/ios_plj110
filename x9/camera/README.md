@@ -313,6 +313,10 @@ stop 先失效 generation 并按原顺序 drain 硬件，再最多等 1 s 排空
 
 provider 必须先确认真实 PASS1_DONE/group/tag/inner sequence 与本次 owned slot/request 对应、检查错误并完成 CPU cache 同步，按 SOF/控制生效延迟绑定该帧 metadata。无法确认绑定时不交付；不能把最新 AP 命令、晚读寄存器或未资格化 IRQ 当作完成证明。capture_id 是 generation 内严格递增的 64-bit owned-request 标识，不是直接放宽/截断硬件 32-bit counter。
 
+native AE 在真实 RAW/CPU/no-credit 边界更新控制。长焦按 Android `hhtele_set_gain` 的实际 gain code 选择 OB：`>0x3df8` 为36db（type1），否则30db（type2）；新 cold epoch 从未选择的type0开始，首次增益请求即使与原值相同也执行选表，后续同type不重复发送。两个八对表由构建器从 `hhtelemipiraw_Sensor.c` 提取并保留原license/source hash，内核preflight限定完整寄存器序列。Android的OB立即发送、hold/gain/release缓冲到commit才发送，因此native也先发OB，再执行原group控制。三颗Sony增益统一采用厂商的 `unity - floor(unity*1024/gain)`，保留整数取整顺序；超广角线性增益不变。
+
+OB逐条记录attempt/ACK与最后一次table/serial，八条ACK齐全只更新`ob_acked`；仍须原group release、稳定控制读回、三次真实0005计数前进和边界守卫成功，才更新`ob_bound`并为下一owned request绑定metadata。未假定OB寄存器可读，不额外读回或声称物理黑电平已验收；部分写入或超时锁存首错、不重发、不提前改旧帧metadata。物理关闭后将完整AE/OB状态随epoch receipt归档，错误或ACK/bound不一致禁止recycle；八个exported epoch上限保持。新增AE日志的OB字段用于定位真实事务，尚无新实机控制或画质结果。
+
 控制层只验证记录版本/保留字、generation、preview 精确尺寸与 64B stride、字节范围、非零 sof_time≤time≤now、曝光/帧长步长和增益范围。重复或乱序 capture_id/time/sof_time 返回 `ESTALE`；有效但被 CPU reader 背压丢弃的记录也退休，再提交同一记录仍为 `ESTALE`，不冒充新帧。用户 RAW10 `sequence` 保持接受帧计数，独立于 provider capture_id。iOS 在 allocation/ISP/metadata/PixelBufferHandler 前验证固定 preview header，并拒绝重复、倒序或未来时间帧。
 
 **这实现了同请求 SOF/DONE 记录→RAW10 header→iOS 的绑定和拒绝路径，不是 CAMSV 硬件 completion、控制延迟、SMMUv3 mapping 或真实帧的实测。** 用户 RAW10 magic/保留字语义升级为 v2（尺寸仍120B），ioctl/status/command ABI 未改，没有新增诊断 ioctl；仍需真实采集 provider，不能拍摄。
