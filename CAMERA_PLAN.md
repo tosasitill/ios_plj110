@@ -110,6 +110,10 @@
   前摄preview最终3621=0仍按源码保留。`MODULE_ACKED`只指事务ACK，非光学校准通过。
   超广角源码`set_sensor_cali:3037`本身直接return，没有可照搬的banked校准表；
   保留unsupported/factory blocker。AF/OIS和ISP颜色/镜头校准未闭；精确构建结果见NOTES。
+- 2026-11-17补齐main/tele sensor `open()` 的VCM模式激活：main为AF02=00→3ms→ID，
+  tele为ID→AF02=00→3ms，随后才init/校准/preview；原ID-only注册不触发此写。
+  独立窄helper保存稳定原模式，实际native退休通过后、隔离/撤电前恢复；失败不重发、保留依赖。
+  不写位置或PID/NVM，NO_FOCUS保持；不是完整马达init/归位或光学对焦验收。构建状态见NOTES。
 - 期望：`NATIVE CONFIG ... completed=1 errno=0`。
 - 长焦preview增益路径已静态补齐原`hhtele_set_gain`的30/36db OB选择：
   code `>3df8`选type1，否则type2，新epoch从type0开始，首次同值SET_GAIN也必须选择。

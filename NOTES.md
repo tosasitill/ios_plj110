@@ -160,6 +160,16 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机主链继续：补齐主/长焦 sensor open 的 VCM 模式激活（待 r37 整包）
+
+- **起点/范围**：单代理继续相机工作树/分支，`544497bc` clean。上一回合属progress（MMQoS源码、r36整包与推送）。最新实机仍`~/350.txt`，r28b..r36均无新MM/RAW/预览结果；未触主checkout、共享`.local`输入、ADB/设备/分区，未跑测试脚本或套件。
+- **主链核查事实**：当前开源`mtk_cam-sv.c`的STG路径只有reset、dump与寄存器定义，未见可移植配置写者；native持续检查central STG triggers为0、CQ SUB_THR0未enable，CQI阈值配置不代表CQ取指。不因Android动态统计里有stash/CQI就增加端口或推定完整STG生命周期。现有真实SOF/hybrid状态读取、FBC/CPU cache/worker→staging→软件ISP/PixelBufferHandler已接线，没有由这轮源码检查取得实际画面证据。
+- **确定遗漏/真实顺序**：Android `hhmain_mipi_raw/hhmainmipiraw_Sensor.c:28/2990..3006`明确`HHMAIN_AF_WRITE_ID=18`、先i2c4/0c一字节reg02=00→3ms→get_imgsensor_id→sensor_init；`hhtele_mipi_raw/hhtelemipiraw_Sensor.c:27/2041..2057`为ID→i2c7/2d reg02=00→3ms→init。live DT `camera_af_main@0c:9175`、`camera_af_tele@2d:9420`确认地址与同bus，原native完全漏此调用。AK7316M/T驱动init实际读取reg02，正常代码使用00/20/40模式；sensor `.close=common_close`本身没有VCM关闭命令。**这只是确定的open调用遗漏，不证明日志350的旧MM电源错误或无画面由AF造成**。
+- **实现/边界**：新增`x9_camera_sensor_open.inc`，独立固定main/tele helper复用原AP FIFO、rails/pins/clock/receiver守卫；不扩大通用sensor/EEPROM slave和寄存器范围。仅配置阶段按两者原顺序重读真实16/17 ID、发一次02=00并等待3ms；ID-only注册不触发VCM。实际模式稳定样本只接受源驱动使用的00/20/40，保存原值；attempt/issued在可能START前记账，ACK在后置预算检查前记录，观察active与整个open完成分开。1s软件总预算，源3ms等待不猜其它芯片时序；失败不重发或把晚到readback改成功。新增append-only `CFG_OPEN` stage，720B config/120B RAW/ioctl ABI保持。
+- **关闭/归档**：原native实际退休guard与capture=false通过后，仍在sensor close标记、reset隔离、receiver/MM/rails恢复之前确认mode00并唯一恢复本次借用原模式；原本00只观察不写。此原值恢复是native资源journal约定，不冒充Android common_close原有VCM写者。mode命令不确定或恢复失败保留低层依赖；若激活完整观察后才发生sensor ID/table错误，可独立恢复模式但不清原错误。完整journal随exported epoch归档，recycle要求对应epoch/sensor和实际mode恢复，不放宽8个pin上限。没有位置、PID/NVM存储、前/UW猜地址或FOCUS能力；完整VCM init/归位、前摄09/0c冲突、AF/OIS与光学校准仍未完成。
+- **编译里程碑**：正常Builder `compile_one(sweet_x9_camera.o)` **actual exit0/True，182 warnings**（session15835终态），日志`x9/out/camera-sensor-open-compile-r1-20261117-console.log`，输出`x9/out/x9-camera-sensor-open-compile-r1-20261117/compile.exit=0`。随后补窄helper的命令单次检查、稳定原模式采样和文档，由固定clean源码正常整包编译唯一r37；SHA/实际结果/push待补。本机无CI run ID，不复查成功产物。
+- **下一验收/后续工作**：默认后/前准入，main应有`SENSOR OPEN ... sensor=1 AF=c issued/acked=1/1 id=9186 bytes=2 complete=1 errno=0`；原mode恢复单独看`SENSOR OPEN RESTORE ... restored=1 errno=0`。长焦同源顺序已编入，但默认双摄不要求tele日志。仍需用户新启动日志按最早MM_2 ACK→SMI/reset/QoS→SMMU/CMDQ→RAW/SOF/DONE/cache/handler推进；不能把本轮open补齐称完整代码或相机已完成。
+
 #### 2026-11-17 相机主链继续：追到 ISP8s caller 的 KB/s 换算（r36 整包成功，未上机）
 
 - **源码事实与修正**：沿`isp8s/cam/mtk_cam-dvfs_qos.c:435..440/789..792/1322..1357`追完整`calc_bw → to_qos_icc → mtk_icc_set_bw`，相机专用`mtk_cam-dvfs_qos.h:87..90`明确为`kBps_to_icc(Bps/1024)`，不是通用`Bps_to_icc(Bps/1000)`。r35已正确修枚举3/ratio9/乘3顺序，但caller换算仍应修正。native现按同源helper先/1024，再按MMQoS/1000，然后`ceil(mix_MBps/512)*3`，默认1/上限64；`max`可在此单路径单调取整前取，无需重新估计线时。完整RAW需求仍保留原preview最小帧周期/实际stride的上界，不假装与Android纳秒linet四舍五入逐字节相等。

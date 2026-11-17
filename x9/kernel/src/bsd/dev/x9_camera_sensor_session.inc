@@ -113,6 +113,7 @@ static int cam_sensor_ap_write_word(void *context,uint16_t reg,uint16_t v)
     if(!e && reg==0xfcfc) {j->sensor_page=v;j->page_known=true;j->page_pending=false;}
     return e;
 }
+#include "x9_camera_sensor_open.inc"
 #include "x9_camera_sensor_calibration.inc"
 static int cam_sensor_session_match(uint64_t epoch)
 {
@@ -147,6 +148,9 @@ static int cam_sensor_session_open_locked(uint32_t which,uint64_t *epoch,
     cam_sensor_live.error=cam_sensor_live.close_error=0;
     cam_sensor_live.close_attempted=false;
     memset(&cam_sensor_live.config,0,sizeof(cam_sensor_live.config));
+    bzero(&cam_sensor_open,sizeof(cam_sensor_open));
+    cam_sensor_open.epoch=cam_sensor_live.epoch;
+    cam_sensor_open.sensor=which;cam_sensor_open.slave=cam_sensor_open_slave(which);
     r->flags=X9_CAM_PROBE_ATTEMPTED;r->stage=X9_CAM_STAGE_PREFLIGHT;
     cam_sensor_live.probe=*r;
     e=cam_sensor_cold_open(which,r);
@@ -189,8 +193,11 @@ static int cam_sensor_session_configure_locked(uint64_t epoch,struct x9_camera_c
     ap=(struct cam_sensor_ap){&cam_journal.sensor,cam_sensor_slave(which)};
     io=(struct cam_sensor_io){.context=&ap,.read=cam_sensor_ap_read,.write=cam_sensor_ap_write,
         .read_word=cam_sensor_ap_read_word,.write_word=cam_sensor_ap_write_word};
-    r->stage=X9_CAM_CFG_EEPROM;
-    e=cam_cal_preload(which);
+    e=cam_sensor_open_prepare(which,r);
+    if(!e) {
+        r->stage=X9_CAM_CFG_EEPROM;
+        e=cam_cal_preload(which);
+    }
     if(!e && cam_cal_profiles[which-1].header)io.calibrate=cam_cal_apply;
     if(!e)e=cam_sensor_configure(&io,which,r);
     if(!e)e=cam_cal_mode_check(which,r);
@@ -211,13 +218,16 @@ static int cam_sensor_session_close_locked(uint64_t epoch,struct x9_camera_probe
     /* An independent sensor caller cannot remove supplies below a capture
      * attempt. Core stop must clear capture only after actual HW drain. */
     if(session.capture)return EBUSY;
+    /* Same powered AP bus and rails are still held. Restore only our VCM
+     * mode, before marking the sensor closing and before reset/MM teardown.
+     * A failed activation/restore retains its journal and dependencies. */
+    off=cam_sensor_open_restore(epoch);
     cam_sensor_live.close_attempted=true;
     cam_sensor_live.phase=CAM_SENSOR_CLOSING;
     /* Do not lower MM clocks while a powered sensor can emit packets, and
      * do not lower sensor supplies after a receiver/MM conflict. This is
      * only retirement of an unprogrammed receive lifetime, not DMA drain. */
-    off=0;
-    if(cam_rx_sensor_held_locked(epoch)) {
+    if(!off && cam_rx_sensor_held_locked(epoch)) {
         off=cam_cold_isolate(&cam_journal);
         if(!off)off=cam_rx_sensor_close_locked(epoch);
     }

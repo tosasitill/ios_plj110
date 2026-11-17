@@ -29,6 +29,13 @@ MMPC channel 的10/7 occupancy与16MB/s向上取整静态供给单独保留，�
 ACK及最终开关读数；没有假设校准 SRAM 可读，也不替代光学效果、ISP LSC/CCM、AF/OIS验收。
 超广角的 banked 校准仍未接入，factory blocker 保留。mode2与mode3的同一sensor-session共用此路径。
 
+同一会话还补齐 Sony 主摄/长焦 `open()` 的 VCM 模式激活：主摄先向 i2c4/`0x0c`
+发送一字节地址的`02=00`，等待3ms后重读 sensor ID；长焦先重读 ID，再向 i2c7/`0x2d`
+发`02=00`并等待3ms。两者都在 init/校准/preview 前执行。只由独立 helper 访问这两个地址，
+原 sensor/EEPROM 地址范围不放宽。保存稳定原模式，激活与关闭恢复分别记录 issued/ACK/readback；
+关闭在原 native 退休检查通过后、reset/MM/rails 释放前恢复借用模式，失败保留依赖且不重发。
+此路径没有位置/PID存储命令，`NO_FOCUS`保持；前摄地址冲突和完整马达初始化/归位/FOCUS仍未闭合。
+
 | 路径 | 源码能力与边界 |
 |---|---|
 | 原生采集 | `x9_camera=2` 才准入；真实 ID/probe/close、PHY/CSI/CAMSV、IRQ、SID80、RAW 与退休守卫必须逐项成功，不以注册代替画面 |
