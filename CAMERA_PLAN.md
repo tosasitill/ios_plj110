@@ -2,7 +2,7 @@
 
 ## 0. 现状（已证实）
 - 分支 `feat/camera-integration`，worktree `~/ios_plj110/.worktrees/camera-integration`，最新候选
-  `x9/out/x9-camera-cal-burst-fifo-r43-20261117/boot.img`（源码 **b2fff359**，r43整包 exit0；355已运行到MM_2）。
+  `x9/out/x9-camera-mm-diag-r44-20261117/boot.img`（源码待提交；只加MM_2诊断字段，r44整包 exit0，未上机）。
   日志350对应此前 `x9-camera-wlgroup-r27-20261117`（bbd3c57b）。
   日志351的preload阻塞已由r40修复；最新日志354确认EEPROM两遍读完整通过，但日志没有唯一构建标识，
   不能仅据此独立核定精确源码SHA。r41沿用默认后/前双摄准入，未加`x9_camera_lenses=1`；
@@ -13,8 +13,8 @@
 - **当前最早失败（日志355）**：22.478s `X9 MM POWER GET ... MM_2 bit=3 stage=4 ... ap=8 global=8 sta=8 done=fffffff7 ack2=c2f10152 infra=e3fc0000 errno=60`，
   NATIVE CONFIG stage1 errno60、VCM release errno60、DRAIN latched=1。失败点是`x9_mm_power.c:mm_vote_take()`的
   stage4 `MM_POWER_STA` bit3 idle等待超时；AP SET/EN与global EN已为8，不是旧的`c2000514` SMC失败，也不是I2C失败。
-  尚无MM之后/RAW/handler证据。按用户要求本轮未继续猜测修改；下一步须先逐行对齐Android `hwccf_irq_voter_ctrl`/
-  `_v1_hwccf_irq_voter_nowait|_wait_done`与`mminfra2_onoff`的真实投票/等待/ACK语义，再决定是否出新候选。
+  源码对照确认native地址/顺序/预算与Android v1 IRQ voter一致，`done`不是该路径成功条件；r44只增加
+  `all_sta/fsm/mt0sta/mt1sta`只读日志来判定下一步，不延长或绕过STA。尚无MM之后/RAW/handler证据。
 - **传感器 ID 已通**（log 350）：后摄 hhmain `0x9186`（i2c4/0x1a），前摄 hhfront `0x0615`（i2c2/0x10），
   第一次就读到。根因是 WL28681C 的 pinctrl `reset_high` 组（GPIO203/187/202）里 GPIO187 从没拉高。
 - **此前阻塞（日志350；351尚未走到这里）**：打开 Camera.app 时 `NATIVE CONFIG sensor=1 stage=1 errno=5`，

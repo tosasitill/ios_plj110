@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机主链继续：MM_2源码对齐与可判定诊断（r44整包成功，未上机）
+
+- **范围**：用户说「继续」后，只读对照`hwccf_api.c:776..1125/1190..1239`、`hwccf.h:50..55/116..124/697..707`、`mtk-mminfra-util.c:55..126/250..360`与live DT。确认`mediatek,mt6993-mm_hwv`使用v1 ops；`HW_CCF_BACKUP_GRP_0(55)`映射`XPU_B0_SET=0x20724`、`B0_EN=0x2072c`、`B0_DONE=0x1136c`、`B0_STA=0x1135c`、`B0_GLB_EN=0x11358`，与native地址一致。v1 IRQ voter顺序是pre-poll STA bit3清→写SET→poll EN→wait_done先poll all_en→再poll STA清；native `x9_mm_power.c`已按此顺序，10ms预算也与`MTK_WAIT_GHWV_*`同量级。355的`ap=8 global=8 sta=8`就是最后STA未清；`done=fffffff7`只作诊断，Android该路径不把DONE当成功条件。因此本轮没有延长、忽略STA、清DONE或改投票顺序，避免偏离源码。
+- **实现/边界**：仅给`X9 MM POWER`日志增加Android判定所需的只读观测：`all_sta`(`CCF_ALL_MTCMOS_STA_0=0x13704`)、`fsm`(`CCF_STATUS=0x10000`)、`mt0sta`(`0x1131c`)、`mt1sta`(`0x11334`)，从同一已映射`mm_hwv`读取。没有改变任何电源/时钟/寄存器写入或等待语义，也没有扩大映射范围。下一份日志应能区分`XPU_B0_STA` bit3、整体MTCMOS STA、FSM与MTCMOS0/1状态，仍失败时只按新增状态继续源码对照。
+- **编译/构建实绩**：正常Builder `compile_one(sweet_x9_camera.o)` **actual exit0/True，182 warnings**，脚本`x9/out/camera-mm-diag-compile-r1-20261117/kernel-unit.py`、日志`x9/out/camera-mm-diag-compile-r1-20261117-console.log`、exit文件`compile.exit=0`。固定源码后正常`build.py all --boot-config x9/build/boot-device.json --boot-arg x9_motion=3 --name x9-camera-mm-diag-r44-20261117` **actual exit0**，104/104 overlay +3 prebuilt，Image32247808 B / boot15110144 B。唯一候选 **`/Users/tosasitill/ios_plj110/.worktrees/camera-integration/x9/out/x9-camera-mm-diag-r44-20261117/boot.img`**，原控制台`x9/out/camera-mm-diag-r44-20261117-console.log`。GPU280无需mailbox；默认后/前双摄，未加`x9_camera_lenses=1`。本机无CI run ID；未上机，目标未完成。
+- **下一上机判定**：用户从主checkout手动fastboot boot r44并打开Camera.app。若MM_2仍errno60，新日志重点看`X9 MM POWER GET ... sta=... all_sta=... fsm=... mt0sta=... mt1sta=...`。只按这些真实值与Android `v1_hwccf_irq_voter_nowait/wait_done`及`hwccf_is_enabled`的条件继续，不把诊断候选称为MM修复。
+
 #### 2026-11-17 相机主链继续：日志355，校准链闭合，失败前进到MM_2（源码无新改动）
 
 - **起点/范围**：用户把误写的255更正为355。工作树`b2fff359` tracked clean；`~/355.txt`已只读保存到私有`.local/x9/logs/355.txt`（不入git）。本轮只读核查日志与MM上电源码，没有改源码、编译、构建、运行测试、操作设备或触碰共享输入；构建的r43候选仍是最新供测版本。
