@@ -2962,3 +2962,8 @@ Model now (as Android, one shared AFE, one owner per shared bit):
   it probes the front sensor (WL LDO1/LDO3, same DOVDD, i2c2). Front ACK -> rear-specific;
   front NACK too -> shared WL input / DOVDD. Logs X9 CAMERA REGISTER + front X9 CAMERA ID.
 - Image: x9/out/x9-camera-front-r23-20261117/boot.img
+
+## Camera log 346 (r23) -> r23b (2026-11-17)
+- 346: front returned ENXIO in 2 ms without power-on: cam_native_sensor.error is sticky from the
+  back NACK. r23b clears a clean ENXIO left by a different, already-closed sensor before power-on.
+- Image: x9/out/x9-camera-front-r23b-20261117/boot.img
