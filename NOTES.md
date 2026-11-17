@@ -2967,3 +2967,18 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - 346: front returned ENXIO in 2 ms without power-on: cam_native_sensor.error is sticky from the
   back NACK. r23b clears a clean ENXIO left by a different, already-closed sensor before power-on.
 - Image: x9/out/x9-camera-front-r23b-20261117/boot.img
+
+## Android camera bring-up flow vs iOS (static audit, 2026-11-17)
+Source: mtkcam imgsensor src-isp8s adaptor-drv.c/adaptor-hw.c/adaptor-i2c.c + oplus hhmainmipiraw_Sensor.c.
+1. imgsensor_probe -> adaptor_hw_init -> search_sensor (DT sensor-names hhmain, cjmain; both 0x34/0x35 = 7-bit 0x1a, ID 0x16/0x17).
+2. try_probe_subdrv_entry: adaptor_cam_pmic_on (needs base-supply: absent in DT -> no-op), init_ctx,
+   adaptor_hw_power_on, get_id, power_off.
+3. do_hw_power_on: vs-voter SET (178a mask 4), adaptor_pmic_ctrl (maximum-pmic-delay absent -> return),
+   pw_seq: MCLK clk_prepare_enable+set_parent 24M (pin still mclk_off), RST0 1 ms, AVDD 2.804 3 ms, AVDD1
+   1.804 3 ms, AFVDD 3.0 3 ms, DVDD 1.16 4 ms, DOVDD 1.8 3 ms, pinctrl mclk_4mA (GPIO208 mode1, drive 1) 6 ms,
+   RST1 (GPIO171 out high) 4 ms. No subdrv power_on op, I2C (not I3C, no pre-cfg-addr).
+4. get_id: adaptor_i2c_rd_u8 = 2-msg i2c_transfer (2-byte reg write, repeated start, 1-byte read), 5 tries per addr.
+5. i2c-mt65xx: ch_offset_i2c=0 (no ch-offset-i2c in DT), 1 MHz DT clock.
+iOS matches every step (order, values, delays, pins, transfer format; EEPROM 0x50 / AF 0x0c ACK with the same
+transfer code). Static audit finds no missing step. Signature (bus + EEPROM + AF ACK, sensor NACK) is the Sony
+"no INCK at pad or XCLR low" pattern; iOS MCLK was only proven at the mux (fmeter), never at pad 208.
