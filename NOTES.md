@@ -3027,3 +3027,11 @@ transfer code). Static audit finds no missing step. Signature (bus + EEPROM + AF
 - r27: before the WL ID check, drive 187/202 mode0, DOUT=1, DIR=1, keep high (no restore, as Android). Logs
   X9 CAMERA WL GROUP with prior/after mode/dir/dout/din.
 - Image: x9/out/x9-camera-wlgroup-r27-20261117/boot.img
+
+## Camera log 350 (r27): SENSOR IDs READ (2026-11-17)
+- ROOT CAUSE of the long ID NACK (logs 331-349): GPIO187 of the Android WL28681C pinctrl reset_high group
+  (203/187/202) was never driven. iOS entry: 187 mode0 input low (dir0 dout0 din0); 202 already high.
+  After 187 output-high: back `ID: sensor=1 slave=1a attempts=1 id=9186`, front `sensor=2 slave=10 attempts=1
+  id=0615`, NATIVE REGISTER errno=0 IDs=9186/0615. Repeated at 12.7 s (id 9186).
+- Next blocker: Camera.app start at 16.3 s: `NATIVE CONFIG sensor=1 stage=1 errno=5`, `MM: flags=19
+  stage/slot=1/0 errno=5 blockers=1ff smc=c2000514/0`, start errno=5 (MM/camsys stage, before CSI/DMA).
