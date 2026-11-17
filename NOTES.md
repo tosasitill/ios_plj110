@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机静态复查：按Android修正MM IRQ vote步长，不出测试镜像
+
+- **范围/边界**：用户明确要求“不出探针镜像，现在只开始静态复查，严格按照安卓日志和源码跑一遍我们的启动/上电/预览，遇到可能出错的地方就打印对应错误，不用反复测试；缺失代码严格按安卓逻辑补全”。本轮只读核查351–356日志、`hwccf_api.c/hwccf.h`、`mtk-mminfra-util.c`、`mtk-vmm-notifier-mt6993.c`、live DT和相机native启动/上电/采集链；只改一处源码常量语义，没有编译boot.img、没有生成探针镜像、没有boot/reboot/flash/ADB/设备操作、没有跑测试脚本。
+- **源码排除**：`MMUP_CORE_R_GPR11_ADDR=0x31a041ec`与native `mmup=0x31a04000+0x1ec`一致；`HW_CCF_BACKUP_GRP_0(55)`经v1 wrapper映射到`XPU_B0_SET=0x20724/CLR=0x20728/EN=0x2072c/STA=0x1135c/GLB_EN=0x11358/DONE=0x1136c`，bank未选错。v1 IRQ voter不使用`CCF_STATUS` idle判据，FSM idle只属于`hwccf_voter_ctrl`；`fsm=80000001`低16位为1仍满足idle判据。VMM对本组投票使用bit10/11/14/15/16/18..22，`VMM_VOTE_VAL=0x3c00`不含bit3；日志`ap/global/sta=8`只落在mminfra2的MM_2 bit3。`_v1_mm_hwccf_mtcmos_fsm_err_handle`只对CG资源生效，BACKUP资源直接bypass，不能套CG47 retrigger。
+- **确定修正**：`x9/kernel/src/bsd/dev/x9_mm_power.c`把`mm_wait`拆成`count`与`step_us`；BACKUP1 IRQ vote/unvote的EN等待从`1250*1us`改为Android `MTK_WAIT_GHWV_IRQ_VOTE_CNT=1250`/`MTK_WAIT_GHWV_IRQ_VOTE_US=2`，其它prepoll/global/STA/ACK等待保持`10000*1us`。未延长最终STA预算、未忽略STA、未清DONE/W1C、未改投票顺序、未新增额外父域投票。曾短暂尝试“已投EN则借用并继续检查”，复核`_v1_hwccf_irq_voter_nowait`发现Android在重复投票时直接`goto skip`且跳过后续等待，已撤回该偏离。
+- **静态编译检查**：仅单对象`compile_one(sweet_x9_camera.o)` **actual exit0 / True，182既有warnings**，脚本`x9/out/camera-mm-time-static-r1-20261117/kernel-unit.py`，控制台`x9/out/camera-mm-time-static-r1-20261117-console.log`。没有整包、没有输出供测boot.img；GPU/mailbox不涉及。
+- **预览链当前判断**：356的`NATIVE CONFIG stage=1 ... errno=60`是MM_2失败的传播，不是新的SMI/CAMSV故障。`cam_pipeline_plan()`已按DT/source给出主摄VC1/前摄VC0、DT=0x2b、CSI port/stride/IOVA范围；当前ABI的completed frame没有VC/DT字段，不能凭空补ABI。后续继续静态检查的重点是SENINF/CAMSV时钟与resume顺序、SMMU/S1实际写表和CAMSV IRQ/DONE路径；所有新增判定必须有Android源码对应。
+
 #### 2026-11-17 相机主链继续：日志356闭合r44诊断，MM_2仍停在STA未清
 
 - **起点/范围**：用户要求切到相机分支、按handoff继续并“完全按照安卓流程”。工作树在`97124a0f` tracked clean；`~/356.txt`只读保存到`.local/x9/logs/356.txt`（不入git）。本轮只读核查351–356、`hwccf_api.c/hwccf.h`、`mtk-mminfra-util.c`和native电源代码，没有改上电流程、编译、构建、跑测试、boot/reboot/flash、操作ADB/分区或设备。

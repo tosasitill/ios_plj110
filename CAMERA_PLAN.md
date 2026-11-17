@@ -17,6 +17,7 @@
   `(val & 0xffff) <= 0x1`判据仍是idle，bit31不参与该判定。源码对照确认native地址/顺序/预算与Android v1 IRQ voter一致，
   `done`不是该路径成功条件；失败后Android只assert+返回，CG47 retrigger回调对BACKUP资源直接bypass。r44只增加
   `all_sta/fsm/mt0sta/mt1sta`只读日志，不延长或绕过STA。尚无MM之后/RAW/handler证据。
+- **静态复查新增（不出镜像）**：按用户要求只做静态复查，未出探针镜像/未上机。已确认dummy read地址、BACKUP_GRP0 bank映射、FSM idle判据、VMM bit范围及CG retrigger资格均与native现状一致；唯一源码差异是IRQ voter的EN等待步长。现在`x9_mm_power.c`按Android `MTK_WAIT_GHWV_IRQ_VOTE_CNT/US`把EN vote/unvote改为`1250*2us`，prepoll/global/STA/ACK仍`10000*1us`；不改STA成功条件、不清W1C、不延长最终等待。单对象编译exit0。
 - **传感器 ID 已通**（log 350）：后摄 hhmain `0x9186`（i2c4/0x1a），前摄 hhfront `0x0615`（i2c2/0x10），
   第一次就读到。根因是 WL28681C 的 pinctrl `reset_high` 组（GPIO203/187/202）里 GPIO187 从没拉高。
 - **此前阻塞（日志350；351尚未走到这里）**：打开 Camera.app 时 `NATIVE CONFIG sensor=1 stage=1 errno=5`，

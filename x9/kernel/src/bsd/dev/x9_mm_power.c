@@ -50,11 +50,11 @@ static void mm_write(unsigned off, uint32_t value)
     __asm__ volatile("dsb sy" : : : "memory");
 }
 static int mm_wait(vm_offset_t base, unsigned off, uint32_t mask,
-                   uint32_t target, unsigned us)
+                   uint32_t target, unsigned count, unsigned step_us)
 {
-    for (unsigned n = 0; n <= us; n++) {
+    for (unsigned n = 0; n <= count; n++) {
         if ((mm_read(base, off) & mask) == target) return 0;
-        if (n != us) delay(1);
+        if (n != count) delay(step_us);
     }
     return ETIMEDOUT;
 }
@@ -77,29 +77,30 @@ static int mm_vote_take(uint32_t client)
     /* Same dummy read as _v1_hwccf_irq_voter_nowait, before its STA check.
      * Never use the SMMU itself as an unpowered probe. */
     (void)mm_read(mmup, 0x1ec);
-    e = mm_wait(hwv, MM_POWER_STA, MM_POWER_BIT, 0, 10000);
+    e = mm_wait(hwv, MM_POWER_STA, MM_POWER_BIT, 0, 10000, 1);
     if (e) goto out;
     if (!(mm_read(hwv, MM_POWER_EN) & MM_POWER_BIT)) {
         vote_owned = true; /* BEFORE the one potentially ambiguous SET */
         mm_write(MM_POWER_SET, MM_POWER_BIT);
         stage = 2;
-        e = mm_wait(hwv, MM_POWER_EN, MM_POWER_BIT, MM_POWER_BIT, 1250);
+        /* MTK_WAIT_GHWV_IRQ_VOTE_CNT/US: 1250 * 2us. */
+        e = mm_wait(hwv, MM_POWER_EN, MM_POWER_BIT, MM_POWER_BIT, 1250, 2);
         if (e) goto out;
     }
     stage = 3;
-    e = mm_wait(hwv, MM_POWER_GLOBAL, MM_POWER_BIT, MM_POWER_BIT, 10000);
+    e = mm_wait(hwv, MM_POWER_GLOBAL, MM_POWER_BIT, MM_POWER_BIT, 10000, 1);
     if (e) goto out;
     stage = 4;
-    e = mm_wait(hwv, MM_POWER_STA, MM_POWER_BIT, 0, 10000);
+    e = mm_wait(hwv, MM_POWER_STA, MM_POWER_BIT, 0, 10000, 1);
     if (e) goto out;
     /* mminfra-util verifies its DT-selected two-bit MTCMOS ack after ON.
      * MM_2's upstream domain includes infra0/AO, required by the callers. */
     stage = 5;
     e = mm_wait(power_ack, MM_POWER_ACK, MM_POWER_ACK_MASK,
-        MM_POWER_ACK_MASK, 10000);
+        MM_POWER_ACK_MASK, 10000, 1);
     if (e) goto out;
     stage = 6;
-    e = mm_wait(hwv, 0x12900, MM_INFRA_BITS, MM_INFRA_BITS, 10000);
+    e = mm_wait(hwv, 0x12900, MM_INFRA_BITS, MM_INFRA_BITS, 10000, 1);
     if (!e) vote_held = true;
 out:
     /* A failed issued vote stays in the journal; do not compensate/replay. */
@@ -112,7 +113,7 @@ static int mm_vote_drop(uint32_t client)
     unsigned stage = 1;
     int e = 0;
     (void)mm_read(mmup, 0x1ec);
-    e = mm_wait(hwv, MM_POWER_STA, MM_POWER_BIT, 0, 10000);
+    e = mm_wait(hwv, MM_POWER_STA, MM_POWER_BIT, 0, 10000, 1);
     if (e) goto out;
     if (!(mm_read(hwv, MM_POWER_EN) & MM_POWER_BIT)) {
         e = ESTALE; goto out;
@@ -120,11 +121,11 @@ static int mm_vote_drop(uint32_t client)
     if (vote_owned) {
         stage = 2;
         mm_write(MM_POWER_CLR, MM_POWER_BIT); /* Only the AP bit we added */
-        e = mm_wait(hwv, MM_POWER_EN, MM_POWER_BIT, 0, 1250);
+        e = mm_wait(hwv, MM_POWER_EN, MM_POWER_BIT, 0, 1250, 2);
         if (e) goto out;
         delay(100); /* _v1_hwccf_irq_voter_wait_done UNVOTE settling */
         stage = 3;
-        e = mm_wait(hwv, MM_POWER_STA, MM_POWER_BIT, 0, 10000);
+        e = mm_wait(hwv, MM_POWER_STA, MM_POWER_BIT, 0, 10000, 1);
         if (e) goto out;
         /* Other XPUs may still need MM_2: do not require global/ACK OFF. */
     }
