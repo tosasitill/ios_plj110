@@ -2986,3 +2986,13 @@ transfer code). Static audit finds no missing step. Signature (bus + EEPROM + AF
 ## r24 pad check (user-approved diagnostic, 2026-11-17)
 - Read-only DIN sampling before the ID read: GPIO208 (MCLK) 4096 samples, ones/edges; GPIO171 (XCLR) 64 samples; plus MODE. Log X9 CAMERA PAD.
 - Image: x9/out/x9-camera-pad-r24-20261117/boot.img
+
+## Camera log 347 (r24 pad check) (2026-11-17)
+- X9 CAMERA PAD: mclk=208 mode=1 din_ones=1576/4096 edges=3150; reset=171 mode=0 din_high=64/64.
+  MCLK toggles at the pad and XCLR is high, as in Android. Pad layer ruled out. ID still NACK (10 + 30 late).
+- Front still not probed (REGISTER sensor=2 NACK 2 ms later, no power-on): r23b sticky-error clear not
+  sufficient; another gate blocks it (side issue, not pursued).
+- WL28681C DT node has no vin supplies (inputs hard-wired); vendor driver only writes 0x11=07; codes
+  179/54/144 match its linear ranges. Regs 0x14-0x1e never compared with Android.
+- MT6661 BUCK5 range 0-1.2 V (5 mV): vosel be = 0.95 V; DA 0x16c5 only bit0 (EN) defined in vendor header;
+  bit4 (iOS 13 vs Android 03) undocumented.
