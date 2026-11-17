@@ -1,5 +1,5 @@
 /* Restore camera metadata without restoring the old per-field tree walkers.
- * One bounded ADT walk locates both slots. One FDT collection plus one batch
+ * One bounded ADT walk locates all three slots. One FDT collection plus one batch
  * phandle pass retains all IRQ/CSI provenance checks. The shared collector
  * services the watchdog every 2048 tokens and has a 2s budget per pass,
  * already exercised by audio (NOTES 5.6). Refusals leave zero slots and are
@@ -10,6 +10,7 @@
 #include "plog.h"
 #include "../kernel/src/bsd/dev/x9_camera_irq_layout.h"
 #include "../kernel/src/bsd/dev/x9_camera_calibration.h"
+#include "../kernel/src/bsd/dev/x9_camera_smmu_policy.h"
 
 static const char camera_paths[CN_COUNT][FDT_CAPTURE_PATH_BYTES]={
     "","/soc","/soc/camsv1@3a600000","/interrupt-controller@6800000",
@@ -20,13 +21,14 @@ static const char camera_paths[CN_COUNT][FDT_CAPTURE_PATH_BYTES]={
     "/soc/seninf-top@3a400000/seninf-csi-port-1",
     "/soc/seninf-top@3a400000/seninf-csi-port-2",
     "/efuse@10160000/csi-data1@1d4","/efuse@10160000/csi-data2@1d8",
-    "/chosen","/chosen@0"};
+    "/chosen","/chosen@0","/soc/iommu@30800000","/soc/mm-smmu-cam"};
 _Static_assert(CN_COUNT<=FDT_COLLECT_MAX_NODES,"camera node table");
 /* ~6KiB BSS, never on the shim's 64KiB stack; only this call consumes it. */
 static struct camera_fdt camera;
-enum { SlotIRQ,SlotCAL,Slots };
-static const char slot_key[Slots][24]={"x9-camera-irq-layout","x9-camera-calibration"};
-static const uint32_t slot_bytes[Slots]={X9_CAM_IRQ_LAYOUT_BYTES,X9_CAM_CALIBRATION_BYTES};
+enum { SlotIRQ,SlotCAL,SlotSMMU,Slots };
+static const char slot_key[Slots][24]={"x9-camera-irq-layout","x9-camera-calibration","x9-camera-smmu-policy"};
+static const uint32_t slot_bytes[Slots]={X9_CAM_IRQ_LAYOUT_BYTES,X9_CAM_CALIBRATION_BYTES,
+    X9_CAM_SMMU_POLICY_BYTES};
 static uint32_t le(const uint8_t *p)
 {return p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;}
 static void put(uint8_t *p,uint32_t v)
@@ -98,10 +100,12 @@ int fdt_camera_patch_adt(uintptr_t dt,void *adt,size_t size)
     plog_hex("X9 CAMERA FDT nodes present",a->c.present);
     plog_hex("X9 CAMERA FDT properties",a->c.count);
     struct x9_camera_irq_layout q={0};uint32_t words[5]={0},features=0;
+    struct x9_camera_smmu_policy smmu={0};
     if(camera_irq_qualify(a,&q))features|=CF_IRQ;
     if(camera_calibration_qualify(a,words))features|=CF_CALIBRATION;
+    if(camera_smmu_qualify(a,&smmu))features|=CF_SMMU;
     uint32_t ok=0;
-    /* At most one second full-tree pass, even when both candidates pass.
+    /* At most one second full-tree pass, even when all candidates pass.
      * No candidate or its old partial registration is a successful grant. */
     if(a->handles) {
         uint64_t pass1=a->c.ticks;
@@ -127,5 +131,13 @@ int fdt_camera_patch_adt(uintptr_t dt,void *adt,size_t size)
         put(p+24,words[3]);put(p+28,words[4]);
         plog_str("X9 CAMERA CAL FDT: this boot's CSI0/1/2/3 devinfo copied; no PHY/rate/DMA grant\n");
     } else plog_str("X9 CAMERA CAL FDT: LK devinfo/CSI cell mapping refused; no calibration data\n");
+    if((features&CF_SMMU)&&x9_camera_smmu_policy_valid(&smmu)) {
+        const uint32_t *v=(const uint32_t *)&smmu;
+        for(unsigned i=0;i<X9_CAM_SMMU_POLICY_BYTES/4;i++)put(slot[SlotSMMU]+4*i,v[i]);
+        plog_str("X9 CAMERA SMMU FDT: live MT6993 MM SID80 TCU prefetch2; no MM/SID/DMA grant\n");
+    } else {
+        features&=~CF_SMMU;
+        plog_str("X9 CAMERA SMMU FDT: controller/master policy refused; metadata absent\n");
+    }
     return features?1:0;
 }

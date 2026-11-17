@@ -120,6 +120,10 @@
   `x9_camera_smmu.inc` 里 `SMMU_SECURE` 相关的假设要重新核对（pKVM 平台）。
 - 已修正 native CMDQ 开启顺序；普通 wrapper 用 DT resource1 `309e0000`，
   保存/验证/退休完整原值；secure WPCFG/AID-SID 策略尚无运行验证，不能由普通寄存器匹配推定。
+- 已补Android安装STE前`mtk_smmu_setup_features`的本机TCU预取策略：
+  shim从本boot FDT核定MM controller→SID80与`tcu-prefetch=2`，经独立32B ADT元数据传入；
+  native有效S1 STE word1 bits57:56按该值发布并完整校验，BBM保持/清除依原退休阶段。
+  未资格的零占位拒绝startup，不默认填值；无新MM/IRQ/DMA授权。实际整包/上机结果见NOTES。
 - CAMSV 已接入 MT6993 默认静态 FIFO 的完整 DMA/CQI 阈值；后续仍需核对 Android
   runtime resume 的局部 reset、DDR/BW_QOS/COH 软件请求及其关闭顺序（本轮实现见下，尚未实跑）。
   SET/CLEAR/SW_R 独立记账，不作为普通几何字段按完整 RW 字还原。

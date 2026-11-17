@@ -39,6 +39,9 @@ static void cam_native_prior(const struct x9_camera_smmu *m,struct cam_native_sn
 }
 static int cam_native_wp_guard(struct x9_camera_smmu *m)
 {
+    struct x9_camera_smmu_policy policy;
+    int e=cam_smmu_policy_read(&policy);if(e)return e;
+    if(memcmp(&policy,&m->native_policy,sizeof(policy)))return ESTALE;
     if(!m->native_wp)return ENXIO;
     for(unsigned i=0;i<4;i++)
         if(*(volatile uint32_t *)(m->native_wp+cam_native_wp_off[i])!=m->native_wp_expected[i])
@@ -169,11 +172,15 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
 {
     vm_offset_t mmio;
     struct cam_native_snapshot entry,again;
+    struct x9_camera_smmu_policy policy;
     struct x9_camera_smmu probe={0},*m=NULL;
     int e;
     if(!out || *out || !view || !token)return EINVAL;
     uint64_t el;__asm__ volatile("mrs %0, CurrentEL":"=r"(el));
     if(el!=4)return ENOTSUP; /* normal EL1 host, not a guessed EL2 handoff */
+    /* This boot's qualified controller/master policy, BEFORE MMIO or
+     * exporting any storage. No generated/live.dts fallback is a grant. */
+    e=cam_smmu_policy_read(&policy);if(e)return e;
     e=x9_mm_power_validate(token,X9_MM_POWER_CAMERA);if(e)return e;
     lck_mtx_lock(&camera_smmu_lock);
     if(!cam_native_mmio)cam_native_mmio=ml_io_map(0x30800000,0x20000);
@@ -201,6 +208,7 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     lck_mtx_lock(&camera_smmu_lock);
     m->native_power=token;m->native_gbpa=entry.word[CAM_N_GBPA];
     m->native_wp=cam_native_wp_mmio;
+    m->native_policy=policy;
     memcpy(m->native_prior_word,entry.word,sizeof(entry.word));
     memcpy(m->native_prior_wp,entry.wp,sizeof(entry.wp));
     memcpy(m->native_wp_expected,entry.wp,sizeof(entry.wp));
@@ -246,9 +254,10 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     if(!e)e=cam_smmu_live(m);
     if(!e)m->native_started=true;
     else {cam_smmu_latch(m,e);if(e==ETIMEDOUT)cam_smmu_retire_timeout(m);}
-    printf("X9 CAMERA NATIVE SMMU: sidbits=%u bypass=%u cr0=%x started=%u "
+    printf("X9 CAMERA NATIVE SMMU: sidbits=%u bypass=%u cr0=%x started=%u tcu_pf=%u "
         "prod=%x cons=%x errno=%d (own normal storage, retain MM power/backing)\n",
-        sidbits,m->native_bypass,m->native_cr0,m->native_started,m->prod,m->cons,e);
+        sidbits,m->native_bypass,m->native_cr0,m->native_started,
+        m->native_policy.tcu_prefetch,m->prod,m->cons,e);
     lck_mtx_unlock(&camera_smmu_lock);return e;
 }
 int x9_camera_native_smmu_start(uint64_t token,uint64_t iova,uint32_t bytes,

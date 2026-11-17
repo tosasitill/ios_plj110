@@ -5,7 +5,9 @@
  * the actual cold bootstrap. Own-base equality is NOT a firmware grant.
  */
 #include "x9_camera_smmu.h"
+#include "x9_camera_smmu_policy.h"
 #include "x9_mm_power.h"
+#include <pexpert/device_tree.h>
 LCK_MTX_DECLARE(camera_smmu_lock,&camera_group);
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 #define CAM_SMMU_MAGIC 0x583943414d4d5531ull
@@ -54,10 +56,30 @@ struct x9_camera_smmu {
     uint64_t native_retire_epoch,native_prior_base[3];
     vm_offset_t native_wp;
     uint32_t native_prior_wp[4],native_wp_expected[4],native_wp_issued;
+    struct x9_camera_smmu_policy native_policy;
 };
 static struct x9_camera_smmu *cam_smmu_namespace;
 static int cam_smmu_shared_check_locked(struct x9_camera_smmu *);
 static int cam_native_wp_guard(struct x9_camera_smmu *);
+static int cam_smmu_policy_read(struct x9_camera_smmu_policy *out)
+{
+    DTEntry chosen;const void *p=NULL;unsigned n=0;
+    _Static_assert(sizeof(*out)==X9_CAM_SMMU_POLICY_BYTES,"camera SMMU policy");
+    if(SecureDTLookupEntry(NULL,"/chosen",&chosen)!=kSuccess ||
+       SecureDTGetProperty(chosen,"x9-camera-smmu-policy",&p,&n)!=kSuccess ||
+       !p || n!=sizeof(*out))return ENXIO;
+    memcpy(out,p,sizeof(*out));
+    return x9_camera_smmu_policy_valid(out)?0:EINVAL;
+}
+static uint64_t cam_smmu_s1_ste_word1(const struct x9_camera_smmu *m)
+{
+    /* arm_smmu_make_cdtable_ste + mtk_smmu_setup_features:
+     * this fixed non-ATS master has a valid CD pointer, so DT TCU_PF
+     * applies to bits57:56. Keep NC/outer-shareable CD fetch and NS-EL1.
+     * The inherited-host API retains its original provider contract. */
+    return 2ull|(2ull<<6)|((((m->idr0>>24)&3u)==0)?1ull<<27:0)|
+        (m->native?(uint64_t)m->native_policy.tcu_prefetch<<56:0);
+}
 
 static bool cam_smmu_capable(uint32_t idr0,uint32_t idr1,uint32_t idr5)
 {
@@ -124,6 +146,7 @@ static int cam_smmu_storage(struct x9_camera_smmu *m)
     if(!cam_smmu_capable(m->idr0,m->idr1,m->idr5) || !m->map ||
         m->cmd_shift<2 || m->cmd_shift>8 || m->evt_shift<2 || m->evt_shift>7)
         return EFAULT;
+    if(m->native && !x9_camera_smmu_policy_valid(&m->native_policy))return ESTALE;
     oas=cam_s1_oas[m->idr5&7u];
     e=x9_camera_s1_validate(m->map);
     if(e)return e;
@@ -168,8 +191,7 @@ static int cam_smmu_storage(struct x9_camera_smmu *m)
                     (m->native_bypass?1ull|(4ull<<1):1ull):0;
                 if(w==1) {
                     if(m->native_ste_phase==1) {
-                        expected=2ull|(2ull<<6);
-                        if(((m->idr0>>24)&3u)==0)expected|=1ull<<27;
+                        expected=cam_smmu_s1_ste_word1(m);
                     } else if(m->native_bypass && (m->idr1&(1u<<27)))expected=1ull<<44;
                 }
             } else if(sid==CAM_SMMU_SID && m->exported) {
@@ -178,8 +200,7 @@ static int cam_smmu_storage(struct x9_camera_smmu *m)
                     /* SSID0, NC CD fetch, outer shareable, NS-EL1, !ATS.
                      * S1STALLD only exists on a stall-capable SMMU.
                      */
-                    expected=2ull|(2ull<<6);
-                    if(((m->idr0>>24)&3u)==0)expected|=1ull<<27;
+                    expected=cam_smmu_s1_ste_word1(m);
                 }
             }
             if(ste[sid*CAM_SMMU_STE_WORDS+w]!=expected)return ESTALE;
@@ -247,8 +268,7 @@ int x9_camera_smmu_export(struct x9_camera_smmu *m,struct x9_camera_smmu_export 
         m->exported=true;
         e=x9_camera_s1_export(m->map,CAM_SMMU_ASID,&m->view.map);
         if(!e) {
-            ste[CAM_SMMU_SID*CAM_SMMU_STE_WORDS+1]=2ull|(2ull<<6)|
-                ((((m->idr0>>24)&3u)==0)?1ull<<27:0);
+            ste[CAM_SMMU_SID*CAM_SMMU_STE_WORDS+1]=cam_smmu_s1_ste_word1(m);
             __asm__ volatile("dsb sy":::"memory");
             ste[CAM_SMMU_SID*CAM_SMMU_STE_WORDS]=1ull|(5ull<<1)|m->view.map.cd_pa;
             m->view.strtab_base=m->ste.pa;m->view.strtab_cfg=m->ste_shift;

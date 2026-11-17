@@ -482,6 +482,8 @@ cameractl status                 # 只读缓存，不重新触碰硬件
 
 厂商正常路径是 `arm_smmu_attach_dev → arm_smmu_domain_finalise → ARM_64_LPAE_S1`，分配 ASID、建立 CD/STE 并同步命令队列；之后 `mtk_smmu_map_pages` 调用该 domain 的 `io_pgtable_ops.map_pages` 建立 IOVA→PA。仅有电源引用、可用 IOVA 范围或空闲控制寄存器，都没有提供这套主机映射服务。
 
+native STE还须经过Android `arm_smmu_install_ste_for_dev → mtk_smmu_setup_features`的实际平台策略。本机MM节点`tcu-prefetch=2`，SID80非ATS且使用有效S1 CD pointer时，写到STE word1 bits57:56。shim在原bounded两遍FDT收集内核定controller完整compatible/resource、SOC寻址、SID80 master引用及影响STE的属性，再经独立32B `/chosen/x9-camera-smmu-policy`传入本次值；未知/冲突只留下零占位。内核在MMIO和export前验证并保存该policy，安装及全表校验用相同word1构造；BBM phase1保留原字段，phase2/3清除为原abort/bypass目标，已pin namespace保留完整本次policy。旧IRQ64B/校准32B与公开ioctl ABI不变。该元数据不是MM上电、SID独占或DMA授权，继承host API不套用native policy；没有本boot输入不能回退到captured DT常数。日志新增`SMMU FDT ... prefetch2`与`NATIVE SMMU ... tcu_pf=2`，尚未证明实机TCU策略或RAW效果。
+
 `pkvm_smmu_host.c::smmu_host_hvc` 注册的 secure MAP/UNMAP 是另一条链：
 
 - `mtk_tmem_interop.c::pkvm_smmu_mapping` 用固定 SMC `0xBB00FFCB/0xBB00FFCC` 查询返回在 **a1** 的动态 HVC handle，再通过 `pkvm_el2_mod_call` 调用。固定 SMC 返回不等于已经 map，也不能把源码中的注册顺序当作 HVC 编号。
