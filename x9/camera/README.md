@@ -16,6 +16,8 @@ BACKUP_GRP0是共享资源：DPC/VMM也会以同一resource55投其它bit，但v
 
 下一次诊断行还新增只读`irqhis=mm_read(0x124cc)`：参考树把该偏移命名为`HW_CCF_VOTE_IRQ_HIS_INDEX_POINTER`，后面的`0x124d0..0x1253c`是IRQ vote addr/data history。这里只读指针，不写history、不清W1C、不改STA；单对象编译exit0，没有镜像。
 
+当前静态复查阶段已提交/推送到 `6ff5ea02`：只有`x9_mm_power.c`的只读`int=`/`irqhis=`字段变化，不改STA成功条件、投票顺序或等待时长；最近一次实机候选仍是r44，新增字段尚无运行日志验证。
+
 `fsm=80000001`的高位bit31也不是失败条件：`hwccf_api.c:325`只看低16位，DPC和原ATF对同一`0x31c10000`只掩`0xfffe`。SMMU冷启动顺序（`CMDQEN+ACK→CFGI_ALL/TLBI→EVTQ/SMMU`）、CAMSV DDR/COH/BW_QOS的SW-mode SET/OR_CQ写回采样、SENINF core PM/clocks/vcore/PHY源选择/outmux disable，均已在native源码中有对应实现或资格检查。当前没有越过MM_2，因此这些不能当实际生效或画面通过证据。
 
 静态复查补充：`hwccf_drv_probe()`只做syscon→regmap、MMUP GPR映射和回调注册，不写HWCCF控制寄存器；参考树里的`HWCCF_INIT_DONE_REG`没有probe使用点。native的`0x31c00000+0x22000`覆盖所有已用XPU/诊断偏移，`0x31a04000+0x1000`和`0x31b50000+0x1000`覆盖MMUP dummy read与ACK。351–356从WL/EEPROM、校准FIFO推进到MM_2，355/356在`apply/mode/VCM INIT`通过后稳定停在`sta=8`。没有漏掉的Android HWCCF probe初始化或MMIO映射错误；`CCF_BACKUP1_VIP_STA_CLR`/`CCF_INT_STATUS`只是寄存器定义，v1 IRQ voter成功路径不清W1C，不能拿来伪造通过。Android SMI的MM_2入口同样只是`mtk_mminfra_on_off()`，larb/common resume不外加剧BACKUP1 bit3动作。新增只读`en6`日志用于观察`HWCCF_REG_EN6/block_voting`，不调用freeze/unfreeze、不绕过STA；单对象编译exit0，没有镜像。`ack2=c2f10152`和`infra=e3fc0000`按DT/HWV mask检查均满足，唯一硬失败仍是`STA bit3`。

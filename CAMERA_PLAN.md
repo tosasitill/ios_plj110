@@ -2,7 +2,7 @@
 
 ## 0. 现状（已证实）
 - 分支 `feat/camera-integration`，worktree `~/ios_plj110/.worktrees/camera-integration`，最新候选
-  `x9/out/x9-camera-mm-diag-r44-20261117/boot.img`（源码待提交；只加MM_2诊断字段，r44整包 exit0，未上机）。
+  `x9/out/x9-camera-mm-diag-r44-20261117/boot.img` 是最后一次已启动候选；本阶段按用户要求只做静态复查，新增 `int=`、`irqhis=` 只读诊断只经单对象编译，没有新镜像、未上机。源码/交接已提交并推送至 `6ff5ea02`。
   日志350对应此前 `x9-camera-wlgroup-r27-20261117`（bbd3c57b）。
   日志351的preload阻塞已由r40修复；最新日志354确认EEPROM两遍读完整通过，但日志没有唯一构建标识，
   不能仅据此独立核定精确源码SHA。r41沿用默认后/前双摄准入，未加`x9_camera_lenses=1`；
