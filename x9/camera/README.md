@@ -2,7 +2,7 @@
 
 ## 当前状态（2026-11-17）
 
-**最新日志 `~/351.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615`、完成 native 注册及主摄 sensor-open；尚无真实预览、拍照、录像或切镜验收。** 当前最早失败发生在主摄EEPROM校准preload期间：第一遍已读3246/3456 B，电源守卫使用的WL28681C i2c12/gate1请求超时，第二遍尚未开始，也未进入MM/SMMU。`SENSOR CAL reg=7cce`只是校准当前位置，不是失败WL事务的寄存器。日志350的旧MM上电失败来自不支持的`0xc2000514` SMC；源码`06166db7`已改为HWCCF MM_2 bit3引用，但351不能验证这项修正。r40新候选的确切源码与构建结果见`NOTES.md` §5；351的功能日志本身没有唯一构建SHA。
+**最新日志 `~/352.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615`、完成 native 注册、主摄 sensor-open 与 EEPROM 校准 preload（3456/3456 B）；尚无真实预览、拍照、录像或切镜验收。** 当前最早失败发生在校准 apply：1562/1562 次sensor写均已ACK，但 `errno=60`、`applied=0`、`start sensor=1 errno=60`。这不是新的WL/I2C失败：352中AP WAIT观察到真实terminal `status=1`、START已停止，apply附近没有AP REQUEST失败。时间线指向 init/calibration/preview 共用15s configure预算在apply末段耗尽；r41已给calibration apply独立有界预算，成功/失败后恢复configure预算，不重试、不扩大寄存器范围、不写EEPROM、不把ACK当光学校准通过。r41整包成功、未上机，详见`NOTES.md` §5；日志本身没有唯一构建SHA。
 
 后续源码核查又修正了 SMMU 的 CMDQ 使能顺序（8→12→13）、接入 DT 对应的普通
 wrapper 和34个 CAMSV DMA/CQI FIFO 默认配置，修复退休快照未初始化 padding，以及四摄使用

@@ -154,12 +154,26 @@ static int cam_cal_apply(struct cam_sensor_io *io,uint32_t which,struct x9_camer
 {
     const struct cam_cal_profile *p=&cam_cal_profiles[which-1];
     unsigned index=0;
-    int e=cam_cal_guard(io->deadline);
+    uint64_t span,end,saved;
+    int e;
+    /* The EEPROM preload has already completed in this live epoch. Its
+     * remaining time must not decide whether the following QR/SPC/LRC SRAM
+     * writes may finish; log 352 ACKed all 1562 writes but hit the parent
+     * init-table deadline. Bound this phase on its own, then restore the
+     * enclosing configure deadline for preview and readback. */
+    nanoseconds_to_absolutetime(15000000000ULL,&span);
+    saved=io->deadline;
+    end=mach_absolute_time()+span;
+    e=cam_cal_guard(end);
     if(!e && (!cam_sensor_cal.preloaded || cam_sensor_cal.sensor!=which ||
        cam_sensor_cal.apply_attempted || !p->header))e=ESTALE;
-    if(e)return cam_cal_fault(e);
+    if(e) {
+        io->deadline=saved;
+        return cam_cal_fault(e);
+    }
     cam_sensor_cal.apply_attempted=true;
     r->stage=X9_CAM_CFG_CALIBRATION;r->table_index=0;
+    io->deadline=end;
     /* Main set_sensor_cali applies mounting mirror before QSC. Front/tele
      * have no such write. The ordinary end-of-mode mirror remains intact. */
     if(p->mirror)e=cam_cal_write(io,0x0101,(uint8_t)sensors[which-1].mirror,r);
@@ -174,6 +188,7 @@ static int cam_cal_apply(struct cam_sensor_io *io,uint32_t which,struct x9_camer
         /* Android enables QSC immediately after QSC data, before SPC/LRC. */
         if(!b && !e)e=cam_cal_write(io,p->enable,1,r);
     }
+    io->deadline=saved;
     if(!e){cam_sensor_cal.applied=true;r->flags|=X9_CAM_CFG_MODULE_ACKED;}
     else cam_cal_fault(e);
     cam_cal_log("apply",e);return e;

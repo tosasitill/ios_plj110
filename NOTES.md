@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机主链继续：日志352，校准apply独立预算（r41整包成功，未上机）
+
+- **起点/范围**：用户指定「看352」并继续剩余部分。相机工作树从`8951dfb4` tracked clean起步；`~/352.txt`已只读保存到私有`.local/x9/logs/352.txt`（不入git）；只读检查源码、日志与现有文档。未触主checkout、设备、ADB、分区或共享`.local`输入；未运行测试脚本/套件，构建成功后没有解包/hash/反汇编等二次检查。
+- **352运行证据**：`:753` `NATIVE REGISTER errno=0 IDs=9186/0615`，`:4610`主摄sensor-open完成。`:5260` `SENSOR CAL phase=preload ... read=3456/3456 ... preloaded=1 ... errno=0`，说明r40的AP FIFO等待与EEPROM 16B分块修复已越过351的preload阻塞。`:6337` `AP WAIT: gate=1 slave=35 tx=1 rx=1 polls=2 elapsed_us=54960 budget_us=50000 status=00000001 start=00004000 bus=WL`：terminal状态在54.96ms被观察到，START已停止，资格检查后继续，不再把`ffffffff`占位当失电。最早失败转移到`:9754`（31.972s）`SENSOR CAL phase=apply ... writes=1562 acked=1562 preloaded=1 applied=0 errno=60`，随后`:9755` OPEN RESTORE errno=0、`:9756` DRAIN、`:9757` `CAMERA: start sensor=1 errno=60`；本次没有MM/SMMU/RAW/SOF/DONE/handler或实际预览证据。日志无唯一构建标识，不能独立核定源码SHA。
+- **失败定位**：`cam_sensor_configure()`用同一个15s `io->deadline`覆盖init table、calibration apply与preview table。352的preload在17.173s完成，apply约14.8s后失败；所有1562次sensor写均已ACK，才在常见writer的ACK后预算检查返回ETIMEDOUT。该时间线与共用预算耗尽一致，不是新的WL/I2C硬件失败；apply附近也没有新的AP WAIT/AP REQUEST失败行。这里区分**观察**（ACK计数/时间线）和**推断**（预算到点），不把后者当作硬件寄存器读数。
+- **实现/边界**：`cam_cal_apply()`在原有live epoch/session/preload资格通过后，先保存configure截止，以独立15s `end`设置`io->deadline`；所有校准SRAM写、mirror与enable都在该预算内，成功或失败都恢复原configure截止，preview/readback仍按原预算运行。独立预算不足仍返回ETIMEDOUT、保留真实ACK计数与依赖，不重试、不改寄存器范围、不动EEPROM、不掩盖写失败，也不把ACK当光学校准通过。`cam_sensor_configure()`的注释同步说明三阶段各有独立预算；校准preload仍保持原有15s与两遍完整payload/header校验。
+- **编译/构建实绩**：正常Builder `compile_one(sweet_x9_camera.o)` **actual exit0/True，182 warnings**，脚本`x9/out/camera-cal-deadline-compile-r1-20261117/kernel-unit.py`、日志`x9/out/camera-cal-deadline-compile-r1-20261117-console.log`、exit文件同目录`compile.exit=0`。固定工作树修改后执行正常`build.py all --boot-config x9/build/boot-device.json --boot-arg x9_motion=3 --name x9-camera-cal-deadline-r41-20261117` **actual exit0**，104/104 overlay +3 prebuilt，Image32247808 B / boot15110144 B。唯一候选 **`/Users/tosasitill/ios_plj110/.worktrees/camera-integration/x9/out/x9-camera-cal-deadline-r41-20261117/boot.img`**，原控制台`x9/out/camera-cal-deadline-r41-20261117-console.log`。GPU280无需mailbox；默认后/前双摄，未加`x9_camera_lenses=1`。本机无CI run ID；仍未上机，目标保持未完成。
+- **下一上机判定**：用户从主checkout手动fastboot boot上述r41并打开Camera.app。新日志先看`SENSOR CAL phase=apply ... writes=... acked=... applied=1 errno=0`与`phase=mode ... errno=0`，再看`VCM INIT`/`NATIVE CONFIG ... completed=1 errno=0`，随后才按MM/SMMU/RAW/SOF/DONE/handler推进。若apply仍errno60，应记录新的writes/acked与绝对时间来判断是否真的超过独立15s，不能沿用本次预算解释或猜测I2C reset。
+
 #### 2026-11-17 相机主链继续：日志351，AP FIFO等待及EEPROM分块修正（r40整包成功，未上机）
 
 - **起点/范围**：用户指定看`~/351.txt`，随后继续未完成的相机主线。相机工作树起点`08a894f8` tracked clean；原始日志已只读复制到私有`.local/x9/logs/351.txt`（不入git）。未触主checkout、设备、ADB、分区或共享`.local`输入；未运行测试脚本/套件，构建成功后没有解包/hash/反汇编等二次检查。

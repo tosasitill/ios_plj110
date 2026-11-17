@@ -1,18 +1,18 @@
-# X9 后摄出图：交接计划（2026-11-17，接 log 351）
+# X9 后摄出图：交接计划（2026-11-17，接 log 352）
 
 ## 0. 现状（已证实）
 - 分支 `feat/camera-integration`，worktree `~/ios_plj110/.worktrees/camera-integration`，最新候选
-  `x9/out/x9-camera-i2c-poll-fifo-r40-20261117/boot.img`（源码 **ac41d1d2**，本机整包 exit0，未上机）。
+  `x9/out/x9-camera-cal-deadline-r41-20261117/boot.img`（r41整包 exit0，未上机；固定源码SHA待提交后补记）。
   日志350对应此前 `x9-camera-wlgroup-r27-20261117`（bbd3c57b）。
-  新日志351已执行sensor-open与EEPROM preload，但日志没有唯一构建标识，不能仅据此独立核定精确源码SHA。
-  r39沿用默认后/前双摄准入，未加`x9_camera_lenses=1`；长焦OB/VCM已编入但尚未获运行验收。
-- **当前最早失败（日志351）**：13.606s主摄sensor-open成功，25.338s校准preload期间
-  WL28681C电源守卫的i2c12/gate1请求超时（errno60），第一遍已读3246/3456 B，第二遍尚未开始；
-  `reg=7cce`是校准当前位置，不是失败WL事务的寄存器。
-  没有本次MM/SMMU/RAW/handler证据。AP REQUEST的`start=ffffffff`是未采样占位，
-  不能推定实际START全1或失电。旧5ms/1000次等待改为Android FIFO50ms及最终STAT采样，
-  EEPROM按mt6991_compat的16B FIFO分块，保留两遍完整数据和前后header比对；
-  真正无terminal或资格失败仍锁存保留，不重置/重发。编译/新候选确切结果见NOTES。
+  日志351的preload阻塞已由r40修复；最新日志352确认EEPROM两遍读完整通过，但日志没有唯一构建标识，
+  不能仅据此独立核定精确源码SHA。r41沿用默认后/前双摄准入，未加`x9_camera_lenses=1`；
+  长焦OB/VCM已编入但尚未获运行验收。
+- **当前最早失败（日志352）**：17.173s主摄 `SENSOR CAL phase=preload ... read=3456/3456 ... preloaded=1 errno=0`；
+  31.972s `phase=apply ... writes=1562 acked=1562 applied=0 errno=60`，紧接着start返回60。
+  全部sensor写已ACK，时间线指向init/calibration/preview共用的15s configure预算在apply末段耗尽，
+  不是新的WL/I2C硬件失败；apply附近没有对应的AP WAIT/AP REQUEST失败行。
+  尚无本次MM/SMMU/RAW/handler证据。r41将calibration apply改为独立15s预算并在成功/失败后恢复
+  configure预算，不重试、不改EEPROM/寄存器范围、不把ACK当光学校准通过；编译与新候选结果见NOTES。
 - **传感器 ID 已通**（log 350）：后摄 hhmain `0x9186`（i2c4/0x1a），前摄 hhfront `0x0615`（i2c2/0x10），
   第一次就读到。根因是 WL28681C 的 pinctrl `reset_high` 组（GPIO203/187/202）里 GPIO187 从没拉高。
 - **此前阻塞（日志350；351尚未走到这里）**：打开 Camera.app 时 `NATIVE CONFIG sensor=1 stage=1 errno=5`，

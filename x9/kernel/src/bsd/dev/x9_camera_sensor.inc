@@ -204,8 +204,10 @@ static int cam_sensor_load_table(struct cam_sensor_io *io, const uint16_t *p,
 static int cam_sensor_configure(struct cam_sensor_io *io, uint32_t which,
                                  struct x9_camera_config *r)
 {
-    /* Byte FIFO calibration needs more transactions than Android's DMA
-     * bursts. This bounds software work, not sensor settling or frame time. */
+    /* This bounds the common init/preview table software work, not sensor
+     * settling or frame time. The module calibration's EEPROM preload and
+     * many byte FIFO sensor writes each have their own independent budget;
+     * do not let work already spent here consume their time. */
     uint64_t span;nanoseconds_to_absolutetime(io->calibrate?15000000000ULL:5000000000ULL,&span);
     io->deadline=mach_absolute_time()+span;
     if(which==X9_CAMERA_ULTRAWIDE)return cam_uw_configure(io,r);
