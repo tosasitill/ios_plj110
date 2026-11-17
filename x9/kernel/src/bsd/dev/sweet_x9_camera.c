@@ -325,7 +325,7 @@ int x9_camera_register_platform(const struct x9_camera_platform *p)
     else if(hw.version)e=EBUSY;
     else if(!X9_HHMAIN_INIT_COUNT || !X9_HHFRONT_INIT_COUNT)e=ENOTSUP;
     else {
-        hw=*p;
+        hw=*p;int first=0;
         for(unsigned i=0;i<X9_CAMERA_SENSOR_COUNT && !e;i++) {
             if(!(cam_native_mask&(1u<<sensors[i].sensor)))continue;
             st.sensor=sensors[i].sensor;
@@ -340,7 +340,17 @@ int x9_camera_register_platform(const struct x9_camera_platform *p)
             }
             if(!e)e=off; if(!e && id!=sensors[i].chip_id)e=ENODEV;
             if(!e)cam_sensor_id_record(sensors[i].sensor,id);
+            else if(e==ENXIO && !off) {
+                /* Clean NACK with a clean power-off: still probe the next
+                 * sensor (logs 335-345: back NACKs; front shares WL/DOVDD
+                 * but not the module or i2c4, so its result splits shared
+                 * supply from rear-module causes). Report the first error. */
+                printf("X9 CAMERA REGISTER: sensor=%u NACK, continuing to next sensor\n",sensors[i].sensor);
+                if(!first)first=e;
+                e=0;
+            }
         }
+        if(!e && first)e=first;
         if(!e){st.sensor=X9_CAMERA_BACK;st.supported_mask=cam_native_mask;st.flags=X9_CAMERA_READY;}
         else {st.flags|=X9_CAMERA_FAULT;st.last_errno=e;}
     }

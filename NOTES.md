@@ -2952,3 +2952,13 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - r22: WL entry clear settle 150 ms -> 1 s; after 10 NACKs keep power and poll 0x1a ID every
   10 ms for 300 ms (X9 CAMERA ID LATE). Only 0x1a reads added.
 - Image: x9/out/x9-camera-settle-r22-20261117/boot.img
+
+## Camera log 345 (r22) -> r23 (2026-11-17)
+- 345: no hang (2nd clean run after ch0-only). WL entry was 0x80 (COLD WL prior=c8 is the journal
+  value before the last channel enable), so no inherited rails: the 1 s settle never applied and the
+  sensor already started from full power-off like Android. Late polling 30x10 ms: still NACK.
+  Timing/state hypothesis disproven. AOV DT node is only an SCP capability declaration.
+- r23: register loop no longer stops at the back sensor's clean NACK (only when power-off was clean);
+  it probes the front sensor (WL LDO1/LDO3, same DOVDD, i2c2). Front ACK -> rear-specific;
+  front NACK too -> shared WL input / DOVDD. Logs X9 CAMERA REGISTER + front X9 CAMERA ID.
+- Image: x9/out/x9-camera-front-r23-20261117/boot.img
