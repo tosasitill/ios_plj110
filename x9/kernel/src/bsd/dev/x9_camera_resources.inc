@@ -1,13 +1,13 @@
 /* Shared MT6993 receive power provider. Independent of the sensor journal.
  * Sources: live PLJ110 DT; hwccf_api.c::_v1_mm_hwccf_voter_ctrl,
  * clk-mt6993-pd.c (CSI_BS_RX bank1 bit11, no VMM/MMINFRA flags);
- * smmu-secure.c::mtk_smmu_pm_get/put, arm-smmu-v3-common.h.
+ * mminfra-util.c::mminfra_ctrl, arm-smmu-v3-common.h.
  *
  * No CAM_MAIN/CAM_MRAW gates, VMM IRQ backup votes, SMMU SEC_INIT/reset,
  * wrapper writes, CR0/GBPA changes, inherited table walks or queue commands.
  * MM SMMUv3 is shared with display, and mt6993_data_mm enables HYP/SEC.
  * An all-zero NS configuration does NOT establish exclusive ownership.
- * Register mappings persist, but every successful secure power reference
+ * Register mappings persist, but every successful HWCCF power reference
  * is paired, and only our newly added CSI AP bit may be removed.
  */
 #include "x9_mm_power.h"
@@ -26,10 +26,10 @@ static struct cam_receive_power cam_receive;
 static struct x9_camera_resources cam_resources_last={.version=1};
 static bool cam_resources_attempted, cam_resources_latched;
 
-/* Camera and VCP share the native reference authority. First GET/last PUT
- * only; a software-only shared take/drop reports smc_a0=0 too, so this field
- * alone is not evidence that a new SMC was issued. A live VCP child prevents
- * camera teardown from removing the physical MM reference. */
+/* First take/last drop share MM_2 through the native reference authority.
+ * smc_get/put are legacy zero fields; X9 MM POWER records actual HWCCF.
+ * The private smmu_owned flag means a retained MM power token, not a
+ * secure SMC/semaphore or SMMU namespace grant. */
 static uint64_t cam_res_read64(vm_offset_t b,unsigned off)
 { return *(volatile uint64_t *)(b+off); }
 static void cam_csi_snapshot(struct cam_receive_power *p,uint32_t v[6])
@@ -146,7 +146,7 @@ static int cam_smmu_observe(struct cam_receive_power *p,struct x9_camera_resourc
 }
 static int cam_receive_power_restore(struct cam_receive_power *p,struct x9_camera_resources *r)
 {
-    /* Keep the secure MM power reference through the final MMUP dummy read
+    /* Keep the MM_2 power reference through the final MMUP dummy read
      * and CSI unvote. On failure retain dependencies and the journal. */
     if(p->csi_owned || p->csi_borrowed) {
         int e=cam_mm_vote_idle(p);if(e)return e;
@@ -185,17 +185,17 @@ static int cam_receive_power_take(struct cam_receive_power *p,struct x9_camera_r
     r->mm_ack_required=CAM_RES_MM_INFRA;
     r->stage=X9_CAM_RES_STAGE_SMMU_POWER;
     int power=x9_mm_power_acquire(X9_MM_POWER_CAMERA,&p->power_token,&r->smc_get);
+    /* An ambiguous issued SET returns its faulted token on error too. */
+    p->smmu_owned=p->power_token!=0;
     if(power)return power;
-    p->smmu_owned=true;
     r->flags|=X9_CAM_RES_SMMU_POWER;
     r->blockers&=~X9_CAM_RES_NEED_SMMU_POWER;
     r->stage=X9_CAM_RES_STAGE_MM_INFRA;
     r->mm_ack_active=cam_rr(p->hwv,0x12900);
     power=x9_mm_power_validate(p->power_token,X9_MM_POWER_CAMERA);
     if(power)return power;
-    /* Never read MMUP with an unpowered shared infra path. Secure PM_GET
-     * must keep the already initialized AO/infra0 provider awake; do not
-     * invent VMM backup/IRQ votes or initialize their firmware handlers. */
+    /* MM_2 keeps its real AO/infra0 parent chain awake. Do not invent VMM
+     * backup/IRQ votes or initialize their firmware handlers here. */
     if((r->mm_ack_active&CAM_RES_MM_INFRA)!=CAM_RES_MM_INFRA ||
        (cam_rr(p->hwv,0x1131c)&CAM_RES_MM_INFRA))return ENXIO;
     r->blockers&=~X9_CAM_RES_NEED_MM_INFRA;

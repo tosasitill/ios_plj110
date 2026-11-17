@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机 log350 续接：MM_2 HWCCF 电源入口替换（r28 构建前）
+
+- **工作位置/基线**：现有 `.worktrees/camera-integration` / `feat/camera-integration`，起点 `0430c9a3`；先读本文件与 `CAMERA_PLAN.md`。主 checkout 的 SMS 未提交交接和其它功能树未动。本轮没有设备操作、Android debugfs 读取、共享输入修改或合 main。
+- **观察与源码核定**：`~/350.txt` 的后/前摄真实 ID 为 `9186/0615`，Camera.app 在 `NATIVE CONFIG stage=1`、`MM stage/slot=1/0` 停于 `smc=c2000514/0 errno=5`。Android `mtk-mminfra-util.c:395` 的时钟回调使用 DT `mminfra-type0-pwr=3`（MM_2），`drivers/memory/mtk-smi.c:2783` 同样申请 MM_2；DT voter55、bit3、ACK `31b500a8 & c0000000`。`hwccf_api.c:776/993/1191` 的 v1 顺序是 MMUP `31a041ec` dummy read → BACKUP1 STA bit3 idle → AP SET/CLR 与 EN 回显 → ON global EN → STA idle；**不轮询 DONE 置位**。`0xc2000831` 是 pKVM 的保持上电 semaphore，不替代 HWCCF 上电，本轮没有猜加另一条 SMC。
+- **改动**：`x9_mm_power.c/.h` 将不支持的 0514 GET/PUT 换成 AP BACKUP1 bit3 引用，保留父/子 token；继承 AP bit3 只借用，最后一个 parent 只 CLR 自己新增的 bit3，不碰其它 bit/XPU。新增两次 AP/global/STA、MM_2 ACK 与 AO/infra0 ACK 资格检查；SET/CLR 已发后的错误锁存且保留 token/依赖，不补偿/重发。`cam_receive_power_take` 在 acquire 错误时也记录非零 faulted token，防止 close 假称未持有；ABI 尺寸/旧 smc 字段保留（此后始终0），MM 日志标为 `CSI/MM`，新增 `X9 MM POWER GET/PUT: backend=hwccf ... stage/ap/global/sta/done/ack2/infra/errno`。这是供电引用，**不是 SMMU namespace/semaphore、DMA 或画面验收**；原 normal-bank 冷启动与退休守卫仍适用。
+- **编译**：`prepare-local.py --check` exit0。首个单对象编译因新 `delay()` 缺 `kern/clock.h` 声明 exit1，原始日志 `x9/out/camera-mm-hwccf-compile-20261117.log`；补 include 后 `x9_mm_power.o`、`sweet_x9_camera.o` 两对象正常编译 **exit0**，日志 `x9/out/camera-mm-hwccf-compile-r2-20261117.log`，产物在对应 `x9-camera-mm-hwccf-compile-r2-20261117/`。未运行测试套件/测试脚本，未二次检查编译产物。
+- **下一步**：提交源码后正常整包 `--boot-config x9/build/boot-device.json --boot-arg x9_motion=3 --name x9-camera-mm-hwccf-r28-20261117`。最终 build/boot 路径与提交随后补记；上机由用户手动执行。先验 GET errno0/ACK，再看 MM RECEIVE→MAP/TAKE、SMMU 快照、NATIVE CONFIG、物理 RAW/SOF/DONE 与 PixelBufferHandler/实际预览，不能把本轮编译当相机完成。
+
 #### 2026-11-16 相机合入最新main与整包重编（进行中）
 
 - **用户范围/基线**：用户明确要求“合并重编”，单代理在既有 `feat/camera-integration` / `.worktrees/camera-integration` 执行，原相机head **595f28f8** clean；fetch实际exit0，锁定当次远端main **6266ec76**，包含灵动岛/20px状态栏 **00478b31**、全屏与UI默认on **bfbc0e51**、方向 **266d3de9** 与最新CPU/GPU/锁屏策略。本轮不合其它未发布分支、不修改主checkout或其它活动树。scratch仅本树 `x9/out/camera-main-integration-20261116/`，原r6/失败日志/私有输入/备份保持。

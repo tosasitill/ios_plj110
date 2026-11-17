@@ -40,6 +40,16 @@
     （`imgsensor/src-isp8s/`、seninf、camsys/camsv）
 
 ## 3. 阶段 A：修 MM 上电（当前阻塞）
+**2026-11-17 续接实现（r28，待上机）**
+- 已从 `mminfra_ctrl()` 的 DT `mminfra-type0-pwr=3` 和 `mtk_smi_mt6993_disp_resource_ctrl()` 确认
+  时钟/SMI 所需是 MM_2（BACKUP组0 bit3），以该引用保持 AO/infra0 父链；没有改用猜测的 0831 上电。
+- `x9_mm_power.c` 已替换 0514 GET/PUT：MMUP dummy read、STA idle、AP SET/EN、global EN/STA、
+  DT MM_2 ACK 和父域 ACK；继承 AP 票只借用，只撤本次新增票。v1 **不要求 DONE=1**。
+- 父/子 token 保留；已发 SET/CLR 失败保留错误账本，不重发。相机错误路径也保留失败申请返回的 token。
+  `smc_get/put` 为兼容字段，此后恒0；实际电源观察看新增 `X9 MM POWER GET/PUT` 日志。
+- 电源与完整相机两个对象已编译 exit0。整包结果和实机结果见 `NOTES.md` 当前交接；本节后面的
+  阶段 B–E 仍须按真实新日志推进，尚无 r28 MM/RAW/预览成功证据。
+
 **已查清（static）**
 - 安卓 MT6993 的 MM SMMU 由 pKVM 管（plat flags `SMMU_SEC_EN|SMMU_HYP_EN`）。smi-dbg 有 `hwccf-support`，
   所以 `mtk_smi_pm_ops` 不注册。

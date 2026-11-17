@@ -9,7 +9,7 @@
  *
  * This is a persistent register-access clock lifetime, not capture initialization.
  * No VMM CVFS/AVS/eFuse rewrite, PLL/AL-map change, CG47 pulse, SMI
- * larb enable, PHY/route/DMA write or NS SMMU ownership claim. The secure
+ * larb enable, PHY/route/DMA write or NS SMMU ownership claim. The MM_2
  * receive reference is kept through every dummy read and dependent unvote.
  * CAMSV B..F EN banks are screened before MM writes, and their physical
  * gates after MRAW power take; keep these siblings inactive throughout the
@@ -83,7 +83,7 @@ static int cam_mm_idle(struct cam_mm_journal *j,unsigned n,bool on)
 {
     const struct cam_mm_desc *d=&j->desc[n];
     int e;
-    /* receive_take proved AO/infra0; retain its secure reference until done. */
+    /* receive_take proved AO/infra0; retain its MM_2 reference until done. */
     if(!j->receive.smmu_owned)return ENXIO;
     /* Check the parent BEFORE the MMUP dummy read. This also reaches the
      * shared power authority's validate through cam_mm_vote_idle. A cached
@@ -192,8 +192,8 @@ static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera
         } else if(d->kind==CAM_MM_DOMAIN) {
             if(!!(before[1]&d->mask)!=!!(before[2]&d->effect_mask))return EBUSY;
         } else if(n<X9_CAM_MM_VMM) {
-            /* Secure PM_GET also holds AO/infra0 independently of BACKUP.
-             * BACKUP=0/PM_ACK=1 is expected here, not evidence of exclusivity. */
+            /* MM_2 holds AO/infra0 via its parent-domain chain.
+             * Their own BACKUP bits may be zero while PM_ACK is one. */
             if(!(before[2]&d->effect_mask))return ENXIO;
         }
         uint32_t add=d->mask&~ap;
@@ -313,7 +313,7 @@ static int cam_mm_restore(struct cam_mm_journal *j,struct x9_camera_mm_status *r
             r->retained=j->seen;r->slot=n;
             for(unsigned k=0;k<X9_CAM_MM_SLOTS;k++)if(j->seen&(1u<<k))
                 r->sample[k].flags|=X9_CAM_MM_SLOT_RETAINED;
-            return e; /* lower domains/VMM/infra/secure power must stay */
+            return e; /* lower domains/VMM/infra/MM_2 power must stay */
         }
     }
     int e=cam_sv_sibling_guard(j);
@@ -484,7 +484,7 @@ static void cam_mm_log(unsigned sensor,const struct x9_camera_mm_status *r)
     const struct x9_camera_resources *receive=&cam_mm_live.receive;
     cam_mm_last=*r;
     printf("X9 CAMERA MM: sensor=%u flags=%x stage/slot=%u/%u errno=%u restore=%u "
-        "blockers=%x retained=%x CSI/secure=%u/%u smc=%x/%x cfg=%x/%x/%x "
+        "blockers=%x retained=%x CSI/MM=%u/%u smc=%x/%x cfg=%x/%x/%x "
         "(register clocks only, NOT capture ready)\n",sensor,r->flags,r->stage,r->slot,
         r->last_errno,r->restore_errno,r->blockers,r->retained,cam_mm.receive.csi_owned,
         cam_mm.receive.smmu_owned,receive->smc_get,receive->smc_put,r->cfg[0],r->cfg[1],r->cfg[2]);

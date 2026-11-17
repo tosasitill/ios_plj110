@@ -137,7 +137,7 @@ struct x9_camera_pipeline {
 #define X9_CAMERA_GET_PIPELINE _IOWR('C', 0x93, struct x9_camera_pipeline)
 /* Shared receive resources, separate 224-byte ABI. PROBE request is exactly
  * {.version=1}; GET returns the cached result without MMIO. mode3/root only.
- * This is CSI_BS_RX power + secure MM-SMMU power, NOT full MM camera clocks,
+ * This is CSI_BS_RX power + MM_2 HWCCF power, NOT full MM camera clocks,
  * translation ownership, PHY setup or capture readiness. */
 #define X9_CAM_RES_ATTEMPTED 1u
 #define X9_CAM_RES_CSI_POWER 2u
@@ -220,7 +220,7 @@ struct x9_camera_mm_sample {
 };
 struct x9_camera_mm_status {
     uint32_t version, sensor, flags, stage, slot, last_errno, restore_errno, blockers;
-    uint32_t cfg[3], retained; /* CAM/CAMTM byte, SENINF byte; slots + CSI30/secure31 */
+    uint32_t cfg[3], retained; /* CAM/CAMTM byte, SENINF byte; slots + CSI30/MM31 */
     struct x9_camera_mm_sample sample[X9_CAM_MM_SLOTS];
 };
 #define X9_CAMERA_GET_MM_CLOCKS _IOR('C', 0x96, struct x9_camera_mm_status)

@@ -66,7 +66,7 @@ static int cam_smi_parent_guard(void)
     if(cam_rr(cam_mm.top,0x330)&(1u<<29))return EBUSY;
     if(!(cam_rr(cam_mm.top,0x270)&(1u<<29)))return ENXIO;
     /* MMINFRA is an AL mux; no AP SET/parent/PDN/PLL manipulation. The
-     * MM/secure reference holds its power, FENC is still an observation,
+     * MM_2 reference holds its power, FENC is still an observation,
      * not a throughput or continuous rate lease. */
     return 0;
 }
