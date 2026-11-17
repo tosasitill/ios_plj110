@@ -119,6 +119,12 @@
   tele为ID→AF02=00→3ms，随后才init/校准/preview；原ID-only注册不触发此写。
   独立窄helper保存稳定原模式，实际native退休通过后、隔离/撤电前恢复；失败不重发、保留依赖。
   不写位置或PID/NVM，NO_FOCUS保持；不是完整马达init/归位或光学对焦验收。构建状态见NOTES。
+- 后续AK7316M/T normal lens生命周期已接入同一会话：主摄PID/84原点读取、
+  原g_last_pos511位置store与active；长焦两份初始缓存同511，init无位置store。
+  normal release按独立V4L2 control初值0，最后位置0→mode20（tele另等2800us），
+  再恢复sensor-open借用模式。逐事务保存issued/ACK；实际native退休回执允许
+  core仍保留stream历史时的关闭访问，不能提前清stream来通过。公开FOCUS/帧绑定、
+  AF/OIS与前/UW仍未完成；RAW继续NO_FOCUS。精确编译/镜像状态见NOTES。
 - 期望：`NATIVE CONFIG ... completed=1 errno=0`。
 - 长焦preview增益路径已静态补齐原`hhtele_set_gain`的30/36db OB选择：
   code `>3df8`选type1，否则type2，新epoch从type0开始，首次同值SET_GAIN也必须选择。

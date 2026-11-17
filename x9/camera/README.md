@@ -34,7 +34,21 @@ ACK及最终开关读数；没有假设校准 SRAM 可读，也不替代光学�
 发`02=00`并等待3ms。两者都在 init/校准/preview 前执行。只由独立 helper 访问这两个地址，
 原 sensor/EEPROM 地址范围不放宽。保存稳定原模式，激活与关闭恢复分别记录 issued/ACK/readback；
 关闭在原 native 退休检查通过后、reset/MM/rails 释放前恢复借用模式，失败保留依赖且不重发。
-此路径没有位置/PID存储命令，`NO_FOCUS`保持；前摄地址冲突和完整马达初始化/归位/FOCUS仍未闭合。
+sensor-open helper本身没有位置/PID存储命令；正常lens生命周期由下一段的独立journal负责。
+
+主摄/长焦的 AK7316M/T normal lens init/release 也接入同一mode2/mode3会话。
+沿用既有3.0V/3.1V VIN与DT地址；这两个节点没有可选`vcamaf_on/off`引脚组。
+正常5100us等待、首个mode读后3ms；主摄读`16` PID及`84`双字节原点，写原
+`g_last_pos=511`的`00,7f,c0`三字节位置命令，再发`02=00`。PID不同只记录，
+不触发另一路NVM更新；读/写错误保留原错与依赖，不猜中间位置。
+长焦原`g_origin_pos/g_last_pos`初值都511，正常init不发位置store，不把缓存当实测。
+V4L2 focus control初值0与init缓存独立保存；正常release按该control的100步长/1ms
+规则并无条件发最后0，再`02=20`，长焦另等2800us，实际mode双采样后才恢复
+sensor-open借用原模式并撤依赖。位置ACK不是物理到位或光学对焦证明。
+`session.stream`在core中保留至power(false)完成，因此关闭helper逐事务检查实际
+native退休回执，不要求提前清掉这份历史。journal随原exported epoch归档；
+部分命令失败不重发。公开FOCUS、帧绑定与AF/OIS仍未接通，RAW继续`NO_FOCUS`。
+前摄地址冲突和超广角VCM也仍未闭合。
 
 媒体时间按 ISP8s 正常 CAMSV SOF→controller runtime info→job timestamp→buffer done
 链路取同请求 SOF；bridge 的 metadata、PixelBufferHandler 参数和各输出单调门统一使用

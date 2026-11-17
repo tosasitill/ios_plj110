@@ -26,6 +26,7 @@ struct cam_native_epoch_receipt {
     __typeof__(cam_sv_gate) gate;
     __typeof__(cam_sensor_live) sensor;
     __typeof__(cam_sensor_open) sensor_open;
+    __typeof__(cam_vcm) vcm;
     __typeof__(cam_sensor_cal) calibration;
     struct cam_native_ae_state ae;
     bool ae_captured;
@@ -60,6 +61,7 @@ static int cam_native_epoch_recycled_check_locked(uint64_t epoch,struct x9_camer
 }
 static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu *m)
 {
+    uint8_t vcm_mode=0;
     int e=0;
     if(!m || m!=cam_smmu_namespace || m->magic!=CAM_SMMU_MAGIC || !m->native ||
        !m->exported || !m->native_restored || !m->native_retire_attempted ||
@@ -87,6 +89,9 @@ static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu 
        !cam_sensor_open.restored ||
        (cam_sensor_open_slave(cam_sensor_open.sensor) &&
         (!cam_sensor_open.complete || !cam_sensor_open.acked)))return ESTALE;
+    if(cam_vcm_closed_mode(epoch,&vcm_mode) ||
+       (cam_sensor_open_slave(cam_sensor_open.sensor) &&
+        (!cam_vcm.attempted || !cam_vcm.complete)))return ESTALE;
     if(!x9_camera_sensor_valid(cam_sensor_cal.sensor) || cam_sensor_cal.epoch!=epoch ||
        cam_sensor_cal.sensor!=cam_sv.status.sensor || cam_sensor_cal.error ||
        (cam_cal_profiles[cam_sensor_cal.sensor-1].header &&
@@ -137,7 +142,8 @@ static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu 
         h->epoch=epoch;h->smmu=m;h->source=cam_source;h->stream_close=cam_stream_close;
         h->dma_stop=cam_dma_stop;h->sv=cam_sv;h->sv_reset=cam_sv_reset;h->gate=cam_sv_gate;
         h->sv_qos=cam_sv_qos;h->sv_shutdown=cam_sv_shutdown;
-        h->sensor=cam_sensor_live;h->sensor_open=cam_sensor_open;h->calibration=cam_sensor_cal;
+        h->sensor=cam_sensor_live;h->sensor_open=cam_sensor_open;h->vcm=cam_vcm;
+        h->calibration=cam_sensor_cal;
         if(cam_native_ae.epoch==epoch){h->ae=cam_native_ae;h->ae_captured=true;}
         h->rx=cam_rx_live;h->mm_live=cam_mm_live;h->mm=cam_mm;
         h->smi=cam_smi;h->a0=cam_smi_a0;h->shared=cam_smi_shared;

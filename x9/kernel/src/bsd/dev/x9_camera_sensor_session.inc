@@ -114,6 +114,7 @@ static int cam_sensor_ap_write_word(void *context,uint16_t reg,uint16_t v)
     return e;
 }
 #include "x9_camera_sensor_open.inc"
+#include "x9_camera_vcm.inc"
 #include "x9_camera_sensor_calibration.inc"
 static int cam_sensor_session_match(uint64_t epoch)
 {
@@ -151,6 +152,9 @@ static int cam_sensor_session_open_locked(uint32_t which,uint64_t *epoch,
     bzero(&cam_sensor_open,sizeof(cam_sensor_open));
     cam_sensor_open.epoch=cam_sensor_live.epoch;
     cam_sensor_open.sensor=which;cam_sensor_open.slave=cam_sensor_open_slave(which);
+    bzero(&cam_vcm,sizeof(cam_vcm));
+    cam_vcm.epoch=cam_sensor_live.epoch;cam_vcm.sensor=which;
+    cam_vcm.slave=cam_sensor_open_slave(which);
     r->flags=X9_CAM_PROBE_ATTEMPTED;r->stage=X9_CAM_STAGE_PREFLIGHT;
     cam_sensor_live.probe=*r;
     e=cam_sensor_cold_open(which,r);
@@ -201,6 +205,7 @@ static int cam_sensor_session_configure_locked(uint64_t epoch,struct x9_camera_c
     if(!e && cam_cal_profiles[which-1].header)io.calibrate=cam_cal_apply;
     if(!e)e=cam_sensor_configure(&io,which,r);
     if(!e)e=cam_cal_mode_check(which,r);
+    if(!e)e=cam_vcm_prepare(which,r);
     if(!e)e=cam_sensor_ap_guard(&ap); /* supplies still match after final readback */
     if(e){cam_sensor_session_fault(e);r->flags|=X9_CAM_CFG_LATCHED;}
     else cam_sensor_live.phase=CAM_SENSOR_CONFIGURED;
@@ -218,10 +223,11 @@ static int cam_sensor_session_close_locked(uint64_t epoch,struct x9_camera_probe
     /* An independent sensor caller cannot remove supplies below a capture
      * attempt. Core stop must clear capture only after actual HW drain. */
     if(session.capture)return EBUSY;
-    /* Same powered AP bus and rails are still held. Restore only our VCM
-     * mode, before marking the sensor closing and before reset/MM teardown.
-     * A failed activation/restore retains its journal and dependencies. */
-    off=cam_sensor_open_restore(epoch);
+    /* Normal lens release first, then restore the borrowed sensor-open
+     * VCM mode, before close marking/reset/MM/supplier teardown. Both need
+     * this still-powered AP bus and the independent capture retirement. */
+    off=cam_vcm_close(epoch);
+    if(!off)off=cam_sensor_open_restore(epoch);
     cam_sensor_live.close_attempted=true;
     cam_sensor_live.phase=CAM_SENSOR_CLOSING;
     /* Do not lower MM clocks while a powered sensor can emit packets, and

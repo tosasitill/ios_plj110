@@ -11,6 +11,7 @@ static struct {
     bool close_attempted,restore_issued,restore_acked,restored;
     int error,restore_error;
 } cam_sensor_open;
+static int cam_vcm_closed_mode(uint64_t,uint8_t *);
 
 static uint8_t cam_sensor_open_slave(uint32_t sensor_id)
 {
@@ -21,15 +22,23 @@ static int cam_sensor_open_guard(uint64_t deadline)
 {
     struct cam_sensor_ap ap={&cam_journal.sensor,
         cam_sensor_slave(cam_sensor_open.sensor)};
+    int e;
     if(!cam_sensor_open.epoch || cam_sensor_open.epoch!=cam_sensor_live.epoch ||
        cam_sensor_open.sensor!=cam_sensor_live.probe.sensor ||
        !cam_sensor_open.slave ||
        cam_sensor_open.slave!=cam_sensor_open_slave(cam_sensor_open.sensor) ||
        (cam_sensor_live.phase!=CAM_SENSOR_CONFIGURING &&
         !cam_sensor_open.close_attempted) ||
-       cam_sensor_live.close_attempted || session.capture || session.stream ||
+       cam_sensor_live.close_attempted || session.capture ||
+       (session.stream && !cam_sensor_open.close_attempted) ||
        !cam_journal.afvdd.taken)return ESTALE;
     if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+    /* Core retains stream=true until power(false) completes. It records an
+     * attempted stream, not current source activity. Close access instead
+     * needs the independent source/DMA/IRQ/translation retirement receipt. */
+    e=cam_sensor_open.close_attempted?
+        cam_native_sensor_retirement_guard_locked(cam_sensor_open.epoch):0;
+    if(e)return e;
     /* Use the original sensor proxy for the full rails/pins/clock/receiver
      * dependency guard. Only this helper supplies the separate VCM address. */
     return cam_sensor_ap_guard(&ap);
@@ -155,6 +164,7 @@ static int cam_sensor_open_prepare(uint32_t which,struct x9_camera_config *r)
 static int cam_sensor_open_restore(uint64_t epoch)
 {
     uint64_t span,deadline;
+    uint8_t close_mode=0;
     int e;
     if(cam_sensor_open.epoch!=epoch)return ESTALE;
     if(!cam_sensor_open.issued) {
@@ -170,11 +180,12 @@ static int cam_sensor_open_restore(uint64_t epoch)
         e=cam_sensor_open.error?cam_sensor_open.error:ESTALE;
     else {
         nanoseconds_to_absolutetime(1000000000ull,&span);deadline=mach_absolute_time()+span;
-        e=cam_sensor_open_observe(deadline,0);
-        if(!e && cam_sensor_open.prior) {
+        e=cam_vcm_closed_mode(epoch,&close_mode);
+        if(!e)e=cam_sensor_open_observe(deadline,close_mode);
+        if(!e && cam_sensor_open.prior!=close_mode) {
             e=cam_sensor_open_mode(deadline,(uint8_t)cam_sensor_open.prior,true);
             /* Preserve the tele driver's >2.71ms sleep entry bound, using
-             * the same3ms wait as sensor open. No position is changed. */
+             * the same3ms wait as sensor open. VCM release is separate. */
             if(!e)delay(3000);
             if(!e)e=cam_sensor_open_observe(deadline,(uint8_t)cam_sensor_open.prior);
         }

@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机主链继续：AK7316M/T normal lens生命周期与实际停流后的模式恢复（编译里程碑）
+
+- **起点/范围**：上一goal turn属progress（SOF PTS代码、r38整包和push）。本轮单代理继续既有相机工作树/`feat/camera-integration`，`c8283cf5` tracked clean；最新实机仍`~/350.txt`，r28b–r38没有新MM/RAW/预览运行证据。未改主checkout/共享输入，未操作设备、ADB、boot或分区；未运行测试脚本/套件。
+- **确定关闭缺陷**：`sweet_x9_camera.c::stop():193..207`在实际source-off/capture-off成功后只清`session.capture`，必须等`hw.power(false)`成功才清`session.stream`；它是attempt历史，不能当当前物理stream状态。r37的`cam_sensor_open_guard`却在这个power(false)内部无条件拒绝`session.stream`，即使完整DMA/translation退休也必返ESTALE。现仅close_attempted分支允许历史stream，且每次AP事务仍重新检查`cam_native_sensor_retirement_guard_locked(epoch)`及真实rails/pins/clock/receiver；原capture=true仍拒绝。未提前清历史或把布尔作为退休证明，不能据此声称r37在设备上已复现该失败。
+- **Android可达依据**：`.local/references/oppo-modules-dt-mt6993/vendor/oplus/kernel/camera/lens/vcm/v4l2/ak7316{m,t}_24085/*.c`的normal`open→power_on→init`与`close→power_off→release`，不是另一路`set_setting`/NVM或注释DAC mode。main`:93..100/157..201/229..275`在VIN后5100us等待，首mode样本后3ms，读PID16（期望20，仅提示不同）、read_word84→swab16>>6原点、原g_last_pos511位置store，再02=00；tele`:98..117/176..211/239..282`的两份初始cache同511，goto diff0直接return，无position store。main`:433..441`与tele`:435..443`的V4L2 focus control默认0，**不是g_last_pos511**。release main`:123..154`/tele`:120..153`按focus->val每100步/1ms回0，仍无条件最后写0，再02=20；tele额外2800us。live DT i2c4/0c、i2c7/2d的VIN与当前3.0/3.1V rails相符，没有可选vcamaf pinctrl属性。Linux`drivers/i2c/i2c-core-smbus.c:378..385`确认WORD_DATA低byte先传，故source`swab16(val<<6)`线上为`00,(val<<6)>>8,(val<<6)&ff`，511为`00,7f,c0`。
+- **实现/边界**：新增`x9_camera_vcm.inc`，mode2/mode3实际sensor配置末尾执行正常lens init，ID-only注册不动。独立1s初始化/关闭预算，窄地址/寄存器范围，全部issued在可能START前记账，ACK在后置guard/预算检查前留证；模式实际双采样，位置仅标记ACK，不猜可读DAC或机械到位。main真实PID/原点与tele缓存分别留read标志，不以PID不匹配自动写AE/03/NVM。AP读/写出错保留首错，不使用source的猜位置fallback/重发来掩盖不确定状态。没有放宽generic sensor/EEPROM writer。
+- **关闭/归档**：原native实际退休通过、capture=false之后，先normal lens release/02=20（tele2800us），再sensor-open恢复借用原模式：原20只观察，原00/40唯一写回并等3ms。只有独立完整VCM close journal允许sensor-open把20当本次已知合法中间态，未知/partial不得覆盖或卸依赖。V4L2 control0与ACKed init DAC511分开保存，保持source无FOCUS命令时的release行为。journal随原exported epoch归档，成功recycle另检查完整init/位置ACK/mode/close，8个pin上限不变。append-only CFG_VCM，config720B/RAW120B/ioctl ABI不变；公开FOCUS与RAW仍NO_FOCUS，完整帧绑定/AF/OIS、front09/0c冲突、UW及光学校准继续未闭。
+- **编译里程碑**：正常Builder`compile_one(sweet_x9_camera.o)` **actual exit0/True，183 warnings**（session17490终态），原日志`x9/out/camera-vcm-lifecycle-compile-r1-20261117-console.log`，输出`x9/out/x9-camera-vcm-lifecycle-compile-r1-20261117/compile.exit=0`。随后移两处声明、补phase guard和PID/原点read来源字段，由固定clean源码最终整包覆盖。下一正常layout检查、源码commit、唯一r39整包并push；本机无CI run ID。整体目标继续active，本轮尚无运行/对焦效果证明。
+
 #### 2026-11-17 相机主链继续：媒体 PTS 沿用同请求 SOF（r38整包成功，未上机）
 
 - **起点/范围**：单代理在既有相机工作树/`feat/camera-integration`，`588e6871` clean。最新实机仍`~/350.txt`；r28b–r37无新MM/RAW/预览运行证据。未触主checkout或共享`.local`输入，未运行测试脚本/套件或操作设备。

@@ -290,7 +290,7 @@ enum x9_camera_config_stage { X9_CAM_CFG_NONE, X9_CAM_CFG_TABLE_CHECK,
     X9_CAM_CFG_MIRROR, X9_CAM_CFG_READBACK, X9_CAM_CFG_RESTORE, X9_CAM_CFG_DONE,
     X9_CAM_CFG_FAB, X9_CAM_CFG_FAB_EXIT, X9_CAM_CFG_FAB_PATCH,
     X9_CAM_CFG_EEPROM, X9_CAM_CFG_CALIBRATION, X9_CAM_CFG_CAL_MODE,
-    X9_CAM_CFG_OPEN }; /* Append only. */
+    X9_CAM_CFG_OPEN, X9_CAM_CFG_VCM }; /* Append only. */
 #define X9_CAM_CFG_SAMPLES 48u
 struct x9_camera_config_sample { uint32_t reg, expected, observed; };
 struct x9_camera_config {
