@@ -37,16 +37,17 @@ static int cam_bus_terminal_check(struct cam_probe_bus *b,uint32_t status)
     if(cam_rr(b->base,CAM_I2C_STAT)!=status)return ESTALE;
     return 0;
 }
-/* WRRD: up to four TX bytes followed by up to16 FIFO data bytes.
- * FIFO_DATA is byte-accessed upstream even with 32-bit CSR. The EEPROM
- * reader uses sequential reads; calibration sensor writes use the same
- * sequential-write shape as Android's adaptor_i2c_wr_seq_p8, bounded to
- * the mt6991 AP FIFO. Sensor/VCM callers retain their own narrow
- * register/length checks. No DMA, extra write leg or automatic retry. */
+/* AP FIFO transfers. FIFO_DATA is byte-accessed upstream even with a
+ * 32-bit CSR. WRRD keeps its four-byte TX prefix and up to16 RX bytes.
+ * Write-only transfers may use the whole 16-byte mt6991 FIFO: Android's
+ * adaptor_i2c_wr_seq_p8 puts the 16-bit register and consecutive payload
+ * bytes in one i2c_msg, and i2c-mt65xx.c:1967 selects FIFO whenever
+ * msg.len <= fifo_size. No DMA, extra write leg or automatic retry. */
 static int cam_bus_transfer_n(struct cam_probe_bus *b,uint8_t slave,
                             const uint8_t *tx,unsigned count,uint8_t *rx,unsigned rx_count)
 {
-    if(!tx || !count || count>4 || rx_count>CAM_I2C_FIFO_BYTES ||
+    if(!tx || !count || (rx?count>4:count>CAM_I2C_FIFO_BYTES) ||
+       rx_count>CAM_I2C_FIFO_BYTES ||
        (!!rx != !!rx_count))return EINVAL;
     if(!b->owned || cam_bus_unretired(b))return EBUSY;
     int e=cam_bus_clock(b);if(!e)e=cam_bus_idle(b);

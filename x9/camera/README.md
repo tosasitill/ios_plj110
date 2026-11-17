@@ -2,7 +2,7 @@
 
 ## 当前状态（2026-11-17）
 
-**最新日志 `~/353.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615`、完成 native 注册、主摄 sensor-open 与 EEPROM 校准 preload（3456/3456 B）；尚无真实预览、拍照、录像或切镜验收。** r41给calibration apply独立15s预算后，353仍在`writes/acked=2004/2004`时`errno=60`、`applied=0`：每笔I2C只写一个寄存器字节，完成观察与守卫开销使15s内无法写完3456B；全部ACK表明不是新的WL/I2C硬件失败。Android `set_sensor_cali`实际用`subdrv_i2c_wr_seq_p8`发送起始寄存器加连续payload。r42仅在已有sensor AP I2C与16B FIFO内改成顺序burst，不启用DMA/APDMA/SCP、不跨校准block、不写EEPROM、不扩大寄存器范围；日志的`writes/acked`改计FIFO事务数（预期约217），ACK仍不是光学校准证明。r42整包成功、未上机，详见`NOTES.md` §5；日志本身没有唯一构建SHA。
+**最新日志 `~/354.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615`、完成 native 注册、主摄 sensor-open 与 EEPROM 校准 preload（3456/3456 B）；尚无真实预览、拍照、录像或切镜验收。** r42的burst在`reg=c000`第一笔返回`errno=22`、`writes/acked=2/1`：这是本地传输层把写方向限制为4B、传入18B消息导致START前的EINVAL，不是传感器NACK。严格按Android：`adaptor_i2c_wr_seq_p8()`每次只发一条`2B寄存器+连续payload`消息、`reg += payload`，MTK `i2c-mt65xx.c:1967`在`msg.len<=fifo_size(16)`时走FIFO。r43改为每笔2B寄存器+14B payload、总长16B，仍在已拥有AP FIFO内，不启用DMA/APDMA/SCP、不跨block、不写EEPROM；日志`writes/acked`计事务数（预期约249），ACK不是光学校准证明。r43整包成功、未上机，详见`NOTES.md` §5；日志本身没有唯一构建SHA。
 
 后续源码核查又修正了 SMMU 的 CMDQ 使能顺序（8→12→13）、接入 DT 对应的普通
 wrapper 和34个 CAMSV DMA/CQI FIFO 默认配置，修复退休快照未初始化 padding，以及四摄使用

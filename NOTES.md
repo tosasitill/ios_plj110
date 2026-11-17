@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-17 相机主链继续：日志354，回到Android FIFO消息形状（r43整包成功，未上机）
+
+- **起点/范围**：用户指定「354」并明确要求完全按Android流程、不猜测。工作树从`4d2f6757` tracked clean起步；`~/354.txt`已只读保存到私有`.local/x9/logs/354.txt`（不入git）。只读核查日志、源码与Android参考；未触主checkout、设备、ADB、分区或共享`.local`输入；未运行测试脚本/套件，构建成功后没有解包/hash/反汇编等二次检查。
+- **354运行证据**：`:974` `NATIVE REGISTER errno=0 IDs=9186/0615`；`:4877`主摄sensor-open完成；`:5325` `SENSOR CAL phase=preload ... read=3456/3456 ... preloaded=1 ... errno=0`。`:5829`（21.241s）`SENSOR CAL phase=apply ... block=0 offset=0 reg=c000 writes=2 acked=1 ... applied=0 errno=22`，随后OPEN RESTORE errno=0、DRAIN与`start sensor=1 errno=22`。没有本次MM/SMMU/RAW/SOF/DONE/handler或真实预览证据；日志无唯一构建标识，不能独立核定源码SHA。
+- **确定源码错误（不是硬件猜测）**：r42的`cam_cal_write_seq()`按Android的`msg.len=2+payload`想一次写满16B payload，但native `cam_bus_transfer_n()`入口仍保留写方向`count<=4`限制，于是18B消息在START之前直接返回`EINVAL`。这解释了`writes=2/acked=1`且没有对应AP WAIT/REQUEST；不是传感器NACK或总线失败。`adaptor-i2c.c:358..413`的`adaptor_i2c_wr_seq_p8()`每次是单个写消息，`msg.len=2+cnt`、`reg += cnt`；`i2c-mt65xx.c:1967`规定`msgs->len<=fifo_size(16)`走FIFO，超过才DMA。之前把payload上限设成16使`msg.len=18`，偏离了本机FIFO路径。
+- **实现/边界**：写方向传输允许完整16B `msg.len`（WRRD仍保留4B TX前缀与16B RX限制）；校准顺序写定义`CAM_CAL_WR_PAYLOAD=CAM_I2C_FIFO_BYTES-2=14`，每笔正好是`2B寄存器+14B payload`、最大16B，末块按剩余长度，寄存器按payload字节数前进，不跨block。严格保持已拥有AP总线、控制/FIFO/terminal/W1C守卫，不启用DMA/APDMA/SCP，不重试、不写EEPROM、不扩大寄存器范围；`writes/acked`仍计事务数，ACK不是光学校准证明。
+- **编译/构建实绩**：正常Builder `compile_one(sweet_x9_camera.o)` **actual exit0/True，182 warnings**，脚本`x9/out/camera-cal-burst-fifo-compile-r1-20261117/kernel-unit.py`、日志`x9/out/camera-cal-burst-fifo-compile-r1-20261117-console.log`、exit文件`compile.exit=0`。固定工作树修改后正常`build.py all --boot-config x9/build/boot-device.json --boot-arg x9_motion=3 --name x9-camera-cal-burst-fifo-r43-20261117` **actual exit0**，104/104 overlay +3 prebuilt，Image32247808 B / boot15110144 B。唯一候选 **`/Users/tosasitill/ios_plj110/.worktrees/camera-integration/x9/out/x9-camera-cal-burst-fifo-r43-20261117/boot.img`**，原控制台`x9/out/camera-cal-burst-fifo-r43-20261117-console.log`。GPU280无需mailbox；默认后/前双摄，未加`x9_camera_lenses=1`。本机无CI run ID；仍未上机，目标保持未完成。
+- **下一上机判定**：用户从主checkout手动fastboot boot r43并打开Camera.app。新日志先看`SENSOR CAL phase=apply ... writes≈249 acked≈249 applied=1 errno=0`（mirror+QSC+payload+SPC/LRC+enable事务数）与`phase=mode ... errno=0`，再看`VCM INIT`/`NATIVE CONFIG ... completed=1 errno=0`，随后才按MM/SMMU/RAW/SOF/DONE/handler推进。若仍失败，只按真实日志中首个errno/AP状态定位，不继续改软件预算或启用DMA。
+
 #### 2026-11-17 相机主链继续：日志353，校准sensor写入改顺序burst（r42整包成功，未上机）
 
 - **起点/范围**：用户指定「353」继续主线。工作树从`4f0413ee` tracked clean起步；`~/353.txt`已只读复制到私有`.local/x9/logs/353.txt`（不入git）。只读核查日志、源码与Android参考；未触主checkout、设备、ADB、分区或共享`.local`输入；未运行测试脚本/套件，构建成功后没有解包/hash/反汇编等二次检查。

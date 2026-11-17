@@ -152,17 +152,21 @@ static int cam_cal_write(struct cam_sensor_io *io,uint16_t reg,uint8_t value,
 }
 /* Android's set_sensor_cali calls subdrv_i2c_wr_seq_p8, which sends the
  * 16-bit start register followed by consecutive payload bytes in one I2C
- * message. Adapt the same layout to the already-owned AP FIFO: start
- * register + at most CAM_I2C_FIFO_BYTES payload bytes, no DMA, no SCP,
- * no extra bus ownership, no crossing into another calibration block. */
+ * message (adaptor-i2c.c:358..413). Its Linux msg.len is 2+payload and
+ * i2c-mt65xx.c:1967 uses DMA only when that length exceeds fifo_size=16.
+ * Native deliberately stays on the owned AP FIFO, so each message is the
+ * exact same shape with msg.len=16 maximum: 2-byte register + 14 payload
+ * bytes. reg advances by the payload count; no DMA/SCP, no extra bus
+ * ownership, no crossing into another calibration block. */
+#define CAM_CAL_WR_PAYLOAD (CAM_I2C_FIFO_BYTES-2u)
 static int cam_cal_write_seq(struct cam_sensor_io *io,uint16_t reg,
     const uint8_t *values,unsigned count,struct x9_camera_config *r)
 {
     struct cam_sensor_ap *ap=io->context;
-    uint8_t tx[2+CAM_I2C_FIFO_BYTES];
+    uint8_t tx[CAM_I2C_FIFO_BYTES];
     uint32_t acked=r->written;
     int e;
-    if(!count || count>CAM_I2C_FIFO_BYTES || !values)return EINVAL;
+    if(!count || count>CAM_CAL_WR_PAYLOAD || !values)return EINVAL;
     if(cam_sensor_forbidden(reg))return EPERM;
     e=cam_cal_guard(io->deadline);if(e)return e;
     tx[0]=(uint8_t)(reg>>8);tx[1]=(uint8_t)reg;
@@ -207,9 +211,9 @@ static int cam_cal_apply(struct cam_sensor_io *io,uint32_t which,struct x9_camer
     for(unsigned b=0;b<3 && !e;b++) {
         const struct cam_cal_block *d=&p->block[b];
         cam_sensor_cal.block=b;
-        for(unsigned n=0;n<d->bytes && !e;n+=CAM_I2C_FIFO_BYTES) {
+        for(unsigned n=0;n<d->bytes && !e;n+=CAM_CAL_WR_PAYLOAD) {
             unsigned count=d->bytes-n;
-            if(count>CAM_I2C_FIFO_BYTES)count=CAM_I2C_FIFO_BYTES;
+            if(count>CAM_CAL_WR_PAYLOAD)count=CAM_CAL_WR_PAYLOAD;
             cam_sensor_cal.offset=n;r->table_index=index+n;
             e=cam_cal_write_seq(io,(uint16_t)(d->sensor+n),
                 cam_sensor_cal.payload+index+n,count,r);
