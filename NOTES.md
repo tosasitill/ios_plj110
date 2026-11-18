@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-18 相机静态复查 · 首帧失败定位
+
+- ISP8s `mtk_cam-job.c:1456/1477` 先调用 `mtk_cam_sv_dev_stream_on()`，再调用 `ctx_stream_on_seninf_sensor()`。`mtk_cam-sv.c:2278` 对启用的 tag 逐一开流。native 入口 `start()` 先完成 `hw.capture(on)`，再写 sensor `0x0100=1`。`cam_irq_begin_locked()` 在现有路径上依次布置 DMA 和 CAMSV 请求，发布 IRQ，提交 FBC credit，再执行接收与源切换。
+- `X9 CAMERA NATIVE PREPARE` 新增 `step=`，可区分 standby、RAW layout、source/rate guard、控制线程、SMMU 初始化或重开、映射导出。`NATIVE FIRST ARM` 和 `IRQ ARM` 报告初始控制、DMA 检查、CAMSV 请求、GIC 路由与解屏蔽、FBC credit、接收与 source transition 的首错。`X9 CAMERA: start` 附带失败回调的名称。硬件操作和失败保留路径按原顺序执行。
+- cdev `cam_read()` 在已有读期限到达时记录 `RAW WAIT`，限同一代第一次仍无 RAW 的超时。iOS worker 对同一物理会话的每个输出和实际错误各记一次，覆盖 PTS metadata、pixel buffer lock/unlock、RAW 渲染和 metadata 复制及挂载。原有 buffer pool 与 layout 报告继续覆盖各自失败。`first picture given` 对应真实 handler 调用。
+- `NATIVE CONFIG` 的 `completed` 是 `%x` 位图。`x9_camera_native_source.h:6` 定义阶段 1–8，因此完整配置行应为 `stage=9 completed=1fe errno=0`，更正旧条目的 `completed=1`。356 在 `stage=1 completed=0 errno=60`，未进入本轮补齐诊断的首帧阶段。
+- 起点 `7b61e448`。只交叉编译 `sweet_x9_camera.o` 和 iOS `camera_device.o`，两者 exit 0。前者 `compile_one=True`、182 条既有 warning，后者无诊断。首次 kernel 单对象编译记录保存在 `compile-initial.log`。最终日志、复现脚本和对象位于 `x9/out/camera-first-frame-stages-20261118/`，无 CI run。本阶段仍为静态复查，最新实机日志仍是 356。MM_2 最终 STA 的失败原因仍缺运行证据。
+
 #### 2026-11-18 相机静态复查 · GLB_EN 采样顺序与 Android MM_2 运行记录
 
 - `hwccf_api.c:1007` 的 `wait_done()` 每次先读 `GLB_EN`，再 `udelay(1)`，然后判断该次读值。`x9_mm_power.c` 的 GET stage 3 已按该顺序执行，最多仍为 10001 次采样。stage 4 继续要求 fresh `STA bit3=0`，单调期限为 10000 µs。356 已通过 stage 3，现有日志无法验证这项时序修正是否影响 stage 4。

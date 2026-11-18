@@ -2,6 +2,8 @@
 
 ## 当前状态（2026-11-18）
 
+首帧错误按驱动实际执行顺序定位。`NATIVE CONFIG stage=9 completed=1fe errno=0` 表示 receiver 到 OUTMUX 全部通过。接下来 `NATIVE PREPARE step=` 覆盖 RAW 规划、控制线程和 SMMU 导出，`NATIVE FIRST ARM` / `IRQ ARM` 覆盖 DMA、CAMSV 请求、GIC、FBC 和接收源切换，随后才执行 `SENSOR STREAM`。cdev 在首个 RAW 尚未发布时按代记录一次 `RAW WAIT`。已取得 RAW 的 iOS worker 会分输出记录首次 PTS metadata、像素锁、渲染及 metadata 挂载错误。`first picture given` 表示相应输出已实际调用 handler。
+
 `x9_mm_power.c` 的 IRQ voter 轮询已按 OPPO `regmap_read_poll_timeout_atomic()` 对齐。EN 以 2 µs 为采样间隔、1250 µs 为总预算。pre-STA/final STA 使用 1 µs 间隔及 10000 µs 总预算。GET 在 pre-STA 前识别已有的 AP EN，借用票仍需通过 global EN 和 final STA。`x9_mm_power.o` 单对象编译 exit 0。最近一次实机日志仍是 356。
 
 `GLB_EN` 按 Android v1 `wait_done()` 每次读值后延迟 1 µs，再判断该次读值。采样上限为 10001 次，通过后进入 final STA。Android `mtk_mminfra_is_on()` 在 HWCCF 完成后单次检查 MM_2 ACK。native 在同一位置另以 MM_2 和 infra0/AO ACK 作为 token 发放条件。现有 Android MMINFRA 运行记录证实 CG_LINK、CMDQ、SMI 均使用过 MM_2，启动首笔请求的调用者尚未确认。出处见 `NOTES.md` §5。

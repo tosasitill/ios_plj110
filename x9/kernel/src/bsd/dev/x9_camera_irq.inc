@@ -577,7 +577,8 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
     struct x9_camera_camsv_request r;
     struct x9_camera_camsv_dma dma;
     const unsigned order[]={X9_CAM_IRQ_SOF,X9_CAM_IRQ_HYBRID,X9_CAM_IRQ_DEBUG};
-    int e;
+    const char *step="admission";
+    int e,cause;
     boolean_t old;
     bool owns,arm_attempted=false;
     if(!request||!d)return EINVAL;
@@ -600,6 +601,7 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
     if(!e&&cam_irq.slot->state!=X9_CAMSV_EMPTY&&cam_irq.slot->state!=X9_CAMSV_RETIRED)e=EBUSY;
     if(!e)e=cam_source_admission_locked(epoch);
     if(!e) {
+        step="dma-arm";
         arm_attempted=true;
         e=x9_camera_camsv_arm(cam_irq.slot,&r,&dma); /* real lease + per-page CIVAC */
     }
@@ -608,8 +610,12 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
      * and FH_SPARE, then no-credit FBC_EN. No enable is written by this helper.
      * The ONE credit command and inactive receive arm follow actual GIC publication;
      * unexpected counter changes are retained, never re-credited. */
-    if(!e)e=cam_sv_request_prepare_locked(epoch,cam_irq.slot);
+    if(!e) {
+        step="camsv-request";
+        e=cam_sv_request_prepare_locked(epoch,cam_irq.slot);
+    }
     if(!e&&!owns) {
+        step="irq-route";
         /* Capture all priors before any route/priority write. Never change
          * Group/ICFGR/CTLR, and no distributor-global initialization. */
         for(unsigned i=0;i<3;i++) {
@@ -634,10 +640,15 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
             cam_irq.uncertain_priority&=~(1u<<i);
         }
     }
-    if(!e)e=dma.check(dma.context,dma.lease,&cam_irq.slot->request);
-    if(!e)e=cam_sv_request_guard_locked(epoch,cam_irq.slot);
-    if(!e)e=cam_irq_config(false);if(!e)e=cam_irq_power();
     if(!e) {
+        step="pre-unmask-guard";
+        e=dma.check(dma.context,dma.lease,&cam_irq.slot->request);
+        if(!e)e=cam_sv_request_guard_locked(epoch,cam_irq.slot);
+        if(!e)e=cam_irq_config(false);
+        if(!e)e=cam_irq_power();
+    }
+    if(!e) {
+        step="irq-unmask";
         old=cam_irq_spin_take();cam_irq.request=cam_irq.slot->request;cam_irq.sof_seen=false;
         memset(&cam_irq.sof_frame,0,sizeof(cam_irq.sof_frame));cam_irq.accepting=true;
         cam_irq_spin_drop(old);
@@ -651,16 +662,37 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
             if(!e)e=cam_irq_unmask(order[n]);
         }
     }
-    if(!e)e=cam_sv_credit_issue_locked(epoch,cam_irq.slot);
-    if(!e)e=cam_sv_receive_transition_locked(epoch,false);
-    if(!e)e=cam_sv_gate_transition_locked(epoch,false);
-    if(!e)e=cam_irq_fbc_bind_locked(epoch);
-    if(!e)e=cam_source_transition_locked(epoch,false);
+    if(!e) {
+        step="fbc-credit";
+        e=cam_sv_credit_issue_locked(epoch,cam_irq.slot);
+    }
+    if(!e) {
+        step="camsv-receive";
+        e=cam_sv_receive_transition_locked(epoch,false);
+    }
+    if(!e) {
+        step="camsv-gate";
+        e=cam_sv_gate_transition_locked(epoch,false);
+    }
+    if(!e) {
+        step="fbc-bind";
+        e=cam_irq_fbc_bind_locked(epoch);
+    }
+    if(!e) {
+        step="source-transition";
+        e=cam_source_transition_locked(epoch,false);
+    }
+    cause=e;
     if(e&&arm_attempted&&cam_irq.slot->state!=X9_CAMSV_EMPTY&&cam_irq.slot->state!=X9_CAMSV_RETIRED) {
         e=cam_irq_fault(e);lck_mtx_lock(&camera_camsv_lock);
         cam_camsv_retain(cam_irq.slot,e);lck_mtx_unlock(&camera_camsv_lock);
     }
-    lck_mtx_unlock(&camera_irq_lock);return e;
+    lck_mtx_unlock(&camera_irq_lock);
+    if(cause) {
+        printf("X9 CAMERA IRQ ARM: epoch=%llu generation=%llu capture_id=%llu "
+            "step=%s cause=%d errno=%d\n",epoch,r.frame.generation,r.frame.capture_id,step,cause,e);
+    }
+    return e;
 }
 int x9_camera_camsv_irq_begin(uint64_t epoch,const struct x9_camera_camsv_request *r,
     const struct x9_camera_camsv_dma *d)

@@ -383,23 +383,35 @@ static int cam_native_capture_prepare(void *context,uint64_t epoch,
     const struct x9_camera_sensor *s)
 {
     struct cam_native_capture_context *c=context;
-    struct x9_camera_pipeline plan;
+    struct x9_camera_pipeline plan={0};
     struct x9_camera_smmu *smmu=NULL;
     struct x9_camera_smmu *old_smmu;
     struct x9_camera_smmu_export view={0};
-    uint64_t token;
+    const char *step="sensor";
+    uint64_t token=0;
     int e;
-    if(c!=&cam_native_capture)return EINVAL;
-    e=cam_native_capture_sensor(epoch,s);if(e)return e;
-    if(session.capture || session.stream)return EBUSY;
-    e=cam_native_source_standby_locked(epoch);if(e)return e;
-    e=cam_pipeline_plan(s->sensor,&plan);if(e)return e;
+    if(c!=&cam_native_capture || !s)return EINVAL;
+    e=cam_native_capture_sensor(epoch,s);
+    if(e)goto out;
+    step="standby";
+    e=session.capture || session.stream?EBUSY:cam_native_source_standby_locked(epoch);
+    if(e)goto out;
+    step="raw-layout";
+    e=cam_pipeline_plan(s->sensor,&plan);
+    if(e)goto out;
     token=cam_mm.receive.power_token;
+    step="source-ready";
     if(!token || !cam_mm.active || !cam_irq.prepared || cam_irq.epoch!=epoch ||
        cam_irq.close_attempted || !cam_native_source.rate_valid ||
        cam_native_source.status.sensor_epoch!=epoch ||
-       cam_native_source.status.stage!=X9_CAM_NATIVE_SOURCE_CONFIGURED)return ENXIO;
-    e=cam_native_source_rate_guard_locked(epoch);if(e)return e;
+       cam_native_source.status.stage!=X9_CAM_NATIVE_SOURCE_CONFIGURED) {
+        e=ENXIO;
+        goto out;
+    }
+    step="rate-guard";
+    e=cam_native_source_rate_guard_locked(epoch);
+    if(e)goto out;
+    step="reserve";
     lck_mtx_lock(&camera_native_capture_lock);
     e=c->error?c->error:c->prepare_attempted?EALREADY:0;
     old_smmu=c->smmu; /* pinned retired namespace, never freed/reset as live */
@@ -411,9 +423,14 @@ static int cam_native_capture_prepare(void *context,uint64_t epoch,
         c->reserved=true; /* per-epoch private allocation; old namespace stays pinned */
     }
     lck_mtx_unlock(&camera_native_capture_lock);
-    if(e)return e;
+    if(e)goto out;
+    step="controller";
     e=cam_native_capture_thread_start_locked();
-    if(e)return cam_native_capture_fault(c,e);
+    if(e) {
+        e=cam_native_capture_fault(c,e);
+        goto out;
+    }
+    step=old_smmu?"smmu-reopen":"smmu-start";
     e=old_smmu?cam_native_reopen_locked(epoch,old_smmu,token,CAM_NATIVE_IOVA,
         plan.bytes,&smmu,&view):x9_camera_native_smmu_start(token,CAM_NATIVE_IOVA,
         plan.bytes,&smmu,&view);
@@ -423,13 +440,17 @@ static int cam_native_capture_prepare(void *context,uint64_t epoch,
     c->smmu=smmu;c->view=view;
     if(!e && (!smmu || !view.map.backing || !view.map.raw ||
        view.map.iova!=CAM_NATIVE_IOVA || view.map.bytes!=plan.bytes ||
-       view.map.mapped_bytes!=c->reservation_bytes || view.asid!=CAM_SMMU_ASID))e=EFAULT;
+       view.map.mapped_bytes!=c->reservation_bytes || view.asid!=CAM_SMMU_ASID)) {
+        step="smmu-export";
+        e=EFAULT;
+    }
     if(e && !c->error)c->error=e;
     if(!e){c->prepared=true;c->phase=CAM_CAPTURE_LIVE;}
     lck_mtx_unlock(&camera_native_capture_lock);
+out:
     printf("X9 CAMERA NATIVE PREPARE: sensor=%u epoch=%llu MM=%llu iova=%llx bytes=%u "
-        "exported=%u errno=%d (retain namespace; not READY)\n",s->sensor,epoch,token,
-        CAM_NATIVE_IOVA,plan.bytes,smmu!=NULL,e);
+        "exported=%u errno=%d step=%s\n",s->sensor,epoch,token,
+        CAM_NATIVE_IOVA,plan.bytes,smmu!=NULL,e,e?step:"prepared");
     return e;
 }
 
@@ -602,6 +623,7 @@ static int cam_native_capture_capture(void *context,uint64_t epoch,
     struct cam_native_capture_context *c=context;
     struct x9_camera_camsv_request r={0};
     struct x9_camera_camsv_dma dma={0};
+    const char *step="admission";
     int e;
     if(c!=&cam_native_capture || !s || s->sensor<X9_CAMERA_BACK ||
        s->sensor>X9_CAMERA_SENSOR_COUNT || s!=&sensors[s->sensor-1] ||
@@ -613,12 +635,16 @@ static int cam_native_capture_capture(void *context,uint64_t epoch,
         e=c->error?c->error:EBUSY;
     if(!e) {c->on_attempted=true;c->generation=generation;}
     lck_mtx_unlock(&camera_native_capture_lock);
-    if(e)return e;
+    if(e)goto report;
+    step="sensor-session";
     e=cam_native_capture_sensor(epoch,s);
     if(!e && (!session.capture || session.stream || session.generation!=generation))e=ESTALE;
-    if(!e)e=cam_native_ae_seed_locked(epoch,config);
+    if(e)goto fault;
+    step="initial-controls";
+    e=cam_native_ae_seed_locked(epoch,config);
     if(!e)e=cam_native_ae_snapshot_locked(epoch,&r.frame);
-    if(e)return cam_native_capture_fault(c,e);
+    if(e)goto fault;
+    step="raw-request";
     lck_mtx_lock(&camera_native_capture_lock);
     if(c->capture_serial==UINT64_MAX)e=EOVERFLOW;
     if(!e) {
@@ -638,10 +664,16 @@ static int cam_native_capture_capture(void *context,uint64_t epoch,
             .check=cam_native_capture_dma_check};
     }
     lck_mtx_unlock(&camera_native_capture_lock);
-    if(!e)e=cam_native_capture_dma_check(c,dma.lease,&r);
-    if(!e)e=cam_irq_begin_locked(epoch,&r,&dma);
-    if(!e)e=cam_repeat_enable_locked(epoch); /* actual first credit; sensor still OFF */
-    if(e)return cam_native_capture_fault(c,e);
+    if(e)goto fault;
+    step="dma-check";
+    e=cam_native_capture_dma_check(c,dma.lease,&r);
+    if(e)goto fault;
+    step="cam-irq-begin";
+    e=cam_irq_begin_locked(epoch,&r,&dma);
+    if(e)goto fault;
+    step="repeat-enable";
+    e=cam_repeat_enable_locked(epoch); /* actual first credit; sensor still OFF */
+    if(e)goto fault;
     lck_mtx_lock(&camera_native_capture_lock);
     c->repeat_admission=true;
     lck_mtx_unlock(&camera_native_capture_lock);
@@ -650,6 +682,12 @@ static int cam_native_capture_capture(void *context,uint64_t epoch,
         "capture_id=%llu inner=%x iova=%llx (physical RCNT; sensor stream follows)\n",
         s->sensor,epoch,generation,r.frame.capture_id,r.inner_sequence,r.iova);
     return 0;
+fault:
+    e=cam_native_capture_fault(c,e);
+report:
+    printf("X9 CAMERA NATIVE FIRST ARM: sensor=%u epoch=%llu generation=%llu "
+        "capture_id=%llu step=%s errno=%d\n",s->sensor,epoch,generation,r.frame.capture_id,step,e);
+    return e;
 }
 
 static int cam_native_capture_exposure(void *context,uint64_t epoch,

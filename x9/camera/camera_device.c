@@ -1472,9 +1472,33 @@ buffer_layout(CVPixelBufferRef pb, struct render_job *job)
 	return (uintptr_t)job->y + y_bytes <= (uintptr_t)job->uv || (uintptr_t)job->uv + uv_bytes <= (uintptr_t)job->y;
 }
 
+enum delivery_fault {
+	DELIVERY_METADATA_TIME, DELIVERY_PIXEL_LOCK, DELIVERY_RENDER,
+	DELIVERY_PIXEL_UNLOCK, DELIVERY_METADATA_COPY, DELIVERY_METADATA_ATTACH
+};
+
+static bool
+report_delivery_fault(unsigned *reported, const struct output_snapshot *snapshot,
+    const struct hakios_camera_frame *f, enum delivery_fault fault, const char *step, CVReturn cv)
+{
+	unsigned bit = 1u << fault;
+
+	if (!(*reported & bit)) {
+		*reported |= bit;
+		if (fault == DELIVERY_PIXEL_LOCK || fault == DELIVERY_PIXEL_UNLOCK) {
+			say("%s: frame %llu sensor=%u delivery failed step=%s cv=%d", snapshot->name,
+			    (unsigned long long)f->sequence, f->sensor, step, cv);
+		} else {
+			say("%s: frame %llu sensor=%u delivery failed step=%s", snapshot->name,
+			    (unsigned long long)f->sequence, f->sensor, step);
+		}
+	}
+	return false;
+}
+
 static bool
 deliver(struct stream *s, const struct output_snapshot *snapshot, const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw,
-    CFDictionaryRef metadata)
+    CFDictionaryRef metadata, unsigned *reported)
 {
 	CMTime pts;
 	uint64_t sof_time = hakios_camera_sof_time(f);
@@ -1483,14 +1507,16 @@ deliver(struct stream *s, const struct output_snapshot *snapshot, const struct i
 	    .still = snapshot->still };
 
 	if (!metadata_time(metadata, s->port, &pts) ||
-	    CMTimeCompare(pts, CMClockMakeHostTimeFromSystemUnits(sof_time)) != 0) return false;
+	    CMTimeCompare(pts, CMClockMakeHostTimeFromSystemUnits(sof_time)) != 0)
+		return report_delivery_fault(reported, snapshot, f, DELIVERY_METADATA_TIME, "metadata-time", 0);
 	pb = output_buffer(s, snapshot);
 	if (pb == NULL) {
 		return false;
 	}
-	if (CVPixelBufferLockBaseAddress(pb, 0) != kCVReturnSuccess) {
+	CVReturn locked = CVPixelBufferLockBaseAddress(pb, 0);
+	if (locked != kCVReturnSuccess) {
 		CVPixelBufferRelease(pb);
-		return false;
+		return report_delivery_fault(reported, snapshot, f, DELIVERY_PIXEL_LOCK, "pixel-lock", locked);
 	}
 	if (!buffer_layout(pb, &job)) {
 		snapshot_bad_shape(s, snapshot, "unsupported/invalid locked pixel buffer layout");
@@ -1506,7 +1532,9 @@ deliver(struct stream *s, const struct output_snapshot *snapshot, const struct i
 
 	if (unlocked != kCVReturnSuccess || atomic_load_explicit(&job.failed, memory_order_relaxed)) {
 		CVPixelBufferRelease(pb);
-		return false;
+		if (unlocked != kCVReturnSuccess)
+			return report_delivery_fault(reported, snapshot, f, DELIVERY_PIXEL_UNLOCK, "pixel-unlock", unlocked);
+		return report_delivery_fault(reported, snapshot, f, DELIVERY_RENDER, "raw-render", 0);
 	}
 	uint32_t width = job.width, height = job.height, pf = job.format;
 
@@ -1528,7 +1556,7 @@ deliver(struct stream *s, const struct output_snapshot *snapshot, const struct i
 
 	if (m == NULL) {
 		CVPixelBufferRelease(pb);
-		return false;
+		return report_delivery_fault(reported, snapshot, f, DELIVERY_METADATA_COPY, "metadata-copy", 0);
 	}
 	CVBufferSetAttachment(pb, md_attachment, m, kCVAttachmentMode_ShouldPropagate);
 	bool attached = CVBufferGetAttachment(pb, md_attachment, NULL) == m;
@@ -1536,7 +1564,7 @@ deliver(struct stream *s, const struct output_snapshot *snapshot, const struct i
 	CFRelease(m);
 	if (!attached) {
 		CVPixelBufferRelease(pb);
-		return false;
+		return report_delivery_fault(reported, snapshot, f, DELIVERY_METADATA_ATTACH, "metadata-attach", 0);
 	}
 
 	/* Admission binds one actual handler invocation to this exact run/configuration/request.
@@ -1903,6 +1931,7 @@ worker(void *context)
 	struct isp_stats st;
 	uint8_t *buffer = NULL;
 	size_t bytes = 0;
+	unsigned delivery_faults[OUTPUTS] = { 0 };
 	uint32_t tuned_for = ~0u;
 	float lux = -1, cct = -1;
 	struct af af = { 0 };
@@ -1983,6 +2012,7 @@ worker(void *context)
                 s->applied_zoom=choice.requested_zoom;s->run_epoch++;
                 pthread_mutex_unlock(&s->lock);
                 free(buffer);buffer=NULL;bytes=0;last_sequence=0;tuned_for=~0u;
+                memset(delivery_faults, 0, sizeof(delivery_faults));
                 /* Keep graph/pools/host timestamps. Reset sensor-specific
                  * LSC/CCM/AF, carry only bounded common WB gains, not calibration. */
                 float wb[3]; memcpy(wb, isp.wb, sizeof(wb));
@@ -2143,7 +2173,7 @@ worker(void *context)
 			struct output_snapshot snapshot = { 0 };
 
 			if (!snapshot_take(s, i, hakios_camera_sof_time(f), &snapshot)) continue;
-			invoked |= deliver(s, &snapshot, &presentation, f, raw, metadata);
+			invoked |= deliver(s, &snapshot, &presentation, f, raw, metadata, &delivery_faults[i]);
 			snapshot_release(&snapshot);
 		}
 		if (metadata != NULL) {

@@ -57,6 +57,7 @@ _Static_assert(__builtin_offsetof(struct hakios_camera_frame,sof_time_lo)==100,"
  * partial state change. Kept after failed drain/restore; no retry on close. */
 static struct {
     bool power, capture, stream, latched, stopping;
+    bool first_raw_timeout_logged;
     uint64_t generation;
     int last_errno;
 } session;
@@ -270,6 +271,7 @@ static int cam_stop_cached_close(void)
 }
 static int start(uint32_t which, uint32_t mode)
 {
+    const char *step="sensor-power";
     if(!x9_camera_sensor_valid(which))return EINVAL;
     if(mode && mode!=UINT32_MAX)return ENOTSUP;
     if(!(st.supported_mask&(1u<<which)))return ENOTSUP; /* before retiring an active lens */
@@ -283,6 +285,7 @@ static int start(uint32_t which, uint32_t mode)
     if(!frame)frame=kalloc_data(X9_CAMERA_MAX_BYTES,Z_WAITOK);
     if(!frame)return ENOMEM;
     session.generation=st.generation;
+    session.first_raw_timeout_logged=false;
     last_capture_id=last_capture_time=last_sof_time=0;
     session.power=true;
     /* Worker completions can enter camera_deliver during capture setup.
@@ -290,17 +293,31 @@ static int start(uint32_t which, uint32_t mode)
      * across power/I2C/capture callbacks. */
     lck_mtx_unlock(&camera_lock);
     e=hw.power(s,1);
-    if(!e)e=read16(s,s->id_reg,&id);
-    if(!e && id!=s->chip_id)e=ENODEV;
-    if(!e)e=hw.configure(s,&config);
-    if(!e){session.capture=true;e=hw.capture(s,1,session.generation);}
-    if(!e){session.stream=true;e=write8(s,0x0100,1);}
+    if(!e) {
+        step="sensor-id";
+        e=read16(s,s->id_reg,&id);
+        if(!e && id!=s->chip_id)e=ENODEV;
+    }
+    if(!e) {
+        step="configure";
+        e=hw.configure(s,&config);
+    }
+    if(!e) {
+        step="capture-arm";
+        session.capture=true;
+        e=hw.capture(s,1,session.generation);
+    }
+    if(!e) {
+        step="sensor-stream-on";
+        session.stream=true;
+        e=write8(s,0x0100,1);
+    }
     lck_mtx_lock(&camera_lock);
     if(e) {
         st.flags|=X9_CAMERA_FAULT;st.last_errno=e;
         int cleanup=stop();st.last_errno=e;
-        printf("X9 CAMERA: start sensor=%u errno=%d cleanup=%d retained=%u\n",
-            which,e,cleanup,session.latched);
+        printf("X9 CAMERA: start sensor=%u errno=%d cleanup=%d retained=%u step=%s\n",
+            which,e,cleanup,session.latched,step);
         return e;
     }
     st.flags|=X9_CAMERA_STREAMING;st.width=s->width;st.height=s->height;st.last_errno=0;
@@ -675,6 +692,12 @@ static int cam_read(dev_t d,struct uio *uio,__unused int flags)
             if(e || generation!=st.generation || !(st.flags&X9_CAMERA_STREAMING))break;
         }
         if(e==EWOULDBLOCK)e=EAGAIN;
+        if(e==EAGAIN && generation==st.generation && (st.flags&X9_CAMERA_STREAMING) &&
+           !frame_bytes && !session.first_raw_timeout_logged) {
+            session.first_raw_timeout_logged=true;
+            printf("X9 CAMERA RAW WAIT: sensor=%u generation=%llu errno=%d "
+                "(first RAW unavailable after read deadline)\n",st.sensor,generation,e);
+        }
         if(!e && generation!=st.generation)e=ESTALE;
         if(!e && (!(st.flags&X9_CAMERA_STREAMING)||!frame_bytes))e=ENXIO;
         if(!e && !peek && uio_resid(uio)!=(user_ssize_t)(sizeof(head)+frame_bytes))e=EMSGSIZE;

@@ -147,7 +147,7 @@
   再恢复sensor-open借用模式。逐事务保存issued/ACK；实际native退休回执允许
   core仍保留stream历史时的关闭访问，不能提前清stream来通过。公开FOCUS/帧绑定、
   AF/OIS与前/UW仍未完成；RAW继续NO_FOCUS。精确编译/镜像状态见NOTES。
-- 期望：`NATIVE CONFIG ... completed=1 errno=0`。
+- `NATIVE CONFIG stage=9 completed=1fe errno=0` 表示 receiver 到 OUTMUX 的八个阶段通过。`completed` 按十六进制打印，后续另查 `NATIVE PREPARE` 的 SMMU 导出。
 - 长焦preview增益路径已静态补齐原`hhtele_set_gain`的30/36db OB选择：
   code `>3df8`选type1，否则type2，新epoch从type0开始，首次同值SET_GAIN也必须选择。
   OB表通过生成器提取，在真实no-credit边界先直接发送OB、再发原group控制；
@@ -185,7 +185,7 @@
   真实隔离之后，独立执行`sv_reset()`的DMA/STG/CQ stop/ACK与central reset。
   两份完整post配置、三个请求都实际恢复到本次冷基线，才允许撤SMI/MM；
   复位前自然FBC和复位后读数各自存档，后者不替代自然DONE/退休。
-- 期望：CAMSV 收到帧中断、DMA 写出、`X9 CAMERA` 帧计数增加，Camera.app 出画面。
+- 首帧按 `NATIVE PREPARE` → `NATIVE FIRST ARM` / `IRQ ARM` → `SENSOR STREAM` → CAMSV SOF/DONE → RAW → `first picture given` 检查。`RAW WAIT` 表示该代在读期限内还没有发布首个 RAW。桥接层会报告 metadata、像素锁或渲染失败。Camera.app 的画面与画质仍需实测。
 
 ## 7. 阶段 E：收尾
 - 前摄同样流程（i2c2/0x10、MCLK 引脚 72、复位脚 170、WL LDO1/LDO3）。
