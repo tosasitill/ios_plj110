@@ -34,8 +34,16 @@ _Static_assert(sizeof(struct x9_camera_irq_layout)==64,"camera IRQ topology ABI"
 enum { CAM_IRQ_RING=4, CAM_IRQ_PRIORITY=0xa0 };
 struct cam_irq_event {
     struct x9_camera_camsv_irq frame;
-    uint32_t role, sof, channel, common, top, fifo;
+    uint32_t role, expected_sequence, sof, channel, common, top, fifo;
     uint32_t fbc_control[2], fbc_counter[2], fbc_sampled; /* ordinary CSR, never status ack */
+    int error;
+};
+struct cam_irq_parked_fault {
+    uint64_t epoch;
+    unsigned role, phase;
+    uint32_t sof, channel, err, done, cq;
+    uint32_t fbc_control[2], fbc_counter[2], fbc_sampled;
+    bool status_sampled;
     int error;
 };
 static struct {
@@ -52,9 +60,10 @@ static struct {
     struct x9_camera_camsv_request request;
     struct x9_camera_camsv_irq sof_frame;
     struct cam_irq_event queue[CAM_IRQ_RING];
+    struct cam_irq_parked_fault parked_fault;
     unsigned head,count;
     uint64_t deliveries[3];
-    bool owns,accepting,sof_seen,busy;
+    bool owns,accepting,sof_seen,busy,parked_fault_pending;
     int error;
 } cam_irq;
 static boolean_t cam_irq_spin_take(void)
@@ -292,8 +301,9 @@ static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
 bool x9_camera_irq_filter(uint32_t intid)
 {
     boolean_t old;
+    struct cam_irq_parked_fault parked_fault={0};
     unsigned role=0;
-    bool wake=false;
+    bool wake=false,parked,wake_repeat;
     int qualification;
     if(intid!=0x26d+32&&intid!=0x273+32&&intid!=0x279+32)return false;
     old=cam_irq_spin_take();
@@ -305,14 +315,20 @@ bool x9_camera_irq_filter(uint32_t intid)
      * Never acknowledge sources in a dormant/quiescing/foreign lifetime. */
     qualification=cam_irq.accepting?cam_irq_config(true):0;
     cam_irq_wr(cam_irq_bank(role,0x180),cam_irq_bit(role));
-    int idle_error=0;
-    bool parked=cam_repeat_idle_irq_locked(role,&idle_error);
-    if(parked && idle_error) {
-        if(!cam_irq.error)cam_irq.error=idle_error;
+    parked_fault.epoch=cam_irq.epoch;
+    parked_fault.role=role;
+    parked=cam_repeat_idle_irq_locked(role,&parked_fault);
+    wake_repeat=parked && parked_fault.error;
+    if(wake_repeat) {
+        if(!cam_irq.error)cam_irq.error=parked_fault.error;
         cam_irq.accepting=false;cam_irq_mask_all();
+        cam_irq.parked_fault=parked_fault;
+        cam_irq.parked_fault_pending=true;
+        wake=true;
     }
     if(cam_irq.accepting && !parked) {
-        struct cam_irq_event ev={.role=role,.error=qualification};
+        struct cam_irq_event ev={.role=role,.expected_sequence=cam_irq.request.inner_sequence,
+            .error=qualification};
         if(cam_irq.deliveries[role]==UINT64_MAX)ev.error=EOVERFLOW;
         else cam_irq.deliveries[role]++;
         if(!ev.error)ev.error=cam_irq_power();
@@ -330,6 +346,8 @@ bool x9_camera_irq_filter(uint32_t intid)
         wake=true;
     }
     cam_irq_spin_drop(old);
+    /* The controller and STOP wait on repeat progress even with an empty ring. */
+    if(wake_repeat)thread_wakeup((event_t)&cam_repeat.completed);
     if(wake)thread_wakeup((event_t)&cam_irq.count);
     return true; /* sleh still performs its original EOI, exactly once */
 }
@@ -408,6 +426,18 @@ static void __attribute__((noreturn)) cam_irq_worker(void *arg,wait_result_t res
         struct cam_irq_event ev;
         bool current,discard;
         int e;
+        if(cam_irq.parked_fault_pending) {
+            const struct cam_irq_parked_fault fault=cam_irq.parked_fault;
+            cam_irq.parked_fault_pending=false;
+            cam_irq_spin_drop(old);
+            printf("X9 CAMERA PARKED IRQ: epoch=%llu role=%u phase=%u status_sampled=%u "
+                "sof=%x channel=%x done=%x err=%x cq=%x fbc=%x/%x control=%x/%x "
+                "fbc_sampled=%x errno=%d\n",
+                fault.epoch,fault.role,fault.phase,fault.status_sampled,fault.sof,fault.channel,
+                fault.done,fault.err,fault.cq,fault.fbc_counter[0],fault.fbc_counter[1],
+                fault.fbc_control[0],fault.fbc_control[1],fault.fbc_sampled,fault.error);
+            continue;
+        }
         if(!cam_irq.count) {
             assert_wait((event_t)&cam_irq.count,THREAD_UNINT);
             cam_irq_spin_drop(old);thread_block(THREAD_CONTINUE_NULL);continue;
@@ -460,10 +490,13 @@ static void __attribute__((noreturn)) cam_irq_worker(void *arg,wait_result_t res
         }
         if(e||cam_irq.reported<32) {
         if(cam_irq.reported<32)cam_irq.reported++;
-        printf("X9 CAMERA IRQ: epoch=%llu role=%u seq=%x/%x done=%x err=%x cq=%x "
+        printf("X9 CAMERA IRQ: epoch=%llu role=%u seq=%x/%x expected_seq=%x "
+            "tags=%x/%x groups=%x/%x/%x/%x done=%x err=%x cq=%x "
             "sof=%x channel=%x debug=%x/%x/%x fbc=%x/%x control=%x/%x sampled=%x "
             "state=%u errno=%d (IAR sample, no DMA reuse)\n",
             cam_irq.epoch,ev.role,ev.frame.inner_sequence,ev.frame.outer_sequence,
+            ev.expected_sequence,ev.frame.first_tag,ev.frame.last_tag,
+            ev.frame.group_tags[0],ev.frame.group_tags[1],ev.frame.group_tags[2],ev.frame.group_tags[3],
             ev.frame.done_status,ev.frame.err_status,ev.frame.cq_status,ev.sof,ev.channel,
             ev.common,ev.top,ev.fifo,ev.fbc_counter[0],ev.fbc_counter[1],
             ev.fbc_control[0],ev.fbc_control[1],ev.fbc_sampled,cam_irq.slot->state,e);

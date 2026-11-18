@@ -234,17 +234,17 @@ static void cam_repeat_completed_locked(void)
     }
     cam_repeat.completed++;cam_repeat.prior_done=true;cam_repeat.phase=CAM_REPEAT_PARKED;
 }
-/* Only the actual IAR-owned parked source. No arbitrary R-C sweep or pending
- * clear is performed. Consume genuine no-credit SOF/CHANNEL, as the vendor
- * fbc_empty/drop path does, never publish it as a RAW frame. Hybrid errors
- * PASS1_DONE/errors are terminal. One actual late CHANNEL DMA_DONE may
+/* Only the actual IAR-owned parked source. Consume genuine no-credit
+ * SOF/CHANNEL, as the vendor fbc_empty/drop path does. Hybrid PASS1_DONE
+ * and errors are terminal. One actual late CHANNEL DMA_DONE may
  * belong to the independently completed prior credit; never a new frame.
- * Repeated/unknown DMA_DONE and debug remain terminal. */
-static bool cam_repeat_idle_irq_locked(unsigned role,int *error)
+ * Repeated/unknown DMA_DONE and debug remain terminal. Save existing samples
+ * for fault reporting by the worker in thread context. */
+static bool cam_repeat_idle_irq_locked(unsigned role,struct cam_irq_parked_fault *fault)
 {
-    *error=0;
     if(!cam_repeat_identity() || cam_repeat.phase<CAM_REPEAT_PARKED ||
        cam_repeat.phase>CAM_REPEAT_POSTED)return false;
+    fault->phase=cam_repeat.phase;
     int e=cam_irq_power();if(!e)e=cam_irq_config(true);
     if(!e && cam_repeat.phase==CAM_REPEAT_POSTED) {
         if(role!=X9_CAM_IRQ_SOF)return false;
@@ -252,6 +252,8 @@ static bool cam_repeat_idle_irq_locked(unsigned role,int *error)
         for(unsigned bank=0;bank<2;bank++) {
             uint32_t ctl=cam_irq_rd(cam_irq.view[bank],0x540);
             uint32_t count=cam_irq_rd(cam_irq.view[bank],0x544);
+            fault->fbc_control[bank]=ctl;fault->fbc_counter[bank]=count;
+            fault->fbc_sampled|=1u<<bank;
             e=cam_irq_fbc_note_locked(bank,ctl,count);
             if(e)break;
             if((count&255u)==(cam_repeat.empty[bank]&255u))precredit=true;
@@ -265,6 +267,7 @@ static bool cam_repeat_idle_irq_locked(unsigned role,int *error)
     if(!e && role==X9_CAM_IRQ_SOF) {
         uint32_t sof=cam_irq_rd(cam_irq.view[0],0x360);
         uint32_t channel=cam_irq_rd(cam_irq.view[0],0x370);
+        fault->sof=sof;fault->channel=channel;fault->status_sampled=true;
         /* tag0 SOF bit2, SW_ENQ_ERR bit0. CHANNEL-only IAR is a genuine
          * vendor event but cannot publish a new RCNT. No status is replayed.
          * DMA_DONE is NOT a drop: only one receipt for our prior completed
@@ -280,11 +283,14 @@ static bool cam_repeat_idle_irq_locked(unsigned role,int *error)
         uint32_t err=cam_irq_rd(cam_irq.view[1],0x350);
         uint32_t done=cam_irq_rd(cam_irq.view[0],0x348);
         uint32_t cq=cam_irq_rd(cam_irq.view[0],0x201c);
+        fault->err=err;fault->done=done;fault->cq=cq;fault->status_sampled=true;
         if(err || done || (cq&~1u))e=EIO;
     } else if(!e)e=EIO;
     for(unsigned bank=0;bank<2 && !e;bank++) {
         uint32_t ctl=cam_irq_rd(cam_irq.view[bank],0x540);
         uint32_t count=cam_irq_rd(cam_irq.view[bank],0x544);
+        fault->fbc_control[bank]=ctl;fault->fbc_counter[bank]=count;
+        fault->fbc_sampled|=1u<<bank;
         bool handled=false;e=cam_repeat_note_locked(bank,ctl,count,&handled);
         if(!e && !handled)e=ESTALE;
     }
@@ -300,7 +306,7 @@ static bool cam_repeat_idle_irq_locked(unsigned role,int *error)
         cam_rw(cam_sv.view[0],0x540,cam_sv.target[CAM_SV_FBC]|CAM_SV_FBC_RCNT);
         cam_repeat.submitted++;
     }
-    if(e){*error=cam_repeat_fault_locked(e);return true;}
+    if(e){fault->error=cam_repeat_fault_locked(e);return true;}
     /* Re-enable only the consumed line. Its current IAR is still ACTIVE,
      * sleh performs the unchanged single EOI; next actual SOF may retrigger. */
     cam_irq_wr(cam_irq_bank(role,0x100),cam_irq_bit(role));

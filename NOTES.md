@@ -160,6 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-18 相机静态复查 · CAMSV 序号与候帧 IRQ
+
+- ISP8s `mtk_cam-sv.c:328/367/3688` 的硬件 DONE 使用前一 SOF 绑定的 inner cookie。`mtk_cam-engine_fsm.h:166/214` 在漏帧恢复分支使用 outer，正常 DONE 不比较双 bank。X9 初次 arm 通过 `cam_sv_request_guard_locked()` 校验双 bank FH，重复请求经 `cam_sv_commit()` / `cam_sv_target_observe()` 确认双 bank 后才发布新请求及放行 IRQ。本轮保留无 CQ、单请求路径的 outer 一致性检查。`X9 CAMERA IRQ` 增加预期序号、first/last tag、group 原始样本。
+- `cam_repeat_idle_irq_locked()` 之前可在 READY 或 POSTED 的实际 IAR 上锁存错误并屏蔽中断，同时控制线程已睡在 `cam_repeat.completed`，队列为空时没有 worker 唤醒来源。现在发布错误后直接唤醒此等待点，并独立唤醒 worker 打印 `X9 CAMERA PARKED IRQ`。日志记录发生错误时的 role/phase 与已经读取的状态、FBC 控制和计数器，`status_sampled` / `fbc_sampled` 标记实际读过的寄存器组。该记录不进入帧队列，原有 IAR、RCNT 和 EOI 顺序一致。
+- 起点 `dd5b1b16`。`sweet_x9_camera.o` 单对象交叉编译 `compile_one=True`、exit 0、181 条 warning，见 `x9/out/camera-parked-irq-20261118/`。本轮只做源码与单对象检查。356 的 MM_2 final STA 超时仍是最早实机阻塞。
+
 #### 2026-11-18 相机静态复查 · 预览配置首个失败调用
 
 - ISP8s `mtk_cam-sv.c:4509` 把 SMI larb、时钟和 `sv_reset_by_camsys_top()` 放在 CAMSV runtime resume 的不同调用。native `NATIVE CONFIG stage=2` 同时覆盖 `cam_smi_clocks_open_locked()`、sensor standby 和 `cam_sv_cold_reset_locked()`。`NATIVE CONFIG` 现在记录 `step=`，可区分同阶段内的失败调用，也记录配置入口的 standby、重复尝试和残留会话拒绝。末尾分别报告 receiver、SMI、rate 守卫或 `step=configured`。

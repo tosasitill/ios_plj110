@@ -170,6 +170,9 @@ static int cam_irq_fbc_live_sample(uint64_t epoch,unsigned bank,vm_offset_t view
 /* Actual IAR path, spin held. No callback, PTE/cache/RAW access, mutex,
  * status reread/ack, or counter write. The queue retains the raw evidence.
  * A DONE binds the already captured SOF, never a later group/sequence read.
+ * Native has one published request with CQ off. Initial arm and repeat
+ * observe FH_SPARE in both banks before publishing that request. Validate
+ * the outer shadow here as an ownership invariant. Completion uses inner.
  */
 static void cam_irq_fbc_event_locked(struct cam_irq_event *ev)
 {
