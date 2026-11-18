@@ -35,6 +35,9 @@ LCK_MTX_DECLARE(mm_power_lock, &mm_power_group);
 #define MM_POWER_INT_STATUS 0x50u
 #define MM_POWER_INT_BACKUP1_TIMEOUT (1u << 5)
 #define MM_POWER_VOTE_IRQ_HIS_POINTER 0x124ccu
+#define MM_POWER_VOTE_IRQ_HIS_ADDR 0x124d0u
+#define MM_POWER_VOTE_IRQ_HIS_DATA 0x12508u
+#define MM_POWER_VOTE_IRQ_HIS_SLOTS 14u
 #define MM_POWER_ACK 0xa8u
 #define MM_POWER_ACK_MASK 0xc0000000u
 #define MM_IRQ_PREPARE_TIMEOUT_US 10000u
@@ -104,6 +107,33 @@ static int mm_irq_wait_global(struct mm_irq_timeout *timeout)
         }
     }
 }
+/* MT6993 clkchk lists parallel IRQ address and data history registers.
+ * Read in slot order. Firmware may update the ring during the snapshot. */
+struct mm_irq_history {
+    uint32_t first_pointer, last_pointer;
+    uint32_t address[MM_POWER_VOTE_IRQ_HIS_SLOTS];
+    uint32_t data[MM_POWER_VOTE_IRQ_HIS_SLOTS];
+};
+
+static void mm_irq_history_read(struct mm_irq_history *history)
+{
+    history->first_pointer = mm_read(hwv, MM_POWER_VOTE_IRQ_HIS_POINTER);
+    for (unsigned i = 0; i < MM_POWER_VOTE_IRQ_HIS_SLOTS; i++) {
+        history->address[i] = mm_read(hwv, MM_POWER_VOTE_IRQ_HIS_ADDR + 4 * i);
+        history->data[i] = mm_read(hwv, MM_POWER_VOTE_IRQ_HIS_DATA + 4 * i);
+    }
+    history->last_pointer = mm_read(hwv, MM_POWER_VOTE_IRQ_HIS_POINTER);
+}
+
+static void mm_irq_history_log(const struct mm_irq_history *history)
+{
+    printf("X9 MM POWER IRQ HISTORY: pointer_before=%x pointer_after=%x\n",
+        history->first_pointer, history->last_pointer);
+    for (unsigned i = 0; i < MM_POWER_VOTE_IRQ_HIS_SLOTS; i++)
+        printf("X9 MM POWER IRQ HISTORY: slot=%u addr=%08x data=%08x\n",
+            i, history->address[i], history->data[i]);
+}
+
 static void mm_log(const char *op, uint32_t client, unsigned stage, int error,
                    struct mm_irq_timeout timeout)
 {
@@ -125,6 +155,8 @@ static void mm_log(const char *op, uint32_t client, unsigned stage, int error,
 static int mm_vote_take(uint32_t client)
 {
     struct mm_irq_timeout timeout = {0};
+    struct mm_irq_history history;
+    bool log_history;
     unsigned stage = 1;
     int e;
     /* v1 nowait checks for a repeat after waking the voter bus.
@@ -159,7 +191,10 @@ static int mm_vote_take(uint32_t client)
 out:
     /* A failed issued vote stays in the journal; do not compensate/replay. */
     if (e && vote_owned) power_fault = true;
+    log_history = stage == 4 && e == ETIMEDOUT;
+    if (log_history) mm_irq_history_read(&history);
     mm_log("GET", client, stage, e, timeout);
+    if (log_history) mm_irq_history_log(&history);
     return e;
 }
 static int mm_vote_drop(uint32_t client)

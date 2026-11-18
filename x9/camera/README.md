@@ -18,7 +18,7 @@ BACKUP_GRP0是共享资源：DPC/VMM也会以同一resource55投其它bit，但v
 
 这些共享票在Android里属于后续runtime PM：`mtk_cam.c`的CAMSYS CAM_SEL、`mtk_imgsys-sys.c`/`mtk_imgsys-cmdq.c`的IMG/IPE_SEL都在resume/suspend成对调用`vmm_enable/disable_cvfs()`，再经`hwccf_irq_voter_ctrl/multi_voter_ctrl`投bit14/15/16；DPC的bit0属于显示runtime路径。356在MM_2 acquire就返回errno60，尚未到这些阶段，不能提前补票来替代STA bit3。
 
-下一次诊断行还新增只读`irqhis=mm_read(0x124cc)`：参考树把该偏移命名为`HW_CCF_VOTE_IRQ_HIS_INDEX_POINTER`，后面的`0x124d0..0x1253c`是IRQ vote addr/data history。这里只读指针，不写history、不清W1C、不改STA；单对象编译exit0，没有镜像。
+`irqhis=` 记录 `HW_CCF_VOTE_IRQ_HIS_INDEX_POINTER`（`0x124cc`）。MM_2 GET 的 final STA 超时还会输出 `X9 MM POWER IRQ HISTORY`，包含采样前后的指针和 `0x124d0..0x1253c` 的 14 组原始地址和数据字。指针变化表示采样期间发生更新。单对象编译 exit 0。
 
 `int_raw=` 保存与 `int=` 同一次 `CCF_INT_STATUS` 读取的完整值。bit5/21 对应 BACKUP1 VIP/AP timeout，bit9/25 对应 VIP/AP vote-before-ready。原始字段、`int=` 和 `irqhis=` 尚无实机值。live DT 的 `vcp-gipc` 使 `mminfra-debug` 的 `init-clk-on` 只增加软件计数。Android GCE0 本地 mailbox 在相应首末引用中管理 AO 和 MM_2。
 

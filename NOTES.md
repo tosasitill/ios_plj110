@@ -160,6 +160,11 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-18 相机静态复查 · MM_2 IRQ 历史
+
+- `clkchk-mt6993.c:3964` 和 `hwccf_dbg.c:259` 的 Android 调试表包含指针 `0x124cc`、14 个地址字 `0x124d0..0x12504` 和 14 个数据字 `0x12508..0x1253c`。`x9_mm_power.c` 在 MM_2 GET final STA 超时后读取该窗口。先输出 `X9 MM POWER GET`，再输出 `X9 MM POWER IRQ HISTORY` 的两个原始指针和 14 组原始寄存器值。两次指针读值变化说明采样期间有更新，读值相同也不能排除环回。寄存器表没有提供记录的编码规则，暂以槽号保存原始值供对照。
+- 起点 `d647bebd`。`x9_mm_power.o` 单对象交叉编译 `compile_one=True`、exit 0、两条 XNU 导出头 warning。复现脚本和日志在 `x9/out/camera-mm-irq-history-20261118/`。本轮交付源码和单对象，无 CI run 或实机启动结果。356 仍是最新的运行基线，尚缺 `int_raw`、末次 STA 样本及 IRQ 历史值。
+
 #### 2026-11-18 相机静态复查 · MM SMMU 电源分支与 MM/SMI 时钟投票
 
 - live DT `smi-dbg` 带 `hwccf-support`（`:12622`），因此 Android `mtk-smi-dbg.c:1534` 跳过 `mtk_smmu_set_pm_ops(MM_SMMU, …)`。`iommu@30800000` 选择 `mt6993_data_mm`（`mtk-smmu-v3.c:3187/3235`），该配置无 `SMMU_CLK_AO_EN`。源码的实际分支是 `mtk_smmu_power_get/put()` → `mtk_smmu_pm_get/put()` → secure PM。日志 350 的 native 旧 SMC 路径在 `:5173` 已报 `errno=5 smc=c2000514/0`。现有 Android 记录仍缺 MM_2 首笔 0→1 的调用者与完整投票序列。
