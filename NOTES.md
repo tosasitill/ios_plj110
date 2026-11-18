@@ -160,6 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-18 相机静态复查 · MM_2 acquire 失败后的 VCM 收尾
+
+- 356 `:6086–6090` 先报 MM_2 final STA 超时，后报 `VCM RELEASE ... positions=1/1 modes=1/1 closed=0 errno=60`。计数来自 VCM init。收尾的第一次模式读经 `cam_sensor_ap_guard()` 命中已经锁存的 MM_2 错误。板级 `camera_af_main@0c` 使用独立的 I²C client 和 `vin-supply`。Android `ak7316m_24085.c:123/206/316` 在镜头 close 先归位并写 `0x02=0x20`，随后归还该驱动的供电引用。
+- VCM release 和 lens open 模式恢复在同一 receiver epoch 的 MM_2 acquire 失败且尚未进入 CSI 配置时，使用原有 AP 供电、时钟、引脚和 FIFO 检查。close 入口继续校验采集退役及 `session.capture`。普通 sensor 事务和进入后续 CSI 阶段的 close 继续校验 receiver。`X9 CAMERA SENSOR CLOSE` 记录实际收尾步骤、原始故障和收尾返回值。MM_2 的失败票仍由共享 power authority 保留。
+- 起点 `fb77d106`。`sweet_x9_camera.o` 单对象交叉编译 `compile_one=True`、exit 0、181 条 warning。路径 `x9/out/camera-vcm-mm2-close-20261118/`，无 CI run。最新运行证据仍为 356。VCM 归位与收尾结果待实机日志。
+
 #### 2026-11-18 相机静态复查 · MM_2 IRQ 历史
 
 - `clkchk-mt6993.c:3964` 和 `hwccf_dbg.c:259` 的 Android 调试表包含指针 `0x124cc`、14 个地址字 `0x124d0..0x12504` 和 14 个数据字 `0x12508..0x1253c`。`x9_mm_power.c` 在 MM_2 GET final STA 超时后读取该窗口。先输出 `X9 MM POWER GET`，再输出 `X9 MM POWER IRQ HISTORY` 的两个原始指针和 14 组原始寄存器值。两次指针读值变化说明采样期间有更新，读值相同也不能排除环回。寄存器表没有提供记录的编码规则，暂以槽号保存原始值供对照。

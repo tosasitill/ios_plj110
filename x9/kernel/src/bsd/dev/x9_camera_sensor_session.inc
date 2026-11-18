@@ -12,6 +12,7 @@ static int cam_rx_sensor_prepare_locked(uint64_t,struct x9_camera_receiver *);
 static int cam_rx_sensor_guard_locked(uint64_t);
 static int cam_rx_sensor_close_locked(uint64_t);
 static bool cam_rx_sensor_held_locked(uint64_t);
+static bool cam_rx_sensor_mm2_take_failed_locked(uint64_t);
 enum cam_sensor_session_phase {
     CAM_SENSOR_EMPTY, CAM_SENSOR_POWERING, CAM_SENSOR_STANDBY,
     CAM_SENSOR_CONFIGURING, CAM_SENSOR_CONFIGURED, CAM_SENSOR_FAULT,
@@ -41,7 +42,7 @@ static int cam_sensor_session_fault(int e)
  * PMIC rails, not just the snapshot taken before the table loop. Clock, pin,
  * FIFO and AP configuration guards still run in the transfer. These are
  * visible-state checks, not a lease or an atomic ABA detector. */
-static int cam_sensor_ap_guard(struct cam_sensor_ap *ap)
+static int cam_sensor_ap_local_guard(struct cam_sensor_ap *ap)
 {
     struct cam_probe_journal *j=&cam_journal;
     uint8_t enable=0;
@@ -53,8 +54,23 @@ static int cam_sensor_ap_guard(struct cam_sensor_ap *ap)
     if(!e && (enable&j->board.wl_mask)!=j->board.wl_mask)e=EBUSY;
     if(!e)e=cam_clock_check(j,false,true);
     if(!e)e=cam_pins_guard(j,false);
-    if(!e)e=cam_rx_sensor_guard_locked(cam_sensor_live.epoch);
     return e;
+}
+static int cam_sensor_ap_guard(struct cam_sensor_ap *ap)
+{
+    int e=cam_sensor_ap_local_guard(ap);
+    return e?e:cam_rx_sensor_guard_locked(cam_sensor_live.epoch);
+}
+
+/* Android VCM release uses the powered AF I2C client independently of MM_2.
+ * Close callers have already checked the capture retirement receipt. When
+ * MM_2 acquisition failed before CSI or receiver admission, the lens can
+ * finish its I2C close using the sensor's live rail, clock and pin guards. */
+static int cam_sensor_lens_ap_guard(struct cam_sensor_ap *ap,bool closing)
+{
+    if(closing && cam_rx_sensor_mm2_take_failed_locked(cam_sensor_live.epoch))
+        return cam_sensor_ap_local_guard(ap);
+    return cam_sensor_ap_guard(ap);
 }
 static int cam_sensor_ap_read(void *context, uint16_t reg, uint8_t *v)
 {
@@ -216,6 +232,7 @@ static int cam_sensor_session_configure_locked(uint64_t epoch,struct x9_camera_c
 }
 static int cam_sensor_session_close_locked(uint64_t epoch,struct x9_camera_probe *r)
 {
+    const char *step="vcm-release";
     int off,e=cam_sensor_session_match(epoch);
     if(e)return e; /* stale/second close has no MMIO or journal mutation */
     e=cam_native_sensor_retirement_guard_locked(epoch);
@@ -227,17 +244,29 @@ static int cam_sensor_session_close_locked(uint64_t epoch,struct x9_camera_probe
      * VCM mode, before close marking/reset/MM/supplier teardown. Both need
      * this still-powered AP bus and the independent capture retirement. */
     off=cam_vcm_close(epoch);
-    if(!off)off=cam_sensor_open_restore(epoch);
+    if(!off) {
+        step="lens-open-restore";
+        off=cam_sensor_open_restore(epoch);
+    }
     cam_sensor_live.close_attempted=true;
     cam_sensor_live.phase=CAM_SENSOR_CLOSING;
     /* Do not lower MM clocks while a powered sensor can emit packets, and
      * do not lower sensor supplies after a receiver/MM conflict. This is
      * only retirement of an unprogrammed receive lifetime, not DMA drain. */
     if(!off && cam_rx_sensor_held_locked(epoch)) {
+        step="sensor-isolate";
         off=cam_cold_isolate(&cam_journal);
-        if(!off)off=cam_rx_sensor_close_locked(epoch);
+        if(!off) {
+            step="receiver-close";
+            off=cam_rx_sensor_close_locked(epoch);
+        }
     }
-    if(!off)off=cam_restore(&cam_journal);
+    if(!off) {
+        step="supplier-restore";
+        off=cam_restore(&cam_journal);
+    }
+    if(off)printf("X9 CAMERA SENSOR CLOSE: sensor=%u epoch=%llu step=%s original=%d errno=%d\n",
+        cam_sensor_live.probe.sensor,epoch,step,cam_sensor_live.error,off);
     cam_sensor_live.close_error=off;
     cam_sensor_live.probe.restore_errno=off;
     cam_sensor_live.probe.i2c_status[0]=cam_journal.sensor.last_status;

@@ -39,9 +39,8 @@ static int cam_sensor_open_guard(uint64_t deadline)
     e=cam_sensor_open.close_attempted?
         cam_native_sensor_retirement_guard_locked(cam_sensor_open.epoch):0;
     if(e)return e;
-    /* Use the original sensor proxy for the full rails/pins/clock/receiver
-     * dependency guard. Only this helper supplies the separate VCM address. */
-    return cam_sensor_ap_guard(&ap);
+    /* Use the sensor's rail, clock and pin journal for this AF client. */
+    return cam_sensor_lens_ap_guard(&ap,cam_sensor_open.close_attempted);
 }
 static int cam_sensor_open_read(uint64_t deadline,uint8_t *value)
 {

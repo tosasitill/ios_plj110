@@ -30,7 +30,7 @@ static int cam_vcm_guard(uint64_t deadline)
     /* stream is an attempted-stream ledger until power(false) returns.
      * Only the actual native retirement receipt admits this close access. */
     e=cam_vcm.close_attempted?cam_native_sensor_retirement_guard_locked(cam_vcm.epoch):0;
-    if(!e)e=cam_sensor_ap_guard(&ap);
+    if(!e)e=cam_sensor_lens_ap_guard(&ap,cam_vcm.close_attempted);
     return e;
 }
 static int cam_vcm_read(uint64_t deadline,uint8_t reg,uint8_t *bytes,unsigned count)

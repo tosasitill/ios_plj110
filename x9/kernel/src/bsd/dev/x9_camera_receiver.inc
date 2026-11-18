@@ -322,6 +322,16 @@ static int cam_rx_session_close(struct x9_camera_receiver *r)
 }
 static bool cam_rx_sensor_held_locked(uint64_t epoch)
 { return cam_rx_live.epoch && cam_rx_live.sensor_epoch==epoch; }
+
+static bool cam_rx_sensor_mm2_take_failed_locked(uint64_t epoch)
+{
+    return epoch && cam_rx_sensor_held_locked(epoch) &&
+        cam_rx_live.epoch==cam_mm_live.epoch && !cam_rx_live.close_attempted &&
+        !cam_mm_live.close_attempted && cam_rx_live.status.stage==X9_CAM_RX_STAGE_MM &&
+        cam_rx_live.error && cam_mm_live.error &&
+        cam_mm_live.status.stage==X9_CAM_MM_STAGE_RECEIVE &&
+        cam_mm_live.receive.stage==X9_CAM_RES_STAGE_SMMU_POWER;
+}
 static int cam_rx_sensor_prepare_locked(uint64_t epoch,struct x9_camera_receiver *r)
 {
     int e;
