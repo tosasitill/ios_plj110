@@ -160,6 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-18 相机静态复查 · MM_2 的 IRQ 状态前后样本
+
+- Android `clkchk-mt6993.c:5163` 的 timeout 诊断读取 `CCF_INT_STATUS`。`hwccf.h:150/167` 将 bit5/21 定义为 BACKUP1 timeout，bit9/25 为 vote-before-ready。native `int_before` 在 MMUP dummy read 后采样，`int_raw` 在投票路径退出时、IRQ history 扫描前采样。若 bit5/21 在 `int_before` 已置位，单凭结束采样无法归因给本次请求。若从 0 变 1，再结合 `timeout_raw` 和 history 核对事务。该变更仅采样状态，SET/CLR 与 `STA bit3=0` 成功判据照旧。
+- 主 checkout 的 `x9/out/call-owned-runtime/dmesg.txt:1754` 在 Android 120→60 Hz 切换时记录 `dpc get mminfra`。同一次归档的 MM_2 `T[4]` 与 DISP `user[2]` 的起止毫秒数一致（`:2138/2142`）。live DT 的 `disp-dpc@3eff0000` 配置 `mminfra-pwr-idx=3`、`mminfra-pwr-type=2`，无 `power-domains`。`mtk_dpc_driver.c:2093/554/4493` 将这个引用走到 `mtk_mminfra_on_off()`。这组记录可用于对照 Android 正常运行中的 MM_2 引用，启动首笔投票和 356 中 final STA 未清的原因仍待实证。
+- 起点 `ddf4f745`。`x9_mm_power.o` 单对象交叉编译 `compile_one=True`、exit 0、两条 XNU 导出头 warning，见 `x9/out/camera-mm-irq-status-20261118/`。先前两项已推送为 `d6e60044`、`ddf4f745`，候帧 IRQ 的 11 个 MMIO 调用点逐项对照通过。实机仍以 356 为准。范围为静态复查和单对象编译。
+
 #### 2026-11-18 相机静态复查 · 首帧 RAW 的交接证据
 
 - Android `mtk_cam-sv.c:3870` 将 CAMSV FSM 的事件交给 `mtk_cam_ctrl_isr_event()`，`mtk_cam-ctrl.c:1256` 以完成 cookie 调用 `handle_frame_done()`，查找同一 job 并标记 engine DONE。X9 在真实同请求 SOF/DONE、FBC 和 DMA CPU 交接通过后调用 `x9_camera_deliver()`。现在 `X9 CAMERA RAW PUBLISH` 每代在首个 staging copy 完成后记录一次，带 generation、capture_id、序号、尺寸、stride、字节数和 SOF/DONE。

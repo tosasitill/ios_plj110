@@ -135,13 +135,12 @@ static void mm_irq_history_log(const struct mm_irq_history *history)
 }
 
 static void mm_log(const char *op, uint32_t client, unsigned stage, int error,
-                   struct mm_irq_timeout timeout)
+                   struct mm_irq_timeout timeout, uint32_t int_before, uint32_t int_status)
 {
-    uint32_t int_status = mm_read(hwv, MM_POWER_INT_STATUS);
     printf("X9 MM POWER %s: client=%u backend=hwccf MM_2 bit=3 stage=%u "
         "owned=%u held=%u ap=%x global=%x sta=%x done=%x ack2=%x "
         "infra=%x all_sta=%x fsm=%x mt0sta=%x mt1sta=%x en6=%x int=%x "
-        "int_raw=%x irqhis=%x errno=%d timeout_off=%x timeout_raw=%x\n",
+        "int_raw=%x irqhis=%x errno=%d timeout_off=%x timeout_raw=%x int_before=%x\n",
         op, client, stage, vote_owned, vote_held,
         mm_read(hwv, MM_POWER_EN), mm_read(hwv, MM_POWER_GLOBAL),
         mm_read(hwv, MM_POWER_STA), mm_read(hwv, MM_POWER_DONE),
@@ -150,18 +149,21 @@ static void mm_log(const char *op, uint32_t client, unsigned stage, int error,
         mm_read(hwv, 0x1131c), mm_read(hwv, 0x11334),
         mm_read(hwv, MM_POWER_REG_EN6),
         int_status & MM_POWER_INT_BACKUP1_TIMEOUT, int_status,
-        mm_read(hwv, MM_POWER_VOTE_IRQ_HIS_POINTER), error, timeout.offset, timeout.value);
+        mm_read(hwv, MM_POWER_VOTE_IRQ_HIS_POINTER), error, timeout.offset, timeout.value,
+        int_before);
 }
 static int mm_vote_take(uint32_t client)
 {
     struct mm_irq_timeout timeout = {0};
     struct mm_irq_history history;
     bool log_history;
+    uint32_t int_before, int_status;
     unsigned stage = 1;
     int e;
     /* v1 nowait checks for a repeat after waking the voter bus.
      * Even a borrowed vote goes through the outer wait_done. */
     (void)mm_read(mmup, 0x1ec);
+    int_before = mm_read(hwv, MM_POWER_INT_STATUS);
     if (!(mm_read(hwv, MM_POWER_EN) & MM_POWER_BIT)) {
         e = mm_irq_poll(MM_POWER_STA, 0, 1, MM_IRQ_PREPARE_TIMEOUT_US, &timeout);
         if (e) goto out;
@@ -191,18 +193,21 @@ static int mm_vote_take(uint32_t client)
 out:
     /* A failed issued vote stays in the journal; do not compensate/replay. */
     if (e && vote_owned) power_fault = true;
+    int_status = mm_read(hwv, MM_POWER_INT_STATUS);
     log_history = stage == 4 && e == ETIMEDOUT;
     if (log_history) mm_irq_history_read(&history);
-    mm_log("GET", client, stage, e, timeout);
+    mm_log("GET", client, stage, e, timeout, int_before, int_status);
     if (log_history) mm_irq_history_log(&history);
     return e;
 }
 static int mm_vote_drop(uint32_t client)
 {
     struct mm_irq_timeout timeout = {0};
+    uint32_t int_before;
     unsigned stage = 1;
     int e = 0;
     (void)mm_read(mmup, 0x1ec);
+    int_before = mm_read(hwv, MM_POWER_INT_STATUS);
     e = mm_irq_poll(MM_POWER_STA, 0, 1, MM_IRQ_PREPARE_TIMEOUT_US, &timeout);
     if (e) goto out;
     if (!(mm_read(hwv, MM_POWER_EN) & MM_POWER_BIT)) {
@@ -222,7 +227,7 @@ static int mm_vote_drop(uint32_t client)
     vote_owned = vote_held = false;
 out:
     if (e) power_fault = true; /* An attempted drop is never retried */
-    mm_log("PUT", client, stage, e, timeout);
+    mm_log("PUT", client, stage, e, timeout, int_before, mm_read(hwv, MM_POWER_INT_STATUS));
     return e;
 }
 static bool mm_client(uint32_t client)
