@@ -2,7 +2,7 @@
 
 ## 0. 现状（已证实）
 - 分支 `feat/camera-integration`，worktree `~/ios_plj110/.worktrees/camera-integration`，最新候选
-  `x9/out/x9-camera-mm-diag-r44-20261117/boot.img` 是最后一次已启动候选；本阶段按用户要求只做静态复查，新增 `int=`、`irqhis=` 只读诊断只经单对象编译，没有新镜像、未上机。源码/交接已提交并推送至 `6ff5ea02`。
+  `x9/out/x9-camera-mm-diag-r44-20261117/boot.img` 是最后一次已启动候选。本阶段的只读诊断和 IRQ 轮询对齐经单对象交叉编译。
   日志350对应此前 `x9-camera-wlgroup-r27-20261117`（bbd3c57b）。
   日志351的preload阻塞已由r40修复；最新日志354确认EEPROM两遍读完整通过，但日志没有唯一构建标识，
   不能仅据此独立核定精确源码SHA。r41沿用默认后/前双摄准入，未加`x9_camera_lenses=1`；
@@ -17,7 +17,7 @@
   `(val & 0xffff) <= 0x1`判据仍是idle，bit31不参与该判定。源码对照确认native地址/顺序/预算与Android v1 IRQ voter一致，
   `done`不是该路径成功条件；失败后Android只assert+返回，CG47 retrigger回调对BACKUP资源直接bypass。r44只增加
   `all_sta/fsm/mt0sta/mt1sta`只读日志，不延长或绕过STA。尚无MM之后/RAW/handler证据。
-- **MM_2 轮询和启动路径复查**：OPPO `regmap.h:152` 的 `timeout_us` 是单调期限。EN 每 2 µs 采样，预算 1250 µs。pre-STA/final STA 每 1 µs 采样，预算 10000 µs。GET 先识别重复 EN，借用票仍需通过 global/STA。`int_raw=` 保留 `0x50` 的原始只读状态供解码，详见 `NOTES.md` §5。`init-clk-on` 在本机 `vcp-gipc` 配置只增加软件计数。GCE0 本地 mailbox 启用流程带 AO 和 MM_2 引用，356 尚无首次 Android MM_2 请求的对应记录。`x9_mm_power.o` 单对象编译 exit 0，无新镜像。
+- **MM_2 轮询和启动路径复查**。OPPO `regmap.h:152` 的 `timeout_us` 是单调期限。EN 每 2 µs 采样，预算 1250 µs。pre-STA/final STA 每 1 µs 采样，预算 10000 µs。GET 先识别重复 EN，借用票仍需通过 global/STA。`GLB_EN` 按 `hwccf_api.c:1007` 读值后延迟 1 µs 再判断，最多 10001 次采样。`int_raw=` 保留 `0x50` 的原始只读状态供解码。`init-clk-on` 在本机 `vcp-gipc` 配置只增加软件计数，GCE0 本地 mailbox 启用流程带 AO 和 MM_2 引用。现存 Android MM_2 历史证实 CG_LINK、CMDQ、SMI 都使用过 MM_2，其中一次启动在 `1348 ms` 已有引用转换。首笔投票调用者仍缺证据。`x9_mm_power.o` 单对象编译 exit 0。源码、日志出处和复现路径见 `NOTES.md` §5。
 - **静态复查收束（不出镜像）**：重复票语义已复核：`_v1_hwccf_irq_voter_nowait`的`goto skip`只跳过nowait内部prepoll/SET/EN，外层`_v1_hwccf_irq_voter_ctrl`仍调用`wait_done`继续等`all_en`/`STA`；`_v1_mm_hwccf_voter_ctrl`则是单函数skip。不能用“重复票跳过后续等待”放宽native判据。原ATF反汇编确认`28d48/28f08`分别以resource55/bit3做VOTE/UNVOTE，后者丢弃内部返回值并总返回0；这与日志356中AP vote仍置位一致，但不能推出额外补救、不能绕过最终STA。三套Android voter路径对`ap=8 global=8 sta=8`都会失败。仍不出镜像、不上机；下一步只查硬件STA bit3未清的源码级原因，不能跳RAW。
 - **ATF bit3判据闭合（静态）**：原ATF `21424(type1,resource0x37,bit3)`对AP使用MM HWV `0x31c00000`，VOTE/UNVOTE写`+0x30724/+0x30728`（即`CCF_XPU(0)+XPU_B0_SET/CLR`）。按物理地址逐指令复核`37f4→385c→3988`：SET前检查AP EN，SET后`385c`等AP EN和global EN；`3988`再以`0x2710×1us`等待`w19/w20`对应寄存器清零，而`37f4`传入的是`0x1135c/STA`与bit3，所以ATF VOTE路径最终仍要求STA bit3清零。此前“3988只等global EN/没有再轮询STA”的表述错误，以此纠正。`21564`的`0x31c3748=2`只在VM型资源`0x38/0x39`成功后写，MM BACKUP0 `0x37`不写。新增只读`int=CCF_INT_STATUS&BIT(5)`用于观察backup1 timeout，不写W1C、不出镜像。`sta=8`在native/Android/ATF下都必须失败。
 - **ATF调用条件与native差异（静态观察）**：`28d48`只在ATF自身引用计数0→1且`0x1325dc bit0`置位时投资源55 bit3；`28f08`只在计数归零且该bit仍置位时UNVOTE，并在`21424`返回后写`0x31c3748=2/1`、清该bit。native没有这套ATF私有引用计数/flag，首个camera parent直接按Android `mminfra2_onoff()`语义投AP bit3。由于当前日志没有ATF引用计数/flag状态，不能据此改变native流程；继续要求STA bit3 clear，不清W1C、不改bank。

@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-18 相机静态复查 · GLB_EN 采样顺序与 Android MM_2 运行记录
+
+- `hwccf_api.c:1007` 的 `wait_done()` 每次先读 `GLB_EN`，再 `udelay(1)`，然后判断该次读值。`x9_mm_power.c` 的 GET stage 3 已按该顺序执行，最多仍为 10001 次采样。stage 4 继续要求 fresh `STA bit3=0`，单调期限为 10000 µs。356 已通过 stage 3，现有日志无法验证这项时序修正是否影响 stage 4。
+- Android `mtk-mminfra-util.c:130/355` 在 HWCCF 成功后单次检查 MM_2 ACK，失败时打印并 dump。native stage 5/6 则是 token 发放前的 MM_2 ACK 与 infra0/AO 守卫，`cam_receive_power_take()` 还会校验 token 和父链，再进入 CSI/SMMU。两级守卫保留在 stage 4 之后。live DT 的 `mminfra-util` 无 `mminfra-vlp-base`，源码的可选 VLP `irq_rdy_bit` 只有带该基址时才在 shutdown 清除。
+- 原厂留存 `~/x9-android-dmesg.txt` 从 uptime `15.555922 s` 起，`:897` 记录 GCE0 secure context setup，`:3931` 记录显示 C3D 的 CMDQ flush 调用点。主 checkout 的 `x9/out/android-incoming-20261115-192820/dmesg.txt:245` 还保留 MM_2 `max_latency=[1]ms in [1348]ms`，可确认该次 Android 启动早期已有 MM_2 引用转换。主 checkout `x9/out/call-owned-runtime/dmesg.txt:2147` 的 MM_2 user 累计值显示 CG_LINK `[0]`、CMDQ `[1]`、SMI `[5]` 都有运行使用记录，类型定义见 `mtk-mminfra-util.h:10`。现存记录未给出首笔 0→1 的调用者，也未找到可对照 356 的 Android 开相机 runtime-resume 序列。
+- 起点 `7b08c87c`。`x9_mm_power.o` 单对象交叉编译 `compile_one=True`、exit 0，两条 XNU 导出头 warning。复现脚本与日志在 `x9/out/camera-mm-global-read-delay-20261118/`。本轮为静态复查，实机基线仍为 r44 的 `.local/x9/logs/356.txt:6086`。下一验收点仍是最早 `X9 MM POWER GET` 的 `stage/sta/errno/int_raw`。取得 stage 4 完成证据后再沿 MM clocks → SMI/SMMU → CAMSV SOF/DONE → RAW → iOS handler → 实际预览核验。
+
 #### 2026-11-18 相机静态复查：MM_2 IRQ 轮询单位与 Android 启动调用者
 
 - Vendor `hwccf_api.c:776/993` 的 pre-STA、EN、final STA 调用 OPPO GKI `include/linux/regmap.h:152` 的 `regmap_read_poll_timeout_atomic()`。第五参数是 `ktime_add_us()` 的微秒期限，第四参数是 `udelay()` 的步长。纠正上轮 `1250×2 µs` 的解读：EN 为 **1250 µs 总预算，2 µs 间隔**，pre-STA/final STA 为 **10000 µs 总预算，1 µs 间隔**。`GLB_EN` 用独立显式计数循环。`x9_mm_power.c` 现在用单调期限和期限到达后的最后一次采样实现这三处 regmap 轮询。GET 在 dummy read 后先检查已投 EN，借用票仍进入 global/STA 检查。SET 前保留 fresh EN 检查，只有自己发出的 SET 才登记为自有票。

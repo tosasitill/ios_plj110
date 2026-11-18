@@ -4,6 +4,8 @@
 
 `x9_mm_power.c` 的 IRQ voter 轮询已按 OPPO `regmap_read_poll_timeout_atomic()` 对齐。EN 以 2 µs 为采样间隔、1250 µs 为总预算。pre-STA/final STA 使用 1 µs 间隔及 10000 µs 总预算。GET 在 pre-STA 前识别已有的 AP EN，借用票仍需通过 global EN 和 final STA。`x9_mm_power.o` 单对象编译 exit 0。最近一次实机日志仍是 356。
 
+`GLB_EN` 按 Android v1 `wait_done()` 每次读值后延迟 1 µs，再判断该次读值。采样上限为 10001 次，通过后进入 final STA。Android `mtk_mminfra_is_on()` 在 HWCCF 完成后单次检查 MM_2 ACK。native 在同一位置另以 MM_2 和 infra0/AO ACK 作为 token 发放条件。现有 Android MMINFRA 运行记录证实 CG_LINK、CMDQ、SMI 均使用过 MM_2，启动首笔请求的调用者尚未确认。出处见 `NOTES.md` §5。
+
 重复票语义复核：`_v1_hwccf_irq_voter_nowait()`的重复票`goto skip`只跳过nowait里的prepoll/SET/EN，外层`_v1_hwccf_irq_voter_ctrl()`仍调用`_v1_hwccf_irq_voter_wait_done()`继续等`all_en`和`STA`；`_v1_mm_hwccf_voter_ctrl()`的单函数skip不能混入这条组合语义。三套路径最终都要求`STA bit3=0`，因此`ap=8/global=8/sta=8`不是等待步长或重复票造成的假失败。原ATF中`28d48/28f08`对resource55/bit3的VOTE/UNVOTE与native同一资源；`28f08`丢弃内部HWCCF返回值并总返回0，外层PM成功不能证明内部成功，也无法替代native的最终STA判定。未据此改代码、清状态或延长等待。
 
 原ATF `21424(type1,0x37,bit3)`继续闭合到`37f4/385c/3988`：AP使用MM HWV `0x31c00000`，VOTE/UNVOTE写`+0x30724/+0x30728`（对应`XPU_B0_SET/CLR`）。按物理地址逐指令复核：`385c`检查并等待AP EN和global EN；`3988`再以`0x2710×1us`等待`w19/w20`清零，而`37f4`传入的是`0x1135c/STA`与bit3，所以ATF VOTE路径最终仍要求STA bit3清零。此前“3988只等global EN/没有再轮询STA”的表述错误，以此纠正。native按Android v1 voter的`wait_done()`同样要求STA bit3 idle，不能放宽。`21564`的`0x31c3748=2`只在VM型资源`0x38/0x39`成功后写，MM BACKUP0 `0x37`不写。新增只读`int=CCF_INT_STATUS&BIT(5)`用于观察backup1 timeout，不写W1C；`sta=8`仍按源码失败，不清W1C、不改bank、不延长。

@@ -40,6 +40,7 @@ LCK_MTX_DECLARE(mm_power_lock, &mm_power_group);
 #define MM_IRQ_PREPARE_TIMEOUT_US 10000u
 #define MM_IRQ_VOTE_TIMEOUT_US 1250u
 #define MM_IRQ_DONE_TIMEOUT_US 10000u
+#define MM_IRQ_GLOBAL_MAX_RETRIES 10000u
 static struct { uint64_t token; uint32_t client, children; } parents[MM_POWER_PARENTS];
 static struct { uint64_t token, parent; } children[MM_POWER_CHILDREN];
 static uint64_t next_token = 1;
@@ -82,6 +83,17 @@ static int mm_irq_poll(unsigned off, uint32_t target, unsigned step_us,
         delay(step_us);
     }
 }
+/* v1 HWCCF wait_done delays after every global EN read, including the
+ * sample that succeeds or exhausts the retry count. */
+static int mm_irq_wait_global(void)
+{
+    for (unsigned retry = 0; retry <= MM_IRQ_GLOBAL_MAX_RETRIES; retry++) {
+        uint32_t global = mm_read(hwv, MM_POWER_GLOBAL);
+        delay(1);
+        if (global & MM_POWER_BIT) return 0;
+    }
+    return ETIMEDOUT;
+}
 static void mm_log(const char *op, uint32_t client, unsigned stage, int error)
 {
     uint32_t int_status = mm_read(hwv, MM_POWER_INT_STATUS);
@@ -118,13 +130,13 @@ static int mm_vote_take(uint32_t client)
         }
     }
     stage = 3;
-    e = mm_wait(hwv, MM_POWER_GLOBAL, MM_POWER_BIT, MM_POWER_BIT, 10000, 1);
+    e = mm_irq_wait_global();
     if (e) goto out;
     stage = 4;
     e = mm_irq_poll(MM_POWER_STA, 0, 1, MM_IRQ_DONE_TIMEOUT_US);
     if (e) goto out;
-    /* mminfra-util verifies its DT-selected two-bit MTCMOS ack after ON.
-     * MM_2's upstream domain includes infra0/AO, required by the callers. */
+    /* Android samples the MM_2 ACK once after HWCCF completes.
+     * Native additionally gates token admission on MM_2 and infra0/AO ACK. */
     stage = 5;
     e = mm_wait(power_ack, MM_POWER_ACK, MM_POWER_ACK_MASK,
         MM_POWER_ACK_MASK, 10000, 1);
