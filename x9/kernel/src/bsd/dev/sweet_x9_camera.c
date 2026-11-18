@@ -406,6 +406,7 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
         if(frame_readers)e=EBUSY; /* retire, never overwrite/replay a pinned CPU copy */
     }
     if(!e) {
+        bool first_frame=!frame_bytes;
         memset(&head,0,sizeof(head));memcpy(head.magic,HAKIOS_CAMERA_MAGIC,8);
         head.header_bytes=sizeof(head);head.width=s->width;head.height=s->height;
         head.stride=f.stride;head.format=1;head.bayer=s->bayer;head.black=64;
@@ -420,6 +421,11 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
         head.frame_lines=f.frame_lines;head.frame_lines_min=s->frame_lines;head.frame_lines_max=s->frame_max;
         head.margin=s->margin;head.sensor=f.sensor;head.focus=HAKIOS_CAMERA_NO_FOCUS;
         memcpy(frame,f.raw,f.bytes);frame_bytes=f.bytes;wakeup(&frame_bytes);
+        if(first_frame)
+            printf("X9 CAMERA RAW PUBLISH: sensor=%u generation=%llu capture_id=%llu "
+                "seq=%llu width=%u height=%u stride=%u bytes=%u sof=%llu done=%llu\n",
+                f.sensor,f.generation,f.capture_id,head.sequence,s->width,s->height,
+                f.stride,f.bytes,f.sof_time,f.time);
     } else {st.rejected++;st.last_errno=e;}
     lck_mtx_unlock(&camera_lock);return e;
 }

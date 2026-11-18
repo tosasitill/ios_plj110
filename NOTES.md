@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-18 相机静态复查 · 首帧 RAW 的交接证据
+
+- Android `mtk_cam-sv.c:3870` 将 CAMSV FSM 的事件交给 `mtk_cam_ctrl_isr_event()`，`mtk_cam-ctrl.c:1256` 以完成 cookie 调用 `handle_frame_done()`，查找同一 job 并标记 engine DONE。X9 在真实同请求 SOF/DONE、FBC 和 DMA CPU 交接通过后调用 `x9_camera_deliver()`。现在 `X9 CAMERA RAW PUBLISH` 每代在首个 staging copy 完成后记录一次，带 generation、capture_id、序号、尺寸、stride、字节数和 SOF/DONE。
+- iOS `first RAW read` 发生在完整读取、header 和时间检查通过、`isp_measure()` 已处理有效载荷之后。每次物理镜头启动记录一次，用相同序号和 SOF/DONE 对上 kernel 事件，并打印已有采样统计。`first picture given` 对应后续 handler 调用。采样统计可以协助辨认黑帧，正确字节序、色彩和可见预览仍需真实帧验证。
+- RAW 格式核对发现 ISP8s 的 `mtk_cam-sv.h:135/142` 区分 `SV_FMT_RAW10=1` 和 `SV_FMT_MIPI_RAW10=8`，`mtk_cam-fmt_utils.c:419` 区分两种 V4L2 输出格式。当前 X9 `FORMAT_TAG1=1` 与 ISP8s `mtk_cam_slave_sv_dev_config():1870` 的直接编程值一致，iOS 解包按 `V4L2_PIX_FMT_*10P` 的 4 像素 5 字节排列。ISP8s 普通 CAMSV main out 经 IPI 交付格式，现有原厂日志缺对应预览 tag 的实际 `FORMAT_TAG1` 和 RAW payload。本轮保留格式值。核对证据应为同一正常预览请求的 IPI 输出/CQ 或 CAMSV 格式回读加 RAW 样本。
+- 起点 `d6e60044`。`sweet_x9_camera.o` 单对象交叉编译 `compile_one=True`、exit 0、181 条 warning，iOS `camera_device.o` exit 0、无诊断。日志、编译 argv 和产物在 `x9/out/camera-first-raw-20261118/`。无 CI run 或实机结果。当前首个实机阻塞仍为 356 `:6086` 的 MM_2 final STA。
+
 #### 2026-11-18 相机静态复查 · CAMSV 序号与候帧 IRQ
 
 - ISP8s `mtk_cam-sv.c:328/367/3688` 的硬件 DONE 使用前一 SOF 绑定的 inner cookie。`mtk_cam-engine_fsm.h:166/214` 在漏帧恢复分支使用 outer，正常 DONE 不比较双 bank。X9 初次 arm 通过 `cam_sv_request_guard_locked()` 校验双 bank FH，重复请求经 `cam_sv_commit()` / `cam_sv_target_observe()` 确认双 bank 后才发布新请求及放行 IRQ。本轮保留无 CQ、单请求路径的 outer 一致性检查。`X9 CAMERA IRQ` 增加预期序号、first/last tag、group 原始样本。

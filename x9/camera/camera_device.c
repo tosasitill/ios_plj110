@@ -2066,11 +2066,18 @@ worker(void *context)
             f->sequence<=last_sequence || f->time<=last_time || hakios_camera_sof_time(f)<=last_sof) {
             say("invalid/stale frame; not delivering to capture graph"); error=EPROTO; break;
         }
+        bool first_raw = last_sequence == 0;
         last_sequence=f->sequence;last_time=f->time;last_sof=hakios_camera_sof_time(f);
         const uint8_t *raw = buffer + f->header_bytes;
 		struct hakios_camera_command c;
 
 		isp_measure(&isp, f, raw, &st);
+		if (first_raw) {
+			say("first RAW read: sensor=%u seq=%llu stride=%u bayer=%u SOF=%llu DONE=%llu "
+			    "sampled cells=%u mean RGB above black=%.1f/%.1f/%.1f green low bin=%u",
+			    f->sensor, f->sequence, f->stride, f->bayer, last_sof, last_time,
+			    st.cells, st.mean[0], st.mean[1], st.mean[2], st.hist[0]);
+		}
 		isp_awb(&isp, &st);
 		if (f->sensor != tuned_for) {
 			tuned_for = f->sensor;
