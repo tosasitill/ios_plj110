@@ -1,14 +1,14 @@
 # X9 原生相机桥
 
-## 当前状态（2026-11-17）
+## 当前状态（2026-11-18）
 
-静态复查补充：按用户要求本阶段不出探针镜像、不反复上机测试，只按Android源码补确定差异。`x9_mm_power.c`的BACKUP1 IRQ vote/unvote EN等待已改为Android `MTK_WAIT_GHWV_IRQ_VOTE_CNT=1250` × `MTK_WAIT_GHWV_IRQ_VOTE_US=2`；prepoll/global/STA/ACK仍保持`10000*1us`，最终STA未清仍按源码失败，不清W1C、不绕过、不改投票顺序。单对象编译exit0；没有boot.img，未上机。
+`x9_mm_power.c` 的 IRQ voter 轮询已按 OPPO `regmap_read_poll_timeout_atomic()` 对齐。EN 以 2 µs 为采样间隔、1250 µs 为总预算。pre-STA/final STA 使用 1 µs 间隔及 10000 µs 总预算。GET 在 pre-STA 前识别已有的 AP EN，借用票仍需通过 global EN 和 final STA。`x9_mm_power.o` 单对象编译 exit 0。最近一次实机日志仍是 356。
 
 重复票语义复核：`_v1_hwccf_irq_voter_nowait()`的重复票`goto skip`只跳过nowait里的prepoll/SET/EN，外层`_v1_hwccf_irq_voter_ctrl()`仍调用`_v1_hwccf_irq_voter_wait_done()`继续等`all_en`和`STA`；`_v1_mm_hwccf_voter_ctrl()`的单函数skip不能混入这条组合语义。三套路径最终都要求`STA bit3=0`，因此`ap=8/global=8/sta=8`不是等待步长或重复票造成的假失败。原ATF中`28d48/28f08`对resource55/bit3的VOTE/UNVOTE与native同一资源；`28f08`丢弃内部HWCCF返回值并总返回0，外层PM成功不能证明内部成功，也无法替代native的最终STA判定。未据此改代码、清状态或延长等待。
 
 原ATF `21424(type1,0x37,bit3)`继续闭合到`37f4/385c/3988`：AP使用MM HWV `0x31c00000`，VOTE/UNVOTE写`+0x30724/+0x30728`（对应`XPU_B0_SET/CLR`）。按物理地址逐指令复核：`385c`检查并等待AP EN和global EN；`3988`再以`0x2710×1us`等待`w19/w20`清零，而`37f4`传入的是`0x1135c/STA`与bit3，所以ATF VOTE路径最终仍要求STA bit3清零。此前“3988只等global EN/没有再轮询STA”的表述错误，以此纠正。native按Android v1 voter的`wait_done()`同样要求STA bit3 idle，不能放宽。`21564`的`0x31c3748=2`只在VM型资源`0x38/0x39`成功后写，MM BACKUP0 `0x37`不写。新增只读`int=CCF_INT_STATUS&BIT(5)`用于观察backup1 timeout，不写W1C；`sta=8`仍按源码失败，不清W1C、不改bank、不延长。
 
-`CCF_INT_STATUS(0x50)`的bit5/bit21分别在`hwccf.h:150/167`命名为VIP/AP backup1 timeout；参考树只在`hwccf_dbg.c:172`和`clkchk-mt6993.c:3572/3876`的debug dump列出`0x50`，v1 IRQ voter没有读取或清除该寄存器。新增的`int=`只用于下一次日志诊断，不能替代`CCF_BACKUP1_STA`判据，也不能在尚无新日志时宣称硬件已置位timeout。
+`CCF_INT_STATUS(0x50)`的bit5/bit21分别在`hwccf.h:150/167`命名为VIP/AP backup1 timeout；`hwccf_dbg.c:172` 将其列入寄存器 dump，`clkchk-mt6993.c:5163` 读取并判断是否触发 timeout dump。v1 IRQ voter 的成功条件仍由 global EN 和 STA 决定。新增的`int=`只用于下一次日志诊断，不能替代`CCF_BACKUP1_STA`判据，也不能在尚无新日志时宣称硬件已置位timeout。
 
 BACKUP_GRP0是共享资源：DPC/VMM也会以同一resource55投其它bit，但v1 wrapper只按resource选择同一组寄存器。MM_2由DT给的`vote_bit=3`；日志356的`ap/global/sta=8`未显示其它bit参与，且两个v1 retrigger handler要么只接受CG资源（backup SET直接bypass），要么要求`mtcmos_sta!=0 && all_mtcmos_sta==0`（日志全0）。没有源码依据把`sta=8`归因于共享FSM retrigger，native继续只CLR自己新增的bit3。
 
@@ -16,7 +16,7 @@ BACKUP_GRP0是共享资源：DPC/VMM也会以同一resource55投其它bit，但v
 
 下一次诊断行还新增只读`irqhis=mm_read(0x124cc)`：参考树把该偏移命名为`HW_CCF_VOTE_IRQ_HIS_INDEX_POINTER`，后面的`0x124d0..0x1253c`是IRQ vote addr/data history。这里只读指针，不写history、不清W1C、不改STA；单对象编译exit0，没有镜像。
 
-当前静态复查阶段已提交/推送到 `6ff5ea02`：只有`x9_mm_power.c`的只读`int=`/`irqhis=`字段变化，不改STA成功条件、投票顺序或等待时长；最近一次实机候选仍是r44，新增字段尚无运行日志验证。
+`int_raw=` 保存与 `int=` 同一次 `CCF_INT_STATUS` 读取的完整值。bit5/21 对应 BACKUP1 VIP/AP timeout，bit9/25 对应 VIP/AP vote-before-ready。原始字段、`int=` 和 `irqhis=` 尚无实机值。live DT 的 `vcp-gipc` 使 `mminfra-debug` 的 `init-clk-on` 只增加软件计数。Android GCE0 本地 mailbox 在相应首末引用中管理 AO 和 MM_2。
 
 进一步按原ATF逐指令复核`28d48/28f08`：bit3投票只在ATF自身引用计数0→1且`0x1325dc bit0`置位时发生，UNVOTE只在计数归零且该flag仍置位时发生；native没有这套ATF私有状态，首个camera parent按Android `mminfra2_onoff()`直接投AP bit3。当前无ATF引用计数/flag日志，不能据此改native或清flag，仍要求`CCF_BACKUP1_STA` bit3 clear。
 
@@ -24,7 +24,7 @@ BACKUP_GRP0是共享资源：DPC/VMM也会以同一resource55投其它bit，但v
 
 静态复查补充：`hwccf_drv_probe()`只做syscon→regmap、MMUP GPR映射和回调注册，不写HWCCF控制寄存器；参考树里的`HWCCF_INIT_DONE_REG`没有probe使用点。native的`0x31c00000+0x22000`覆盖所有已用XPU/诊断偏移，`0x31a04000+0x1000`和`0x31b50000+0x1000`覆盖MMUP dummy read与ACK。351–356从WL/EEPROM、校准FIFO推进到MM_2，355/356在`apply/mode/VCM INIT`通过后稳定停在`sta=8`。没有漏掉的Android HWCCF probe初始化或MMIO映射错误；`CCF_BACKUP1_VIP_STA_CLR`/`CCF_INT_STATUS`只是寄存器定义，v1 IRQ voter成功路径不清W1C，不能拿来伪造通过。Android SMI的MM_2入口同样只是`mtk_mminfra_on_off()`，larb/common resume不外加剧BACKUP1 bit3动作。新增只读`en6`日志用于观察`HWCCF_REG_EN6/block_voting`，不调用freeze/unfreeze、不绕过STA；单对象编译exit0，没有镜像。`ack2=c2f10152`和`infra=e3fc0000`按DT/HWV mask检查均满足，唯一硬失败仍是`STA bit3`。
 
-**最新日志 `~/356.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615`、完成 native 注册、sensor-open 与 EEPROM 校准 preload（3456/3456 B）；r44的校准apply/mode与VCM init继续通过：`phase=apply writes=250 acked=250 applied=1 errno=0`、`phase=mode mode=1/1 errno=0`、`VCM INIT complete=1 errno=0`。** 当前最早失败仍是MM_2：`X9 MM POWER GET ... stage=4 ... ap=8 global=8 sta=8 done=fffffff7 ack2=c2f10152 infra=e3fc0000 all_sta=0 fsm=80000001 mt0sta=0 mt1sta=0 errno=60`，随后 NATIVE CONFIG stage1 errno60。按Android `hwccf_api.c`的v1 IRQ voter源码对照，native的地址、顺序和10ms预算一致，`done`不是该路径的成功条件；失败就是最后`STA` bit3未清。`fsm=80000001`的bit31不属于`hwccf_api.c:325`的`(val & 0xffff) <= 0x1` FSM idle判据；`all_sta/mt0sta/mt1sta=0`排除普通嵌套MTCMOS未完成解释。Android v1 ctrl失败后只assert+返回，注册的CG47 retrigger对BACKUP资源直接bypass，不能照搬。r44新增的`all_sta/fsm/mt0sta/mt1sta`只读日志不改变投票/等待/写入语义，不忽略`sta=8`。尚无真实预览、拍照、录像或切镜验收；详见`NOTES.md` §5。
+**最新日志 `~/356.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615`、完成 native 注册、sensor-open 与 EEPROM 校准 preload（3456/3456 B）；r44的校准apply/mode与VCM init继续通过：`phase=apply writes=250 acked=250 applied=1 errno=0`、`phase=mode mode=1/1 errno=0`、`VCM INIT complete=1 errno=0`。** 当前最早失败仍是MM_2：`X9 MM POWER GET ... stage=4 ... ap=8 global=8 sta=8 done=fffffff7 ack2=c2f10152 infra=e3fc0000 all_sta=0 fsm=80000001 mt0sta=0 mt1sta=0 errno=60`，随后 NATIVE CONFIG stage1 errno60。按Android `hwccf_api.c`的v1 IRQ voter源码对照，356已达到v1 IRQ voter最后的`STA` bit3检查，`done`仅用于诊断。`fsm=80000001`的bit31不属于`hwccf_api.c:325`的`(val & 0xffff) <= 0x1` FSM idle判据；`all_sta/mt0sta/mt1sta=0`排除普通嵌套MTCMOS未完成解释。Android v1 ctrl失败后只assert+返回，注册的CG47 retrigger对BACKUP资源直接bypass，不能照搬。r44新增的`all_sta/fsm/mt0sta/mt1sta`只读日志不改变投票/等待/写入语义，不忽略`sta=8`。尚无真实预览、拍照、录像或切镜验收；详见`NOTES.md` §5。
 
 后续源码核查又修正了 SMMU 的 CMDQ 使能顺序（8→12→13）、接入 DT 对应的普通
 wrapper 和34个 CAMSV DMA/CQI FIFO 默认配置，修复退休快照未初始化 padding，以及四摄使用

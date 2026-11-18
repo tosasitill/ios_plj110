@@ -11,6 +11,8 @@
 #include <sys/errno.h>
 #include <kern/clock.h>
 #include <kern/locks.h>
+#include <mach/clock_types.h>
+#include <mach/mach_time.h>
 #include <mach/mach_types.h>
 #include "x9_mm_power.h"
 extern int sweet_early_is_x9(void);
@@ -35,6 +37,9 @@ LCK_MTX_DECLARE(mm_power_lock, &mm_power_group);
 #define MM_POWER_VOTE_IRQ_HIS_POINTER 0x124ccu
 #define MM_POWER_ACK 0xa8u
 #define MM_POWER_ACK_MASK 0xc0000000u
+#define MM_IRQ_PREPARE_TIMEOUT_US 10000u
+#define MM_IRQ_VOTE_TIMEOUT_US 1250u
+#define MM_IRQ_DONE_TIMEOUT_US 10000u
 static struct { uint64_t token; uint32_t client, children; } parents[MM_POWER_PARENTS];
 static struct { uint64_t token, parent; } children[MM_POWER_CHILDREN];
 static uint64_t next_token = 1;
@@ -62,12 +67,28 @@ static int mm_wait(vm_offset_t base, unsigned off, uint32_t mask,
     }
     return ETIMEDOUT;
 }
+/* Android regmap_read_poll_timeout_atomic uses an elapsed-time budget and
+ * takes one final sample when the deadline has passed. */
+static int mm_irq_poll(unsigned off, uint32_t target, unsigned step_us,
+                       unsigned timeout_us)
+{
+    uint64_t deadline;
+    clock_interval_to_deadline(timeout_us, NSEC_PER_USEC, &deadline);
+    for (;;) {
+        if ((mm_read(hwv, off) & MM_POWER_BIT) == target) return 0;
+        if (mach_absolute_time() > deadline) {
+            return (mm_read(hwv, off) & MM_POWER_BIT) == target ? 0 : ETIMEDOUT;
+        }
+        delay(step_us);
+    }
+}
 static void mm_log(const char *op, uint32_t client, unsigned stage, int error)
 {
+    uint32_t int_status = mm_read(hwv, MM_POWER_INT_STATUS);
     printf("X9 MM POWER %s: client=%u backend=hwccf MM_2 bit=3 stage=%u "
         "owned=%u held=%u ap=%x global=%x sta=%x done=%x ack2=%x "
         "infra=%x all_sta=%x fsm=%x mt0sta=%x mt1sta=%x en6=%x int=%x "
-        "irqhis=%x errno=%d\n",
+        "int_raw=%x irqhis=%x errno=%d\n",
         op, client, stage, vote_owned, vote_held,
         mm_read(hwv, MM_POWER_EN), mm_read(hwv, MM_POWER_GLOBAL),
         mm_read(hwv, MM_POWER_STA), mm_read(hwv, MM_POWER_DONE),
@@ -75,31 +96,32 @@ static void mm_log(const char *op, uint32_t client, unsigned stage, int error)
         mm_read(hwv, MM_POWER_ALL_STA), mm_read(hwv, MM_POWER_FSM),
         mm_read(hwv, 0x1131c), mm_read(hwv, 0x11334),
         mm_read(hwv, MM_POWER_REG_EN6),
-        mm_read(hwv, MM_POWER_INT_STATUS) & MM_POWER_INT_BACKUP1_TIMEOUT,
+        int_status & MM_POWER_INT_BACKUP1_TIMEOUT, int_status,
         mm_read(hwv, MM_POWER_VOTE_IRQ_HIS_POINTER), error);
 }
 static int mm_vote_take(uint32_t client)
 {
     unsigned stage = 1;
     int e;
-    /* Same dummy read as _v1_hwccf_irq_voter_nowait, before its STA check.
-     * Never use the SMMU itself as an unpowered probe. */
+    /* v1 nowait checks for a repeat after waking the voter bus.
+     * Even a borrowed vote goes through the outer wait_done. */
     (void)mm_read(mmup, 0x1ec);
-    e = mm_wait(hwv, MM_POWER_STA, MM_POWER_BIT, 0, 10000, 1);
-    if (e) goto out;
     if (!(mm_read(hwv, MM_POWER_EN) & MM_POWER_BIT)) {
-        vote_owned = true; /* BEFORE the one potentially ambiguous SET */
-        mm_write(MM_POWER_SET, MM_POWER_BIT);
-        stage = 2;
-        /* MTK_WAIT_GHWV_IRQ_VOTE_CNT/US: 1250 * 2us. */
-        e = mm_wait(hwv, MM_POWER_EN, MM_POWER_BIT, MM_POWER_BIT, 1250, 2);
+        e = mm_irq_poll(MM_POWER_STA, 0, 1, MM_IRQ_PREPARE_TIMEOUT_US);
         if (e) goto out;
+        if (!(mm_read(hwv, MM_POWER_EN) & MM_POWER_BIT)) {
+            vote_owned = true; /* BEFORE the one potentially ambiguous SET */
+            mm_write(MM_POWER_SET, MM_POWER_BIT);
+            stage = 2;
+            e = mm_irq_poll(MM_POWER_EN, MM_POWER_BIT, 2, MM_IRQ_VOTE_TIMEOUT_US);
+            if (e) goto out;
+        }
     }
     stage = 3;
     e = mm_wait(hwv, MM_POWER_GLOBAL, MM_POWER_BIT, MM_POWER_BIT, 10000, 1);
     if (e) goto out;
     stage = 4;
-    e = mm_wait(hwv, MM_POWER_STA, MM_POWER_BIT, 0, 10000, 1);
+    e = mm_irq_poll(MM_POWER_STA, 0, 1, MM_IRQ_DONE_TIMEOUT_US);
     if (e) goto out;
     /* mminfra-util verifies its DT-selected two-bit MTCMOS ack after ON.
      * MM_2's upstream domain includes infra0/AO, required by the callers. */
@@ -121,7 +143,7 @@ static int mm_vote_drop(uint32_t client)
     unsigned stage = 1;
     int e = 0;
     (void)mm_read(mmup, 0x1ec);
-    e = mm_wait(hwv, MM_POWER_STA, MM_POWER_BIT, 0, 10000, 1);
+    e = mm_irq_poll(MM_POWER_STA, 0, 1, MM_IRQ_PREPARE_TIMEOUT_US);
     if (e) goto out;
     if (!(mm_read(hwv, MM_POWER_EN) & MM_POWER_BIT)) {
         e = ESTALE; goto out;
@@ -129,11 +151,11 @@ static int mm_vote_drop(uint32_t client)
     if (vote_owned) {
         stage = 2;
         mm_write(MM_POWER_CLR, MM_POWER_BIT); /* Only the AP bit we added */
-        e = mm_wait(hwv, MM_POWER_EN, MM_POWER_BIT, 0, 1250, 2);
+        e = mm_irq_poll(MM_POWER_EN, 0, 2, MM_IRQ_VOTE_TIMEOUT_US);
         if (e) goto out;
         delay(100); /* _v1_hwccf_irq_voter_wait_done UNVOTE settling */
         stage = 3;
-        e = mm_wait(hwv, MM_POWER_STA, MM_POWER_BIT, 0, 10000, 1);
+        e = mm_irq_poll(MM_POWER_STA, 0, 1, MM_IRQ_DONE_TIMEOUT_US);
         if (e) goto out;
         /* Other XPUs may still need MM_2: do not require global/ACK OFF. */
     }

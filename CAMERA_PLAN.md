@@ -1,4 +1,4 @@
-# X9 后摄出图：交接计划（2026-11-17，接 log 356）
+# X9 后摄出图：交接计划（2026-11-18，接 log 356）
 
 ## 0. 现状（已证实）
 - 分支 `feat/camera-integration`，worktree `~/ios_plj110/.worktrees/camera-integration`，最新候选
@@ -17,7 +17,7 @@
   `(val & 0xffff) <= 0x1`判据仍是idle，bit31不参与该判定。源码对照确认native地址/顺序/预算与Android v1 IRQ voter一致，
   `done`不是该路径成功条件；失败后Android只assert+返回，CG47 retrigger回调对BACKUP资源直接bypass。r44只增加
   `all_sta/fsm/mt0sta/mt1sta`只读日志，不延长或绕过STA。尚无MM之后/RAW/handler证据。
-- **静态复查新增（不出镜像）**：按用户要求只做静态复查，未出探针镜像/未上机。已确认dummy read地址、BACKUP_GRP0 bank映射、FSM idle判据、VMM bit范围及CG retrigger资格均与native现状一致；唯一源码差异是IRQ voter的EN等待步长。现在`x9_mm_power.c`按Android `MTK_WAIT_GHWV_IRQ_VOTE_CNT/US`把EN vote/unvote改为`1250*2us`，prepoll/global/STA/ACK仍`10000*1us`；不改STA成功条件、不清W1C、不延长最终等待。单对象编译exit0。
+- **MM_2 轮询和启动路径复查**：OPPO `regmap.h:152` 的 `timeout_us` 是单调期限。EN 每 2 µs 采样，预算 1250 µs。pre-STA/final STA 每 1 µs 采样，预算 10000 µs。GET 先识别重复 EN，借用票仍需通过 global/STA。`int_raw=` 保留 `0x50` 的原始只读状态供解码，详见 `NOTES.md` §5。`init-clk-on` 在本机 `vcp-gipc` 配置只增加软件计数。GCE0 本地 mailbox 启用流程带 AO 和 MM_2 引用，356 尚无首次 Android MM_2 请求的对应记录。`x9_mm_power.o` 单对象编译 exit 0，无新镜像。
 - **静态复查收束（不出镜像）**：重复票语义已复核：`_v1_hwccf_irq_voter_nowait`的`goto skip`只跳过nowait内部prepoll/SET/EN，外层`_v1_hwccf_irq_voter_ctrl`仍调用`wait_done`继续等`all_en`/`STA`；`_v1_mm_hwccf_voter_ctrl`则是单函数skip。不能用“重复票跳过后续等待”放宽native判据。原ATF反汇编确认`28d48/28f08`分别以resource55/bit3做VOTE/UNVOTE，后者丢弃内部返回值并总返回0；这与日志356中AP vote仍置位一致，但不能推出额外补救、不能绕过最终STA。三套Android voter路径对`ap=8 global=8 sta=8`都会失败。仍不出镜像、不上机；下一步只查硬件STA bit3未清的源码级原因，不能跳RAW。
 - **ATF bit3判据闭合（静态）**：原ATF `21424(type1,resource0x37,bit3)`对AP使用MM HWV `0x31c00000`，VOTE/UNVOTE写`+0x30724/+0x30728`（即`CCF_XPU(0)+XPU_B0_SET/CLR`）。按物理地址逐指令复核`37f4→385c→3988`：SET前检查AP EN，SET后`385c`等AP EN和global EN；`3988`再以`0x2710×1us`等待`w19/w20`对应寄存器清零，而`37f4`传入的是`0x1135c/STA`与bit3，所以ATF VOTE路径最终仍要求STA bit3清零。此前“3988只等global EN/没有再轮询STA”的表述错误，以此纠正。`21564`的`0x31c3748=2`只在VM型资源`0x38/0x39`成功后写，MM BACKUP0 `0x37`不写。新增只读`int=CCF_INT_STATUS&BIT(5)`用于观察backup1 timeout，不写W1C、不出镜像。`sta=8`在native/Android/ATF下都必须失败。
 - **ATF调用条件与native差异（静态观察）**：`28d48`只在ATF自身引用计数0→1且`0x1325dc bit0`置位时投资源55 bit3；`28f08`只在计数归零且该bit仍置位时UNVOTE，并在`21424`返回后写`0x31c3748=2/1`、清该bit。native没有这套ATF私有引用计数/flag，首个camera parent直接按Android `mminfra2_onoff()`语义投AP bit3。由于当前日志没有ATF引用计数/flag状态，不能据此改变native流程；继续要求STA bit3 clear，不清W1C、不改bank。
@@ -26,7 +26,7 @@
 - **VMM CAM/IMG/IPE成对票不提前补**：`mtk_cam.c:6027/6111`和`mtk_imgsys-sys.c:2903/2904/2960/2961`在各自runtime PM resume/suspend里成对调用`vmm_enable/disable_cvfs()`，最终投BACKUP_GRP0 bit14/15/16；DPC bit0也是显示runtime路径。356在MM_2 `x9_mm_power_acquire()`即失败，尚未进入这些CAM/IMGSYS阶段，源码没有依据把它们前移到MM_2上电。
 - **下一次日志字段**：MM失败行新增只读`int=`（`CCF_INT_STATUS bit5`，但当前日志尚无该字段）和`irqhis=`（`0x124cc` IRQ vote history ring pointer），都不写W1C、不清history、不改STA判据。下一次实机只先看最早MM_2失败行及这些只读值，不先改电源流程；单对象编译exit0，未出镜像。
 - **后续阶段与FSM高位（静态）**：`fsm=80000001`的低16位满足`hwccf_api.c:325`的idle判据，DPC和原ATF对同一`0x31c10000`只掩`0xfffe`，bit31不参与，不能当BACKUP1失败。SMMU冷启动已按Android先CMDQEN+ACK再CFGI_ALL/TLBI/最后EVTQ/SMMU；CAMSV QoS已有DDR/COH/BW_QOS SW-mode SET/OR_CQ与真实写回采样，SW_R只观察；SENINF resume的core PM/clocks/vcore/PHY源选择/outmux disable在native各有对应阶段。没有发现可据源码补的缺口；MM_2未通过前这些都未生效，不能跳RAW。
-- **351–356主链重放与初始化排除（静态）**：351首错停在WL AP FIFO/EEPROM preload，352/353是校准apply逐字节或burst事务超时，354是18B消息越过FIFO形状而`errno=22`；355/356校准apply/mode和VCM init全通，唯一硬失败都是MM_2 `stage=4 sta=8 errno=60`。`hwccf_drv_probe()`只syscon→regmap、映射MMUP GPR和注册回调，不写HWCCF寄存器，`HWCCF_INIT_DONE_REG`无实际probe使用点；native映射`0x31c00000+0x22000`覆盖所有已用偏移，MMUP/ACK两个1KiB映射也覆盖dummy read和ACK。没有漏掉的Android HWCCF probe初始化或MMIO范围错误。`CCF_BACKUP1_VIP_STA_CLR`/`CCF_INT_STATUS`仅在头文件定义，v1 IRQ voter成功路径不读取/清除它们；不能据诊断位清W1C或宣称成功。`mtk_smi_mt6993_disp_resource_ctrl()`同样只调用`mtk_mminfra_on_off(MM_PWR_MM_2, MM_TYPE_SMI)`，larb/common resume不外加剧BACKUP1 bit3动作。最新只添加只读`en6=...`日志，用于观察`HWCCF_REG_EN6/block_voting`是否被冻结；不改投票/等待/STA判据，单对象编译exit0，未出镜像。`ack2=c2f10152`与`infra=e3fc0000`按DT mask检查都已满足，问题仍只在`STA bit3`。当前到画面的缺口仍是MM_2→MM/SMI/SMMU→CAMSV/SOF/DONE→RAW→handler→预览。
+- **351–356主链重放与初始化排除（静态）**：351首错停在WL AP FIFO/EEPROM preload，352/353是校准apply逐字节或burst事务超时，354是18B消息越过FIFO形状而`errno=22`；355/356校准apply/mode和VCM init全通，唯一硬失败都是MM_2 `stage=4 sta=8 errno=60`。`hwccf_drv_probe()`只syscon→regmap、映射MMUP GPR和注册回调，不写HWCCF寄存器，`HWCCF_INIT_DONE_REG`无实际probe使用点；native映射`0x31c00000+0x22000`覆盖所有已用偏移，MMUP/ACK两个1KiB映射也覆盖dummy read和ACK。没有漏掉的Android HWCCF probe初始化或MMIO范围错误。`CCF_BACKUP1_VIP_STA_CLR`/`CCF_INT_STATUS`仅在头文件定义，v1 IRQ voter成功路径不读取/清除它们；不能据诊断位清W1C或宣称成功。`mtk_smi_mt6993_disp_resource_ctrl()`同样只调用`mtk_mminfra_on_off(is_enable, MM_PWR_MM_2, MM_TYPE_SMI)`，larb/common resume不外加剧BACKUP1 bit3动作。最新只添加只读`en6=...`日志，用于观察`HWCCF_REG_EN6/block_voting`是否被冻结；不改投票/等待/STA判据，单对象编译exit0，未出镜像。`ack2=c2f10152`与`infra=e3fc0000`按DT mask检查都已满足，问题仍只在`STA bit3`。当前到画面的缺口仍是MM_2→MM/SMI/SMMU→CAMSV/SOF/DONE→RAW→handler→预览。
 - **传感器 ID 已通**（log 350）：后摄 hhmain `0x9186`（i2c4/0x1a），前摄 hhfront `0x0615`（i2c2/0x10），
   第一次就读到。根因是 WL28681C 的 pinctrl `reset_high` 组（GPIO203/187/202）里 GPIO187 从没拉高。
 - **此前阻塞（日志350；351尚未走到这里）**：打开 Camera.app 时 `NATIVE CONFIG sensor=1 stage=1 errno=5`，
@@ -101,7 +101,7 @@
 **原调查清单（MM_2 已实现，以下保留未完成观察项）**
 1. 确认相机要投哪几位：
    - 读 `hwccf_api.c` 的 `_v1_hwccf_irq_voter_nowait/_wait_done`（行 776、993），弄清写 SET 后 DONE/STA/EN 的握手。
-   - 查安卓谁对 MM_0/1/2/AO 投票：cmdq 用 MM_AO；看 VCP/vmm notifier（`$R/drivers/misc/mediatek/vmm/mtk-vmm-notifier-mt6993.c`）、
+   - 查安卓谁对 MM_0/1/2/AO 投票：GCE0 mailbox 使用 MM_AO 与 MM_2；看 VCP/vmm notifier（`$R/drivers/misc/mediatek/vmm/mtk-vmm-notifier-mt6993.c`）、
      SMI larb runtime PM、`mtk-cam` 的 pm_runtime 链。
    - 之前反汇编 ATF 的笔记写的是 PM 路径投 group0x37 bit3（MM_2）。
 2. 确认屏幕是否已经让 mminfra 一直开着：只读 MM HWV `+0x1135c/+0x11358`、`0x31b5009c..a8`。

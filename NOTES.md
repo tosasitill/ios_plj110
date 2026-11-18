@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-18 相机静态复查：MM_2 IRQ 轮询单位与 Android 启动调用者
+
+- Vendor `hwccf_api.c:776/993` 的 pre-STA、EN、final STA 调用 OPPO GKI `include/linux/regmap.h:152` 的 `regmap_read_poll_timeout_atomic()`。第五参数是 `ktime_add_us()` 的微秒期限，第四参数是 `udelay()` 的步长。纠正上轮 `1250×2 µs` 的解读：EN 为 **1250 µs 总预算，2 µs 间隔**，pre-STA/final STA 为 **10000 µs 总预算，1 µs 间隔**。`GLB_EN` 用独立显式计数循环。`x9_mm_power.c` 现在用单调期限和期限到达后的最后一次采样实现这三处 regmap 轮询。GET 在 dummy read 后先检查已投 EN，借用票仍进入 global/STA 检查。SET 前保留 fresh EN 检查，只有自己发出的 SET 才登记为自有票。
+- `clkchk-mt6993.c:5163` 的 `check_mm_hwv_irq_sta()` 读取 `0x50` 并用 `0x07fd07fd` 判定是否触发 dump。`X9 MM POWER GET/PUT` 同一份只读样本保留 `int=`（bit5）并新增 `int_raw=`，可区分 BACKUP1 timeout 的 VIP/AP bit5/21 和 vote-before-ready 的 VIP/AP bit9/25。一次失败后样本不能确定这些状态首次置位的时间。`irqhis=` 只有环指针，单独不能识别投票者。
+- live DT `mminfra-debug` 的 `mminfra-bkrs=0` 使 `mtk-mminfra-debug.c:1389` 读取 `vcp-gipc`。`:1584` 的 `init-clk-on` 在该配置只增加 `clk_ref_cnt` 并打印日志。GCE0 则配置 `gce-fast-mtcmos`、`ao-ctrl-by-mminfra` 和 `mminfra-all-on-pwr-idx=3`。Android `mtk-cmdq-mailbox-ext.c:764/795/3900` 的本地 mailbox 路径在相应首次引用时申请 AO 和 MM_2，并在末次释放。两者属于不同的引用。源码未给相机第一次 MM_2 acquire 增加常驻 AO 投票的依据，Android 当次实际首个 MM_2 调用者也未由日志确认。
+- 起点 `e388a373`。最终仅交叉编译 `x9_mm_power.o`，`compile_one=True`、exit 0、两条 XNU 导出头 warning。复现脚本、日志和 exit 文件在 `x9/out/camera-mm-irq-deadline-static-20261118/`。首次脚本因输出目录尚未创建而停在 Builder 初始化，保留为 `compile-setup.log`。本轮无 CI run、无新镜像或设备操作。
+- 已有运行证据仍以 `.local/x9/logs/356.txt:6086` 为准。该次 AP EN 与 GLB EN 均通过，final STA bit3 未清。时间单位修正影响轮询实现，尚无运行结果。MM 时钟、SMI/SMMU、CAMSV SOF/DONE、有效 RAW、iOS handler 和画面仍待实测。下次只在用户允许实测时，先检查最早 `X9 MM POWER GET` 的 `stage/sta/errno/int_raw`。
+
+
 #### 2026-11-17 相机静态复查：351–356 主链重放、MMIO/HWCCF 初始化排除（不出镜像）
 
 - **范围/边界**：用户要求“继续看351/352/353/354/355/356、完全按安卓流程、不出探针镜像”。本轮只读检查相机 worktree、351–356日志、`hwccf_api.c/hwccf.h`、`mtk-mminfra-util.c`、live DT和 native 电源/相机源码；没有上机、没有 boot/reboot/flash/ADB、没有运行测试脚本、没有构建 boot.img，也没有改电源/时钟/相机源码。
