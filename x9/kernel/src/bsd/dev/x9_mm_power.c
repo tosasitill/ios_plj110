@@ -47,6 +47,10 @@ static uint64_t next_token = 1;
 static vm_offset_t hwv, mmup, power_ack;
 static bool power_fault, vote_owned, vote_held;
 static uint32_t holders;
+struct mm_irq_timeout {
+    unsigned offset;
+    uint32_t value;
+};
 
 static uint32_t mm_read(vm_offset_t base, unsigned off)
 {
@@ -71,36 +75,43 @@ static int mm_wait(vm_offset_t base, unsigned off, uint32_t mask,
 /* Android regmap_read_poll_timeout_atomic uses an elapsed-time budget and
  * takes one final sample when the deadline has passed. */
 static int mm_irq_poll(unsigned off, uint32_t target, unsigned step_us,
-                       unsigned timeout_us)
+                       unsigned timeout_us, struct mm_irq_timeout *timeout)
 {
     uint64_t deadline;
     clock_interval_to_deadline(timeout_us, NSEC_PER_USEC, &deadline);
     for (;;) {
         if ((mm_read(hwv, off) & MM_POWER_BIT) == target) return 0;
         if (mach_absolute_time() > deadline) {
-            return (mm_read(hwv, off) & MM_POWER_BIT) == target ? 0 : ETIMEDOUT;
+            uint32_t value = mm_read(hwv, off);
+            if ((value & MM_POWER_BIT) == target) return 0;
+            *timeout = (struct mm_irq_timeout){ .offset = off, .value = value };
+            return ETIMEDOUT;
         }
         delay(step_us);
     }
 }
 /* v1 HWCCF wait_done delays after every global EN read, including the
  * sample that succeeds or exhausts the retry count. */
-static int mm_irq_wait_global(void)
+static int mm_irq_wait_global(struct mm_irq_timeout *timeout)
 {
-    for (unsigned retry = 0; retry <= MM_IRQ_GLOBAL_MAX_RETRIES; retry++) {
+    for (unsigned retry = 0;; retry++) {
         uint32_t global = mm_read(hwv, MM_POWER_GLOBAL);
         delay(1);
         if (global & MM_POWER_BIT) return 0;
+        if (retry == MM_IRQ_GLOBAL_MAX_RETRIES) {
+            *timeout = (struct mm_irq_timeout){ .offset = MM_POWER_GLOBAL, .value = global };
+            return ETIMEDOUT;
+        }
     }
-    return ETIMEDOUT;
 }
-static void mm_log(const char *op, uint32_t client, unsigned stage, int error)
+static void mm_log(const char *op, uint32_t client, unsigned stage, int error,
+                   struct mm_irq_timeout timeout)
 {
     uint32_t int_status = mm_read(hwv, MM_POWER_INT_STATUS);
     printf("X9 MM POWER %s: client=%u backend=hwccf MM_2 bit=3 stage=%u "
         "owned=%u held=%u ap=%x global=%x sta=%x done=%x ack2=%x "
         "infra=%x all_sta=%x fsm=%x mt0sta=%x mt1sta=%x en6=%x int=%x "
-        "int_raw=%x irqhis=%x errno=%d\n",
+        "int_raw=%x irqhis=%x errno=%d timeout_off=%x timeout_raw=%x\n",
         op, client, stage, vote_owned, vote_held,
         mm_read(hwv, MM_POWER_EN), mm_read(hwv, MM_POWER_GLOBAL),
         mm_read(hwv, MM_POWER_STA), mm_read(hwv, MM_POWER_DONE),
@@ -109,31 +120,32 @@ static void mm_log(const char *op, uint32_t client, unsigned stage, int error)
         mm_read(hwv, 0x1131c), mm_read(hwv, 0x11334),
         mm_read(hwv, MM_POWER_REG_EN6),
         int_status & MM_POWER_INT_BACKUP1_TIMEOUT, int_status,
-        mm_read(hwv, MM_POWER_VOTE_IRQ_HIS_POINTER), error);
+        mm_read(hwv, MM_POWER_VOTE_IRQ_HIS_POINTER), error, timeout.offset, timeout.value);
 }
 static int mm_vote_take(uint32_t client)
 {
+    struct mm_irq_timeout timeout = {0};
     unsigned stage = 1;
     int e;
     /* v1 nowait checks for a repeat after waking the voter bus.
      * Even a borrowed vote goes through the outer wait_done. */
     (void)mm_read(mmup, 0x1ec);
     if (!(mm_read(hwv, MM_POWER_EN) & MM_POWER_BIT)) {
-        e = mm_irq_poll(MM_POWER_STA, 0, 1, MM_IRQ_PREPARE_TIMEOUT_US);
+        e = mm_irq_poll(MM_POWER_STA, 0, 1, MM_IRQ_PREPARE_TIMEOUT_US, &timeout);
         if (e) goto out;
         if (!(mm_read(hwv, MM_POWER_EN) & MM_POWER_BIT)) {
             vote_owned = true; /* BEFORE the one potentially ambiguous SET */
             mm_write(MM_POWER_SET, MM_POWER_BIT);
             stage = 2;
-            e = mm_irq_poll(MM_POWER_EN, MM_POWER_BIT, 2, MM_IRQ_VOTE_TIMEOUT_US);
+            e = mm_irq_poll(MM_POWER_EN, MM_POWER_BIT, 2, MM_IRQ_VOTE_TIMEOUT_US, &timeout);
             if (e) goto out;
         }
     }
     stage = 3;
-    e = mm_irq_wait_global();
+    e = mm_irq_wait_global(&timeout);
     if (e) goto out;
     stage = 4;
-    e = mm_irq_poll(MM_POWER_STA, 0, 1, MM_IRQ_DONE_TIMEOUT_US);
+    e = mm_irq_poll(MM_POWER_STA, 0, 1, MM_IRQ_DONE_TIMEOUT_US, &timeout);
     if (e) goto out;
     /* Android samples the MM_2 ACK once after HWCCF completes.
      * Native additionally gates token admission on MM_2 and infra0/AO ACK. */
@@ -147,15 +159,16 @@ static int mm_vote_take(uint32_t client)
 out:
     /* A failed issued vote stays in the journal; do not compensate/replay. */
     if (e && vote_owned) power_fault = true;
-    mm_log("GET", client, stage, e);
+    mm_log("GET", client, stage, e, timeout);
     return e;
 }
 static int mm_vote_drop(uint32_t client)
 {
+    struct mm_irq_timeout timeout = {0};
     unsigned stage = 1;
     int e = 0;
     (void)mm_read(mmup, 0x1ec);
-    e = mm_irq_poll(MM_POWER_STA, 0, 1, MM_IRQ_PREPARE_TIMEOUT_US);
+    e = mm_irq_poll(MM_POWER_STA, 0, 1, MM_IRQ_PREPARE_TIMEOUT_US, &timeout);
     if (e) goto out;
     if (!(mm_read(hwv, MM_POWER_EN) & MM_POWER_BIT)) {
         e = ESTALE; goto out;
@@ -163,18 +176,18 @@ static int mm_vote_drop(uint32_t client)
     if (vote_owned) {
         stage = 2;
         mm_write(MM_POWER_CLR, MM_POWER_BIT); /* Only the AP bit we added */
-        e = mm_irq_poll(MM_POWER_EN, 0, 2, MM_IRQ_VOTE_TIMEOUT_US);
+        e = mm_irq_poll(MM_POWER_EN, 0, 2, MM_IRQ_VOTE_TIMEOUT_US, &timeout);
         if (e) goto out;
         delay(100); /* _v1_hwccf_irq_voter_wait_done UNVOTE settling */
         stage = 3;
-        e = mm_irq_poll(MM_POWER_STA, 0, 1, MM_IRQ_DONE_TIMEOUT_US);
+        e = mm_irq_poll(MM_POWER_STA, 0, 1, MM_IRQ_DONE_TIMEOUT_US, &timeout);
         if (e) goto out;
         /* Other XPUs may still need MM_2: do not require global/ACK OFF. */
     }
     vote_owned = vote_held = false;
 out:
     if (e) power_fault = true; /* An attempted drop is never retried */
-    mm_log("PUT", client, stage, e);
+    mm_log("PUT", client, stage, e, timeout);
     return e;
 }
 static bool mm_client(uint32_t client)

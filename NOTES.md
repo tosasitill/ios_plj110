@@ -160,6 +160,11 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-18 相机静态复查 · 记录 MM_2 超时的末次采样
+
+- OPPO GKI `regmap.h:152` 用期限到达后的最后一次 `val` 决定轮询返回值。native 之前只记录超时后重新读取的 `ap/global/sta`。`x9_mm_power.c` 现在将导致 IRQ 轮询超时的实际样本记为 `timeout_off/timeout_raw`。字段来自原有读操作，`timeout_off=0` 表示这次调用没有 IRQ 轮询超时样本。GET stage 4 超时时应同时核对 `timeout_off=1135c` 的 `timeout_raw` 和后续 `sta` 快照。若两者 bit3 不同，说明该位在作出超时判定后至诊断采样之间变化。
+- 起点 `88dd73c8`。仅交叉编译 `x9_mm_power.o`，`compile_one=True`、exit 0、两条既有 XNU 导出头 warning。复现脚本和日志在 `x9/out/camera-mm-timeout-sample-20261118/`。最近实机仍为 356，该版仅有事后 `sta=8` 快照。
+
 #### 2026-11-18 相机静态复查 · 首帧失败定位
 
 - ISP8s `mtk_cam-job.c:1456/1477` 先调用 `mtk_cam_sv_dev_stream_on()`，再调用 `ctx_stream_on_seninf_sensor()`。`mtk_cam-sv.c:2278` 对启用的 tag 逐一开流。native 入口 `start()` 先完成 `hw.capture(on)`，再写 sensor `0x0100=1`。`cam_irq_begin_locked()` 在现有路径上依次布置 DMA 和 CAMSV 请求，发布 IRQ，提交 FBC credit，再执行接收与源切换。
