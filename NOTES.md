@@ -166,6 +166,7 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - `x9_camera_resources.inc` 的 CSI GET/PUT 对齐这些期限、末次采样和 CLR settling 顺序。失败日志 `X9 CAMERA CSI POWER` 记录 `step`、`errno` 和导致超时的原始采样。`timeout_off=0` 表示没有原始 HWCCF 轮询超时采样。`PM_ACK` 按 native 原有供电守卫检查。CSI 使用通过 MM_2 校验的 token，SET/CLR 操作 XPU0 bank1 bit11。
 - 356 的 CSI 步骤尚未执行。`cam_mm_take()` 在 `cam_receive_power_take()` 的 MM_2 acquire 返回后停止。紧接的 VCM close 先通过退休接口检查，再经 `cam_sensor_ap_guard()` 调用 `cam_rx_sensor_guard_locked()`。`cam_mm_session_check()` 返回之前锁存的 MM_2 `errno=60`，使 release 在第一次读 VCM mode 的守卫处退出。356 的 `positions=1/1 modes=1/1` 与该路径一致，计数属于之前的 VCM init。
 - 起点 `bffc8e19`。`sweet_x9_camera.o` 单对象交叉编译 exit 0、`compile_one=True`、181 条 warning。脚本与日志在 `x9/out/camera-csi-mtcmos-deadlines-20261118/`。实机基线仍为 356 的 MM_2 stage 4。CSI 变更的实机结果待 MM_2 完成后取得。
+- `mtk_cam-seninf-drv.c:835/850/916` 通过本机 `hwccf-apply` 选择的 HWCCF PM 循环在启用 CAM/SENINF 寄存器时钟前处理 `clk_hw_ccf_csi_bs`，并打印时钟开关结果。native 启动失败现在即时打印 `X9 CAMERA RX OPEN`。MM 失败还会在关闭前打印已有 `X9 CAMERA MM` 与有效 `MM SLOT` 样本，`receive_stage=` 标出 MM_2、MM_INFRA、CSI 或 SMMU 快照步骤。日志读已有 journal。起点 `917f75f1` 的诊断变更再次通过 `sweet_x9_camera.o` 单对象交叉编译，exit 0、`compile_one=True`、181 条 warning，见 `x9/out/camera-rx-open-log-20261118/`。
 
 #### 2026-11-18 相机静态复查 · 记录 MM_2 超时的末次采样
 

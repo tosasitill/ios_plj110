@@ -484,10 +484,11 @@ static void cam_mm_log(unsigned sensor,const struct x9_camera_mm_status *r)
     const struct x9_camera_resources *receive=&cam_mm_live.receive;
     cam_mm_last=*r;
     printf("X9 CAMERA MM: sensor=%u flags=%x stage/slot=%u/%u errno=%u restore=%u "
-        "blockers=%x retained=%x CSI/MM=%u/%u smc=%x/%x cfg=%x/%x/%x "
+        "blockers=%x retained=%x CSI/MM=%u/%u smc=%x/%x cfg=%x/%x/%x receive_stage=%u "
         "(register clocks only, NOT capture ready)\n",sensor,r->flags,r->stage,r->slot,
         r->last_errno,r->restore_errno,r->blockers,r->retained,cam_mm.receive.csi_owned,
-        cam_mm.receive.smmu_owned,receive->smc_get,receive->smc_put,r->cfg[0],r->cfg[1],r->cfg[2]);
+        cam_mm.receive.smmu_owned,receive->smc_get,receive->smc_put,r->cfg[0],r->cfg[1],
+        r->cfg[2],receive->stage);
     for(unsigned n=0;n<X9_CAM_MM_SLOTS;n++)if(r->sample[n].flags) {
         const struct x9_camera_mm_sample *s=&r->sample[n];
         printf("X9 CAMERA MM SLOT: n=%u mask=%x flags=%x AP=%x/%x/%x global=%x/%x/%x "

@@ -327,7 +327,17 @@ static int cam_rx_sensor_prepare_locked(uint64_t epoch,struct x9_camera_receiver
     int e;
     if(!epoch || epoch!=cam_sensor_live.epoch)return ESTALE;
     e=cam_rx_session_open(cam_sensor_live.probe.sensor,epoch,r);
-    if(e && cam_rx_sensor_held_locked(epoch))cam_sensor_session_fault(e);
+    if(e) {
+        bool held=cam_rx_sensor_held_locked(epoch);
+
+        /* Close may stop at a dependent sensor guard. Report the captured
+         * bring-up stages before attempting to unwind the receiver. */
+        if(held && r->mm.last_errno)cam_mm_log(r->sensor,&r->mm);
+        printf("X9 CAMERA RX OPEN: sensor=%u epoch=%llu stage=%u mm_errno=%u "
+            "busy=%x changed=%x retained=%x errno=%d\n",
+            r->sensor,epoch,r->stage,r->mm.last_errno,r->busy,r->changed,r->mm.retained,e);
+        if(held)cam_sensor_session_fault(e);
+    }
     return e;
 }
 static int cam_rx_sensor_guard_locked(uint64_t epoch)
