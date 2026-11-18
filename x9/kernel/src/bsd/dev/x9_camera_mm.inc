@@ -19,6 +19,7 @@
  */
 _Static_assert(sizeof(struct x9_camera_mm_status)==576,"camera MM ABI");
 enum cam_mm_kind { CAM_MM_BACKUP, CAM_MM_DOMAIN, CAM_MM_AL, CAM_MM_MUX, CAM_MM_GATE };
+enum { CAM_MM_IRQ_EN_TIMEOUT_US=1250, CAM_MM_IRQ_GLOBAL_LAST_ITERATION=10000 };
 struct cam_mm_desc {
     enum cam_mm_kind kind;
     unsigned set, global, sta, effect, mask, effect_mask;
@@ -79,9 +80,61 @@ static void cam_mm_snapshot(struct cam_mm_journal *j,unsigned n,uint32_t v[3])
     v[0]=cam_rr(b,d->set+8);v[1]=cam_rr(b,d->global);
     v[2]=cam_rr(cam_mm_effect_base(j,n),d->effect);
 }
+
+static int cam_mm_poll_error(unsigned slot,const char *op,const char *step,
+    uint32_t mask,uint32_t target,struct cam_poll_timeout timeout)
+{
+    printf("X9 CAMERA MM VOTER: slot=%u op=%s step=%s errno=%d "
+        "timeout_off=%x timeout_raw=%x mask=%x target=%x\n",
+        slot,op,step,ETIMEDOUT,timeout.offset,timeout.value,mask,target);
+    return ETIMEDOUT;
+}
+
+static int cam_mm_poll(struct cam_mm_journal *j,unsigned slot,const char *op,
+    const char *step,unsigned offset,uint32_t mask,uint32_t target,
+    unsigned interval_us,unsigned timeout_us)
+{
+    struct cam_poll_timeout timeout={0};
+    int e=cam_poll_deadline(j->receive.hwv,offset,mask,target,interval_us,timeout_us,&timeout);
+    return e?cam_mm_poll_error(slot,op,step,mask,target,timeout):0;
+}
+
+static int cam_mm_poll_state(struct cam_mm_journal *j,unsigned slot,const char *op,
+    const char *step,unsigned offset,uint32_t mask,uint32_t target)
+{
+    return cam_mm_poll(j,slot,op,step,offset,mask,target,1,CAM_MM_VOTER_STATE_TIMEOUT_US);
+}
+
+static int cam_mm_poll_ap(struct cam_mm_journal *j,unsigned slot,bool on,uint32_t mask)
+{
+    const struct cam_mm_desc *d=&j->desc[slot];
+    bool irq=d->kind==CAM_MM_BACKUP;
+    return cam_mm_poll(j,slot,on?"set":"clr","ap-en",d->set+8,mask,on?mask:0,
+        irq?2:1,irq?CAM_MM_IRQ_EN_TIMEOUT_US:CAM_MM_RAW_EN_TIMEOUT_US);
+}
+
+static int cam_mm_poll_global(struct cam_mm_journal *j,unsigned slot,uint32_t mask)
+{
+    const struct cam_mm_desc *d=&j->desc[slot];
+    uint32_t value=0;
+
+    if(d->kind!=CAM_MM_BACKUP)
+        return cam_mm_poll_state(j,slot,"set","global-en",d->global,mask,mask);
+
+    /* v1 IRQ wait_done uses a fixed read -> delay -> test loop. */
+    for(unsigned i=0;i<=CAM_MM_IRQ_GLOBAL_LAST_ITERATION;i++) {
+        value=cam_rr(j->receive.hwv,d->global);
+        delay(1);
+        if((value&mask)==mask)return 0;
+    }
+    return cam_mm_poll_error(slot,"set","global-en",mask,mask,
+        (struct cam_poll_timeout){.offset=d->global,.value=value});
+}
+
 static int cam_mm_idle(struct cam_mm_journal *j,unsigned n,bool on)
 {
     const struct cam_mm_desc *d=&j->desc[n];
+    const char *op=on?"set":"clr";
     int e;
     /* receive_take proved AO/infra0; retain its MM_2 reference until done. */
     if(!j->receive.smmu_owned)return ENXIO;
@@ -91,15 +144,11 @@ static int cam_mm_idle(struct cam_mm_journal *j,unsigned n,bool on)
     if((cam_rr(j->receive.hwv,0x12900)&CAM_RES_MM_INFRA)!=CAM_RES_MM_INFRA ||
        (cam_rr(j->receive.hwv,0x1131c)&CAM_RES_MM_INFRA))return ENXIO;
     e=cam_mm_vote_idle(&j->receive);if(e)return e;
-    e=cam_wait_bits(j->receive.hwv,d->sta,d->mask,0,10000);if(e)return e;
+    e=cam_mm_poll_state(j,n,op,"pre-sta",d->sta,d->mask,0);if(e)return e;
     if(d->kind!=CAM_MM_BACKUP && (on || d->kind==CAM_MM_DOMAIN)) {
-        for(unsigned i=0;i<10000;i++) {
-            if((cam_rr(j->receive.hwv,CAM_RES_FSM)&0xffff)<=1)goto ready;
-            delay(1);
-        }
-        return ETIMEDOUT;
+        e=cam_mm_poll_state(j,n,op,"fsm-idle",CAM_RES_FSM,0xfffe,0);
+        if(e)return e;
     }
-ready:
     return cam_mm_fsm_stuck(&j->receive)?EBUSY:0;
 }
 static int cam_mm_cfg_check(struct cam_mm_journal *j,unsigned n)
@@ -201,9 +250,9 @@ static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera
             e=cam_sv_sibling_guard(j);if(e)return e;
             j->owned[n]=add;s->flags|=X9_CAM_MM_SLOT_OWNED;
             cam_rw(b,d->set,add); /* ambiguous SET is already journaled */
-            e=cam_wait_bits(b,d->set+8,d->mask,d->mask,200);
-            if(!e)e=cam_wait_bits(b,d->global,d->mask,d->mask,10000);
-            if(!e)e=cam_wait_bits(b,d->sta,d->mask,0,10000);
+            e=cam_mm_poll_ap(j,n,true,d->mask);
+            if(!e)e=cam_mm_poll_global(j,n,d->mask);
+            if(!e)e=cam_mm_poll_state(j,n,"set","final-sta",d->sta,d->mask,0);
             if(e)return e;
         }
         if(cam_mm_fsm_stuck(&j->receive))return EBUSY;
@@ -257,9 +306,11 @@ static int cam_mm_slot_restore(struct cam_mm_journal *j,unsigned n,struct x9_cam
             if(n==X9_CAM_MM_VMM && (e=cam_mm_vmm_can_drop(j,drop)))return e;
             e=cam_sv_sibling_guard(j);if(e)return e;
             cam_rw(b,d->set+4,drop);
-            e=cam_wait_bits(b,d->set+8,drop,0,200);
+            e=cam_mm_poll_ap(j,n,false,drop);
+            if(e)return e;
+            /* IRQ BACKUP and raw MTCMOS settle after AP EN clears. */
             if(d->kind==CAM_MM_BACKUP || d->kind==CAM_MM_DOMAIN)delay(100);
-            if(!e)e=cam_wait_bits(b,d->sta,d->mask,0,10000);
+            e=cam_mm_poll_state(j,n,"clr","final-sta",d->sta,d->mask,0);
             if(e)return e;
             /* Preserve journal until actual effect restoration is known.
              * No physical CG_SET: HWV must gate on the last aggregate vote.

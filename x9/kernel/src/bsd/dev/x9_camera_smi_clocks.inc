@@ -70,11 +70,23 @@ static int cam_smi_parent_guard(void)
      * not a throughput or continuous rate lease. */
     return 0;
 }
-static int cam_smi_slot_idle(unsigned n)
+static int cam_smi_voter_poll(unsigned slot,const char *step,unsigned offset,
+    uint32_t target,unsigned timeout_us)
+{
+    const struct cam_smi_gate *gate=&cam_smi.gate[slot];
+    struct cam_poll_timeout timeout={0};
+    int e=cam_poll_deadline(cam_mm.receive.hwv,offset,gate->mask,target,1,timeout_us,&timeout);
+
+    if(e)printf("X9 CAMERA SMI VOTER: slot=%u step=%s errno=%d "
+        "timeout_off=%x timeout_raw=%x mask=%x target=%x\n",
+        slot,step,e,timeout.offset,timeout.value,gate->mask,target);
+    return e;
+}
+static int cam_smi_slot_idle(unsigned n,const char *step)
 {
     const struct cam_smi_gate *g=&cam_smi.gate[n];
     int e=cam_smi_parent_guard();if(e)return e;
-    e=cam_wait_bits(cam_mm.receive.hwv,g->sta,g->mask,0,10000);
+    e=cam_smi_voter_poll(n,step,g->sta,0,CAM_MM_VOTER_STATE_TIMEOUT_US);
     return e?e:cam_smi_parent_guard();
 }
 static void cam_smi_sample(unsigned n,uint32_t v[3])
@@ -95,7 +107,7 @@ static int cam_smi_clock_only_guard(void)
     e=cam_smi_shared_voter_guard();if(e)return e;
     for(unsigned n=0;n<CAM_SMI_SLOTS;n++)if(cam_smi.seen&(1u<<n)) {
         const struct cam_smi_gate *g=&cam_smi.gate[n];uint32_t v[3];
-        e=cam_smi_slot_idle(n);if(e)return e;
+        e=cam_smi_slot_idle(n,"guard-sta");if(e)return e;
         cam_smi_sample(n,v);
         if(v[0]!=g->ap_expected && !(cam_smi.pending==CAM_SMI_SET&&cam_smi.pending_slot==n&&
             v[0]==g->ap_before))return ESTALE;
@@ -122,8 +134,8 @@ static int cam_smi_slot_take(unsigned n)
 {
     struct cam_smi_gate *g=&cam_smi.gate[n];uint32_t a[3],b[3];
     int e=cam_smi_clock_guard();if(e)return e;
-    e=cam_smi_slot_idle(n);if(e)return e;
-    cam_smi_sample(n,a);delay(10);e=cam_smi_slot_idle(n);if(e)return e;
+    e=cam_smi_slot_idle(n,"pre-sta");if(e)return e;
+    cam_smi_sample(n,a);delay(10);e=cam_smi_slot_idle(n,"pre-sta");if(e)return e;
     cam_smi_sample(n,b);if(memcmp(a,b,sizeof(a)))return ESTALE;
     /* No voted-but-gated repair, or unvoted direct-clock owner takeover. */
     if((a[0]&~a[1]) || (a[2]&a[1]) || ((~a[2]&~a[1])&g->mask))return EBUSY;
@@ -135,9 +147,10 @@ static int cam_smi_slot_take(unsigned n)
         cam_smi.pending_slot=n;cam_smi.pending=CAM_SMI_SET;
         g->ap_expected=g->mask; /* mark BEFORE the posted SET */
         cam_rw(cam_mm.receive.hwv,g->set,g->owned);
-        e=cam_wait_bits(cam_mm.receive.hwv,g->set+8,g->mask,g->mask,200);
-        if(!e)e=cam_smi_slot_idle(n);
-        if(!e)e=cam_wait_bits(cam_mm.receive.hwv,g->global,g->mask,g->mask,10000);
+        /* CG34/35 use the v1 raw MM voter: AP EN, global EN, then STA. */
+        e=cam_smi_voter_poll(n,"set-ap-en",g->set+8,g->mask,CAM_MM_RAW_EN_TIMEOUT_US);
+        if(!e)e=cam_smi_voter_poll(n,"global-en",g->global,g->mask,CAM_MM_VOTER_STATE_TIMEOUT_US);
+        if(!e)e=cam_smi_slot_idle(n,"set-final-sta");
         if(e)return e;
         cam_smi.pending=CAM_SMI_NONE;
         cam_smi_sample(n,b);if(b[2]&~g->cg_before)return ESTALE;
@@ -163,7 +176,7 @@ static int cam_smi_pending_retire(void)
     if(!cam_smi.pending)return 0;
     if(cam_smi.pending==CAM_SMI_CLR)return EBUSY; /* sole close already failed */
     g=&cam_smi.gate[cam_smi.pending_slot];
-    e=cam_smi_slot_idle(cam_smi.pending_slot);if(e)return e;
+    e=cam_smi_slot_idle(cam_smi.pending_slot,"retire-sta");if(e)return e;
     cam_smi_sample(cam_smi.pending_slot,v);
     if(v[0]!=g->ap_expected || v[1]!=g->mask)return EBUSY;
     if(cam_smi.pending==CAM_SMI_SET) {
@@ -223,8 +236,8 @@ static int cam_smi_clocks_close_locked(uint64_t epoch)
             cam_smi.pending_slot=n;cam_smi.pending=CAM_SMI_CLR;
             g->ap_expected=g->ap_before;
             cam_rw(cam_mm.receive.hwv,g->set+4,g->owned);
-            e=cam_wait_bits(cam_mm.receive.hwv,g->set+8,g->mask,g->ap_before,200);
-            if(!e)e=cam_smi_slot_idle(n);
+            e=cam_smi_voter_poll(n,"clr-ap-en",g->set+8,g->ap_before,CAM_MM_RAW_EN_TIMEOUT_US);
+            if(!e)e=cam_smi_slot_idle(n,"clr-final-sta");
             if(e)break;
             cam_smi_sample(n,v);
             if(g->cg_before&v[1]) {e=ESTALE;break;} /* a new owner keeps dependencies */

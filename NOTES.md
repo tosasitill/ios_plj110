@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-18 相机静态复查 · MM SMMU 电源分支与 MM/SMI 时钟投票
+
+- live DT `smi-dbg` 带 `hwccf-support`（`:12622`），因此 Android `mtk-smi-dbg.c:1534` 跳过 `mtk_smmu_set_pm_ops(MM_SMMU, …)`。`iommu@30800000` 选择 `mt6993_data_mm`（`mtk-smmu-v3.c:3187/3235`），该配置无 `SMMU_CLK_AO_EN`。源码的实际分支是 `mtk_smmu_power_get/put()` → `mtk_smmu_pm_get/put()` → secure PM。日志 350 的 native 旧 SMC 路径在 `:5173` 已报 `errno=5 smc=c2000514/0`。现有 Android 记录仍缺 MM_2 首笔 0→1 的调用者与完整投票序列。
+- `mtk-mminfra-util.c` 的 AO/infra0 和 `mtk-vmm-notifier-mt6993.c` 的 VMM buck/AP 位走 v1 IRQ BACKUP。`clk-mt6993-pd.c` 的 CAM VCORE/MAIN/MRAW、`clk-mt6993.c` 的 CAMTM/SENINF 和 `clk-mt6993-cam.c` 的 CAM/CAMSV gate 走 v1 raw MM voter。`mm_cam_sel` 用 `mtk_mux_generic_hwv_al_ops`，无 enable/disable 回调。`x9_camera_mm.inc` 分开使用 IRQ AP EN 期限 1250 µs（间隔 2 µs）和 raw AP EN 期限 200 µs（间隔 1 µs）。IRQ global EN 是 10001 次以内的先读、等待、判断循环，raw global EN、pre/final STA 与 raw FSM 使用 10000 µs 期限。IRQ BACKUP 和 raw MTCMOS CLR 在 AP EN 清除成功后等待 100 µs。`MM VOTER` 失败行记录 slot/op/step、末次采样、掩码和目标值。
+- live DT 的 CAM subcommon APB 与 larb14/19/29 SMI clocks 对应 CG35/34。`mtk-smi.c:693` 使用 `clk_prepare_enable()`，对应物理 gate 的 `mtk_clk_gate_generic_mm_hwv_ops`。`x9_camera_smi_clocks.inc` 的 SET 现按 raw voter 的 AP EN → global EN → final STA 顺序确认，再进入物理 gate 路径。CLR 在 AP EN 后确认 final STA。`SMI VOTER` 记录各等待阶段的末次采样。native 继续使用已有分组掩码、借票和依赖守卫。
+- 起点 `89a90e0a`。仅交叉编译 `sweet_x9_camera.o`，`compile_one=True`、exit 0、181 条 warning，产物与复现脚本在 `x9/out/camera-mm-slot-poll-20261118/`。本轮为静态复查，无镜像、CI run 或设备操作。实机仍以 356 `:6086` 为准，MM_2 final STA bit3 忙，`errno=60`。在这个前置条件通过后，依次核对 CSI、MM/SMI、SMMU、SOF/DONE、有效 RAW、iOS handler 和可见预览。
+
 #### 2026-11-18 相机静态复查 · CSI_BS_RX 投票期限
 
 - live DT `seninf-core` 的 `clk_hw_ccf_csi_bs` 指向 clock ID `0x58`。`clk-mt6993-pd.c:331` 将其连到 `csi_bs_rx` 的 MM MTCMOS bank1 bit11。`clk-gate.c:416/481/1011` 经 `v1_raw_hwccf_voter_ctrl()` 进入 `_v1_mm_hwccf_voter_ctrl()`。`hwccf_api.c:313` 使用 `regmap_read_poll_timeout_atomic()`，AP EN 的总期限为 200 µs，pre-STA、FSM、global EN 和 final STA 均为 10000 µs，各以 1 µs 为轮询间隔。CLR 等 AP EN 清除成功后才执行 100 µs settling，再查 STA。
