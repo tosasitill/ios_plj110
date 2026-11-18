@@ -17,6 +17,7 @@ enum { CAM_RES_CSI_BIT=1u<<11, CAM_RES_CSI_SET=0x2070c,
     CAM_RES_CSI_STA=0x11334, CAM_RES_CSI_DONE=0x11344,
     CAM_RES_CSI_ACK=0x12904, CAM_RES_CSI_ALL_STA=0x1370c,
     CAM_RES_FSM=0x10000, CAM_RES_MM_INFRA=(1u<<31)|(1u<<29) };
+enum { CAM_CSI_EN_TIMEOUT_US=200, CAM_CSI_STATE_TIMEOUT_US=10000 };
 struct cam_receive_power {
     vm_offset_t hwv, mmup, smmu;
     uint64_t power_token;
@@ -60,34 +61,112 @@ static bool cam_mm_fsm_stuck(struct cam_receive_power *p)
     return (cam_rr(p->hwv,0x1131c) && !cam_rr(p->hwv,0x13704)) ||
            (cam_rr(p->hwv,0x11334) && !cam_rr(p->hwv,0x1370c));
 }
+struct cam_csi_timeout {
+    unsigned offset;
+    uint32_t value;
+};
+
+/* The raw MM voter polls at 1 us intervals with an elapsed-time budget.
+ * Use the final read after the deadline for both status and diagnostics. */
+static int cam_csi_poll(struct cam_receive_power *p,unsigned offset,uint32_t mask,
+    uint32_t target,unsigned timeout_us,struct cam_csi_timeout *timeout)
+{
+    uint64_t deadline;
+
+    clock_interval_to_deadline(timeout_us,NSEC_PER_USEC,&deadline);
+    for (;;) {
+        if((cam_rr(p->hwv,offset)&mask)==target)return 0;
+        if(mach_absolute_time()>deadline) {
+            uint32_t value=cam_rr(p->hwv,offset);
+            if((value&mask)==target)return 0;
+            *timeout=(struct cam_csi_timeout){.offset=offset,.value=value};
+            return ETIMEDOUT;
+        }
+        delay(1);
+    }
+}
+
+static int cam_csi_prepare_vote(struct cam_receive_power *p,struct cam_csi_timeout *timeout)
+{
+    int e=x9_mm_power_validate(p->power_token,X9_MM_POWER_CAMERA);
+
+    if(e)return e;
+    (void)cam_rr(p->mmup,0x1ec);
+    e=cam_csi_poll(p,CAM_RES_CSI_STA,CAM_RES_CSI_BIT,0,CAM_CSI_STATE_TIMEOUT_US,timeout);
+    if(!e)e=cam_csi_poll(p,CAM_RES_FSM,0xfffe,0,CAM_CSI_STATE_TIMEOUT_US,timeout);
+    return e;
+}
+
+static int cam_csi_error(const char *op,const char *step,const struct cam_receive_power *p,
+    struct cam_csi_timeout timeout,int error)
+{
+    printf("X9 CAMERA CSI POWER %s: step=%s owned=%u borrowed=%u "
+        "errno=%d timeout_off=%x timeout_raw=%x\n",
+        op,step,p->csi_owned,p->csi_borrowed,error,timeout.offset,timeout.value);
+    return error;
+}
+
 static int cam_csi_power_take(struct cam_receive_power *p,struct x9_camera_resources *r)
 {
-    int e=cam_mm_vote_idle(p);if(e)return e;
-    uint32_t before[6];cam_csi_snapshot(p,before);
+    struct cam_csi_timeout timeout={0};
+    uint32_t before[6];
     uint32_t bit=CAM_RES_CSI_BIT;
+    const char *step="pre-vote";
+    int e=cam_csi_prepare_vote(p,&timeout);
+
+    if(e)goto fail;
+    step="ownership";
+    cam_csi_snapshot(p,before);
     for(unsigned i=0;i<6;i++) {
-        if(i!=3 && ((before[i]^r->csi_before[i])&bit))return EBUSY;
+        if(i!=3 && ((before[i]^r->csi_before[i])&bit)) {
+            e=EBUSY;
+            goto fail;
+        }
     }
-    if(cam_mm_fsm_stuck(p))return EBUSY;
+    if(cam_mm_fsm_stuck(p)) {
+        step="fsm-pre-vote";
+        e=EBUSY;
+        goto fail;
+    }
     if(before[0]&bit) {
-        if(!(before[1]&bit) || !(before[4]&bit))return EBUSY;
+        if(!(before[1]&bit) || !(before[4]&bit)) {
+            e=EBUSY;
+            goto fail;
+        }
         p->csi_borrowed=true;
     } else {
         /* Unvoted-but-powered is unknown direct/firmware ownership. Other
          * XPUs' voted power may be pinned by our own additional AP vote. */
-        if(!!(before[1]&bit)!=!!(before[4]&bit))return EBUSY;
+        if(!!(before[1]&bit)!=!!(before[4]&bit)) {
+            e=EBUSY;
+            goto fail;
+        }
         p->csi_owned=true; /* include an ambiguous SET in the restore journal */
         cam_rw(p->hwv,CAM_RES_CSI_SET,bit);
-        e=cam_wait_bits(p->hwv,CAM_RES_CSI_EN,bit,bit,200);
-        if(!e)e=cam_wait_bits(p->hwv,CAM_RES_CSI_GLOBAL,bit,bit,10000);
-        if(!e)e=cam_wait_bits(p->hwv,CAM_RES_CSI_STA,bit,0,10000);
-        if(!e)e=cam_wait_bits(p->hwv,CAM_RES_CSI_ACK,bit,bit,10000);
-        if(e)return e;
+        step="ap-en";
+        e=cam_csi_poll(p,CAM_RES_CSI_EN,bit,bit,CAM_CSI_EN_TIMEOUT_US,&timeout);
+        if(e)goto fail;
+        step="global-en";
+        e=cam_csi_poll(p,CAM_RES_CSI_GLOBAL,bit,bit,CAM_CSI_STATE_TIMEOUT_US,&timeout);
+        if(e)goto fail;
+        step="sta-idle";
+        e=cam_csi_poll(p,CAM_RES_CSI_STA,bit,0,CAM_CSI_STATE_TIMEOUT_US,&timeout);
+        if(e)goto fail;
+        step="supply-ack";
+        /* Native supply guard after the raw HWCCF vote has completed. */
+        e=cam_wait_bits(p->hwv,CAM_RES_CSI_ACK,bit,bit,10000);
+        if(e)goto fail;
     }
-    if(cam_mm_fsm_stuck(p))return EBUSY;
+    if(cam_mm_fsm_stuck(p)) {
+        step="fsm-post-vote";
+        e=EBUSY;
+        goto fail;
+    }
     r->flags|=X9_CAM_RES_CSI_POWER;
     r->blockers&=~X9_CAM_RES_NEED_CSI_POWER;
     return 0;
+fail:
+    return cam_csi_error("GET",step,p,timeout,e);
 }
 static void cam_smmu_snapshot(struct cam_receive_power *p,struct x9_camera_resources *r)
 {
@@ -149,19 +228,26 @@ static int cam_receive_power_restore(struct cam_receive_power *p,struct x9_camer
     /* Keep the MM_2 power reference through the final MMUP dummy read
      * and CSI unvote. On failure retain dependencies and the journal. */
     if(p->csi_owned || p->csi_borrowed) {
-        int e=cam_mm_vote_idle(p);if(e)return e;
-        if(cam_mm_fsm_stuck(p))return EBUSY;
+        struct cam_csi_timeout timeout={0};
+        uint32_t bit=CAM_RES_CSI_BIT;
+        int e=cam_csi_prepare_vote(p,&timeout);
+
+        if(e)return cam_csi_error("PUT","pre-vote",p,timeout,e);
+        if(cam_mm_fsm_stuck(p))return cam_csi_error("PUT","fsm-pre-vote",p,timeout,EBUSY);
         if(p->csi_owned) {
-            cam_rw(p->hwv,CAM_RES_CSI_SET+4,CAM_RES_CSI_BIT);
-            e=cam_wait_bits(p->hwv,CAM_RES_CSI_EN,CAM_RES_CSI_BIT,0,200);
-            delay(100); /* upstream v1 MM MTCMOS unvote settling interval */
-            if(!e)e=cam_wait_bits(p->hwv,CAM_RES_CSI_STA,CAM_RES_CSI_BIT,0,10000);
-            if(!e && !(cam_rr(p->hwv,CAM_RES_CSI_GLOBAL)&CAM_RES_CSI_BIT))
-                e=cam_wait_bits(p->hwv,CAM_RES_CSI_ACK,CAM_RES_CSI_BIT,0,10000);
-            if(e)return e;
+            cam_rw(p->hwv,CAM_RES_CSI_SET+4,bit);
+            e=cam_csi_poll(p,CAM_RES_CSI_EN,bit,0,CAM_CSI_EN_TIMEOUT_US,&timeout);
+            if(e)return cam_csi_error("PUT","ap-en",p,timeout,e);
+            delay(100); /* upstream v1 MM MTCMOS delay after EN clears */
+            e=cam_csi_poll(p,CAM_RES_CSI_STA,bit,0,CAM_CSI_STATE_TIMEOUT_US,&timeout);
+            if(e)return cam_csi_error("PUT","sta-idle",p,timeout,e);
+            if(!(cam_rr(p->hwv,CAM_RES_CSI_GLOBAL)&bit)) {
+                e=cam_wait_bits(p->hwv,CAM_RES_CSI_ACK,bit,0,10000);
+                if(e)return cam_csi_error("PUT","supply-ack",p,timeout,e);
+            }
             p->csi_owned=false;
-        } else if(!(cam_rr(p->hwv,CAM_RES_CSI_EN)&CAM_RES_CSI_BIT) ||
-                  !(cam_rr(p->hwv,CAM_RES_CSI_ACK)&CAM_RES_CSI_BIT))return ESTALE;
+        } else if(!(cam_rr(p->hwv,CAM_RES_CSI_EN)&bit) || !(cam_rr(p->hwv,CAM_RES_CSI_ACK)&bit))
+            return cam_csi_error("PUT","borrowed-vote",p,timeout,ESTALE);
         p->csi_borrowed=false;
     }
     if(p->smmu_owned) {

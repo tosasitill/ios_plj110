@@ -114,6 +114,7 @@
 4. 编镜像，日志看 `X9 CAMERA MM:` 的 stage 能否越过 RECEIVE(1)，进入 MAP(2) 和 TAKE(3)。
 
 ## 4. 阶段 B：MM 时钟 / SMI / larb（stage MAP→TAKE）
+- `clk_hw_ccf_csi_bs` 使用 MTCMOS bank1 bit11 的 raw HWCCF 回调。AP EN 总期限为 200 µs，pre-STA、FSM、global EN 和 final STA 各为 10000 µs，采样间隔均为 1 µs。撤票仅在 AP EN 清除后等 100 µs，再检查 STA。`X9 CAMERA CSI POWER` 记录阶段与导致超时的末次样本。
 - 对照安卓 `seninf-core` 的 clocks 列表（DT 19312 行）：
   - `clk_cam_seninf, clk_cam_cam, clk_cam_camtg, clk_top_seninf..5, clk_top_camtm, clk_top_ap_step0..3, clk_hw_ccf_csi_bs, mmdvfs_mux`；
   - 以及 camsv 节点的 larb/CG 时钟（`cam_main_larb19/14/29_con, camsv_top_con, seninf_camtm_con, camsv_a_con`）。

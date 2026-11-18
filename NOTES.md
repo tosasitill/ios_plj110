@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-18 相机静态复查 · CSI_BS_RX 投票期限
+
+- live DT `seninf-core` 的 `clk_hw_ccf_csi_bs` 指向 clock ID `0x58`。`clk-mt6993-pd.c:331` 将其连到 `csi_bs_rx` 的 MM MTCMOS bank1 bit11。`clk-gate.c:416/481/1011` 经 `v1_raw_hwccf_voter_ctrl()` 进入 `_v1_mm_hwccf_voter_ctrl()`。`hwccf_api.c:313` 使用 `regmap_read_poll_timeout_atomic()`，AP EN 的总期限为 200 µs，pre-STA、FSM、global EN 和 final STA 均为 10000 µs，各以 1 µs 为轮询间隔。CLR 等 AP EN 清除成功后才执行 100 µs settling，再查 STA。
+- `x9_camera_resources.inc` 的 CSI GET/PUT 对齐这些期限、末次采样和 CLR settling 顺序。失败日志 `X9 CAMERA CSI POWER` 记录 `step`、`errno` 和导致超时的原始采样。`timeout_off=0` 表示没有原始 HWCCF 轮询超时采样。`PM_ACK` 按 native 原有供电守卫检查。CSI 使用通过 MM_2 校验的 token，SET/CLR 操作 XPU0 bank1 bit11。
+- 356 的 CSI 步骤尚未执行。`cam_mm_take()` 在 `cam_receive_power_take()` 的 MM_2 acquire 返回后停止。紧接的 VCM close 先通过退休接口检查，再经 `cam_sensor_ap_guard()` 调用 `cam_rx_sensor_guard_locked()`。`cam_mm_session_check()` 返回之前锁存的 MM_2 `errno=60`，使 release 在第一次读 VCM mode 的守卫处退出。356 的 `positions=1/1 modes=1/1` 与该路径一致，计数属于之前的 VCM init。
+- 起点 `bffc8e19`。`sweet_x9_camera.o` 单对象交叉编译 exit 0、`compile_one=True`、181 条 warning。脚本与日志在 `x9/out/camera-csi-mtcmos-deadlines-20261118/`。实机基线仍为 356 的 MM_2 stage 4。CSI 变更的实机结果待 MM_2 完成后取得。
+
 #### 2026-11-18 相机静态复查 · 记录 MM_2 超时的末次采样
 
 - OPPO GKI `regmap.h:152` 用期限到达后的最后一次 `val` 决定轮询返回值。native 之前只记录超时后重新读取的 `ap/global/sta`。`x9_mm_power.c` 现在将导致 IRQ 轮询超时的实际样本记为 `timeout_off/timeout_raw`。字段来自原有读操作，`timeout_off=0` 表示这次调用没有 IRQ 轮询超时样本。GET stage 4 超时时应同时核对 `timeout_off=1135c` 的 `timeout_raw` 和后续 `sta` 快照。若两者 bit3 不同，说明该位在作出超时判定后至诊断采样之间变化。

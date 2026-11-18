@@ -116,7 +116,7 @@ RAW v2 中的真实 SOF 观察值。RAW `time` 仍为 DONE，保留独立 SOF/DO
 | sensor-probe | MT6993 CAMTG voter/parent 申请与释放、AP I2C 父时钟及单控制器门控/FIFO/WRRD；WL28681C 指定通道电压/启停；reset/MCLK pinmux；真实 ID 检查与恢复日志。闲置 AP timing 初始化、禁用共享 rail 的申请/还原、GPIO203 局部唤醒。**I2C 父时钟可有条件从 off 开启；HWCCF autolink/所选 PLL 仍需已就绪，未上机验证** |
 | sensor-standby | 同一冷启动 journal 内，ID 匹配后经真实 AP I2C 写 init/preview 与镜像；前摄先做固定 fab 读端口识别，仅 B4/01 分支追加两项 init patch；读回稳定控制，然后 reset/恢复。mode3 显式命令；与未来 mode2 共用表验证/加载/读回。**不 stream-on、不做 QSC/LRC 标定；未上机** |
 | SENINF/CAMSV 计划 | 零 MMIO 查询实际 CSI 端口、主摄 VC1／前摄 VC0 RAW10、候选 outmux/CAMSV、尺寸/64B stride/WDMA 打包及 SID；**不是资源申请或采集** |
-| 接收电源接口 | TF-A MM-SMMU `PM_GET/PM_PUT`、CSI_BS_RX MM HWCCF 单 bit 申请/恢复；带供电前置检查的 SMMUv3 只读快照。**代码已构建，未上机；不是完整 MM power/clock provider 或 DMA mapping** |
+| 接收电源接口 | MM_2 HWCCF 电源引用、CSI_BS_RX 单 bit 申请和释放，以及通过供电检查后的 SMMUv3 只读快照。实机日志 356 到达 MM_2 的最终 STA 检查。 |
 | MM 寄存器时钟事务 | 显式 AO/infra0/VMM BACKUP 引用、CAM_VCORE/MAIN/MRAW 域、CAM autolink FENC、CAMTM/SENINF voter、CAM/CAMSV 寄存器 CG 申请/逆序恢复。**未上机；不改共享 AVS/CVFS/PLL，不申请 SMI larb，不证明采集速率** |
 | 接收寄存器预检 | 持有完整 MM 寄存器时钟链时，读取目标 MAC、async/AFIFO、outmux0 outer/inner、CAMSV0 central/DMA/CQ 控制，双采样验证稳定及使能位关闭。**只读，不提交配置，不证明 ownership 或 DMA 排空** |
 | 持久 sensor/receiver 生命周期 | kernel-private 冷会话可在 verified standby 后持有同一 MM 时钟与 CSI/secure 电源 journal；后续请求及撤销前检查完整已消费依赖与原始接收控制，先隔离 sensor reset/MCLK，再退休 MM，最后还原 sensor 供电。**无 native capture caller，不 stream-on；不是 DMA lease/drain** |
@@ -777,18 +777,19 @@ cameractl status       # 读取缓存的资源快照，不再访问 MMIO
 
 具体顺序和成功边界：
 
-1. 只映射虚拟 MMIO 窗口，尚不读未供电的 MM-SMMU/CSI 寄存器。
-2. 调用 `0xc2000514`，`a1=0x803`（MM_SMMU/secure/PM_GET）。只有返回 0 才记录自己的引用；失败不调用 PM_PUT。
-3. 验证 HWCCF 的 MM_INFRA_AO/infra0 `PM_ACK`（bank0 bits31/29）且对应 `STA=0`，之后才读 MMUP 的 GPR11 dummy register。
-   前置不足返回 `ENXIO` 并平衡 secure 引用，不擅自触发 VMM backup IRQ 或初始化其固件处理链。
+1. 映射虚拟 MMIO 窗口，采集 HWCCF 的 CSI 投票基线。MM-SMMU 快照安排在供电校验通过后。
+2. 使用 `x9_mm_power_acquire()` 取得 MM_2 的 HWCCF 引用。若本次 SET 已发布但等待失败，保留带错误的 token。
+3. 验证 HWCCF 的 MM_INFRA_AO/infra0 `PM_ACK`（bank0 bits31/29）且对应 `STA=0`，之后才为 CSI voter 读 MMUP 的 GPR11 dummy register。
 4. CSI_BS_RX 使用 **MM HWCCF bank1 bit11**：XPU0 SET/CLR/EN 为 `+0x2070c/+0x20710/+0x20714`。
    按 `STA=0 → FSM idle → SET → AP EN → global EN → STA=0 → PM_ACK=1` 申请新增 vote。
+   AP EN 总期限为 200 µs，pre-STA、FSM、global EN 和 final STA 各为 10000 µs，轮询间隔为 1 µs。
+   `X9 CAMERA CSI POWER` 记录失败阶段，以及 HWCCF 超时对应的 `timeout_off/timeout_raw`。
    `DONE` 只作证据，**不能套 AP CAMTG 的 DONE 判据**。已继承 AP vote 仅借用；未知未投票但上电状态拒绝接管。
-5. 在 secure 引用内读取 MM-SMMUv3 的 IDR0/1/3/5、CR0/ACK、CR1/2、GBPA、STRTAB、CMDQ、EVTQ 和 GERROR/N。
+5. 在 MM_2 引用内读取 MM-SMMUv3 的 IDR0/1/3/5、CR0/ACK、CR1/2、GBPA、STRTAB、CMDQ、EVTQ 和 GERROR/N。
    EVTQ prod/cons 位于架构 page1 `+0x100a8/+0x100ac`；不读保留的 IDR2/4，不解引用继承的表地址。
    配置需两次快照一致；支持 stage1、SID80、SSID、16KiB granule 仅是未来映射的必要条件。
-6. 先撤自己的 CSI vote（CLR → AP EN=0 → 100µs → STA=0；最后全局 vote 消失时再等 PM_ACK=0），继承 vote 不撤。
-   最后 `a1=0x804` PM_PUT 平衡 secure 引用。撤票失败保留 secure 依赖；PUT 失败保留未释放引用，均锁存、不重试。
+6. 自有 CSI vote 按 CLR → AP EN=0 → 100 µs → STA=0 收尾。若全局 CSI vote 已消失，再等 PM_ACK=0。
+   借用票只复核状态。最后由 `x9_mm_power_release()` 释放 MM_2 引用，失败时锁存并保存尚未退休的票与供电依赖。
 
 `RESTORED` 只表示本次新增资源已释放/借用关系已验证，不表示其他 XPU 的 CSI/整个 MM 电源必须为 off。
 `CSI_POWER/SMMU_POWER/SMMU_SNAPSHOT` 是这次操作的历史观察，不是请求返回后仍然持有的资源。
