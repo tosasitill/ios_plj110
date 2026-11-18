@@ -160,6 +160,11 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-18 相机静态复查 · 预览配置首个失败调用
+
+- ISP8s `mtk_cam-sv.c:4509` 把 SMI larb、时钟和 `sv_reset_by_camsys_top()` 放在 CAMSV runtime resume 的不同调用。native `NATIVE CONFIG stage=2` 同时覆盖 `cam_smi_clocks_open_locked()`、sensor standby 和 `cam_sv_cold_reset_locked()`。`NATIVE CONFIG` 现在记录 `step=`，可区分同阶段内的失败调用，也记录配置入口的 standby、重复尝试和残留会话拒绝。末尾分别报告 receiver、SMI、rate 守卫或 `step=configured`。
+- 起点 `57e4454a`。静态比对确认配置函数的 31 个原有 `cam_*` 调用的源码顺序一致。`sweet_x9_camera.o` 单对象交叉编译 `compile_one=True`、exit 0、181 条 warning。路径 `x9/out/camera-native-config-step-20261118/`。当前交付范围为静态复查和单对象编译。356 的 MM_2 final STA 超时仍是首个实机阻塞。
+
 #### 2026-11-18 相机静态复查 · MM_2 acquire 失败后的 VCM 收尾
 
 - 356 `:6086–6090` 先报 MM_2 final STA 超时，后报 `VCM RELEASE ... positions=1/1 modes=1/1 closed=0 errno=60`。计数来自 VCM init。收尾的第一次模式读经 `cam_sensor_ap_guard()` 命中已经锁存的 MM_2 错误。板级 `camera_af_main@0c` 使用独立的 I²C client 和 `vin-supply`。Android `ak7316m_24085.c:123/206/316` 在镜头 close 先归位并写 `0x02=0x20`，随后归还该驱动的供电引用。

@@ -195,6 +195,16 @@ static int cam_native_source_rate_locked(uint64_t epoch)
     return e;
 }
 
+static int cam_native_source_config_log(const struct x9_camera_native_source_status *s,
+    const char *step,int error)
+{
+    printf("X9 CAMERA NATIVE CONFIG: sensor=%u epoch=%llu stage=%u completed=%x "
+        "parent=%x counts=%u/%u CSI=%llu required_vcore=%u errno=%d step=%s\n",
+        s->sensor,s->sensor_epoch,s->stage,s->completed,s->csi_parent,s->clock_count[0],
+        s->clock_count[1],s->csi_clock_hz,s->required_vcore_uv,error,step);
+    return error;
+}
+
 static int cam_native_source_prepare_locked(uint64_t epoch,
     struct x9_camera_native_source_status *result)
 {
@@ -203,53 +213,134 @@ static int cam_native_source_prepare_locked(uint64_t epoch,
     struct x9_camera_phy_status phy={0};
     struct x9_camera_outmux_status outmux={0};
     struct x9_camera_native_source_status *s=&cam_native_source.status;
+    const char *step;
     int e;
     if(!result)return EINVAL;
     memset(result,0,sizeof(*result));result->sensor_epoch=epoch;
     e=cam_native_source_standby_locked(epoch);
-    if(e){result->last_errno=e;return e;}
+    if(e) {
+        result->last_errno=e;
+        return cam_native_source_config_log(result,"entry-standby",e);
+    }
     if(cam_native_source.attempted && s->sensor_epoch==epoch) {
-        *result=*s;return s->last_errno?s->last_errno:EALREADY;
+        *result=*s;
+        return cam_native_source_config_log(result,"already-attempted",
+            s->last_errno?s->last_errno:EALREADY);
     }
     /* A genuinely retired old epoch may be replaced, never an active or
      * partly configured receiver/SMI/PHY/OUTMUX from another lifetime. */
     if(cam_rx_live.epoch || cam_smi.held || cam_mac.held || cam_phy.held || cam_out.held) {
-        result->last_errno=EBUSY;return EBUSY;
+        result->last_errno=EBUSY;
+        return cam_native_source_config_log(result,"lifetime-busy",EBUSY);
     }
     memset(s,0,sizeof(*s));cam_native_source.rate_valid=false;
     s->sensor_epoch=epoch;s->sensor=cam_sensor_live.probe.sensor;
     s->inherited_step=UINT32_MAX;cam_native_source.attempted=true;
     s->stage=X9_CAM_NATIVE_SOURCE_RECEIVER;
+    step="clock-request";
     e=cam_native_clock_request_locked(epoch,s->sensor);
-    if(!e)e=cam_rx_sensor_prepare_locked(epoch,&receiver);
+    if(!e) {
+        step="receiver-open";
+        e=cam_rx_sensor_prepare_locked(epoch,&receiver);
+    }
     cam_native_clock_cancel_unused_locked();
-    if(!e)e=cam_native_source_standby_locked(epoch);
-    if(!e){s->completed|=1u<<s->stage;s->stage=X9_CAM_NATIVE_SOURCE_SMI;
-        e=cam_smi_clocks_open_locked(epoch,s->sensor);}
-    if(!e)e=cam_native_source_standby_locked(epoch);
-    if(!e)e=cam_sv_cold_reset_locked(epoch);
-    if(!e){s->completed|=1u<<s->stage;s->stage=X9_CAM_NATIVE_SOURCE_MAC;
-        e=cam_mac_open_locked(epoch,&mac);}
-    if(!e)e=cam_native_source_standby_locked(epoch);
-    if(!e){s->completed|=1u<<s->stage;s->stage=X9_CAM_NATIVE_SOURCE_ANALOG;
-        phy.sensor_epoch=epoch;phy.sensor=s->sensor;e=cam_phy_open_locked(epoch,&phy);}
-    if(!e)e=cam_native_source_standby_locked(epoch);
-    if(!e){s->completed|=1u<<s->stage;s->stage=X9_CAM_NATIVE_SOURCE_TIMING;
-        e=cam_phy_timing_locked(epoch);}
-    if(!e)e=cam_native_source_standby_locked(epoch);
-    if(!e){s->completed|=1u<<s->stage;s->stage=X9_CAM_NATIVE_SOURCE_RATE;
-        e=cam_native_source_rate_locked(epoch);}
-    if(!e)e=cam_native_source_standby_locked(epoch);
-    if(!e){s->completed|=1u<<s->stage;s->stage=X9_CAM_NATIVE_SOURCE_CTLE;
-        e=cam_phy_ctle_locked(epoch);}
-    if(!e)e=cam_native_source_standby_locked(epoch);
-    if(!e){s->completed|=1u<<s->stage;s->stage=X9_CAM_NATIVE_SOURCE_OUTMUX;
-        e=cam_out_open_locked(epoch,&outmux);}
-    if(!e)e=cam_native_source_standby_locked(epoch);
-    if(!e)e=cam_rx_sensor_guard_locked(epoch);
-    if(!e)e=cam_smi_clock_guard();
-    if(!e)e=cam_native_source_rate_guard_locked(epoch);
-    if(!e){s->completed|=1u<<s->stage;s->stage=X9_CAM_NATIVE_SOURCE_CONFIGURED;}
+    if(!e) {
+        step="standby";
+        e=cam_native_source_standby_locked(epoch);
+    }
+    if(!e) {
+        s->completed|=1u<<s->stage;
+        s->stage=X9_CAM_NATIVE_SOURCE_SMI;
+        step="smi-clocks-open";
+        e=cam_smi_clocks_open_locked(epoch,s->sensor);
+    }
+    if(!e) {
+        step="standby";
+        e=cam_native_source_standby_locked(epoch);
+    }
+    if(!e) {
+        step="camsv-cold-reset";
+        e=cam_sv_cold_reset_locked(epoch);
+    }
+    if(!e) {
+        s->completed|=1u<<s->stage;
+        s->stage=X9_CAM_NATIVE_SOURCE_MAC;
+        step="mac-open";
+        e=cam_mac_open_locked(epoch,&mac);
+    }
+    if(!e) {
+        step="standby";
+        e=cam_native_source_standby_locked(epoch);
+    }
+    if(!e) {
+        s->completed|=1u<<s->stage;
+        s->stage=X9_CAM_NATIVE_SOURCE_ANALOG;
+        step="phy-open";
+        phy.sensor_epoch=epoch;
+        phy.sensor=s->sensor;
+        e=cam_phy_open_locked(epoch,&phy);
+    }
+    if(!e) {
+        step="standby";
+        e=cam_native_source_standby_locked(epoch);
+    }
+    if(!e) {
+        s->completed|=1u<<s->stage;
+        s->stage=X9_CAM_NATIVE_SOURCE_TIMING;
+        step="phy-timing";
+        e=cam_phy_timing_locked(epoch);
+    }
+    if(!e) {
+        step="standby";
+        e=cam_native_source_standby_locked(epoch);
+    }
+    if(!e) {
+        s->completed|=1u<<s->stage;
+        s->stage=X9_CAM_NATIVE_SOURCE_RATE;
+        step="source-rate";
+        e=cam_native_source_rate_locked(epoch);
+    }
+    if(!e) {
+        step="standby";
+        e=cam_native_source_standby_locked(epoch);
+    }
+    if(!e) {
+        s->completed|=1u<<s->stage;
+        s->stage=X9_CAM_NATIVE_SOURCE_CTLE;
+        step="phy-ctle";
+        e=cam_phy_ctle_locked(epoch);
+    }
+    if(!e) {
+        step="standby";
+        e=cam_native_source_standby_locked(epoch);
+    }
+    if(!e) {
+        s->completed|=1u<<s->stage;
+        s->stage=X9_CAM_NATIVE_SOURCE_OUTMUX;
+        step="outmux-open";
+        e=cam_out_open_locked(epoch,&outmux);
+    }
+    if(!e) {
+        step="standby";
+        e=cam_native_source_standby_locked(epoch);
+    }
+    if(!e) {
+        step="receiver-guard";
+        e=cam_rx_sensor_guard_locked(epoch);
+    }
+    if(!e) {
+        step="smi-guard";
+        e=cam_smi_clock_guard();
+    }
+    if(!e) {
+        step="rate-guard";
+        e=cam_native_source_rate_guard_locked(epoch);
+    }
+    if(!e) {
+        s->completed|=1u<<s->stage;
+        s->stage=X9_CAM_NATIVE_SOURCE_CONFIGURED;
+        step="configured";
+    }
     else {
         cam_native_source.rate_valid=false;
         /* Preserve the original journals for the sole native power-off.
@@ -262,9 +353,5 @@ static int cam_native_source_prepare_locked(uint64_t epoch,
         cam_sensor_session_fault(e);
     }
     s->last_errno=e;cam_native_source_snapshot_locked();*result=*s;
-    printf("X9 CAMERA NATIVE CONFIG: sensor=%u epoch=%llu stage=%u completed=%x "
-        "parent=%x counts=%u/%u CSI=%llu required_vcore=%u errno=%d (inactive; no DMA grant)\n",
-        s->sensor,s->sensor_epoch,s->stage,s->completed,s->csi_parent,s->clock_count[0],
-        s->clock_count[1],s->csi_clock_hz,s->required_vcore_uv,e);
-    return e;
+    return cam_native_source_config_log(s,step,e);
 }
