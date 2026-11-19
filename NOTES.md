@@ -160,6 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-19 实机日志 357：MM_2 阻塞复现
+
+- 用户测试 `x9-camera-wrapper-irq-20261119/boot.img` 后提供 `~/357.txt`；boot-args 包含 `x9_camera=2`。主/前摄 ID 分别为 `9186/0615`，native register errno=0；主摄本次读取 EEPROM 3456/3456、apply 250/250，mode 1/1，VCM 初始化 errno=0。这些只证明相应命令/读取，并非画面或光学校准正确。
+- **首次阻塞**：19.626s `MM POWER GET` MM_2 bit3 stage4，`ap=8 global=8 sta=8 done=fffffff7 ack2=c2f10152 infra=e3fc0000 all_sta=0 fsm=80000001 errno=60 timeout_off=1135c timeout_raw=8`；与 356 的主要状态一致。IRQ history pointer d，slot12 为 `addr=21420724 data=00000008`，仅为记录值，尚不能证明原因。receiver-open 返回60，未到 capture；清理 `dependency guard errno=5`，保留依赖与首错。没有本次 SMMU combined IRQ、CAMSV SOF/DONE、RAW 或预览成功证据。
+- 构建成功与启动了相机配置已确认；下一步应以 Android MM_2 HWCCF 的完成条件和真实硬件状态为依据查 stage4 阻塞，避免把下游代码编译成功当成设备通过。日志原件在 `~/357.txt`，不提交。
+
 #### 2026-11-19 相机 wrapper IRQ 测试镜像
 
 - 用户要求编译供测试；基于 `57111b64` 执行 `python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --name x9-camera-wrapper-irq-20261119`，exit 0，Candidate 为 `x9/out/x9-camera-wrapper-irq-20261119/boot.img`；设备参数含 `x9_camera=2`。本次未使用 CI，无 run ID。
