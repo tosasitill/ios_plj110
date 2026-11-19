@@ -2,7 +2,9 @@
  * FDT. No SMMU/controller access, table walk, SMC or IRQ operation. */
 #include "camera_fdt.h"
 #include "../kernel/src/bsd/dev/x9_camera_smmu_policy.h"
+#include "../kernel/src/bsd/dev/x9_camera_smmu_irq_layout.h"
 _Static_assert(sizeof(struct x9_camera_smmu_policy)==X9_CAM_SMMU_POLICY_BYTES,"camera SMMU policy");
+_Static_assert(sizeof(struct x9_camera_smmu_irq_layout)==X9_CAM_SMMU_IRQ_LAYOUT_BYTES,"camera SMMU IRQ layout");
 static uint32_t be(const uint8_t *p)
 {return (uint32_t)p[0]<<24|(uint32_t)p[1]<<16|(uint32_t)p[2]<<8|p[3];}
 static int eq(const uint8_t *p,size_t n,const char *s)
@@ -50,4 +52,35 @@ int camera_smmu_qualify(struct camera_fdt *a,struct x9_camera_smmu_policy *q)
     for(unsigned i=0;i<sizeof(absent)/sizeof(absent[0]);i++)
         if(fdt_collect_get(&a->c,CN_SMMU_CAM,absent[i],&p,&n)!=FDT_PROPERTY_ABSENT)return 0;
     return x9_camera_smmu_policy_valid(q) && camera_fdt_need(a,ph,CN_SMMU,CF_SMMU);
+}
+
+/* Match the actual combined interrupt and inherited GIC parent. In particular,
+ * the live MM SMMU is edge rising, unlike the CAMSV level interrupts. */
+int camera_smmu_irq_qualify(struct camera_fdt *a,struct x9_camera_smmu_irq_layout *q)
+{
+    const uint8_t *p;size_t n;uint32_t ph;
+    const unsigned nodes[]={CN_ROOT,CN_SOC,CN_SMMU};
+    if(!q || !(a->c.present&(1u<<CN_GIC)) || !enabled(a,CN_GIC) ||
+       !get(a,CN_GIC,"compatible",&p,&n) || !eq(p,n,"arm,gic-v3") ||
+       !word(a,CN_GIC,"#interrupt-cells",4) ||
+       !get(a,CN_GIC,"interrupt-controller",&p,&n) || n ||
+       !get(a,CN_GIC,"phandle",&p,&n) || n!=4 || !(ph=be(p)))return 0;
+    if(!get(a,CN_GIC,"reg",&p,&n)||n!=32||be(p)||be(p+4)!=0x06800000||
+       be(p+8)||be(p+12)!=0x40000||be(p+16)||be(p+20)!=0x06880000||
+       be(p+24)||be(p+28)!=0x200000)return 0;
+    for(unsigned i=0;i<3;i++) {
+        unsigned node=nodes[i];
+        if(!(a->c.present&(1u<<node)) || !enabled(a,node) ||
+           get(a,node,"interrupt-map",&p,&n) || get(a,node,"interrupt-map-mask",&p,&n) ||
+           get(a,node,"interrupts-extended",&p,&n))return 0;
+        if(i==0 && !word(a,node,"interrupt-parent",ph))return 0;
+        if(i!=0 && get(a,node,"interrupt-parent",&p,&n) && (n!=4||be(p)!=ph))return 0;
+    }
+    if(!get(a,CN_SMMU,"interrupt-names",&p,&n)||!eq(p,n,"combined") ||
+       !get(a,CN_SMMU,"interrupts",&p,&n)||n!=16 || be(p) ||
+       be(p+4)!=0x1df || be(p+8)!=1 || be(p+12))return 0;
+    *q=(struct x9_camera_smmu_irq_layout){.version=1,.flags=X9_CAM_SMMU_IRQ_LK_TOPOLOGY,
+        .gicd_base=0x06800000,.gicd_bytes=0x40000,.intid=0x1df+32,
+        .trigger=1,.irq_cells=4};
+    return x9_camera_smmu_irq_layout_valid(q) && camera_fdt_need(a,ph,CN_GIC,CF_SMMU_IRQ);
 }

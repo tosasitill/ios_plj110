@@ -181,6 +181,7 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     /* This boot's qualified controller/master policy, BEFORE MMIO or
      * exporting any storage. No generated/live.dts fallback is a grant. */
     e=cam_smmu_policy_read(&policy);if(e)return e;
+    cam_smmu_irq_topology_log();
     e=x9_mm_power_validate(token,X9_MM_POWER_CAMERA);if(e)return e;
     lck_mtx_lock(&camera_smmu_lock);
     if(!cam_native_mmio)cam_native_mmio=ml_io_map(0x30800000,0x20000);

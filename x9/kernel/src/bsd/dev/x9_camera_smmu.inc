@@ -9,6 +9,7 @@
 #include "x9_mm_power.h"
 #include <pexpert/device_tree.h>
 LCK_MTX_DECLARE(camera_smmu_lock,&camera_group);
+#include "x9_camera_smmu_irq_layout.h"
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 #define CAM_SMMU_MAGIC 0x583943414d4d5531ull
 /* live.dts mm-smmu-cam uses iommus=<MM_SMMU 0x80>; generic
@@ -79,6 +80,28 @@ static uint64_t cam_smmu_s1_ste_word1(const struct x9_camera_smmu *m)
      * The inherited-host API retains its original provider contract. */
     return 2ull|(2ull<<6)|((((m->idr0>>24)&3u)==0)?1ull<<27:0)|
         (m->native?(uint64_t)m->native_policy.tcu_prefetch<<56:0);
+}
+
+/* IRQ topology is independently qualified from this boot's FDT. It is
+ * informational until the combined IRQ owner/worker and teardown exist. */
+static void cam_smmu_irq_topology_log(void)
+{
+    DTEntry chosen;const void *p;unsigned n;
+    struct x9_camera_smmu_irq_layout q;
+    _Static_assert(sizeof(q)==X9_CAM_SMMU_IRQ_LAYOUT_BYTES,"camera SMMU IRQ layout");
+    if(SecureDTLookupEntry(NULL,"/chosen",&chosen)!=kSuccess ||
+       SecureDTGetProperty(chosen,"x9-camera-smmu-irq",&p,&n)!=kSuccess ||
+       !p || n!=sizeof(q)) {
+        printf("X9 CAMERA SMMU IRQ: topology absent; combined IRQ not installed\n");
+        return;
+    }
+    memcpy(&q,p,sizeof(q));
+    if(!x9_camera_smmu_irq_layout_valid(&q)) {
+        printf("X9 CAMERA SMMU IRQ: topology invalid; combined IRQ not installed\n");
+        return;
+    }
+    printf("X9 CAMERA SMMU IRQ: intid=%u trigger=%u (edge rising); combined IRQ not installed\n",
+        q.intid,q.trigger);
 }
 
 static bool cam_smmu_capable(uint32_t idr0,uint32_t idr1,uint32_t idr5)

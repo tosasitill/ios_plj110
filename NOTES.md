@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-19 相机 SMMU combined IRQ 拓扑（实现未完成）
+
+- **设备树事实**：本机 `/soc/iommu@30800000` 的 `interrupt-names="combined"`，`interrupts=<0 0x1df 1 0>`，GIC 四单元中 type=0 为 SPI、编号479 加32得到 INTID511，flags=1 为 edge rising；不是现有 CAMSV 三条 level-high IRQ。`/interrupt-controller@6800000` 的 GICD/GICR 寄存器范围、四单元格式以及继承的 interrupt-parent 逐项核对。此为保存的 Android live.dts，与下次 LK 设备树值仍须比较。
+- **交接实现**：新增 32B `x9-camera-smmu-irq` chosen slot。shim 单次 FDT collection 验证路径、GIC 寄存器、父 phandle 唯一性、combined 名称和完整中断规格后写入；新增 feature 与 `CF_SMMU` 独立，不因中断信息缺失拒绝既有 SMMU policy。内核 SMMU 准备时读取并打印“IRQ not installed”，不接管 GIC、不宣称中断工作。GIC handle 复用批次 phandle 校验，容量由6增至7。
+- **验证**：`camera_smmu_handoff.c`、`camera_handoff.c` 的 aarch64 freestanding 交叉单对象编译均 exit 0、`-Wall -Wextra -Werror`；`sweet_x9_camera.o` `compile_one=True`、exit 0、181 既有警告；`mkadt.py` 语法编译通过。首次内核编译因 `.inc` 内 `LCK_MTX_DECLARE` 的行号和另一个 include 重复而失败；已把新 include 移到锁声明后，重编 exit 0，失败记录在交互输出，最终日志 `x9/out/camera-smmu-irq-fdt-20261119/kernel-compile.log`。无整包、CI、上机。
+- **尚未对齐**：目前只发布和读取拓扑，没有 IRQ filter/owner/worker，没有 EVTQ 消费或 GERRORN ACK。下一步必须将 actual IAR 接入 `sleh.c`，按 edge GIC `ICFGR` 读取验证并处理 pending/重入；保证 masked 期间新边沿不丢；梳理 CMDQ/EVTQ 内存屏障与非一致缓存、Android `arm_smmu_evtq_thread` 和 `mtk_smmu_evt_handler`、GERROR 的 CMDQ_ERR/SFM 分支；修改 `cam_smmu_live()` 目前非空 EVTQ 即 latch 的语义；先关闭源/IRQ、等待 IRQ worker、解绑 GIC，再退休 SMMU 和所有 backing。不能使用 CAMSV level 模式的 idle 判定冒充 edge IRQ 正确处理，也不能仅清 GERRORN 或丢弃事件。351–356 尚未通过 MM_2，以上均无实机结果。
+
 #### 2026-11-19 相机按 Android 复核 · SMMU 冷启动顺序（未上机）
 
 - **提交/推送**：`2aecbefb`，`git push origin feat/camera-integration` exit 0（`579cead8..2aecbefb`）。
