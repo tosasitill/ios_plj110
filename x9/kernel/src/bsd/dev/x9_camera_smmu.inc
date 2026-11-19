@@ -38,6 +38,8 @@ struct x9_camera_smmu {
     uint64_t magic;
     uint32_t idr0,idr1,idr5,cmd_shift,evt_shift,prod,cons,wait_cons;
     uint32_t last_errno,last_prod,last_cons,gerror,gerrorn,evt_prod,evt_cons;
+    uint32_t evt_owned_cons,evt_last_prod;
+    uint64_t evt_events,evt_overflows;
     struct cam_s1_page ste,cmd,evt;
     struct x9_camera_s1 *map;
     struct x9_camera_smmu_export view;
@@ -326,6 +328,54 @@ int x9_camera_smmu_discard(struct x9_camera_smmu **map)
     lck_mtx_unlock(&camera_smmu_lock);return e;
 }
 
+/* Consume only this native host's exported EVTQ while camera_smmu_lock is
+ * held. The producer publishes the 32-byte entries before advancing PROD;
+ * the allocation is device-owned, so invalidate before reading, never clean
+ * stale CPU lines over it. Android queue_remove_raw advances CONS only after
+ * copying the four words. This synchronous path is also usable by the future
+ * IRQ thread. Fault reporting is not yet the Android device-fault callback:
+ * return EIO after reporting so the active caller cannot claim success. */
+static int cam_smmu_evtq_service_locked(struct x9_camera_smmu *m)
+{
+    const uint32_t ring=1u<<m->evt_shift, mask=2u*ring-1u, ovf=1u<<31;
+    uint32_t prod=cam_smmu_rr(m,0x100a8),cons=cam_smmu_rr(m,0x100ac);
+    unsigned count=0;int e;
+    if((prod&~(mask|ovf)) || (cons&~(mask|ovf)) || cons!=m->evt_owned_cons ||
+       (((prod&mask)-(cons&mask))&mask)>ring)
+        return ESTALE;
+    if((prod^m->evt_last_prod)&ovf) {
+        m->evt_overflows++;
+        printf("X9 CAMERA SMMU EVTQ: overflow prod=%x previous=%x cons=%x lost=unknown\n",
+            prod,m->evt_last_prod,cons);
+    }
+    m->evt_last_prod=prod;
+    while((cons&mask)!=(prod&mask)) {
+        const volatile uint64_t *entry;
+        uint64_t w0,w1,w2,w3;
+        if(count++>=ring)return EOVERFLOW;
+        e=cam_cache_range(m->evt.va,CAM_S1_PAGE,CAM_CACHE_CPU);if(e)return e;
+        entry=(const volatile uint64_t *)m->evt.va+(cons&(ring-1u))*4u;
+        w0=entry[0];w1=entry[1];w2=entry[2];w3=entry[3];
+        __asm__ volatile("dsb sy":::"memory");
+        m->evt_events++;
+        printf("X9 CAMERA SMMU EVTQ: event=%llu id=%x sid=%x ssid_valid=%u "
+            "ssid=%x stall=%u read=%u words=%llx/%llx/%llx/%llx\n",
+            m->evt_events,(uint32_t)(w0&0xffu),(uint32_t)(w0>>32),
+            (unsigned)((w0>>11)&1u),(uint32_t)((w0>>12)&0xfffffu),
+            (unsigned)((w1>>31)&1u),(unsigned)((w1>>35)&1u),w0,w1,w2,w3);
+        /* queue_sync_cons_out: CPU reads complete before the CONS store. */
+        cons=(cons&ovf)|(((cons&mask)+1u)&mask);
+        __asm__ volatile("dsb sy":::"memory");
+        cam_smmu_rw(m,0x100ac,cons);m->evt_owned_cons=cons;
+    }
+    if((prod^cons)&ovf) {
+        cons=(cons&mask)|(prod&ovf);
+        cam_smmu_rw(m,0x100ac,cons);m->evt_owned_cons=cons;
+    }
+    m->evt_prod=prod;m->evt_cons=cons;
+    return count || m->evt_overflows ? EIO : 0;
+}
+
 /* The powered, authoritative native controller must own this namespace.
  * These checks prevent this engine from writing to an inherited CMDQ or
  * accepting base redirection by an active HYP interceptor. They cannot
@@ -360,8 +410,12 @@ static int cam_smmu_live(struct x9_camera_smmu *m)
      */
     m->evt_prod=cam_smmu_rr(m,0x100a8);m->evt_cons=cam_smmu_rr(m,0x100ac);
     __asm__ volatile("dsb sy":::"memory");
-    if(m->gerror^m->gerrorn || (m->last_cons&~mask) ||
-        (m->evt_prod&~(evt_mask|(1u<<31))) || m->evt_cons || m->evt_prod)return EIO;
+    if((m->evt_prod&~(evt_mask|(1u<<31))) ||
+        (m->evt_cons&~(evt_mask|(1u<<31))))return EIO;
+    if(m->native && m->native_evtq_programmed && (m->native_cr0&CAM_SMMU_CR0_EVTQEN)) {
+        int e=cam_smmu_evtq_service_locked(m);if(e)return e;
+    } else if(m->evt_cons || m->evt_prod)return EIO;
+    if((m->gerror^m->gerrorn) || (m->last_cons&~mask))return EIO;
     if(m->last_prod!=m->prod)return ESTALE;
     if(!m->pending && m->last_cons!=m->cons)return ESTALE;
     if(m->pending) {

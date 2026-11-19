@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-19 SMMU EVTQ 同步消费（combined IRQ 尚未实现）
+
+- **本轮**：起点 `d434779f`；OPPO `arm-smmu-v3.h:623..652,711..718` 的 EVTQ 消费先观察 PROD、读取 4×64-bit 项，再推进 CONS，最后同步 overflow。`cam_smmu_live()` 在 native 且 EVTQ 已启用时调用锁内服务：校验自有 PROD/CONS 掩码、软件持有的 CONS 及距离，失效专属设备写入页的 CPU 缓存，逐项记录原始 4 个字与 event ID/SID/SSID/stall/read，顺序更新 CONS 和 overflow；最多处理一次实际快照的一环。出现事件或 overflow 时仍返回 EIO，让调用者保持原故障，不能把消费视为故障恢复。未接 GIC、未实现 Android 的 device fault callback、wrapper fault clear 或 GERRORN。
+- **边界**：这是现有同步检查中的真实 EVTQ 消费，不是异步 IRQ，也不是成功的端到端采集。队列由现有 `camera_smmu_lock` 串行，涉及其他 SID 的事件也原样打印；不声称它们已交付对应设备处理。`cam_smmu_live` 的同步调用若在 GERROR 同时出现，先消费合格 EVTQ，随后仍报告故障；不消除全局错误。已记录的 overflow 保持 EIO，不假设事件没有丢失。
+- **验证**：`sweet_x9_camera.o` `compile_one=True`、exit 0、181 条既有 warning；日志 `x9/out/camera-smmu-evtq-20261119/kernel-compile.log`，首次编译182条时新增 declaration warning，调整后181。无 CI、镜像或上机。最新实机仍是 356 MM_2 失败，不能验证事件或画面。
+- **下一步**：实际安装 combined IRQ 和 worker，以 FDT 验证 edge-rising、GIC route/config/实际 IAR/EOI 和 masked 期间 pending；worker 与命令持锁、退出路径协调；完善 Android GERROR 的 SFM/CMDQ_ERR 及 GERRORN、MTK wrapper fault、stall/device fault 回调，再核对 CAMSV 至 iOS。**目标仍 active**。
+
 #### 2026-11-19 相机 SMMU combined IRQ 拓扑（实现未完成）
 
 - **设备树事实**：本机 `/soc/iommu@30800000` 的 `interrupt-names="combined"`，`interrupts=<0 0x1df 1 0>`，GIC 四单元中 type=0 为 SPI、编号479 加32得到 INTID511，flags=1 为 edge rising；不是现有 CAMSV 三条 level-high IRQ。`/interrupt-controller@6800000` 的 GICD/GICR 寄存器范围、四单元格式以及继承的 interrupt-parent 逐项核对。此为保存的 Android live.dts，与下次 LK 设备树值仍须比较。
