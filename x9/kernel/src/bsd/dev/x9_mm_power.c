@@ -197,7 +197,14 @@ out:
     log_history = stage == 4 && e == ETIMEDOUT;
     if (log_history) mm_irq_history_read(&history);
     mm_log("GET", client, stage, e, timeout, int_before, int_status);
-    if (log_history) mm_irq_history_log(&history);
+    if (log_history) {
+        /* Keep both samples on a short separate line: concurrent console
+         * output can truncate the longer GET line. VIP route and ACK are
+         * observations only; no interrupt status or pending vote is cleared. */
+        printf("X9 MM POWER IRQ SAMPLE: before=%x after=%x output=%x req_ack=%x\n",
+            int_before, int_status, mm_read(hwv, 0x10004), mm_read(hwv, 0x10008));
+        mm_irq_history_log(&history);
+    }
     return e;
 }
 static int mm_vote_drop(uint32_t client)

@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-19 357 MM_2 与 MMUP 前置条件调查
+
+- **实机观察**：357 的 `int_raw=0x4000`；Android `hwccf.h` 将 bit14 命名为 `backup_vote_int_to_vip`，BACKUP1 status bit3 同时为1、DONE bit3为0，AP/global bit3为1。日志长行在 `timeout_raw=8` 后与 IRQ history 交叠，`int_before` 没有可靠显示，不能证明 bit14 是此次投票新产生，也不能确定哪个 backup 资源触发。
+- **Android 对照**：该机 DT `vcp@31800000` 有 `core-nums=2`；rv_v2 `vcp_feature_table.c` 将 `HWCCF_FEATURE_ID` 关联 `MMUP_ID`。`vcp_helper.c:reset_vcp` 在双核配置下设置 MMUP 保留内存参数、调用 secure reset release，并等待 MMUP READY，然后才启动 VCP。原 Android 留存 `x9/out/call-owned-runtime/dmesg.txt` 显示 core id 1 READY 及 MMUP notifier READY；这是 Android 侧事实，不是 357 的 MMUP READY 证据。当前 X9 源码未找到上述 Android MMUP 启动/READY 流程，357 也无 MMUP READY 证据；但无日志不能证明固件停机，亦不能仅凭 feature 归属断言 MMUP 就是 VIP 中断处理者或超时根因。
+- **诊断变更**：stage4 超时将已有 `int_before/int_status` 和 Android debug 寄存器 OUTPUT_STATUS `0x10004`、FSM_REQ_ACK `0x10008` 加到短行 `X9 MM POWER IRQ SAMPLE`，避免长行混写丢失前后状态；只读，不清中断或改投票。`x9_mm_power.o` 单对象编译 exit 0、`compile_one result True`、2条导出头既有 warnings，日志 `x9/out/camera-mm-global-read-delay-20261118/compile-irq-sample-357.log`；未构建新镜像或上机。
+- **下一步**：追踪 MMUP 的固件来源、实际启动/继承状态、READY 和 HWCCF VIP 消费关系；在有证据前不写 VIP STA_CLR、不伪造 ACK、不直接 reset 协处理器。新诊断须下一次构建并测试后才能提供样本；357 仍是最新运行证据。
+
 #### 2026-11-19 实机日志 357：MM_2 阻塞复现
 
 - 用户测试 `x9-camera-wrapper-irq-20261119/boot.img` 后提供 `~/357.txt`；boot-args 包含 `x9_camera=2`。主/前摄 ID 分别为 `9186/0615`，native register errno=0；主摄本次读取 EEPROM 3456/3456、apply 250/250，mode 1/1，VCM 初始化 errno=0。这些只证明相应命令/读取，并非画面或光学校准正确。
