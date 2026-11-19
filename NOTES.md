@@ -160,6 +160,11 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-19 相机 wrapper IRQ 测试镜像
+
+- 用户要求编译供测试；基于 `57111b64` 执行 `python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --name x9-camera-wrapper-irq-20261119`，exit 0，Candidate 为 `x9/out/x9-camera-wrapper-irq-20261119/boot.img`；设备参数含 `x9_camera=2`。本次未使用 CI，无 run ID。
+- 此镜像尚未上机，等待用户手动 `fastboot boot` 和本次设备日志；之前最新实机结果仍为 356 的 MM_2 超时，不能推断新 SMMU IRQ、RAW 或预览已通过。纯内核构建没有更换 GPU 插件；若设备仍为已确认的 GPU280 状态无需 mailbox。
+
 #### 2026-11-19 SMMU wrapper IRQ 计数确认（静态对照）
 
 - **改动**：根据 Android `arm_smmu_combined_irq_handler()` / `mtk_smmu_irq_handler()`，自有 native SMMU 在已校验电源、wrapper 和队列配置后，按 GERROR → wrapper → EVTQ 顺序处理；仅真实 IAR 对应 worker 对 wrapper ACK。对 IRQ_STA 采样的已知 0–19 位按 Android TCU/TBU 顺序分别读 IRQ_CNTx，RMW 更新 ACK_CNT 低8位并写 IRQ_ACK；逐项打印 status/bit/count。MM wrapper 是共享来源，不把事件归属推断为相机 SID；未知位不清并返回 EIO。首个已确认 GERROR 错误不阻止后续 wrapper/EVTQ 处理，未经处理的 GERROR 拒绝继续。
