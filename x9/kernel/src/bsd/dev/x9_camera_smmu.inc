@@ -376,6 +376,61 @@ static int cam_smmu_evtq_service_locked(struct x9_camera_smmu *m)
     return count || m->evt_overflows ? EIO : 0;
 }
 
+/* Android arm_smmu_gerror_handler's normal-bank handling, serialized with
+ * the sole CMDQ producer. An error is always returned to the original caller;
+ * skipping an illegal command must not turn its failed invalidation into a
+ * successful SYNC receipt. The retained backing remains terminal on error. */
+static int cam_smmu_gerror_service_locked(struct x9_camera_smmu *m)
+{
+    uint32_t g=cam_smmu_rr(m,0x60),gn=cam_smmu_rr(m,0x64),active=g^gn;
+    const uint32_t known=0x1fdu;
+    if(!active)return 0;
+    printf("X9 CAMERA SMMU GERROR: raw=%x ack=%x active=%x cmd_cons=%x pending=%u\n",
+        g,gn,active,cam_smmu_rr(m,0x9c),m->pending);
+    if(active&~known)return EIO; /* don't acknowledge an unhandled source */
+    if(active&(1u<<8)) {
+        /* Android disables the device on Service Failure Mode before ACK. */
+        uint64_t span,deadline;
+        m->native_cr0=0;cam_smmu_rw(m,0x20,0);
+        nanoseconds_to_absolutetime(10000000ull,&span);
+        deadline=mach_absolute_time()+span;
+        for(unsigned n=0;n<10000;n++) {
+            int e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);
+            if(e)return e;
+            if(!cam_smmu_rr(m,0x24))break;
+            if(mach_absolute_time()>=deadline || n==9999)return ETIMEDOUT;
+            delay(1);
+        }
+    }
+    if(active&1u) {
+        uint32_t cons=cam_smmu_rr(m,0x9c),code=(cons>>24)&0x7fu;
+        uint32_t ring=1u<<m->cmd_shift,mask=2u*ring-1u,position=cons&mask;
+        printf("X9 CAMERA SMMU CMDQ ERROR: cons=%x code=%u batch=%x/%u prod=%x\n",
+            cons,code,m->batch_start,m->batch_count,m->prod);
+        /* Android retries fetch abort and ATC timeout without replacement;
+         * illegal/unknown commands are changed to CMD_SYNC in place. */
+        if(code && code!=2 && code!=3) {
+            unsigned i;struct cam_smmu_cmd *slot;int e;
+            if(!m->pending || !m->batch_count)return ESTALE;
+            for(i=0;i<m->batch_count;i++)
+                if(((m->batch_start+i)&mask)==position)break;
+            if(i==m->batch_count)return ESTALE;
+            slot=(struct cam_smmu_cmd *)m->cmd.va+(position&(ring-1u));
+            if(slot->word[0]!=m->batch[i].word[0] || slot->word[1]!=m->batch[i].word[1])return ESTALE;
+            printf("X9 CAMERA SMMU CMDQ ERROR: replacing command=%llx/%llx with SYNC\n",
+                slot->word[0],slot->word[1]);
+            *slot=(struct cam_smmu_cmd){{CAM_SMMU_CMD_SYNC,0}};
+            m->batch[i]=*slot;
+            e=cam_cache_range((vm_offset_t)slot,sizeof(*slot),CAM_CACHE_CLEAN);
+            if(e)return e;
+        }
+    }
+    /* Snapshot write is the architected toggle ACK. A newer GERROR value is
+     * not acknowledged by this older sample. */
+    cam_smmu_rw(m,0x64,g);m->gerror=g;m->gerrorn=g;
+    return EIO;
+}
+
 /* The powered, authoritative native controller must own this namespace.
  * These checks prevent this engine from writing to an inherited CMDQ or
  * accepting base redirection by an active HYP interceptor. They cannot
@@ -385,6 +440,7 @@ static int cam_smmu_live(struct x9_camera_smmu *m)
 {
     uint32_t mask=(1u<<(m->cmd_shift+1))-1u;
     uint32_t evt_mask=(1u<<(m->evt_shift+1))-1u;
+    int evt_error=0;
     if(!m->exported)return ENXIO;
     if(m->native) {
         int e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);
@@ -405,17 +461,24 @@ static int cam_smmu_live(struct x9_camera_smmu *m)
         cam_smmu_rr(m,0x50) || cam_smmu_rr(m,0x54))return ESTALE;
     m->last_prod=cam_smmu_rr(m,0x98);m->last_cons=cam_smmu_rr(m,0x9c);
     m->gerror=cam_smmu_rr(m,0x60);m->gerrorn=cam_smmu_rr(m,0x64);
-    /* EVTQ page1, NOT CMDQ's page0. Leave foreign/unknown events pending;
-     * event acknowledgement/IRQ ownership is not implemented here.
-     */
+    /* EVTQ page1, NOT CMDQ's page0. Synchronous service logs the owned
+     * queue; asynchronous combined IRQ ownership is not yet installed. */
     m->evt_prod=cam_smmu_rr(m,0x100a8);m->evt_cons=cam_smmu_rr(m,0x100ac);
     __asm__ volatile("dsb sy":::"memory");
     if((m->evt_prod&~(evt_mask|(1u<<31))) ||
         (m->evt_cons&~(evt_mask|(1u<<31))))return EIO;
     if(m->native && m->native_evtq_programmed && (m->native_cr0&CAM_SMMU_CR0_EVTQEN)) {
-        int e=cam_smmu_evtq_service_locked(m);if(e)return e;
+        evt_error=cam_smmu_evtq_service_locked(m);
+        if(evt_error && evt_error!=EIO)return evt_error;
     } else if(m->evt_cons || m->evt_prod)return EIO;
-    if((m->gerror^m->gerrorn) || (m->last_cons&~mask))return EIO;
+    if(m->gerror^m->gerrorn) {
+        int e;
+        if(!m->native)return EIO;
+        e=cam_smmu_gerror_service_locked(m);
+        if(e)return e;
+    }
+    if(evt_error)return evt_error;
+    if(m->last_cons&~mask)return EIO;
     if(m->last_prod!=m->prod)return ESTALE;
     if(!m->pending && m->last_cons!=m->cons)return ESTALE;
     if(m->pending) {

@@ -160,6 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-19 SMMU GERROR 同步处理（IRQ 尚未安装）
+
+- **修改/依据**：在 `eeaae489` 的同步检查路径加入 OPPO `arm_smmu_gerror_handler()` 与 `__arm_smmu_cmdq_skip_err()` 处理：记录 GERROR/GERRORN 和 CMDQ CONS；SFM 写 CR0=0 并等待 ACK；CMDQ fetch abort/ATC timeout 不替换命令；illegal 或其他非零错误仅在定位到当前自有 pending batch 且命令字匹配时替换为 CMD_SYNC 并 clean 缓存；按采样的 GERROR 写 GERRORN 进行 toggle 确认。未知 GERROR 位或无法定位自有队列时不确认。任何实际 GERROR 均向原调用者返回错误，保留资源，避免将被跳过的失效命令当成功。处理过程中若 EVTQ 同时有事件，会先记录/消费 EVTQ 再处理 GERROR。
+- **边界/待办**：目前仅 `cam_smmu_live()` 采样时同步处理；没有 combined IRQ，Android 的 MTK wrapper fault 清理/设备 fault callback 尚无实现，且保守地保留报错状态、不实现完整自动恢复。这里不代表 Android GERROR 全路径或设备验收完成。SFM 尚无真实寄存器证据，CR0 ACK/替换/确认仅静态对照和编译。
+- **验证**：`sweet_x9_camera.o` `compile_one=True`、exit0、181既有 warning，`x9/out/camera-smmu-gerror-20261119/kernel-compile.log`；无新镜像、CI、设备操作；356 MM_2 仍为最早实机失败。下一步实现 FDT 确认的 edge IRQ GIC owner/filter/worker 与安全退役，确保 worker 不与命令持锁和关闭互锁。
+
 #### 2026-11-19 SMMU EVTQ 同步消费（combined IRQ 尚未实现）
 
 - **本轮**：起点 `d434779f`；OPPO `arm-smmu-v3.h:623..652,711..718` 的 EVTQ 消费先观察 PROD、读取 4×64-bit 项，再推进 CONS，最后同步 overflow。`cam_smmu_live()` 在 native 且 EVTQ 已启用时调用锁内服务：校验自有 PROD/CONS 掩码、软件持有的 CONS 及距离，失效专属设备写入页的 CPU 缓存，逐项记录原始 4 个字与 event ID/SID/SSID/stall/read，顺序更新 CONS 和 overflow；最多处理一次实际快照的一环。出现事件或 overflow 时仍返回 EIO，让调用者保持原故障，不能把消费视为故障恢复。未接 GIC、未实现 Android 的 device fault callback、wrapper fault clear 或 GERRORN。
