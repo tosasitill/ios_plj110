@@ -50,7 +50,7 @@ struct x9_camera_smmu {
     bool exported,pending,close_attempted,timedout_retired,shared_attempted;
     /* Cold native host owns all normal controller stores in this TU. */
     bool native, native_bypass, native_started, native_evtq_programmed;
-    uint32_t ste_shift, ste_bytes, native_cr0, native_gbpa;
+    uint32_t ste_shift, ste_bytes, native_cr0, native_gbpa, native_irq_ctrl;
     uint64_t native_power;
     bool native_retire_attempted,native_restored,native_setup_issued,native_unstarted_retired;
     bool native_epoch_recycled;
@@ -62,6 +62,11 @@ struct x9_camera_smmu {
     struct x9_camera_smmu_policy native_policy;
 };
 static struct x9_camera_smmu *cam_smmu_namespace;
+struct cam_native_snapshot;
+static int cam_smmu_irq_bind_locked(struct x9_camera_smmu *,struct cam_native_snapshot *);
+static int cam_smmu_irq_shutdown(struct x9_camera_smmu *);
+static bool cam_smmu_irq_filter(uint32_t);
+static void cam_smmu_irq_notify_fault(int);
 static int cam_smmu_shared_check_locked(struct x9_camera_smmu *);
 static int cam_native_wp_guard(struct x9_camera_smmu *);
 static int cam_smmu_policy_read(struct x9_camera_smmu_policy *out)
@@ -82,28 +87,6 @@ static uint64_t cam_smmu_s1_ste_word1(const struct x9_camera_smmu *m)
      * The inherited-host API retains its original provider contract. */
     return 2ull|(2ull<<6)|((((m->idr0>>24)&3u)==0)?1ull<<27:0)|
         (m->native?(uint64_t)m->native_policy.tcu_prefetch<<56:0);
-}
-
-/* IRQ topology is independently qualified from this boot's FDT. It is
- * informational until the combined IRQ owner/worker and teardown exist. */
-static void cam_smmu_irq_topology_log(void)
-{
-    DTEntry chosen;const void *p;unsigned n;
-    struct x9_camera_smmu_irq_layout q;
-    _Static_assert(sizeof(q)==X9_CAM_SMMU_IRQ_LAYOUT_BYTES,"camera SMMU IRQ layout");
-    if(SecureDTLookupEntry(NULL,"/chosen",&chosen)!=kSuccess ||
-       SecureDTGetProperty(chosen,"x9-camera-smmu-irq",&p,&n)!=kSuccess ||
-       !p || n!=sizeof(q)) {
-        printf("X9 CAMERA SMMU IRQ: topology absent; combined IRQ not installed\n");
-        return;
-    }
-    memcpy(&q,p,sizeof(q));
-    if(!x9_camera_smmu_irq_layout_valid(&q)) {
-        printf("X9 CAMERA SMMU IRQ: topology invalid; combined IRQ not installed\n");
-        return;
-    }
-    printf("X9 CAMERA SMMU IRQ: intid=%u trigger=%u (edge rising); combined IRQ not installed\n",
-        q.intid,q.trigger);
 }
 
 static bool cam_smmu_capable(uint32_t idr0,uint32_t idr1,uint32_t idr5)
@@ -458,7 +441,8 @@ static int cam_smmu_live(struct x9_camera_smmu *m)
         cam_smmu_rr(m,0x28)!=CAM_SMMU_CR1 || cam_smmu_rr(m,0x2c)!=CAM_SMMU_CR2 ||
         (m->native?cam_smmu_rr(m,0x44)!=m->native_gbpa:
           (cam_smmu_rr(m,0x44)&((1u<<31)|(1u<<20)))!=(1u<<20)) ||
-        cam_smmu_rr(m,0x50) || cam_smmu_rr(m,0x54))return ESTALE;
+        cam_smmu_rr(m,0x50)!=(m->native?m->native_irq_ctrl:0) ||
+        cam_smmu_rr(m,0x54)!=(m->native?m->native_irq_ctrl:0))return ESTALE;
     m->last_prod=cam_smmu_rr(m,0x98);m->last_cons=cam_smmu_rr(m,0x9c);
     m->gerror=cam_smmu_rr(m,0x60);m->gerrorn=cam_smmu_rr(m,0x64);
     /* EVTQ page1, NOT CMDQ's page0. Synchronous service logs the owned
@@ -567,9 +551,9 @@ static void cam_smmu_retire_timeout(struct x9_camera_smmu *m)
         m->batch_start,m->batch_count,m->last_prod,m->last_cons,m->prod);
 }
 
-/* One batch + one architected SYNC, no restart, blind retry, global TLBI,
- * consumer writes, IRQ enables or GERRORN acknowledgements. CS_NONE needs
- * neither MSI nor SEV: advancing CONS beyond SYNC is the completion proof.
+/* One batch + one architected SYNC, no restart or blind retry. The common
+ * live check may service native EVTQ/GERROR under this same mutex. CS_NONE
+ * needs neither MSI nor SEV: advancing CONS beyond SYNC proves completion.
  */
 static int cam_smmu_submit(struct x9_camera_smmu *m,const struct cam_smmu_cmd *cmd,
     unsigned count)
@@ -649,3 +633,4 @@ int x9_camera_smmu_sync(struct x9_camera_smmu *m){return cam_smmu_commands(m,0);
 #include "x9_camera_smmu_attach.inc"
 
 #include "x9_camera_native_smmu.inc"
+#include "x9_camera_smmu_irq.inc"

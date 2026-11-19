@@ -246,6 +246,20 @@ static void cam_repeat_stop_locked(uint64_t);
 #include "x9_camera_credit_retire.inc"
 #include "x9_camera_native_repeat.inc"
 #include "x9_camera_sv_shutdown.inc"
+/* Called after the SMMU worker releases its mutex. Wake any CAMSV waiter
+ * without taking camera_irq_lock, which teardown may already hold. */
+static void cam_smmu_irq_notify_fault(int e)
+{
+    boolean_t old=cam_irq_spin_take();
+    bool wake=cam_irq.prepared;
+    if(wake) {
+        if(!cam_irq.error)cam_irq.error=e;
+        cam_irq.accepting=false;
+        if(cam_irq.owns)cam_irq_mask_all();
+    }
+    cam_irq_spin_drop(old);
+    if(wake)thread_wakeup((event_t)&cam_repeat.completed);
+}
 /* Under spin, after actual IAR and only while accepting. Ordinary FIRST/FH
  * reads select exactly the vendor bank. No multi-tag fallback or status sweep. */
 static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
@@ -305,6 +319,7 @@ bool x9_camera_irq_filter(uint32_t intid)
     unsigned role=0;
     bool wake=false,parked,wake_repeat;
     int qualification;
+    if(cam_smmu_irq_filter(intid))return true;
     if(intid!=0x26d+32&&intid!=0x273+32&&intid!=0x279+32)return false;
     old=cam_irq_spin_take();
     if(!cam_irq.owns){cam_irq_spin_drop(old);return false;}

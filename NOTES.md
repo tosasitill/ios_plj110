@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-19 相机 SMMU combined IRQ 初版实现（未上机）
+
+- **起点/范围**：基于 `cf36ee18`，实现 FDT INTID511 edge-rising 的 GIC 单线接管、实际 IAR filter、worker、正常退出及启动失败收尾；本项尚未实机验证，也不是 Android 全路径等价证明。
+- **启动**：`cam_smmu_irq_bind_locked()` 读取同次 LK 的 `x9-camera-smmu-irq`，核对 ADT GIC、映射、线数及空闲/非活跃；保存原 ICFGR/route/priority，只改该 SPI 的 edge 配置及目标 CPU，写前重核已观察状态、每步记录首错；`IRQ_CTRL=5` 经 ACK 后启用 GIC，并要求 enable 回读或已见实际 IAR。位于 EVTQEN 之后、SMMUEN 之前，符合 Android 的中断安装阶段；缺失 topology 会拒绝启动。读取期间的必要检查不宣称排他硬件租约。
+- **IRQ/错误**：现有 `sleh_irq` 的 `x9_camera_irq_filter()` 分发真实 INTID511，filter 在 IAR 后只屏蔽本 SPI 并唤醒 worker，EOI 仍由 `sleh_irq` 原路径完成。worker 在 `camera_smmu_lock` 下调用已有 EVTQ/GERROR service；错误锁存、屏蔽 CAMSV 并唤醒等待者，保留绑定资源；无错误时重启本 SPI，mask 期间新 edge 留 GIC pending。`X9 CAMERA SMMU IRQ` 显示 bind step、IAR 与 retire，避免在硬中断中打印。
+- **正常关闭**：最后的目标 CFGI/TLBI 完成后，native retire 释放 `camera_smmu_lock`，IRQ shutdown 将 SMMU IRQ_CTRL 关0并等 ACK、等待 GIC pending/active 与 worker 清空，再 mask 本线并按实读恢复保存的 priority/route/ICFGR；随后重新持锁并复核 producer 和 SMMU 才关闭控制器。启动失败也尝试关闭 IRQ。无法确认清空/恢复即返回错误并保留资源，不清 pending 制造成功。故障导致 source/stream 无法正确停止时，尚未证明所有失败路径可正常退役，不能称完整关闭通过。
+- **编译**：`sweet_x9_camera.o` `compile_one=True`、exit0、181既有 warning，日志 `x9/out/camera-smmu-irq-owner-20261119/kernel-compile.log`。未修改 `sleh.c`；实接路径是既有 camera filter。无构建镜像/CI/设备操作。尚无真实 IAR/EOI、worker drain 或任何画面证据；356 的 MM_2 timeout 依然是第一处实机阻塞。下一步核验错误收尾（包括 mask 时边沿、GIC 配置共享与 source CTRL 异常）、Android MTK wrapper fault/device callback，再完整对照 CAMSV→iOS。
+
 #### 2026-11-19 SMMU GERROR 同步处理（IRQ 尚未安装）
 
 - **修改/依据**：在 `eeaae489` 的同步检查路径加入 OPPO `arm_smmu_gerror_handler()` 与 `__arm_smmu_cmdq_skip_err()` 处理：记录 GERROR/GERRORN 和 CMDQ CONS；SFM 写 CR0=0 并等待 ACK；CMDQ fetch abort/ATC timeout 不替换命令；illegal 或其他非零错误仅在定位到当前自有 pending batch 且命令字匹配时替换为 CMD_SYNC 并 clean 缓存；按采样的 GERROR 写 GERRORN 进行 toggle 确认。未知 GERROR 位或无法定位自有队列时不确认。任何实际 GERROR 均向原调用者返回错误，保留资源，避免将被跳过的失效命令当成功。处理过程中若 EVTQ 同时有事件，会先记录/消费 EVTQ 再处理 GERROR。

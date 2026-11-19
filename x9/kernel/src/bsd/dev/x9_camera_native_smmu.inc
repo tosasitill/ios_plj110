@@ -181,7 +181,6 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     /* This boot's qualified controller/master policy, BEFORE MMIO or
      * exporting any storage. No generated/live.dts fallback is a grant. */
     e=cam_smmu_policy_read(&policy);if(e)return e;
-    cam_smmu_irq_topology_log();
     e=x9_mm_power_validate(token,X9_MM_POWER_CAMERA);if(e)return e;
     lck_mtx_lock(&camera_smmu_lock);
     if(!cam_native_mmio)cam_native_mmio=ml_io_map(0x30800000,0x20000);
@@ -265,6 +264,7 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     CAM_NATIVE_STEP("evtq-prod",cam_native_write32(m,&entry,CAM_N_EP,0));
     CAM_NATIVE_STEP("evtq-cons",cam_native_write32(m,&entry,CAM_N_EC,0));
     CAM_NATIVE_STEP("evtq-enable-ack",cam_native_enable(m,&entry,CAM_SMMU_CR0_CMDQEN|CAM_SMMU_CR0_EVTQEN));
+    CAM_NATIVE_STEP("combined-irq",cam_smmu_irq_bind_locked(m,&entry));
     CAM_NATIVE_STEP("smmu-enable-ack",cam_native_enable(m,&entry,CAM_SMMU_CR0));
     CAM_NATIVE_STEP("live-check",cam_smmu_live(m));
 #undef CAM_NATIVE_STEP
@@ -274,7 +274,12 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
         "prod=%x cons=%x errno=%d (own normal storage, retain MM power/backing)\n",
         step,sidbits,m->native_bypass,m->native_cr0,m->native_started,
         m->native_policy.tcu_prefetch,m->prod,m->cons,e);
-    lck_mtx_unlock(&camera_smmu_lock);return e;
+    lck_mtx_unlock(&camera_smmu_lock);
+    if(e) {
+        int irq_cleanup=cam_smmu_irq_shutdown(m);
+        if(irq_cleanup)printf("X9 CAMERA SMMU IRQ: startup cleanup errno=%d original=%d\n",irq_cleanup,e);
+    }
+    return e;
 }
 int x9_camera_native_smmu_start(uint64_t token,uint64_t iova,uint32_t bytes,
     struct x9_camera_smmu **out,struct x9_camera_smmu_export *view)
@@ -338,6 +343,16 @@ static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m
     }
     if(!e)e=cam_native_producer_guard_locked(epoch,m);
     if(!e)e=cam_smmu_storage(m);if(!e)e=cam_smmu_live(m);
+    if(!e) {
+        /* The IRQ worker takes camera_smmu_lock. Drop it while disabling and
+         * draining the source, then revalidate the original producer proof. */
+        lck_mtx_unlock(&camera_smmu_lock);
+        e=cam_smmu_irq_shutdown(m);
+        lck_mtx_lock(&camera_smmu_lock);
+        if(!e)e=cam_smmu_identity(m);
+        if(!e)e=cam_native_producer_guard_locked(epoch,m);
+        if(!e)e=cam_smmu_live(m);
+    }
     if(!e) {
         cam_native_read(m,&now);
         /* No untranslated source is left: exact OFF/gates and bus idle
