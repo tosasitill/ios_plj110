@@ -434,16 +434,38 @@ static int cam_smmu_gerror_service_locked(struct x9_camera_smmu *m)
     return EIO;
 }
 
+/* Android mtk_smmu_irq_handler: IRQ_STA covers the shared MM SMMU,
+ * not just camera SIDs. ACK each observed source with its sampled count;
+ * never clear unrecognized bits or translation-fault monitor evidence. */
+static int cam_smmu_wp_irq_service_locked(struct x9_camera_smmu *m)
+{
+    volatile uint32_t *wp=(volatile uint32_t *)m->native_wp;
+    uint32_t sta=wp[0x80/4], unknown=sta&~0xfffffu;
+    static const uint8_t order[]={0,1,2,3,4,5,6,7,8,12,16,9,13,17,10,14,18,11,15,19};
+    for(unsigned i=0;i<sizeof(order);i++) {
+        unsigned bit=order[i];uint32_t count,ack;
+        if(!(sta&(1u<<bit)))continue;
+        count=wp[(0x100+4*bit)/4];ack=wp[0x88/4];
+        wp[0x88/4]=(ack&~0xffu)|(count&0xffu);
+        __asm__ volatile("dsb sy":::"memory");
+        wp[0x84/4]=1u<<bit;
+        __asm__ volatile("dsb sy":::"memory");
+        printf("X9 CAMERA SMMU WRAPPER IRQ: sta=%x bit=%u count=%u\n",sta,bit,count);
+    }
+    if(unknown)printf("X9 CAMERA SMMU WRAPPER IRQ: unknown=%x retained sta=%x\n",unknown,sta);
+    return unknown?EIO:0;
+}
+
 /* The powered, authoritative native controller must own this namespace.
  * These checks prevent this engine from writing to an inherited CMDQ or
  * accepting base redirection by an active HYP interceptor. They cannot
  * establish firmware authority by themselves, and never set a lease bit.
  */
-static int cam_smmu_live(struct x9_camera_smmu *m)
+static int cam_smmu_live_impl(struct x9_camera_smmu *m, bool irq_observed)
 {
     uint32_t mask=(1u<<(m->cmd_shift+1))-1u;
     uint32_t evt_mask=(1u<<(m->evt_shift+1))-1u;
-    int evt_error=0;
+    int first_error=0;
     if(!m->exported)return ENXIO;
     if(m->native) {
         int e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);
@@ -465,25 +487,31 @@ static int cam_smmu_live(struct x9_camera_smmu *m)
         cam_smmu_rr(m,0x54)!=(m->native?m->native_irq_ctrl:0))return ESTALE;
     m->last_prod=cam_smmu_rr(m,0x98);m->last_cons=cam_smmu_rr(m,0x9c);
     m->gerror=cam_smmu_rr(m,0x60);m->gerrorn=cam_smmu_rr(m,0x64);
-    /* EVTQ page1, NOT CMDQ's page0. Synchronous service logs the owned
-     * queue; asynchronous combined IRQ ownership is not yet installed. */
+    /* Android combined handler services GERROR, wrapper IRQ counts, then
+     * the EVTQ thread. Only a real IAR authorizes wrapper ACKs here. */
+    if(m->gerror^m->gerrorn) {
+        int e;
+        if(!m->native || ((m->gerror^m->gerrorn)&~0x1fdu))return EIO;
+        e=cam_smmu_gerror_service_locked(m);
+        if(e && (e!=EIO || m->gerror!=m->gerrorn))return e;
+        if(e)first_error=e;
+    }
+    if(irq_observed && m->native) {
+        int e=cam_smmu_wp_irq_service_locked(m);
+        if(e && !first_error)first_error=e;
+    }
+    /* EVTQ page1, NOT CMDQ's page0. */
     m->evt_prod=cam_smmu_rr(m,0x100a8);m->evt_cons=cam_smmu_rr(m,0x100ac);
     __asm__ volatile("dsb sy":::"memory");
     if((m->evt_prod&~(evt_mask|(1u<<31))) ||
-        (m->evt_cons&~(evt_mask|(1u<<31))))return EIO;
+        (m->evt_cons&~(evt_mask|(1u<<31))))return first_error?first_error:EIO;
     if(m->native && m->native_evtq_programmed) {
-        /* A service-failure may already have disabled EVTQ fetch while
-         * previously published entries still need actual consumption. */
-        evt_error=cam_smmu_evtq_service_locked(m);
-        if(evt_error && evt_error!=EIO)return evt_error;
-    } else if(m->evt_cons || m->evt_prod)return EIO;
-    if(m->gerror^m->gerrorn) {
-        int e;
-        if(!m->native)return EIO;
-        e=cam_smmu_gerror_service_locked(m);
-        if(e)return e;
+        int e=cam_smmu_evtq_service_locked(m);
+        if(e && !first_error)first_error=e;
+    } else if(m->evt_cons || m->evt_prod) {
+        if(!first_error)first_error=EIO;
     }
-    if(evt_error)return evt_error;
+    if(first_error)return first_error;
     if(m->last_cons&~mask)return EIO;
     if(m->last_prod!=m->prod)return ESTALE;
     if(!m->pending && m->last_cons!=m->cons)return ESTALE;
@@ -497,6 +525,11 @@ static int cam_smmu_live(struct x9_camera_smmu *m)
         m->wait_cons=m->last_cons;
     }
     return 0;
+}
+
+static int cam_smmu_live(struct x9_camera_smmu *m)
+{
+    return cam_smmu_live_impl(m,false);
 }
 
 int x9_camera_smmu_check(struct x9_camera_smmu *m)

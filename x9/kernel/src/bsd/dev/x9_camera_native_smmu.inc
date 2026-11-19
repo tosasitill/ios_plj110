@@ -25,7 +25,7 @@ static const unsigned cam_native_base_off[3]={0x80,0x90,0xa0};
 /* live.dts resource1 is 309e0000, selected by arm_smmu_device_probe.
  * Do not use the fallback base+1ff000 or the secure configuration aperture.
  * The four ordinary RW words are GLB_CTL0, TCU_CTL1, TCU_CTL10, TCU_CTL0.
- * No IRQ, monitor/reset/clear, DVM request or MPAM command is read or written. */
+ * This guard does not access IRQ, monitor/reset/clear, DVM or MPAM registers. */
 static const unsigned cam_native_wp_off[4]={0,0x204,0x228,0x200};
 static vm_offset_t cam_native_mmio,cam_native_wp_mmio;
 static void cam_native_prior(const struct x9_camera_smmu *m,struct cam_native_snapshot *s)

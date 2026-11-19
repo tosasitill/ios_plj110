@@ -160,6 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-19 SMMU wrapper IRQ 计数确认（静态对照）
+
+- **改动**：根据 Android `arm_smmu_combined_irq_handler()` / `mtk_smmu_irq_handler()`，自有 native SMMU 在已校验电源、wrapper 和队列配置后，按 GERROR → wrapper → EVTQ 顺序处理；仅真实 IAR 对应 worker 对 wrapper ACK。对 IRQ_STA 采样的已知 0–19 位按 Android TCU/TBU 顺序分别读 IRQ_CNTx，RMW 更新 ACK_CNT 低8位并写 IRQ_ACK；逐项打印 status/bit/count。MM wrapper 是共享来源，不把事件归属推断为相机 SID；未知位不清并返回 EIO。首个已确认 GERROR 错误不阻止后续 wrapper/EVTQ 处理，未经处理的 GERROR 拒绝继续。
+- **验证**：`sweet_x9_camera.o` 单对象交叉编译 exit 0、`compile_one result True`、181 warnings，日志 `x9/out/camera-smmu-irq-drain-20261119/kernel-compile-wrapper.log`；未出镜像、CI 或上机。
+- **剩余与边界**：wrapper ACK 是静态移植，实际计数、edge 重投递及退役均未验证；TF monitor 采集、逐 SID/master callback 与安全清除尚未实现。真实 RAW 格式、iOS handler 和可见预览无实机成功证据；356 MM_2 超时仍为首个硬件阻塞。继续遵守暂不构建探针镜像和不上机的要求。
+
 #### 2026-11-19 SMMU IRQ 关机动态状态和待处理中断
 
 - **基于 `b20d9a34` 修正**：关闭 `IRQ_CTRL` 等 ACK 的过程中允许硬件实际更新 GERROR/GERRORN、EVTQ PROD 和 CMDQ CONS；不放宽控制器配置、CPU producer/EVTQ consumer、wrapper 或其他寄存器的比较。之前整个 snapshot 必须静止，会在 source-off 时新的真实事件到达而错误返回 ESTALE。正常启动的 IRQ 控制比较仍严格。

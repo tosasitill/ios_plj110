@@ -157,7 +157,7 @@ static void __attribute__((noreturn)) cam_smmu_irq_worker(void *unused,wait_resu
             e=!m || m!=cam_smmu_namespace || m->magic!=CAM_SMMU_MAGIC ||
                 !m->native || !m->exported?EINVAL:0;
             if(!e)e=cam_smmu_storage(m);
-            if(!e)e=cam_smmu_live(m);
+            if(!e)e=cam_smmu_live_impl(m,true);
             if(!e && m->last_errno)e=(int)m->last_errno;
             if(e && m && m==cam_smmu_namespace && m->exported)e=cam_smmu_latch(m,e);
             if(m && m==cam_smmu_namespace){events=m->evt_events;gerror=m->gerror^m->gerrorn;}
