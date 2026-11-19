@@ -160,6 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-19 SMMU IRQ 关机动态状态和待处理中断
+
+- **基于 `b20d9a34` 修正**：关闭 `IRQ_CTRL` 等 ACK 的过程中允许硬件实际更新 GERROR/GERRORN、EVTQ PROD 和 CMDQ CONS；不放宽控制器配置、CPU producer/EVTQ consumer、wrapper 或其他寄存器的比较。之前整个 snapshot 必须静止，会在 source-off 时新的真实事件到达而错误返回 ESTALE。正常启动的 IRQ 控制比较仍严格。
+- **关机期间已有 edge**：IRQ_CTRL 已经 ACK 为0 后，若 GIC 有 pending、非 active、IRQ 被先前故障 mask，且已安装的 edge/route/priority 三项都仍匹配，则重新使能该线让真实 IAR 送达 worker，不写 ICPENDR。worker 即使第一错误已锁存，仍验证当前 namespace/backing 并处理真实 EVTQ/GERROR，再保留原始错误；硬件迟迟不交付会打印 pending/active/enable/worker 状态并超时保留。SFM 已关 EVTQEN 时，仍消费此前已发布到自有 EVTQ 的项。
+- **验证与限制**：`sweet_x9_camera.o` `compile_one=True`、exit0、181既有 warnings，日志 `x9/out/camera-smmu-irq-drain-20261119/kernel-compile.log`。未出镜像、CI 或上机；该并发路径、真实 GIC IAR/EOI 和错误时完整收尾仍需运行证据。Android MTK wrapper fault/device callback、真实 RAW 格式、iOS 预览也尚未完成，目标保持 active；356 MM_2 仍是首个实机阻塞。
+
 #### 2026-11-19 IRQ 后续：EVTQ 到达期间重采和 RAW 格式边界
 
 - **队列**：基于 `3a71dedd`；Android `arm_smmu_evtq_thread()` 每次排空后 `queue_sync_prod_in()` 并继续直到为空。X9 EVTQ service 现处理一批后重读 PROD（含 overflow），持续处理已实际发布的后来项；在真实队列持续变化时最多处理 `4*ring` 项/轮，超过有明确日志与 EOVERFLOW，不伪造清空；每轮最多输出前16条原始项及压缩计数，避免故障风暴把内核日志拖死。处理事件仍返回 EIO，IRQ worker 会停用本 GIC 线并保留依赖，Android MTK wrapper fault/device callback 和故障后复位/退役未完成。

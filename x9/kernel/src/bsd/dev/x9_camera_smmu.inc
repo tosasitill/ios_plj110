@@ -471,7 +471,9 @@ static int cam_smmu_live(struct x9_camera_smmu *m)
     __asm__ volatile("dsb sy":::"memory");
     if((m->evt_prod&~(evt_mask|(1u<<31))) ||
         (m->evt_cons&~(evt_mask|(1u<<31))))return EIO;
-    if(m->native && m->native_evtq_programmed && (m->native_cr0&CAM_SMMU_CR0_EVTQEN)) {
+    if(m->native && m->native_evtq_programmed) {
+        /* A service-failure may already have disabled EVTQ fetch while
+         * previously published entries still need actual consumption. */
         evt_error=cam_smmu_evtq_service_locked(m);
         if(evt_error && evt_error!=EIO)return evt_error;
     } else if(m->evt_cons || m->evt_prod)return EIO;

@@ -72,19 +72,45 @@ static int cam_smmu_irq_topology(void)
        ((cam_smmu_irq_read(4)&31u)+1u)*32u<=SMMU_IRQ_ID)return EBUSY;
     return 0;
 }
-/* Same full-bank comparison as CR0 enable; IRQ_CTRLACK is allowed to move
- * only from the old snapshot to the requested value during this operation. */
-static int cam_smmu_irq_control_locked(struct x9_camera_smmu *m,struct cam_native_snapshot *s,uint32_t value)
+/* The IRQ source's configuration is serialized by camera_smmu_lock. During
+ * shutdown hardware may still publish an event or advance an in-flight CMDQ;
+ * those observations belong to the worker and must not turn source-off into
+ * a false ESTALE. All controller configuration and CPU-owned cursors remain
+ * exact; only GERROR/GERRORN, EVTQ PROD and CMDQ CONS may move. */
+static int cam_smmu_irq_snapshot_match(struct x9_camera_smmu *m,
+    const struct cam_native_snapshot *expected,struct cam_native_snapshot *now,bool quiescing)
 {
-    uint64_t span,end;uint32_t before;int e=cam_native_match(m,s);if(e)return e;
+    struct cam_native_snapshot comparable;
+    int e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);if(e)return e;
+    cam_native_read(m,now);comparable=*now;
+    if(quiescing) {
+        comparable.word[CAM_N_GE]=expected->word[CAM_N_GE];
+        comparable.word[CAM_N_GEN]=expected->word[CAM_N_GEN];
+        comparable.word[CAM_N_EP]=expected->word[CAM_N_EP];
+        comparable.word[CAM_N_CC]=expected->word[CAM_N_CC];
+    }
+    return memcmp(&comparable,expected,sizeof(comparable))?ESTALE:0;
+}
+/* IRQ_CTRLACK may move only from the sampled old value to the requested one. */
+static int cam_smmu_irq_control_locked(struct x9_camera_smmu *m,struct cam_native_snapshot *s,
+    uint32_t value,bool quiescing)
+{
+    uint64_t span,end;uint32_t before;struct cam_native_snapshot now;
+    int e=cam_smmu_irq_snapshot_match(m,s,&now,quiescing);if(e)return e;
     before=s->word[CAM_N_IRQACK];m->native_irq_ctrl=value;
     cam_smmu_rw(m,0x50,value);s->word[CAM_N_IRQ]=value;
     nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
     for(unsigned i=0;i<10000;i++) {
-        struct cam_native_snapshot now;uint32_t ack;
+        uint32_t ack;
         e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);if(e)return e;
         cam_native_read(m,&now);ack=now.word[CAM_N_IRQACK];
         if(ack!=before && ack!=value)return ESTALE;
+        if(quiescing) {
+            /* Preserve actual dynamic values in s after the ACK, while the
+             * comparison below continues to protect every static register. */
+            s->word[CAM_N_GE]=now.word[CAM_N_GE];s->word[CAM_N_GEN]=now.word[CAM_N_GEN];
+            s->word[CAM_N_EP]=now.word[CAM_N_EP];s->word[CAM_N_CC]=now.word[CAM_N_CC];
+        }
         now.word[CAM_N_IRQACK]=s->word[CAM_N_IRQACK];
         if(memcmp(&now,s,sizeof(now)))return ESTALE;
         if(ack==value){s->word[CAM_N_IRQACK]=value;return 0;}
@@ -125,9 +151,14 @@ static void __attribute__((noreturn)) cam_smmu_irq_worker(void *unused,wait_resu
         armed=cam_smmu_irq.armed;cam_smmu_irq_spin_drop(old);
         if(armed) {
             lck_mtx_lock(&camera_smmu_lock);
-            e=cam_smmu_identity(m);
+            /* Even a terminal first fault can be followed by another edge
+             * already pending at the GIC. Service its real queue/status while
+             * preserving the original error, then allow shutdown to drain it. */
+            e=!m || m!=cam_smmu_namespace || m->magic!=CAM_SMMU_MAGIC ||
+                !m->native || !m->exported?EINVAL:0;
             if(!e)e=cam_smmu_storage(m);
             if(!e)e=cam_smmu_live(m);
+            if(!e && m->last_errno)e=(int)m->last_errno;
             if(e && m && m==cam_smmu_namespace && m->exported)e=cam_smmu_latch(m,e);
             if(m && m==cam_smmu_namespace){events=m->evt_events;gerror=m->gerror^m->gerrorn;}
             lck_mtx_unlock(&camera_smmu_lock);
@@ -203,7 +234,7 @@ static int cam_smmu_irq_bind_impl_locked(struct x9_camera_smmu *m,struct cam_nat
     __asm__ volatile("dsb sy":::"memory");
     if(*(volatile uint8_t *)(cam_smmu_irq.gic+SMMU_IRQ_PRIORITY)!=0xa0)return EIO;
     *step="source-ack";e=cam_smmu_irq_setup_guard_locked(m,s);if(e)return e;
-    e=cam_smmu_irq_control_locked(m,s,5);if(e)return e; /* EVTQ + GERROR */
+    e=cam_smmu_irq_control_locked(m,s,5,false);if(e)return e; /* EVTQ + GERROR */
     *step="gic-enable";old=cam_smmu_irq_spin_take();
     if(cam_smmu_irq.deliveries==UINT64_MAX) {
         cam_smmu_irq_spin_drop(old);return EOVERFLOW;
@@ -240,21 +271,41 @@ static int cam_smmu_irq_shutdown(struct x9_camera_smmu *m)
     if(!e) {
         struct cam_native_snapshot now;cam_native_read(m,&now);
         if(now.word[CAM_N_IRQ] || now.word[CAM_N_IRQACK])
-            e=cam_smmu_irq_control_locked(m,&now,0);
+            e=cam_smmu_irq_control_locked(m,&now,0,true);
     }
     lck_mtx_unlock(&camera_smmu_lock);if(e)return e;
     nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
     for(;;) {
-        bool busy,hardware_pending;
+        bool busy,hardware_pending;uint32_t pending,active,enabled;
         old=cam_smmu_irq_spin_take();
         busy=cam_smmu_irq.busy || cam_smmu_irq.pending;
-        hardware_pending=((cam_smmu_irq_read(SMMU_IRQ_PENDING)|cam_smmu_irq_read(SMMU_IRQ_ACTIVE))&SMMU_IRQ_BIT)!=0;
+        pending=cam_smmu_irq_read(SMMU_IRQ_PENDING)&SMMU_IRQ_BIT;
+        active=cam_smmu_irq_read(SMMU_IRQ_ACTIVE)&SMMU_IRQ_BIT;
+        enabled=cam_smmu_irq_read(SMMU_IRQ_ENABLE)&SMMU_IRQ_BIT;
+        hardware_pending=(pending|active)!=0;
+        if(!busy && pending && !active && !enabled) {
+            /* IRQ_CTRL is already ACKed off. Deliver a real latched edge
+             * instead of clearing GIC pending; the worker preserves any first
+             * error while servicing actual EVTQ/GERROR state. */
+            uint32_t config=cam_smmu_irq_read(SMMU_IRQ_CONFIG)&(3u<<SMMU_IRQ_SHIFT);
+            uint8_t priority=*(volatile uint8_t *)(cam_smmu_irq.gic+SMMU_IRQ_PRIORITY);
+            if((cam_smmu_irq.dirty&7)!=7 || config!=(2u<<SMMU_IRQ_SHIFT) ||
+               cam_smmu_irq_route()!=cam_smmu_irq.route || priority!=0xa0) {
+                cam_smmu_irq_spin_drop(old);return ESTALE;
+            }
+            cam_smmu_irq.armed=true;
+            cam_smmu_irq_write(SMMU_IRQ_ENABLE,SMMU_IRQ_BIT);
+        }
         if(!busy && !hardware_pending) {
             cam_smmu_irq.armed=false;cam_smmu_irq_write(SMMU_IRQ_DISABLE,SMMU_IRQ_BIT);
             cam_smmu_irq_spin_drop(old);break;
         }
         cam_smmu_irq_spin_drop(old);
-        if(mach_absolute_time()>=end)return ETIMEDOUT;
+        if(mach_absolute_time()>=end) {
+            printf("X9 CAMERA SMMU IRQ: drain timeout pending=%x active=%x enabled=%x worker_busy=%u\n",
+                pending,active,enabled,busy);
+            return ETIMEDOUT;
+        }
         delay(10);
     }
     e=cam_smmu_irq_wait_rwp();if(e)return e;
