@@ -230,14 +230,19 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     if(!e)m->native_setup_issued=true; /* BEFORE first wrapper/normal store */
 #define CAM_NATIVE_STEP(name, expr) do { if(!e) { step=(name); e=(expr); } } while(0)
     CAM_NATIVE_STEP("wrapper",cam_native_wp_init(m,&entry));
+    /* Android arm_smmu_device_reset starts by synchronizing CR0=0.
+     * Admission above requires a cold, unowned bank; do not reset a live
+     * controller whose other stream owners cannot be accounted for. */
+    CAM_NATIVE_STEP("disable-ack",cam_native_enable(m,&entry,0));
     CAM_NATIVE_STEP("cr1",cam_native_write32(m,&entry,CAM_N_CR1,m->view.cr1));
     CAM_NATIVE_STEP("cr2",cam_native_write32(m,&entry,CAM_N_CR2,m->view.cr2));
     CAM_NATIVE_STEP("strtab-base",cam_native_write64(m,&entry,0,m->view.strtab_base));
     CAM_NATIVE_STEP("strtab-cfg",cam_native_write32(m,&entry,CAM_N_CFG,m->view.strtab_cfg));
     CAM_NATIVE_STEP("cmdq-base",cam_native_write64(m,&entry,1,m->view.cmdq_base));
-    CAM_NATIVE_STEP("evtq-base",cam_native_write64(m,&entry,2,m->view.evtq_base));
-    /* Program owned bases before enabling queue fetch. No write to initial
-     * zero producer/consumer, IRQ, EVTQ ACK, GERRORN, GBPA or secure bank. */
+    CAM_NATIVE_STEP("cmdq-prod",cam_native_write32(m,&entry,CAM_N_CP,0));
+    CAM_NATIVE_STEP("cmdq-cons",cam_native_write32(m,&entry,CAM_N_CC,0));
+    /* As in Android, enable CMDQ before invalidations, then initialize EVTQ.
+     * All four initial queue cursors were confirmed zero at admission. */
     CAM_NATIVE_STEP("cmdq-enable-ack",cam_native_enable(m,&entry,CAM_SMMU_CR0_CMDQEN));
     if(!e) {
         const struct cam_smmu_cmd cfg={{4,31}};
@@ -254,6 +259,10 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     /* The owned queue advanced through SYNC; use its actual consumed
      * cursors in subsequent complete register comparisons. */
     if(!e){entry.word[CAM_N_CP]=m->prod;entry.word[CAM_N_CC]=m->cons;}
+    CAM_NATIVE_STEP("evtq-base",cam_native_write64(m,&entry,2,m->view.evtq_base));
+    if(!e)m->native_evtq_programmed=true;
+    CAM_NATIVE_STEP("evtq-prod",cam_native_write32(m,&entry,CAM_N_EP,0));
+    CAM_NATIVE_STEP("evtq-cons",cam_native_write32(m,&entry,CAM_N_EC,0));
     CAM_NATIVE_STEP("evtq-enable-ack",cam_native_enable(m,&entry,CAM_SMMU_CR0_CMDQEN|CAM_SMMU_CR0_EVTQEN));
     CAM_NATIVE_STEP("smmu-enable-ack",cam_native_enable(m,&entry,CAM_SMMU_CR0));
     CAM_NATIVE_STEP("live-check",cam_smmu_live(m));

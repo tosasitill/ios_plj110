@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-19 相机按 Android 复核 · SMMU 冷启动顺序（未上机）
+
+- **用户要求**：相机各阶段按 Android 逻辑与流程对照并修正，范围持续进行；之前不生成探针镜像、不做设备操作的要求仍有效。
+- **本轮源码依据和修改**：OPPO `arm-smmu-v3.c:3924..4006` 先 CR0=0 并等 ACK，写 CR1/CR2、stream table、CMDQ base 和初始 prod/cons，打开 CMDQ 后执行 CFGI_ALL/可选 EL2 TLBI/NSNH TLBI，才设置 EVTQ base/prod/cons 并打开 EVTQ。本轮将 native 冷启动改为此顺序；初始四个 queue 游标仍须实测为0；guard 在 EVTQ base 编程前校验先前 base、之后校验本次 base，避免 CMDQ 失效命令错误地要求事件队列已配置。新增的每个写入均有 `step=` 首错；保留冷控制器所有权准入。没有更改现存其他 stream 的映射策略。
+- **确认尚有 Android 差异，未完成**：live DT `/soc/iommu@30800000` 指定 combined 中断 SPI 479（GIC INTID 511），Android `arm_smmu_setup_irqs()` 安装 handler 并启用 EVTQ/GERROR；`arm_smmu_evtq_thread()` 消费队列，`arm_smmu_gerror_handler()` 处理并确认全局错误。X9 `cam_smmu_live()` 目前不注册该 IRQ、不消费 EVTQ、不确认 GERROR；先 latch 并保留现场。完整移植需要设计同一 GIC 与 SMMU 队列的 owner、处理 teardown/并发、缓存同步和未知/其他 SID 事件，不能把当前代码称为 Android 等价。SMMU 启动还保留拒绝活动/继承 controller、普通 bank 自有队列等 XNU 所有权约束；Android 完整驱动的安全固件/共享内存、SVA/PRI/ATS、错误中断处理及 iOS 输出流程均未证明已等价。未知运行配置不能据源码假定这些分支实际启用。
+- **验证与限制**：基于 `579cead8`；`sweet_x9_camera.o` 单对象交叉编译 `compile_one=True`、exit 0、181 条 warning，日志与命令脚本在 `x9/out/camera-android-smmu-20261119/`。无 CI、整包或上机。356 MM_2 final STA bit3 超时仍是最早实机阻塞，根因和后续阶段硬件行为均未验证。下一步优先完成可追溯的 MM SMMU combined IRQ/GERROR/EVTQ 生命周期与 Android 条件分支对照，再继续 CAMSV 和 iOS 端到端检查。
+
 #### 2026-11-19 相机后续链路与首错日志核对（未上机）
 
 - **提交与推送**：代码和本轮交接提交 `ad27c972`；`git push origin feat/camera-integration` exit 0，远端 `65c9ddb1..ad27c972`。

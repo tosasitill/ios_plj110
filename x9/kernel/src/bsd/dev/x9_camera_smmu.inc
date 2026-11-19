@@ -46,7 +46,7 @@ struct x9_camera_smmu {
     uint32_t batch_start,batch_count,close_samples,close_errno;
     bool exported,pending,close_attempted,timedout_retired,shared_attempted;
     /* Cold native host owns all normal controller stores in this TU. */
-    bool native, native_bypass, native_started;
+    bool native, native_bypass, native_started, native_evtq_programmed;
     uint32_t ste_shift, ste_bytes, native_cr0, native_gbpa;
     uint64_t native_power;
     bool native_retire_attempted,native_restored,native_setup_issued,native_unstarted_retired;
@@ -322,7 +322,8 @@ static int cam_smmu_live(struct x9_camera_smmu *m)
         cam_smmu_rr(m,0x14)!=m->idr5 ||
         cam_smmu_rr64(m,0x80)!=m->view.strtab_base || cam_smmu_rr(m,0x88)!=m->view.strtab_cfg ||
         cam_smmu_rr64(m,0x90)!=m->view.cmdq_base ||
-        cam_smmu_rr64(m,0xa0)!=m->view.evtq_base ||
+        cam_smmu_rr64(m,0xa0)!=(m->native && !m->native_evtq_programmed ?
+            m->native_prior_base[2] : m->view.evtq_base) ||
         cam_smmu_rr(m,0x20)!=(m->native?m->native_cr0:CAM_SMMU_CR0) ||
         cam_smmu_rr(m,0x24)!=(m->native?m->native_cr0:CAM_SMMU_CR0) ||
         cam_smmu_rr(m,0x28)!=CAM_SMMU_CR1 || cam_smmu_rr(m,0x2c)!=CAM_SMMU_CR2 ||
