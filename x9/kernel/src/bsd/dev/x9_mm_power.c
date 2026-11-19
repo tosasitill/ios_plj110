@@ -47,7 +47,7 @@ LCK_MTX_DECLARE(mm_power_lock, &mm_power_group);
 static struct { uint64_t token; uint32_t client, children; } parents[MM_POWER_PARENTS];
 static struct { uint64_t token, parent; } children[MM_POWER_CHILDREN];
 static uint64_t next_token = 1;
-static vm_offset_t hwv, mmup, power_ack;
+static vm_offset_t hwv, mmup, power_ack, vcp_cfg_core0, vcp_cfg_core1;
 static bool power_fault, vote_owned, vote_held;
 static uint32_t holders;
 struct mm_irq_timeout {
@@ -203,6 +203,14 @@ out:
          * observations only; no interrupt status or pending vote is cleared. */
         printf("X9 MM POWER IRQ SAMPLE: before=%x after=%x output=%x req_ack=%x\n",
             int_before, int_status, mm_read(hwv, 0x10004), mm_read(hwv, 0x10008));
+        /* RV_v2 maps core0 status at cfg_core0+0x70 and core1 (MMUP) at
+         * cfg_core1+0x70. GPR1/2/3 are the reset-time MMUP reserved-memory
+         * address/size/logger words. These are observations only. */
+        if (vcp_cfg_core0 && vcp_cfg_core1)
+            printf("X9 MM POWER VCP STATE: core0=%x core1=%x mmup_gpr=%x/%x/%x\n",
+                mm_read(vcp_cfg_core0, 0x70), mm_read(vcp_cfg_core1, 0x70),
+                mm_read(vcp_cfg_core1, 0x44), mm_read(vcp_cfg_core1, 0x48),
+                mm_read(vcp_cfg_core1, 0x4c));
         mm_irq_history_log(&history);
     }
     return e;
@@ -305,6 +313,11 @@ int x9_mm_power_acquire(uint32_t client, uint64_t *token, uint32_t *a0)
     if (!hwv) hwv = ml_io_map(0x31c00000, 0x22000);
     if (!mmup) mmup = ml_io_map(0x31a04000, 0x1000);
     if (!power_ack) power_ack = ml_io_map(0x31b50000, 0x1000);
+    /* Live DT vcp@31800000 reg-names: vcp_cfgreg_core0/core1 at
+     * 31a0a000/31a0d000. The read-only status diagnostic is mapped lazily so
+     * an unrelated mapping failure cannot change the existing vote path. */
+    if (!vcp_cfg_core0) vcp_cfg_core0 = ml_io_map(0x31a0a000, 0x1000);
+    if (!vcp_cfg_core1) vcp_cfg_core1 = ml_io_map(0x31a0d000, 0x1000);
     if (!hwv || !mmup || !power_ack) { e = ENOMEM; goto out; }
     if (!holders) {
         if (vote_held || vote_owned) { e = EIO; goto out; }

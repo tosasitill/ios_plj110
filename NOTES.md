@@ -160,6 +160,11 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-19 MMUP/VCP 启动路径与只读核状态
+
+- **Android 启动链核实**：rv_v2 `vcp_helper.c` 在 probe 中按 `core-nums=2` 调 `mmup_init()`，注册 `IPI_IN_VCP_READY_1`；probe 末尾对 core0/core1 发 RESET_SET，再 `vcp_register_feature(RTOS_FEATURE_ID)` 触发首次 power/clk。`vcp_enable_pm_clk()` 在两核未 ready 时调用 `reset_vcp()`：写 MMUP/VCP 保留内存 GPR，经 `MTK_SIP_TINYSYS_VCP_CONTROL(c200052c)` 的 `MMUP_KERNEL_OP_RESET_RELEASE` 与 `VCP_KERNEL_OP_RESET_RELEASE` 释放复位，并等待 IPI READY。HWCCF feature 位于 MMUP 核。这段说明原 Android 的 MMUP/VCP 并非无需初始化；但 X9 可能由 LK 遗留其运行态，当前无 357 中的直接状态证据。
+- **只读诊断**：`x9_mm_power.c` 现在在 stage4 超时短行中读取 core0/core1 `cfg+0x70` STATUS 及 MMUP `cfg+0x44/48/4c` GPR1/2/3；live DT 对应 core0/core1 cfg 基址 `31a0a000/31a0d000`。这些寄存器来自 Android vcp_reg.h，映射失败不参与、也不改变 MM_2 投票成功判据；不清中断、不 reset/release 协处理器。`x9_mm_power.o` 单对象编译 exit 0、`compile_one result True`、2条导出头既有 warnings，日志 `x9/out/camera-mm-global-read-delay-20261118/compile-vcp-state-357.log`。尚无新镜像或实机采样。
+
 #### 2026-11-19 357 MM_2 与 MMUP 前置条件调查
 
 - **实机观察**：357 的 `int_raw=0x4000`；Android `hwccf.h` 将 bit14 命名为 `backup_vote_int_to_vip`，BACKUP1 status bit3 同时为1、DONE bit3为0，AP/global bit3为1。日志长行在 `timeout_raw=8` 后与 IRQ history 交叠，`int_before` 没有可靠显示，不能证明 bit14 是此次投票新产生，也不能确定哪个 backup 资源触发。
