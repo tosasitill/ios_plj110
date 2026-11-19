@@ -395,14 +395,21 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
      * raw itself must remain immutable/cache-visible through this call. */
     const struct x9_camera_completed_frame f=*completed;
     lck_mtx_lock(&camera_lock);int e=0;const struct x9_camera_sensor *s=sensor();
+    const char *step="identity";
     if(!(st.flags&X9_CAMERA_STREAMING) || f.generation!=st.generation || f.sensor!=st.sensor)e=ESTALE;
-    else if(cam_completed_layout(s,&f) ||
-            !f.capture_id || !f.time || !f.sof_time || f.sof_time>f.time ||
-            f.time>mach_absolute_time())e=EINVAL;
-    else if(f.capture_id<=last_capture_id || f.time<=last_capture_time || f.sof_time<=last_sof_time)e=ESTALE;
-    else e=cam_completed_controls(s,&f);
+    if(!e) {
+        step="layout-time";
+        if(cam_completed_layout(s,&f) || !f.capture_id || !f.time || !f.sof_time ||
+            f.sof_time>f.time || f.time>mach_absolute_time())e=EINVAL;
+    }
+    if(!e) {
+        step="sequence";
+        if(f.capture_id<=last_capture_id || f.time<=last_capture_time || f.sof_time<=last_sof_time)e=ESTALE;
+    }
+    if(!e){step="controls";e=cam_completed_controls(s,&f);}
     if(!e) {
         last_capture_id=f.capture_id;last_capture_time=f.time;last_sof_time=f.sof_time;
+        step="reader-busy";
         if(frame_readers)e=EBUSY; /* retire, never overwrite/replay a pinned CPU copy */
     }
     if(!e) {
@@ -426,7 +433,14 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
                 "seq=%llu width=%u height=%u stride=%u bytes=%u sof=%llu done=%llu\n",
                 f.sensor,f.generation,f.capture_id,head.sequence,s->width,s->height,
                 f.stride,f.bytes,f.sof_time,f.time);
-    } else {st.rejected++;st.last_errno=e;}
+    } else {
+        st.rejected++;st.last_errno=e;
+        printf("X9 CAMERA RAW REJECT: step=%s errno=%d sensor=%u current_sensor=%u "
+            "generation=%llu current_generation=%llu capture_id=%llu stride=%u bytes=%u "
+            "sof=%llu done=%llu readers=%u rejected=%llu\n",step,e,f.sensor,st.sensor,
+            f.generation,st.generation,f.capture_id,f.stride,f.bytes,f.sof_time,f.time,
+            frame_readers,st.rejected);
+    }
     lck_mtx_unlock(&camera_lock);return e;
 }
 #include "x9_camera_native_ae.h"

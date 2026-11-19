@@ -1932,6 +1932,8 @@ worker(void *context)
 	uint8_t *buffer = NULL;
 	size_t bytes = 0;
 	unsigned delivery_faults[OUTPUTS] = { 0 };
+	bool said_rate_wait = false;
+	unsigned graph_admission_reported = 0;
 	uint32_t tuned_for = ~0u;
 	float lux = -1, cct = -1;
 	struct af af = { 0 };
@@ -2013,6 +2015,7 @@ worker(void *context)
                 pthread_mutex_unlock(&s->lock);
                 free(buffer);buffer=NULL;bytes=0;last_sequence=0;tuned_for=~0u;
                 memset(delivery_faults, 0, sizeof(delivery_faults));
+                said_rate_wait=false; graph_admission_reported=0;
                 /* Keep graph/pools/host timestamps. Reset sensor-specific
                  * LSC/CCM/AF, carry only bounded common WB gains, not calibration. */
                 float wb[3]; memcpy(wb, isp.wb, sizeof(wb));
@@ -2042,7 +2045,9 @@ worker(void *context)
 			}
 			/* Start already selected this sensor synchronously. A mismatched record is not permission to reissue SENSOR. */
 			if (!valid_frame(&head, s->physical_sensor)) {
-                say("invalid RAW10 header; stopping before allocation"); error=EPROTO; break;
+                say("invalid RAW10 header: sensor=%u expected=%u format=%u bayer=%u size=%ux%u stride=%u header=%u; stopping",
+                    head.sensor, s->physical_sensor, head.format, head.bayer, head.width, head.height,
+                    head.stride, head.header_bytes); error=EPROTO; break;
             }
             bytes = sizeof(head) + (size_t)head.stride * head.height;
 			buffer = malloc(bytes);
@@ -2064,7 +2069,12 @@ worker(void *context)
 		if (!valid_frame(f, s->physical_sensor) ||
             bytes != sizeof(*f) + (size_t)f->stride * f->height ||
             f->sequence<=last_sequence || f->time<=last_time || hakios_camera_sof_time(f)<=last_sof) {
-            say("invalid/stale frame; not delivering to capture graph"); error=EPROTO; break;
+            say("invalid/stale frame: sensor=%u expected=%u seq=%llu prior=%llu SOF=%llu prior=%llu "
+                "DONE=%llu prior=%llu size=%ux%u stride=%u bytes=%zu; not delivering",
+                f->sensor, s->physical_sensor, (unsigned long long)f->sequence, (unsigned long long)last_sequence,
+                (unsigned long long)hakios_camera_sof_time(f), (unsigned long long)last_sof,
+                (unsigned long long)f->time, (unsigned long long)last_time, f->width, f->height, f->stride, bytes);
+            error=EPROTO; break;
         }
         bool first_raw = last_sequence == 0;
         last_sequence=f->sequence;last_time=f->time;last_sof=hakios_camera_sof_time(f);
@@ -2143,7 +2153,15 @@ worker(void *context)
 		}
 		/* This RAW may precede a rate-control update. Do not publish it
 		 * under the new video rate contract until actual frame length agrees. */
-		if (f->frame_lines < isp.min_frame_lines || f->frame_lines > isp.max_frame_lines) continue;
+		if (f->frame_lines < isp.min_frame_lines || f->frame_lines > isp.max_frame_lines) {
+            if (!said_rate_wait) {
+                said_rate_wait=true;
+                say("frame rate admission waiting: sensor=%u seq=%llu lines=%u expected=%u..%u fps=%.2f..%.2f",
+                    f->sensor, (unsigned long long)f->sequence, f->frame_lines,
+                    isp.min_frame_lines, isp.max_frame_lines, minimum, maximum);
+            }
+            continue;
+        }
 		if (af_now) {
 			/* (whatever it was doing: at once, from the next frame) */
 			af.state = AF_STEADY;
@@ -2176,6 +2194,26 @@ worker(void *context)
 		 * it walks a pointer that is not there yet and mediaserverd dies of SIGSEGV. The frames
 		 * before that are read and thrown away, which is also what settles the exposure.
 		 */
+        /* Capture at most one snapshot per graph state. The graph may start
+         * after RAW begins, so keep both pre-start and started evidence. */
+        if(graph_admission_reported!=3u) {
+            pthread_mutex_lock(&s->lock);
+            bool graph=s->graph_running, running=s->running;
+            unsigned configured=0, handlers=0, enabled=0, known=0;
+            for (unsigned i=0;i<OUTPUTS;i++) {
+                if(s->out[i].config)configured|=1u<<i;
+                if(s->out[i].handler)handlers|=1u<<i;
+                if(s->out[i].enabled)enabled|=1u<<i;
+                if(s->out[i].enabled_known)known|=1u<<i;
+            }
+            pthread_mutex_unlock(&s->lock);
+            unsigned state_bit=graph?2u:1u;
+            if(!(graph_admission_reported&state_bit)) {
+                graph_admission_reported|=state_bit;
+                say("RAW graph admission: sensor=%u seq=%llu running=%u graph=%u config_mask=%x handler_mask=%x enabled_mask=%x known_mask=%x (slots PrimaryScaler/SecondaryScaler/StillImage)",
+                    f->sensor,(unsigned long long)f->sequence,running,graph,configured,handlers,enabled,known);
+            }
+        }
 		for (unsigned i = 0; s->graph_running && i < OUTPUTS; i++) {
 			struct output_snapshot snapshot = { 0 };
 

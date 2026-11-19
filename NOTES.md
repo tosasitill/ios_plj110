@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-19 相机后续链路与首错日志核对（未上机）
+
+- **范围**：基于 `65c9ddb1`，复核 ISP8s `mtk_cam-job.c:1456/1477` 与 X9 `start()` 的 CAMSV 先启动、sensor stream 后启动；`mtk_cam-ctrl.c:1235` 通过 cookie 关联 DONE 的对应为 X9 同请求 SOF/DONE、FBC、DMA 交接后才 publish。对照 OPPO `arm-smmu-v3.c:3924` 的 CR1/CR2、表与队列、CMDQEN ACK、CFGI_ALL/TLBI、EVTQEN 与 SMMUEN 顺序；X9 在 CMDQ 使能前写 EVTQ BASE，要求初始游标为零，且不重置已有活跃 controller，与 Android 的通用 reset 并非逐项相同。先前 static review 的 MM/SMI/receiver/SMMU/CAMSV 阶段及逐层 guard 见后续条目；静态调用路径存在不等于真实硬件可达或已完整。
+- **本轮修改**：SMMU 后半段记录 `step=` 首错（wrapper、CR1/CR2、bases、CMDQ/EVTQ/SMMU ACK、CFGI/TLBI、live）；不添加 MMIO 读取、不改变成功判据。RAW 拒绝记录 identity/layout-time/sequence/controls/reader-busy 及请求字段。iOS RAW header/时间拒绝输出实际值；帧率 admission 第一次等待输出当前帧长度与范围；graph 启动前/后各记录一次输出配置、handler、enable 位图；不放宽 admission。
+- **验证**：`sweet_x9_camera.o` 交叉编译 `compile_one=True`、exit 0、181 条已有 warning；`camera_device.o` iOS 交叉编译 exit 0、无诊断。命令、日志及对象在本 worktree `x9/out/camera-pipeline-audit-20261119/`。无 CI、无整包、无设备动作；仍遵守用户不出探针镜像的要求。
+- **未完成**：最新实机仍是 356 MM_2 final STA bit3 超时，根因未证实；后续时钟、SMI/SMMU、SOF/DONE、RAW、handler、画面都无实机通过证据。ISP8s `FORMAT_TAG1=1` 与 iOS RAW10 packed 解包仍缺同一正常请求的真实格式回读/RAW 样本；identity CCM/无 LSC 并非真实颜色校准。下次有实机日志按 MM POWER → NATIVE CONFIG/PREPARE → NATIVE SMMU → FIRST ARM/IRQ → RAW PUBLISH/REJECT → first RAW/graph admission → first picture 顺序判断，禁止把静态对照当可见预览验收。
+
 #### 2026-11-18 相机静态复查 · MM_2 的 IRQ 状态前后样本
 
 - Android `clkchk-mt6993.c:5163` 的 timeout 诊断读取 `CCF_INT_STATUS`。`hwccf.h:150/167` 将 bit5/21 定义为 BACKUP1 timeout，bit9/25 为 vote-before-ready。native `int_before` 在 MMUP dummy read 后采样，`int_raw` 在投票路径退出时、IRQ history 扫描前采样。若 bit5/21 在 `int_before` 已置位，单凭结束采样无法归因给本次请求。若从 0 变 1，再结合 `timeout_raw` 和 history 核对事务。该变更仅采样状态，SET/CLR 与 `STA bit3=0` 成功判据照旧。

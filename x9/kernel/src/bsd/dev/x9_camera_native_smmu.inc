@@ -222,41 +222,47 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     if(m->exported)*out=m;
     if(e)return e;
     lck_mtx_lock(&camera_smmu_lock);
+    /* Keep the first failing step: the caller's prepare stage also covers
+     * allocation and export, so a bare errno cannot identify which SMMU
+     * register or invalidation failed. No extra MMIO reads on failure. */
+    const char *step="entry-match";
     e=cam_native_match(m,&entry);
     if(!e)m->native_setup_issued=true; /* BEFORE first wrapper/normal store */
-    if(!e)e=cam_native_wp_init(m,&entry);
-    if(!e)e=cam_native_write32(m,&entry,CAM_N_CR1,m->view.cr1);
-    if(!e)e=cam_native_write32(m,&entry,CAM_N_CR2,m->view.cr2);
-    if(!e)e=cam_native_write64(m,&entry,0,m->view.strtab_base);
-    if(!e)e=cam_native_write32(m,&entry,CAM_N_CFG,m->view.strtab_cfg);
-    if(!e)e=cam_native_write64(m,&entry,1,m->view.cmdq_base);
-    if(!e)e=cam_native_write64(m,&entry,2,m->view.evtq_base);
+#define CAM_NATIVE_STEP(name, expr) do { if(!e) { step=(name); e=(expr); } } while(0)
+    CAM_NATIVE_STEP("wrapper",cam_native_wp_init(m,&entry));
+    CAM_NATIVE_STEP("cr1",cam_native_write32(m,&entry,CAM_N_CR1,m->view.cr1));
+    CAM_NATIVE_STEP("cr2",cam_native_write32(m,&entry,CAM_N_CR2,m->view.cr2));
+    CAM_NATIVE_STEP("strtab-base",cam_native_write64(m,&entry,0,m->view.strtab_base));
+    CAM_NATIVE_STEP("strtab-cfg",cam_native_write32(m,&entry,CAM_N_CFG,m->view.strtab_cfg));
+    CAM_NATIVE_STEP("cmdq-base",cam_native_write64(m,&entry,1,m->view.cmdq_base));
+    CAM_NATIVE_STEP("evtq-base",cam_native_write64(m,&entry,2,m->view.evtq_base));
     /* Program owned bases before enabling queue fetch. No write to initial
      * zero producer/consumer, IRQ, EVTQ ACK, GERRORN, GBPA or secure bank. */
-    if(!e)e=cam_native_enable(m,&entry,CAM_SMMU_CR0_CMDQEN);
+    CAM_NATIVE_STEP("cmdq-enable-ack",cam_native_enable(m,&entry,CAM_SMMU_CR0_CMDQEN));
     if(!e) {
         const struct cam_smmu_cmd cfg={{4,31}};
-        e=cam_smmu_submit(m,&cfg,1);
+        CAM_NATIVE_STEP("cfgi-all",cam_smmu_submit(m,&cfg,1));
     }
     if(!e && (m->idr0&(1u<<9))) {
         const struct cam_smmu_cmd hyp={{0x20,0}};
-        e=cam_smmu_submit(m,&hyp,1);
+        CAM_NATIVE_STEP("tlbi-el2-all",cam_smmu_submit(m,&hyp,1));
     }
     if(!e) {
         const struct cam_smmu_cmd tlbi={{0x30,0}}; /* TLBI_NSNH_ALL */
-        e=cam_smmu_submit(m,&tlbi,1);
+        CAM_NATIVE_STEP("tlbi-nsnh-all",cam_smmu_submit(m,&tlbi,1));
     }
     /* The owned queue advanced through SYNC; use its actual consumed
      * cursors in subsequent complete register comparisons. */
     if(!e){entry.word[CAM_N_CP]=m->prod;entry.word[CAM_N_CC]=m->cons;}
-    if(!e)e=cam_native_enable(m,&entry,CAM_SMMU_CR0_CMDQEN|CAM_SMMU_CR0_EVTQEN);
-    if(!e)e=cam_native_enable(m,&entry,CAM_SMMU_CR0);
-    if(!e)e=cam_smmu_live(m);
-    if(!e)m->native_started=true;
+    CAM_NATIVE_STEP("evtq-enable-ack",cam_native_enable(m,&entry,CAM_SMMU_CR0_CMDQEN|CAM_SMMU_CR0_EVTQEN));
+    CAM_NATIVE_STEP("smmu-enable-ack",cam_native_enable(m,&entry,CAM_SMMU_CR0));
+    CAM_NATIVE_STEP("live-check",cam_smmu_live(m));
+#undef CAM_NATIVE_STEP
+    if(!e){m->native_started=true;step="started";}
     else {cam_smmu_latch(m,e);if(e==ETIMEDOUT)cam_smmu_retire_timeout(m);}
-    printf("X9 CAMERA NATIVE SMMU: sidbits=%u bypass=%u cr0=%x started=%u tcu_pf=%u "
+    printf("X9 CAMERA NATIVE SMMU: step=%s sidbits=%u bypass=%u cr0=%x started=%u tcu_pf=%u "
         "prod=%x cons=%x errno=%d (own normal storage, retain MM power/backing)\n",
-        sidbits,m->native_bypass,m->native_cr0,m->native_started,
+        step,sidbits,m->native_bypass,m->native_cr0,m->native_started,
         m->native_policy.tcu_prefetch,m->prod,m->cons,e);
     lck_mtx_unlock(&camera_smmu_lock);return e;
 }
