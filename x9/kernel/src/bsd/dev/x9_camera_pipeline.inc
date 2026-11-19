@@ -41,7 +41,9 @@ static int cam_pipeline_plan(uint32_t which, struct x9_camera_pipeline *p)
      * this register's units from the header or the name exp_hsize. */
     p->vcdt=(p->dt<<16)|(p->vc<<8)|1;
     p->expected_size=((p->height-1)<<16)|(p->width/4*5-1);
-    /* CAMSV central tag1 grab +0x548/+0x54c, RAW10 packed +0x554.
+    /* CAMSV central tag1 grab +0x548/+0x54c, SV_FMT_RAW10=1 at +0x554.
+     * This does not by itself prove MIPI byte packing for normal ISP8s
+     * output: the firmware-generated CQ and actual RAW remain unobserved.
      * DMA bank +0x210 has stride in HIGH16, max-burst in LOW5. */
     p->grab_pixels=p->width<<16;p->grab_lines=p->height<<16;
     p->format=1;p->dma_basic=(stride<<16)|0x10;

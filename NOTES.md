@@ -160,6 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-19 IRQ 后续：EVTQ 到达期间重采和 RAW 格式边界
+
+- **队列**：基于 `3a71dedd`；Android `arm_smmu_evtq_thread()` 每次排空后 `queue_sync_prod_in()` 并继续直到为空。X9 EVTQ service 现处理一批后重读 PROD（含 overflow），持续处理已实际发布的后来项；在真实队列持续变化时最多处理 `4*ring` 项/轮，超过有明确日志与 EOVERFLOW，不伪造清空；每轮最多输出前16条原始项及压缩计数，避免故障风暴把内核日志拖死。处理事件仍返回 EIO，IRQ worker 会停用本 GIC 线并保留依赖，Android MTK wrapper fault/device callback 和故障后复位/退役未完成。
+- **RAW 静态对照**：ISP8s `mtk_cam-fmt_utils.c:415..428` 将 V4L2 `SBGGR10P` 等映射到 `MTKCAM_IPI_IMG_FMT_BAYER10_MIPI`，而 MTISP Bayer10 映射到不同 IPI 格式；iOS `camera_isp.c:cell/unpack_line` 期望每4像素5字节的 MIPI 低两位交织。ISP8s 的 `SV_FMT_RAW10=1` 与 `SV_FMT_MIPI_RAW10=8` 是不同枚举，normal CAMSV 的实际格式来自固件 CQ，未找到 IPI 格式到 ISP8s `FORMAT_TAG1` 的实现或同请求的寄存器/RAW 样本。跨代 `isp7s/cam_legacy/mtk_cam_sv_format_sel()` 对 MTISP 和 10P 均选 `SV_TG_FMT_RAW10=1`，`pak_sel` 都选 packed，但这只能作为跨代参考，不能证明 ISP8s payload 的字节顺序。保留当前寄存器值，修正 `x9_camera_pipeline.inc` 把 `1` 直接叫做“MIPI packed”的不确定注释。
+- **编译**：`sweet_x9_camera.o` `compile_one=True`、exit0、181既有 warning，日志 `x9/out/camera-smmu-evtq-drain-20261119/kernel-compile.log`；无镜像、CI 或设备操作。继续保持目标 active：IRQ 实际 IAR/EOI与故障退役、MTK wrapper/设备 fault 接收、同一 ISP8s 请求的格式和实际 RAW、iOS handler/可见预览均未实机验证。最新实机仍为 356 MM_2 超时。
+
 #### 2026-11-19 相机 SMMU combined IRQ 初版实现（未上机）
 
 - **起点/范围**：基于 `cf36ee18`，实现 FDT INTID511 edge-rising 的 GIC 单线接管、实际 IAR filter、worker、正常退出及启动失败收尾；本项尚未实机验证，也不是 Android 全路径等价证明。

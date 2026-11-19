@@ -321,40 +321,60 @@ int x9_camera_smmu_discard(struct x9_camera_smmu **map)
 static int cam_smmu_evtq_service_locked(struct x9_camera_smmu *m)
 {
     const uint32_t ring=1u<<m->evt_shift, mask=2u*ring-1u, ovf=1u<<31;
-    uint32_t prod=cam_smmu_rr(m,0x100a8),cons=cam_smmu_rr(m,0x100ac);
-    unsigned count=0;int e;
-    if((prod&~(mask|ovf)) || (cons&~(mask|ovf)) || cons!=m->evt_owned_cons ||
-       (((prod&mask)-(cons&mask))&mask)>ring)
-        return ESTALE;
-    if((prod^m->evt_last_prod)&ovf) {
-        m->evt_overflows++;
-        printf("X9 CAMERA SMMU EVTQ: overflow prod=%x previous=%x cons=%x lost=unknown\n",
-            prod,m->evt_last_prod,cons);
-    }
-    m->evt_last_prod=prod;
-    while((cons&mask)!=(prod&mask)) {
-        const volatile uint64_t *entry;
-        uint64_t w0,w1,w2,w3;
-        if(count++>=ring)return EOVERFLOW;
-        e=cam_cache_range(m->evt.va,CAM_S1_PAGE,CAM_CACHE_CPU);if(e)return e;
-        entry=(const volatile uint64_t *)m->evt.va+(cons&(ring-1u))*4u;
-        w0=entry[0];w1=entry[1];w2=entry[2];w3=entry[3];
-        __asm__ volatile("dsb sy":::"memory");
-        m->evt_events++;
-        printf("X9 CAMERA SMMU EVTQ: event=%llu id=%x sid=%x ssid_valid=%u "
-            "ssid=%x stall=%u read=%u words=%llx/%llx/%llx/%llx\n",
-            m->evt_events,(uint32_t)(w0&0xffu),(uint32_t)(w0>>32),
-            (unsigned)((w0>>11)&1u),(uint32_t)((w0>>12)&0xfffffu),
-            (unsigned)((w1>>31)&1u),(unsigned)((w1>>35)&1u),w0,w1,w2,w3);
-        /* queue_sync_cons_out: CPU reads complete before the CONS store. */
-        cons=(cons&ovf)|(((cons&mask)+1u)&mask);
-        __asm__ volatile("dsb sy":::"memory");
-        cam_smmu_rw(m,0x100ac,cons);m->evt_owned_cons=cons;
+    uint32_t prod,cons=cam_smmu_rr(m,0x100ac);
+    unsigned count=0,rounds=0;int e;
+    if((cons&~(mask|ovf)) || cons!=m->evt_owned_cons)return ESTALE;
+    for(;;) {
+        uint32_t next;
+        prod=cam_smmu_rr(m,0x100a8);
+        if((prod&~(mask|ovf)) || (((prod&mask)-(cons&mask))&mask)>ring)return ESTALE;
+        if((prod^m->evt_last_prod)&ovf) {
+            m->evt_overflows++;
+            printf("X9 CAMERA SMMU EVTQ: overflow prod=%x previous=%x cons=%x lost=unknown\n",
+                prod,m->evt_last_prod,cons);
+        }
+        m->evt_last_prod=prod;
+        while((cons&mask)!=(prod&mask)) {
+            const volatile uint64_t *entry;
+            uint64_t w0,w1,w2,w3;
+            /* A permanent fault storm must not hold the global SMMU mutex
+             * forever; any remaining entries stay pending, not fabricated. */
+            if(count++>=4u*ring) {
+                m->evt_prod=prod;m->evt_cons=cons;
+                printf("X9 CAMERA SMMU EVTQ: drain bound prod=%x cons=%x count=%u\n",prod,cons,count-1);
+                return EOVERFLOW;
+            }
+            e=cam_cache_range(m->evt.va,CAM_S1_PAGE,CAM_CACHE_CPU);if(e)return e;
+            entry=(const volatile uint64_t *)m->evt.va+(cons&(ring-1u))*4u;
+            w0=entry[0];w1=entry[1];w2=entry[2];w3=entry[3];
+            __asm__ volatile("dsb sy":::"memory");
+            m->evt_events++;
+            if(count<=16)
+                printf("X9 CAMERA SMMU EVTQ: event=%llu id=%x sid=%x ssid_valid=%u "
+                    "ssid=%x stall=%u read=%u words=%llx/%llx/%llx/%llx\n",
+                    m->evt_events,(uint32_t)(w0&0xffu),(uint32_t)(w0>>32),
+                    (unsigned)((w0>>11)&1u),(uint32_t)((w0>>12)&0xfffffu),
+                    (unsigned)((w1>>31)&1u),(unsigned)((w1>>35)&1u),w0,w1,w2,w3);
+            /* queue_sync_cons_out: CPU reads complete before the CONS store. */
+            cons=(cons&ovf)|(((cons&mask)+1u)&mask);
+            __asm__ volatile("dsb sy":::"memory");
+            cam_smmu_rw(m,0x100ac,cons);m->evt_owned_cons=cons;
+        }
+        /* Android re-reads PROD after draining, including the overflow bit.
+         * Do not overlook arrivals while the first snapshot was processed. */
+        next=cam_smmu_rr(m,0x100a8);
+        if(next==prod)break;
+        if(++rounds>=4u*ring) {
+            m->evt_prod=prod;m->evt_cons=cons;
+            printf("X9 CAMERA SMMU EVTQ: producer changes exceed bound prod=%x cons=%x rounds=%u\n",prod,cons,rounds);
+            return EOVERFLOW;
+        }
     }
     if((prod^cons)&ovf) {
         cons=(cons&mask)|(prod&ovf);
         cam_smmu_rw(m,0x100ac,cons);m->evt_owned_cons=cons;
     }
+    if(count>16)printf("X9 CAMERA SMMU EVTQ: consumed=%u additional_logs_suppressed=%u\n",count,count-16);
     m->evt_prod=prod;m->evt_cons=cons;
     return count || m->evt_overflows ? EIO : 0;
 }
