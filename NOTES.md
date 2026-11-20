@@ -168,12 +168,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
   - 新头文件 `x9/kernel/src/bsd/dev/x9_haptic_stock_waves.h`：3 条原厂波形 24k→12k 重采样（32 抽头 Hamming sinc 低通 5.4 kHz + 2 倍抽取，离线 Python 生成）：**tap**=Threestagekey_RTP_365 第一个按键脉冲 [0,15ms) 180 样本 peak127/rms50；**notify**=notification_clean_RTP_364 全 1917 样本；**buzz**=aw8697_haptic_170 RAM 载荷（跳 4 字节头）2196 样本。原始 dump 不入 git。
   - `sweet_x9_haptic.c`：mode 3 下 PCM 写入路径改为**起始检测**——输入连续 ≥1 ms（48 样本@48k）低于 512 后 armed，首个 ≥512 样本触发一次 tap 满幅播放（强度按 START intensity 缩放）；播放/不应期内输入只消费不排队（HAL 不会收到 EBUSY）。EFFECT 场景映射：NOTIFICATION→notify，RINGTONE/ALARM/GAME_CONTINUOUS→buzz（各播一次），其余→tap；sharpness 接受但不用。worker 场景填充改从 stock 数组拷贝。mode 门放宽为 ≥2（init/open/start）。
   - `x9_haptic_install.inc`（2 处）、`x9/haptic/actuator_plugin.c` qualified()、`x9/tools/boot-xnu.py:99` ADT haptics 门：均接受 mode 3。
-  - 运行开关：boot arg `x9_haptic=3`（+13 B，boot-device.json 546→559 B ≤ mkpayload 607 B 上限）。默认仍 2，mode 2 代码路径不变。
-- **验证（均为逻辑级/构建级，非实机）**：宿主仿真（`x9/out/stock-sim.c`，复制写路径+worker 逻辑，Xcode clang 编译）5/5 通过：离散 tap 各触发一次满幅 127；连续 200 ms 信号只触发 1 次；20 ms 间隔连击 4/4 触发；intensity 500→peak 63；notify 场景 1917 样本全播。**间隔 <~15 ms 的连击会丢第二次**（不应期=波形播放时长，设计取舍）。内核构建 exit0（104/104 overlay，3 prebuilt，ccache）；两次打包 exit0（Image 32,043,008 B / boot 14,966,784 B，<20 MiB）。首次打包因 Homebrew python3.15 在 `-I` 下无 lz4 失败（NOTES 2576 行同款已知问题），改用 `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3` 成功；失败记录留在 build.log。按规则未二次解包/hash/反汇编产物。
-- **交付（A/B，同一内核，仅 boot arg 不同）**：主 checkout **`x9/out/haptic-stock-ab-20261120/`**：
-  - `baseline/boot.img` SHA256 **9c729fa0…**（无 x9_haptic token，默认 mode 2 = 现行行为）
-  - `stock3/boot.img` SHA256 **913a558e…**（`x9_haptic=3`，build.log 确认 --boot-args 末尾含该 token）
-  - 完整构建目录在功能树 `x9/out/x9-haptic-stock{,3}-20261120/`。GPU280 allowlist 不变、无 plugin-package，设备保持 280 时**无需 mailbox**。
+  - 运行开关：**默认 mode 3**（用户 2026-11-20 指定「改成默认 3」；内核 `sweet_x9_arg("x9_haptic",3)` 与 boot-xnu ADT 缺省同步改 3）。`x9_haptic=2` 回退转换器模式，mode 2 代码路径不变；=0 关闭。boot-device.json 546 B + 13 B token = 559 B ≤ mkpayload 607 B 上限。
+- **验证（均为逻辑级/构建级，非实机）**：宿主仿真（`x9/out/stock-sim.c`，复制写路径+worker 逻辑，Xcode clang 编译）5/5 通过：离散 tap 各触发一次满幅 127；连续 200 ms 信号只触发 1 次；20 ms 间隔连击 4/4 触发；intensity 500→peak 63；notify 场景 1917 样本全播。**间隔 <~15 ms 的连击会丢第二次**（不应期=波形播放时长，设计取舍）。内核构建 exit0（104/104 overlay，3 prebuilt，ccache）；两次打包 exit0（Image 32,043,008 B / boot 14,966,784 B，<20 MiB）。默认改 3 后内核重编 + 双包重打亦 exit0（同尺寸）。首次打包因 Homebrew python3.15 在 `-I` 下无 lz4 失败（NOTES 2576 行同款已知问题），改用 `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3` 成功；失败记录留在 build.log。按规则未二次解包/hash/反汇编产物。
+- **交付（A/B，同一内核，仅 boot arg 不同；默认 3 后重建）**：主 checkout **`x9/out/haptic-stock-ab-20261120/`**（已覆盖为默认 3 内核的产物）：
+  - `baseline/boot.img` SHA256 **ca9c0154…**（显式 `x9_haptic=2` = 转换器基线）
+  - `stock3/boot.img` SHA256 **46a9c48b…**（显式 `x9_haptic=3` = stock 波形；不带 token 时新内核也默认 3）
+  - 两边 build.log 均确认 `extra boot arg` token。完整构建目录在功能树 `x9/out/x9-haptic-default3{,-stock}-20261120/`（Image 32,043,008 B / boot 14,966,784 B）；旧默认 2 的 `x9/out/x9-haptic-stock{,3}-20261120/` 只作中间产物，**不要拿旧包做 A/B**。GPU280 allowlist 不变、无 plugin-package，设备保持 280 时**无需 mailbox**。
 - **下一（用户实机 A/B）**：分别 `fastboot boot` 两镜像，同场景对比（键盘打字、通知、长按）。stock3 日志应出现 `X9 HAPTIC: mode=3`、`stock waves tap=180 notify=1917 buzz=2196 samples @12k`；stream summary 的 `peak=127`（mode 2 基线通常 ≤96 折算后更低）。保存新原始日志到 `~/N.txt`。**编译/仿真通过不是功能验收**。
 - **边界/推断（未实机证实）**：12k 重采样保留 <6 kHz 内容，LRA 有效带宽数百 Hz，推断听感差异可忽略；原厂每次流启动的 max-boost + LRA 校准上传（`aw_stream_mode`）iOS 仍未复刻，是下一个独立候选变量；连续振动（铃声/游戏）在 PCM 路径只会触发一次瞬态，长振场景靠 EFFECT 映射兜底。验收通过后再合 main；不通过则弃分支。功能树/分支保留等实机日志。
 

@@ -342,7 +342,7 @@ void sweet_x9_haptic_init(void)
     /* Default on (user: good features default-on); x9_haptic=0 disables.
      * The log-296 hang after haptic init was io_submap exhaustion, not the
      * haptic itself; its stage-12 busy bank is now logged/handled. */
-    int mode=sweet_x9_arg("x9_haptic",2);if(mode<0 || mode>3)mode=0;
+    int mode=sweet_x9_arg("x9_haptic",3);if(mode<0 || mode>3)mode=0;
     hs.mode=(unsigned)mode;if(!mode)return;
     int f0=sweet_x9_arg("x9_haptic_f0",1730);
     if(f0<1600 || f0>1900){hs.last_errno=EINVAL;hs.flags=X9_HAPTIC_FAULT;}
