@@ -3531,3 +3531,9 @@ transfer code). Static audit finds no missing step. Signature (bus + EEPROM + AF
 - **修复(未上机)**：`x9/tools/mmup_image.py` 从 `.local/.../vcp_b.img` 提取 `tinysys-mmup-RV33_A`（段头 +0x200 起的 body，丢弃前 0x2000）生成 gitignored `generated/x9_mmup_image.inc`；`x9_mm_power.c:mmup_restore_loader()` 在 `MMUP_OP_RESET_RELEASE` 前按 SRAM 头(0x31837000)解出 src，校验头、拒绝 XNU 管理页，写入并回读校验，打印 `X9 MM MMUP LOADER: restored ... verify_bad=N`。
 - **候选**：`x9/out/x9-camera-mmup-restore2-20261120/boot.img`（15237120 B）。上机看 `X9 MM MMUP LOADER` 行（restored/refuse/header mismatch）及 `VCP BOOT` stage 是否越过 4。
 - 未解：vcp core0 的 op2 缓冲(`x20+0x200000`, `+0x800000` 第二段)是否同样被覆盖；若 MMUP 通过则再查。
+
+### 363 结果与更正（2026-11-20）
+- **观测**：`X9 MM MMUP LOADER: restored 289792 B to 106c39000 verify_bad=0` 后，MMUP 失败完全不变（`stage=4 errno=60 lr=14e4 nest=3af0d`，TBUF 仍 `19c->4a14` 后为垃圾）。`PROG fpga=0 mask=0`，而镜像静态值 `230bc=1 231e4=ffffffff`，即 SRAM 0x2000.. 仍未得到镜像。
+- **更正（推断）**：SRAM 头 `+04=0x06c37001` 是 36 位打包的 **IOVA** `0x1_06c37000`（落在 mm_smmu_hfrp_protected dma-range `0x1_0000_0000..0x1_4000_0000`），不是物理地址。362/363 的 `0x106c39000` 物理探针和 restore 都无意义（restore 调用已撤除）。
+- **静态**：LK `0x53d4c` 的 `0x200e8` 恒返回 0 → 走 else 分支分配(align 2MiB, limit `0xC0000000`)，与 `mblock-51-me_vcp_reserved 0xbd200000` 吻合：加载缓冲很可能在 `0xbd200000`，no-map，不在 XNU 内存里，内容应完好。MMUP 通过 TF-A 建立的保护 SMMU(SID 0xa1, mm_smmu@0x30800000) 把 IOVA 译到该 PA；读到 0 说明翻译/总线路径在 reset release 时不可用（SMMU 时钟/MM 电源域未开，或翻译态丢失）。Android `reset_vcp()` 在 release 前没有额外 SMMU 操作，依赖 LK/TF-A 留下的状态与 MM/SMMU 时钟已就绪。
+- **下一步（未做）**：确认 reset release 前 MM 电源域/SMMU 时钟状态（`DIAG5 bus=a1/21` 是 bus tracker）；对比 Android 启动顺序里 MM_2/HWCCF 与 VCP 的先后；必要时在 MMUP release 前先拉起 MM 电源。

@@ -515,7 +515,6 @@ static int vcp_boot_ensure(void)
         mm_write_reg(vcp_cfg_core1, VCP_DRAM_RESV_SIZE_OFF, VCP_MEM_TOTAL_SIZE);
         mm_write_reg(vcp_cfg_core1, VCP_DRAM_RESV_LOGGER_OFF,
             VCP_PACK_IOVA(vcp_mem_pa + VCP_MEM_LOGGER_OFFSET));
-        mmup_restore_loader();
         e = vcp_smc_ok(MMUP_OP_RESET_RELEASE, 1, &smc_r1);
         if (!e) { stage = 4; e = vcp_poll_ready(mmup_mbox4, &mmup_sz, &mmup_clr, &snap_1ms, &snap_1ms_ok); }
     }
