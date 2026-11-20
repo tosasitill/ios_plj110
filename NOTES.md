@@ -162,7 +162,7 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 #### 2026-11-20 振动 stock 波形候选：x9_haptic=3 A/B 已构建，待实机（进行中）
 
-- **范围/基线**：分支 `feat/haptic-stock-wave`，功能树 `.worktrees/haptic-stock-wave`，基于 origin/main **3013a8be**。根 checkout 的 SMS 未提交 NOTES 与 `x9/shim/fdt_ram.c` 改动未触碰。本轮无设备操作（此前崩溃事故与 976 文件拉取记录在根 checkout 未提交 NOTES 的同日条目；原始固件归档在主 checkout `x9/out/haptic-rtp-coloros-20261120/`，976 文件 241,678,434 B 已逐尺寸核对，gitignored）。
+- **范围/基线**：分支 `feat/haptic-stock-wave`，功能树 `.worktrees/haptic-stock-wave`，初始 origin/main **3013a8be**，合入前 rebase 到 **72c84338**（仅 NOTES §5 冲突，保留通话 MD 条目）。根 checkout 的 SMS 未提交 NOTES 与 `x9/shim/fdt_ram.c` 改动未触碰。本轮无设备操作（此前崩溃事故与 976 文件拉取记录在根 checkout 未提交 NOTES 的同日条目；原始固件归档在主 checkout `x9/out/haptic-rtp-coloros-20261120/`，976 文件 241,678,434 B 已逐尺寸核对，gitignored）。
 - **动机**：iOS 振动「特别轻特别散」。离线核对 ColorOS 原厂 RTP（源码 `.local/references/oppo-modules-dt-mt6993/.../oplus_haptic/`）：原厂 24 kHz、波形为满幅（peak 127）宽带瞬态 10–200 ms；iOS 转换器输出 80–300 Hz 窄带正弦短脉冲 6.75–33 ms。gain（iOS 0x80 ≥ 原厂 0x79）、vmax（均 0x11）、auto-brake（均开）已排除。设备 f0=1742（174.2 Hz），`get_rtp_name` 首阈值逻辑选 base `.bin`（170 Hz 标称），不是 _174Hz 变体。
 - **实现（x9_haptic=3，stock 模式）**：
   - 新头文件 `x9/kernel/src/bsd/dev/x9_haptic_stock_waves.h`：3 条原厂波形 24k→12k 重采样（32 抽头 Hamming sinc 低通 5.4 kHz + 2 倍抽取，离线 Python 生成）：**tap**=Threestagekey_RTP_365 第一个按键脉冲 [0,15ms) 180 样本 peak127/rms50；**notify**=notification_clean_RTP_364 全 1917 样本；**buzz**=aw8697_haptic_170 RAM 载荷（跳 4 字节头）2196 样本。原始 dump 不入 git。
@@ -175,7 +175,8 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
   - `stock3/boot.img` SHA256 **46a9c48b…**（显式 `x9_haptic=3` = stock 波形；不带 token 时新内核也默认 3）
   - 两边 build.log 均确认 `extra boot arg` token。完整构建目录在功能树 `x9/out/x9-haptic-default3{,-stock}-20261120/`（Image 32,043,008 B / boot 14,966,784 B）；旧默认 2 的 `x9/out/x9-haptic-stock{,3}-20261120/` 只作中间产物，**不要拿旧包做 A/B**。GPU280 allowlist 不变、无 plugin-package，设备保持 280 时**无需 mailbox**。
 - **下一（用户实机 A/B）**：分别 `fastboot boot` 两镜像，同场景对比（键盘打字、通知、长按）。stock3 日志应出现 `X9 HAPTIC: mode=3`、`stock waves tap=180 notify=1917 buzz=2196 samples @12k`；stream summary 的 `peak=127`（mode 2 基线通常 ≤96 折算后更低）。保存新原始日志到 `~/N.txt`。**编译/仿真通过不是功能验收**。
-- **边界/推断（未实机证实）**：12k 重采样保留 <6 kHz 内容，LRA 有效带宽数百 Hz，推断听感差异可忽略；原厂每次流启动的 max-boost + LRA 校准上传（`aw_stream_mode`）iOS 仍未复刻，是下一个独立候选变量；连续振动（铃声/游戏）在 PCM 路径只会触发一次瞬态，长振场景靠 EFFECT 映射兜底。验收通过后再合 main；不通过则弃分支。功能树/分支保留等实机日志。
+- **边界/推断（未实机证实）**：12k 重采样保留 <6 kHz 内容，LRA 有效带宽数百 Hz，推断听感差异可忽略；原厂每次流启动的 max-boost + LRA 校准上传（`aw_stream_mode`）iOS 仍未复刻，是下一个独立候选变量；连续振动（铃声/游戏）在 PCM 路径只会触发一次瞬态，长振场景靠 EFFECT 映射兜底。
+- **合入（2026-11-20，用户指示「合入主线删除分支」，未等实机验收）**：rebase 后 FF 合入 main，功能树与本地/远端分支已删。默认 3 的两个完整构建目录迁至主 checkout `x9/out/x9-haptic-default3{,-stock}-20261120/`；A/B boot.img 在 `x9/out/haptic-stock-ab-20261120/`。旧默认 2 中间产物随树删除。**实机 A/B 仍未做**：后续日志若显示 stock 手感不佳，用 `x9_haptic=2` 回退或另开分支调整，不应默认回滚 main。
 
 #### 2026-11-20 通话 MD 层来电接收：boot 注册 + 已测量子集 auto-approve 候选已构建，待实机（进行中）
 
