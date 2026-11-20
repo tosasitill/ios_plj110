@@ -160,6 +160,20 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 boot 候选完整性核验 + DIAG→②③④门控映射（候选就绪，待用户 fastboot boot）
+
+- **候选核验（实测）**：`x9/out/x9-camera-smmu-dual-20261120/boot.img` sha256=`103e465f3f53c0a6ee9d955b4bc71aa48ab7d788ce82410ebe11bad21b3eb431`、15118336 B，与 NOTES 记录一致。①identity 构建器（commit 1da3722f）为**未接线死代码**（②③④未接入），不改变 DIAG 行为，候选无需重建。
+- **DIAG 覆盖核验（实测 `vcp_smmu_snapshot` x9_mm_power.c）**：ml_io_map(0x30800000,0x20000) 读 IDR0/1/5(00/04/14)、CR0/ACK(20/24)、GBPA(44)、STRTAB_BASE(80/84)+CFG(88)、CMDQ_BASE(90/94)+PROD/CONS(98/9c)、EVTQ_BASE(a0/a4)，并按 fmt 走 L1/L2 dump STE 80/90/a0/a1 各 8 字。**覆盖②③④全部 runtime 门控**。
+- **boot DIAG → 实现决策映射（推断，待 boot 实证）**：
+  - `X9 MM VCP SMMU: idr0/idr1/idr5` → ① geometry 门控（GRAN16K=idr5 bit5、IAS34、OAS=cam_s1_oas[ips]）+ ③ STE word1 的 stall_model=(idr0>>24)&3（决定 S1STALLD bit27）。idr0=0/ffffffff → NS 读失败/控制器未上电。
+  - `cr0/ack` → SMMU 使能态（CR0.SMMUEN/CMDQEN/EVTQEN）；②host adapter enter 须证 NS 写权限+串行化，cr0 决定是否需先 enable 或继承活跃控制器。
+  - `gbpa` bit31 → abort 指示（NS 访问被拒迹象）；结合 NOTES:475 MM SMMU 走 ATF secure PM（smc=c2000514），**②host adapter 形态二分**：NS 直接 MMIO（gbpa 无 abort+STE 可读）vs SMC 中介（task #5/#6 已反汇编 0x21a50/0x4496c ABI）。boot 决定走哪条。
+  - `stb/cfg` → ② STRTAB fmt=(cfg>>16)&3/split=(cfg>>6)&31/bits=cfg&63（cam_shared_table_capture 要求 fmt1/SPLIT8/SPAN9）；决定 STE 0xa0 存储解析路径。
+  - `X9 MM VCP SMMUQ: cmdq/prod/cons/evtq` → ② CMDQ shift=cmdq&31（≤X9_CAM_SMMU_HOST_CMDQ_SHIFT=19）、prod==cons 空闲门控（cam_shared_capture:358）。
+  - `X9 MM VCP STE a0: 8 words (fmt)` → ③ SID 0xa0 默认 STE：prior[0]≤1 且 prior[1..7]=0 才可接管（cam_shared_capture:365-366）；非零 live/bypass → EBUSY 须另议所有权。
+  - `X9 MM VCP BOOT: errno` + `X9 MM POWER VCP STATE: core0/core1` → MMUP 是否运行（验证因果链：MMUP 跑→服务 backup_vote→MM_2 DONE 置位）。
+- **诚实边界**：以上映射为源码推断，**全部待 boot 实证**；NS 读成功≠NS 写权限（写权限须实际 attach 尝试证）。无新代码/镜像/设备操作。关键路径仍硬件门控于用户手动 `fastboot boot` 此候选 + 回传 ~/NNN.txt（最新 365 无 SMMU 输出）。boot 后按本映射立即定②形态/③接管/④接线，作为单一完整编译实证 feature 写入，写镜像前用户确认。commit 见下。
+
 #### 2026-11-20 路径 b ②③④ 复用缺口图（实测源码）：SID80 attach 引擎/STE 编码/host 接口已存在，缺 MM SMMU host adapter + SID 0xa0 参数化 + identity map 接入
 
 - **目的**：①落地后核查现有 SMMU attach 基础设施，厘清 path-b（MM SMMU@0x30800000 SID 0xa0）相对现有 camera SMMU（SID80）引擎的**精确复用 vs 新建缺口**，避免 boot 后重复 486 行 BBM/guard 机制。无代码改动、无镜像、无设备操作。
