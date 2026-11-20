@@ -160,6 +160,16 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 日志 363 TBUF 专项分析：MMUP 早夭于 DRAM MPU 配置前 + RV33 自定义指令纠正「TBUF 垃圾」 framing
+
+- **目的**：NOTES 此前覆盖 356–360 与 365/366，但 **361–363 的 TBUF PC 轨迹未专项分析**。本轮离线分析 363（`~/363.txt:6697-6718`，含 SNAP/DIAG4/5/INTC1/TBUF/HDR/PROG/STK）+ 保存的 `x9/out/mmup.dis`（tinysys-mmup-RV33_A），细化 MMUP 首错位置并验证 path-b 几何。无代码改动、无镜像、无设备操作。
+- **SNAP 时间线（实测 363）**：`pre/rst: st=4 pc=0 lr=0 sp=0 rstn=ff00`（复位中）→ `1ms: st=4 pc=3bc lr=3a4 sp=0 rstn=ff01`（已释放、执行早期代码）→ `end: st=4 pc=0 lr=14e4 sp=fe19ccc4 rstn=ff01`（落入异常环）。`DIAG2: c1_latch=0 lr=14e4 sp=fe19cb38 sram=1a0b5/1a0b5 exc=0/0/0`（两核 SRAM 已由 LK/TF-A 加载）。
+- **1ms PC=0x3bc 是字拷贝循环（实测 mmup.dis:236-241）**：`0x3a8 add t5,t3,t2; lw t4,0(t5); add t5,t0,t2; sw t4,0(t5); addi t2,t2,4; 0x3bc bltu t2,t1,0x3a8`——src=t3+t2、dst=t0+t2 的 memcpy 循环（用途推断：早期 .data/向量重定位）。**若 dst 是需要 SID 0xa0 翻译的 DRAM 而翻译缺失，sw 即 fault**——与 path-b「MMUP_RELEASE 前装翻译」序列吻合。
+- **TBUF 末段有效跳转 0x19c→0x4a14（实测 mmup.dis:105/5703-5707）**：`0x19c: jal 0x4a14`（紧接 `0x198 csrs mstatus,t0(0x800)` 之后）；`0x4a14-0x4a20` 是 **4 条 RV33 自定义指令** `0800507b/080050fb/0800517b/080051fb` + `0x4a24 ret`，标准 riscv objdump 标 `<unknown>`（opcode 0x7b=custom-3）。其后 `0x4a2c` 起是 MPU region 写入函数（`sw t1,0(t0)/sw t2,4(t0)…` 成对 base/attr，间插自定义 cache op）。**纠正先前 framing**：TBUF 尾部 32-bit「垃圾」值（`87edc837…`）**非已证损坏**——部分是轨迹进入 RV33 自定义指令/数据区，标准 objdump 不可解码；不应当作纯 corruption 证据。
+- **MPU/GPR 状态（实测 363 DIAG4/5 + PROG）**：`GPR1=0x58000001=PACK(0x158000000)`、`GPR2=0x20e000`(total)、`GPR3=0x5808d001=PACK(0x15808d000)`(logger offset 0x8d000)——**GPR 打包与 IOVA 窗正确**（pa=0x158000000 ∈ [0x140000000,0x1c0000000)，与锁定 path-b identity 几何一致）。`PROG: nest=3af0d/3af0c mpu10=0..0 mpu11=0..0`——**即使 pa 在窗内，DRAM MPU region 10/11 仍全 0**：MMUP **未完成** remap 函数 `0x15f64`（mmup.dis:27626，配置 DRAM MPU region 10–13）→ 在到达/完成 DRAM MPU 配置前已 fault。
+- **因果链强化（推断，仍待 boot 实证）**：MMUP 从 SRAM 启动并执行早期 memcpy（0x3a8），但在完成 DRAM MPU 配置（0x15f64）前 fault → 递归异常（lr=14e4=0x14e0 jal 0x1511a）→ sp 下穿 → 死循环 → 不服务 backup_vote_int → MM_2 BACKUP1 DONE 永不置位（见上一条因果链条目）。mpu10=0 + 早夭与「DRAM 访问缺 SID 0xa0 翻译」（分歧 #2）一致，**强化 path-b 直击第一阻塞**。
+- **诚实边界/未决**：**首错指令未精确定位**——TBUF 在 0x19c→0x4a14 后进入 RV33 自定义指令区，离线无 RV33 ISA 映射不可解码；memcpy 的 dst(t0) 是否即未翻译 DRAM 需 boot 期单步/MPU dump 实证。不把「TBUF 尾部垃圾」或「mpu10=0」单独当作 SMMU fault 的直证。path-b 几何（IOVA/PA 0x15FC00000、0x400000、MMUP_RELEASE 前）仍由 boot DIAG（STE a0 + core1 状态）最终门控。commit 见下。
+
 #### 2026-11-20 MM_2 errno=60 根因因果链源码实证：BACKUP1→VIP(MMUP) 备份投票未 ACK（验证 path-b 直击第一阻塞）
 
 - **目的**：在 boot 门控期间，用源码把「分歧 #2（SMMU 翻译缺口）」与「第一实机阻塞 MM_2 stage4 errno=60」之间的**因果链**实证出来，验证 path-b 确实直击第一阻塞（而非旁支），并定死 boot 日志中确认/推翻该链的具体行。此前审计覆盖启动顺序/重复投票语义，但**未**对 sta/done/fsm/int_raw 做 BACKUP1→VIP 逐位解码。
