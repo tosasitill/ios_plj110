@@ -505,6 +505,53 @@ RIL真实voice注册查询是`requestVoiceRegistrationState30f8f0→042f→8100/
 networkType来自value+1/u16LE，再经convertCSNetworkType进入ServiceState.voiceRat；
 独立于PS/data RAT和IMSA注册快照。此处只记录原件路径，未新增query或准入默认值。
 
+`convertCSNetworkType2fd710`原件表已离线解码（实测，`x9/out/call-privacy-policy/ril-cs-rat-map.asm`）：
+networkType→RIL voiceRat：{1,2}→16(GSM)；{4,8,16,24,32,48,64,72,96,136,152,160,176,200,224}→3(UMTS)；
+256→6(1xRTT)；512→8(EVDO_A)；1024→13(EHRPD)；{4096,8192,16384}→14(LTE)；32768→20(NR)；其余→0。
+这只是MIPC networkType→Android voiceRat一段；voiceRat→Apple WirelessTechnology→CallTechnology
+以及内核侧042f只读query/8100解析仍未实现，故technology provider仍fail-closed（见下）。
+
+### CallList46 编码器/发布 owner 已实现，technology 与公告双门仍闭合（2026-11-20）
+
+`x9cw_calllist`（`x9_call_state.h`）纯编码QMI VOICE 0x2E指示：SDU [0]=4/[1..2]=txn0/[3..4]=0x2e/[5..6]=TLV长；
+CallList tag1值=count/u8+一个7字节item。item七字节全部有原件依据：+0 id、+1 CallEventStatus（ reducer观测集
+{1,2,3,5,9}）、+2 Call_Type=0（普通语音，sendDialReq Normal1→0/Emergency2→9交叉证明+consumer jump table 0/9）、
++3 direction（MO1/MT2，callDirectionToString1f03908b4）、+4 CallTechnology、+5 multiparty=0（准入单呼非multiparty，
+end/answer目标拒flags&1）、+6 dead byte=0（handler从不消费，编码0为proven-inert而非语义主张）。
+END(status9)仅在end_reason.known时附CallEndReasonList tag14 {count1,id,reason/u16LE}（apple145 NORMAL_CALL_CLEARING）；
+未知cause省略tag14，绝不Apple0 OFFLINE。本轮不发布RemoteNumberList（443-453号码合并边界）。
+
+bb侧`bb_x9_call_publication`扩为kind 0/1/2（handover54/registration03+54/CallList46），新增`bb_x9_call_calllist`
+严格校验18/25B形状后入队（仅queue admission，不授予订阅/就绪）。host侧`x9c_calllist_flush`（`X9Calls.inc`）
+revision-tracked reconciliation单呼（MT优先，其次MO），经`x9_md_mipc_call_publish`→callback→`bb_x9_call_calllist`
+转移IOMallocData-owned帧。**双门fail-closed**：(1)`x9c_calllist_announced=false`，VOICE09公告边界仍闭合
+（audio/拨号/状态/SIM路由未 reconcile，无bootarg override，沿用header既有政策）；(2)`x9c_call_technology`
+读per-slot `x9c_voice_rat[2]`缓存（042f填充，本轮为空）经`x9cw_calltechnology`映射，缓存无效则返回0。
+两门任一未开则不发布。这是完整机制（非empty encoder冒充完成），已接入x9c_poll但被门 inert；
+打开需先实现042f查询填缓存+闭合audio契约，二者本轮均未满足，故iOS来电UI仍不出现（预期边界）。
+
+**technology真实来源链（2026-11-20离线反汇编闭合，唯一推断步显式标注；
+证据`x9/out/call-ios-flow-20261120/q7-tech-tables.txt`）：**
+真实源=语音注册RAT，非NAS GetSignalInfo(0x4d)。RIL `requestVoiceRegistrationState`@30f8f0→
+`obtainMipcData(0x042f,slot)`@30f948 **header-only请求**（仅16B MIPC头、无addMipcVal，timeout0x493e0=300000ms）→
+响应`getMipcVal(0x8100)`@30f9ec，`cmp w5,#0xa`@30fa04强制10B，`ldurh w8,[x22,#1]`@30fa5c→
+**networkType=value+1 u16LE**；per-slot `RIL_CS_REG_STATE_CACHE`(stride0x28,+0 regState/+0x10 networkType)。
+`convertCSNetworkType`@2fd710把networkType→voiceRat：{1,2}→16 GSM；{4,8,16,24,32,48,64,72,96,136,152,160,176,200,224}→3 UMTS；
+256→6 1xRTT；512→8 EVDO_A；1024→13 EHRPD；{4096,8192,16384}→14 LTE；32768→20 NR；其余→0。
+Apple侧`convertWirelessTechnologyToCallTechnology`@1f03921e8（**实测纠正**：WT4→CT2 GSM、WT8→CT1 CDMA、
+WT0x20→CT4 LTE、其余含0/0x28/0x80→CT6 Unknown；旧记录"4→6/else→2"与字节相反，已更正）；
+`asWirelessTechnology(RAT)`@1f03304ac表@1f03c27c4；Apple RAT枚举(asString20dac50a0)0 GSM/2 UTRAN/3 CDMA1x/4 EVDO/
+5 Hybrid/7 LTE/8 1xLTE/9 TDSCDMA/10 NR。
+**唯一推断步**：voiceRat→Apple RAT无二进制转换器（Apple只经QMI NAS SysInfo msg78
+processSystemInfo_sync1f191c440吃QMI rat，RIL voiceRat仅供Android ServiceStateTracker），
+按语义枚举对应16→0/3→2/6→3/8→4/13→9/14→7/20→10（推断，非实测）。
+`x9cw_calltechnology`把全链折叠为networkType→CT：LTE{4096,8192,16384}→4；NR32768→6；{256,512}→1；
+{1,2}/1024/UMTS集→2；其余→6。**CT6对NR/无服务是实测真实映射(WT0x80→CT6)，非Unknown占位绕过**，
+故495-506禁令不被违反（禁的是CLCC rat2→LTE4臆造与无源占位，真实查询RAT经此映射是已证来源）。
+tech字节唯一消费点=setPreferredFormatter(1f1abf374)：{2,3,5}→GSM、1→C2K、{0,4,6,7}→不改（INCOMING UI路径null-guarded）。
+内核侧042f只读查询/8100解析填`x9c_voice_rat`缓存尚未实现（NAS registration owner只带本地路由flag，非解析RAT），
+是下一轮具体步骤；本轮缓存为空，technology门闭合。
+
 ### Apple 普通号码类型不证明 IMS command context（原件架构纠错）
 
 匹配Base `CallInfo::toString1f03911dc..11f4`输出`Call Sub Type:`并读CallInfo+44/u8，

@@ -235,6 +235,15 @@ static inline int x9cw_end_cnf(const uint8_t *p,unsigned n,uint64_t token,uint32
     x9cw_u16(p+12)!=token||x9cw_u16(p+16)||x9cw_u16(p+18)!=4)return 0;
  *result=x9cw_u32(p+20);return 1;
 }
+/* MD mipc_call_answer_get_cnf9131bf98..bfbc emits the same tag0/result u32
+ * as hangup_cnf; capture shows0908/result0 after0907{}. Match the owned
+ * token. CNF success means ANSWER completed, not CONVERSATION: that state
+ * still requires the complete ECPI132/6 sequence. */
+static inline int x9cw_answer_cnf(const uint8_t *p,unsigned n,uint64_t token,uint32_t *result){
+ if(!result||!token||token>65534||!x9cw_frame(p,n,0x908)||n!=24||
+    x9cw_u16(p+12)!=token||x9cw_u16(p+16)||x9cw_u16(p+18)!=4)return 0;
+ *result=x9cw_u32(p+20);return 1;
+}
 /* Staged adapter only: the caller MUST supply a verified single-call mapping.
  * Native id is opaque u32, not a cast of Apple's u8. Empty Android ANSWER
  * cannot target one member of a multi-call set; do not send in that case.

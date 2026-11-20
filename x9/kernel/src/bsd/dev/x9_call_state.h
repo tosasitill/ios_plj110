@@ -83,6 +83,78 @@ static inline struct x9cw_end_reason x9cw_end_reason_metadata(const struct x9cw_
  return r;
 }
 
+/* CallList46 (QMI VOICE 0x2E) indication encoder. Pure bytes only; never
+ * submits, announces or approves. One ordinary-voice call, the measured SIM2
+ * mode20 subset. SDU: [0]=4 ind, [1..2]=txn0, [3..4]=0x2e, [5..6]=TLV len;
+ * CallList tag1 value = count/u8 + one 7-byte item. Item (parseField
+ * 1f1929b2c straight copy; stride 7 proven by validateCallCollisionScenario
+ * 1f1ac59bc reciprocal /7):
+ *   +0 id, +1 CallEventStatus, +2 Call_Type=0 (ordinary voice; sendDialReq
+ *      Normal1->0 / Emergency2->9 cross-check, consumer jump table 0/9 voice),
+ *   +3 direction (MO1/MT2, callDirectionToString 1f03908b4),
+ *   +4 CallTechnology, +5 multiparty=0 (admitted single call is non-multiparty:
+ *      end/answer targets reject flags&1), +6 dead byte=0 (never consumed by
+ *      the handler; encode 0 as proven-inert, not a semantic claim).
+ * CallTechnology MUST be a proven value the caller supplies (tech_known);
+ * no rat2->LTE4 cast and no Unknown placeholder (docs 495-506). Without a
+ * proven technology the encoder returns 0 and publication does not fire.
+ * END (status9) attaches CallEndReasonList tag14 {count1,id,reason/u16LE}
+ * only when end_reason->known (apple145 NORMAL_CALL_CLEARING); an unknown
+ * cause omits tag14, never Apple0 OFFLINE. No RemoteNumberList this round
+ * (docs 443-453 number-merge boundary). States restricted to the reducer's
+ * observed set {1 ORIGINATION,2 INCOMING,3 CONVERSATION,5 ALERTING,9 END}. */
+static inline unsigned x9cw_calllist(uint8_t *out,unsigned room,
+                                    unsigned id,unsigned ios_state,unsigned direction,
+                                    unsigned technology,unsigned tech_known,
+                                    const struct x9cw_end_reason *end_reason){
+ unsigned reason=(ios_state==9&&end_reason&&end_reason->known)?1:0;
+ unsigned size=reason?25:18;
+ if(!out||room<size||!id||id>255||!tech_known||technology>7)return 0;
+ if(ios_state!=1&&ios_state!=2&&ios_state!=3&&ios_state!=5&&ios_state!=9)return 0;
+ if(direction!=1&&direction!=2)return 0;
+ if(reason&&(!end_reason->apple||end_reason->apple>65535))return 0;
+ x9cw_zero(out,size);
+ out[0]=4;x9cw_put16(out+3,0x2e);x9cw_put16(out+5,size-7);
+ out[7]=1;x9cw_put16(out+8,8);out[10]=1;
+ out[11]=(uint8_t)id;out[12]=(uint8_t)ios_state;out[13]=0;
+ out[14]=(uint8_t)direction;out[15]=(uint8_t)technology;out[16]=0;out[17]=0;
+ if(reason){
+  out[18]=0x14;x9cw_put16(out+19,4);out[21]=1;out[22]=(uint8_t)id;
+  x9cw_put16(out+23,end_reason->apple);
+ }
+ return size;
+}
+
+/* Proven voice-registration networkType -> Apple CallTechnology codec for the
+ * CallList46 item+4 byte. Input is the MIPC 042f/8100 response networkType
+ * (value+1 u16LE; requestVoiceRegistrationState 30f8f0 sends a HEADER-ONLY
+ * 042f, response forced 10 bytes, ldurh w8,[x22,#1] 30fa5c). The chain:
+ *   convertCSNetworkType 2fd710 (实测 bit-mask) -> RIL voiceRat
+ *   -> Apple RAT (语义对应, 推断: no binary converts Android voiceRat to Apple
+ *      RAT because Apple only consumes QMI; 16->0,3->2,6->3,8->4,13->9,14->7,20->10)
+ *   -> asWirelessTechnology 1f03304ac (实测 table 1f03c27c4)
+ *   -> convertWirelessTechnologyToCallTechnology 1f03921e8 (实测: WT4->CT2 GSM,
+ *      WT8->CT1 CDMA, WT0x20->CT4 LTE, else incl 0/0x28/0x80 ->CT6).
+ * NOTE the WT4->CT2 direction (an earlier note had it reversed; corrected from
+ * bytes, WT4 string is "GSM/UMTS" 1f03e86e5). CT6 for NR(32768, WT0x80) and for
+ * unknown/no-service is the REAL measured mapping result, NOT an Unknown
+ * placeholder bypassing the source (docs 495-506). Collapsed table (q7-tech-
+ * tables.txt): LTE{4096,8192,16384}->4; NR 32768->6; 1xRTT/EVDO{256,512}->1;
+ * GSM{1,2}/EHRPD 1024/UMTS{4,8,16,24,32,48,64,72,96,136,152,160,176,200,224}->2;
+ * else->6. Pure codec: the caller MUST own a real queried networkType; this
+ * never invents one and is never called without a populated registration cache. */
+static inline int x9cw_calltechnology(unsigned networkType,unsigned *ct){
+ if(!ct)return 0;
+ if(networkType==4096||networkType==8192||networkType==16384){*ct=4;return 1;}
+ if(networkType==32768){*ct=6;return 1;}
+ if(networkType==256||networkType==512){*ct=1;return 1;}
+ if(networkType==1||networkType==2||networkType==1024){*ct=2;return 1;}
+ if(networkType==4||networkType==8||networkType==16||networkType==24||networkType==32||
+    networkType==48||networkType==64||networkType==72||networkType==96||networkType==136||
+    networkType==152||networkType==160||networkType==176||networkType==200||networkType==224){*ct=2;return 1;}
+ *ct=6;return 1;
+}
+
 /* Raw identity from the last accepted WHOLE progress, scoped by the
  * enclosing MO/MT epoch and revision. Keep all sources before the MD inbox
  * and observer erase RX bytes; neither a borrowed pointer nor an unrelated
@@ -302,7 +374,7 @@ static inline int x9cw_current(const uint8_t *p,unsigned n,struct x9cw_current *
  * and is deliberately not admitted as a mode20 end target.
  * are admitted. No wildcard, inferred single count, default id or MT here.
  * The snapshot revision is copied again and checked at writer selection. */
-struct x9cw_end_target {uint64_t epoch,revision;uint32_t native_id;unsigned sim;};
+struct x9cw_end_target {uint64_t epoch,revision;uint32_t native_id;unsigned sim,direction;};
 static inline int x9cw_end_target(const struct x9cw_outbound_state *s,
                                   const struct x9cw_current *c,
                                   struct x9cw_end_target *out){
@@ -313,12 +385,42 @@ static inline int x9cw_end_target(const struct x9cw_outbound_state *s,
  if(r->id!=id||r->direction||r->mode!=20||(r->flags&1u)||
     !((s->ios_state==5&&r->state==3)||
       (s->ios_state==3&&r->state==0)))return 0;
- out->epoch=s->epoch;out->revision=s->revision;out->native_id=id;out->sim=1;return 1;
+ out->epoch=s->epoch;out->revision=s->revision;out->native_id=id;out->sim=1;out->direction=0;return 1;
+}
+/* MT hangup targets the complete CMD identity after observed ECPI132/6
+ * (CONVERSATION3). The owned snapshot must hold exactly that one call:
+ * id/direction1/mode20 match, not multiparty. The snapshot state byte is
+ * validated by x9cw_current but NOT interpreted: no MD 090a state value
+ * for an MT call has been captured, so no state pair is invented here.
+ * Ending while still INCOMING is a different, unobserved Android action. */
+static inline int x9cw_end_target_inbound(const struct x9cw_inbound_state *s,
+                                          const struct x9cw_current *c,
+                                          struct x9cw_end_target *out){
+ unsigned id;
+ if(!out||!s||!c||!x9cw_inbound_id(s,&id)||!s->epoch||s->ios_state!=3||
+    c->result||c->count!=1)return 0;
+ const struct x9cw_current_call *r=&c->calls[0];
+ if(r->id!=id||r->direction!=1||r->mode!=20||(r->flags&1u))return 0;
+ out->epoch=s->epoch;out->revision=s->revision;out->native_id=id;out->sim=1;out->direction=1;return 1;
+}
+/* ANSWER targets the same owned MT identity while still INCOMING2 (ECPI0
+ * observed, never ended). Android capture: ECPI0 -> 0907{} -> 0908/result0.
+ * Single owned count plus id/direction/mode match; state byte uninterpreted
+ * for the same missing-sample reason as the MT end target above. */
+static inline int x9cw_answer_target(const struct x9cw_inbound_state *s,
+                                     const struct x9cw_current *c,
+                                     struct x9cw_end_target *out){
+ unsigned id;
+ if(!out||!s||!c||!x9cw_inbound_id(s,&id)||!s->epoch||s->ios_state!=2||
+    c->result||c->count!=1)return 0;
+ const struct x9cw_current_call *r=&c->calls[0];
+ if(r->id!=id||r->direction!=1||r->mode!=20||(r->flags&1u))return 0;
+ out->epoch=s->epoch;out->revision=s->revision;out->native_id=id;out->sim=1;out->direction=1;return 1;
 }
 static inline int x9cw_end_matches(const struct x9cw_end_target *a,
                                    const struct x9cw_end_target *b){
  return a&&b&&a->epoch==b->epoch&&a->revision==b->revision&&
-        a->native_id==b->native_id&&a->sim==b->sim;
+        a->native_id==b->native_id&&a->sim==b->sim&&a->direction==b->direction;
 }
 /* Join a single explicitly admitted DIAL with BOTH its owned0902 and the
  * next observed MO epoch. Capture's0902 has no ID. Caller retains its real

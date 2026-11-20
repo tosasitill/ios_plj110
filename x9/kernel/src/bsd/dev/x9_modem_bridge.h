@@ -119,6 +119,15 @@ int coachz_baseband_call_guard(const struct x9_mipc_call_owner *owner,
 uint64_t x9_md_mipc_call_end_submit(const uint8_t *frame, uint32_t length,
  const struct x9cw_end_target *target, const struct x9_mipc_call_owner *owner);
 void x9_md_mipc_call_end_abandon(uint64_t token);
+/* ANSWER0907 for the single owned MT identity while INCOMING2. Same lease
+ * rules as END: one attempt per epoch, missing/failed CNF never releases,
+ * retirement needs real END + owned empty snapshot + no busy mutation.
+ * END stays admissible while an answer lease is held; a second DIAL/ANSWER
+ * does not. 0908 CNF success means ANSWER completed, NOT CONVERSATION. */
+int x9_md_mipc_call_answer_snapshot(struct x9cw_end_target *target);
+uint64_t x9_md_mipc_call_answer_submit(const uint8_t *frame, uint32_t length,
+ const struct x9cw_end_target *target, const struct x9_mipc_call_owner *owner);
+void x9_md_mipc_call_answer_abandon(uint64_t token);
 int x9_md_mipc_call_reply(uint32_t token, unsigned approve, unsigned include_cause, uint32_t cause);
 int x9_md_mipc_call_reply_take(uint32_t token, int *result);
 /* x9_dual_sim=1: two fixed physical slots, indexed 0/1. Read-only AT via

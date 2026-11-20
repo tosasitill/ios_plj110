@@ -9,8 +9,8 @@
  * waiting for VOICE03, and a complete CMD8901 in the reconciled SIM2 mode20
  * subset is auto-approved with the live-captured 8902 shape (approve=1, no
  * cause, RIL-converted RSP mask, original txid, echoed id/seq). Approval is
- * the RIL indication acknowledgement, NOT answer; no ANSWER, CallList or
- * audio is produced, and VOICE09 stays unannounced, so iOS shows no call UI.
+ * the RIL indication acknowledgement, NOT answer; the MD layer never sends
+ * ANSWER on its own, and VOICE09 stays unannounced, so iOS shows no call UI.
  * Outside that subset (SIM1, other modes, multi-call, quarantine) approval
  * is withheld fail-closed. Registration/approval are terminal for this boot
  * on timeout or transport loss; no retry.
@@ -20,8 +20,10 @@
  * submitted. The asynchronous DIAL join exists but has no production
  * admission caller; profile/audio admission remains unconnected. Other
  * VOICE requests get unsupported, never a success bootstrap/readiness stub.
- * Explicit VOICE44 routing and guarded VOICE21 end-current-call keep their
- * production dispatch. Bound VOICE03 explicit disables reuse the same
+ * Explicit VOICE44 routing, guarded VOICE21 end-current-call (MO epoch or
+ * owned MT CONVERSATION identity) and guarded VOICE22 answer (owned MT
+ * INCOMING identity, captured empty 0907 -> 0908/result0) keep production
+ * dispatch. Bound VOICE03 explicit disables reuse the same
  * Android-derived registration and owned initial snapshot; handover14
  * enables actual, ordered Android SRVCC -> Apple54 events; extra
  * CallEventsNotify13=1 remains unsupported. None of this publishes VOICE,
@@ -183,7 +185,7 @@ static void x9c_response_poll(){
  }
 }
 struct x9c_end_job {
- bool used,answered;unsigned slot,sim,stage,id;
+ bool used,answered;unsigned slot,sim,stage,id,direction;
  uint16_t transaction;
  uint64_t generation,bridge_generation,deadline,token,epoch,reply,binding;
  uint8_t req[11];
@@ -195,6 +197,26 @@ static bool x9c_end_live(const struct x9c_end_job &j){
 static void x9c_end_answer(struct x9c_end_job &j,uint16_t err){
  if(!j.answered){
   if(x9c_end_live(j))x9c_response_decide(j.reply,err);
+  else x9c_response_release(j.reply);
+ }
+ j.answered=true;bzero(j.req,sizeof(j.req));
+}
+/* VOICE22 answer job: one guarded 0907 attempt per owned MT epoch. The MD
+ * answer lease survives this job; only real END + owned empty retires it.
+ * CNF success means ANSWER completed, NOT CONVERSATION (ECPI132/6 owns that). */
+struct x9c_answer_job {
+ bool used,answered;unsigned slot,sim,stage,id;
+ uint16_t transaction;
+ uint64_t generation,bridge_generation,deadline,token,epoch,reply,binding;
+ uint8_t req[11];
+};
+static x9c_answer_job x9c_answer_job;
+static bool x9c_answer_live(const struct x9c_answer_job &j){
+ return x9c_bound_live(j.slot,j.sim,j.generation,j.binding);
+}
+static void x9c_answer_answer(struct x9c_answer_job &j,uint16_t err){
+ if(!j.answered){
+  if(x9c_answer_live(j))x9c_response_decide(j.reply,err);
   else x9c_response_release(j.reply);
  }
  j.answered=true;bzero(j.req,sizeof(j.req));
@@ -239,6 +261,7 @@ static uint16_t x9c_bind_begin(unsigned slot,const uint8_t *req,unsigned sim,uin
   // Refuse a new changing bind until these owners receive their results;
   // pool index order is not a proof that the old response drained first.
   if((x9c_end_job.used&&x9c_end_job.slot==slot&&x9c_end_job.generation==generation)||
+     (x9c_answer_job.used&&x9c_answer_job.slot==slot&&x9c_answer_job.generation==generation)||
      (x9c_dial_job.used&&x9c_dial_job.slot==slot&&x9c_dial_job.generation==generation))return X9Q_BUSY;
   for(const struct x9c_reg_wait &w:x9c_reg_wait[slot])
    if(w.used&&!w.answered&&w.generation==generation)return X9Q_BUSY;
@@ -502,24 +525,31 @@ static uint16_t x9c_reg_begin(unsigned slot,const uint8_t *req,unsigned len){
  w.deadline=deadline;memcpy(w.req,req,len);return 0;
 }
 /* This read-only query is caused ONLY by an explicit, bound VOICE21.
- * No implicit ID/route adoption from a CNF, log prefix or another client. */
+ * No implicit ID/route adoption from a CNF, log prefix or another client.
+ * MO targets the observed dial epoch; MT targets the owned CMD identity
+ * after ECPI132/6 (CONVERSATION). Ending an still-INCOMING MT call is a
+ * different, unobserved Android action and is not admitted here. */
 static uint16_t x9c_end_begin(unsigned slot,const uint8_t *req,unsigned len){
  unsigned op,id;
  if(!x9cw_qmi_action(req,len,&op,&id)||op!=0x21||!id)return X9Q_ARG;
  const struct x9c_client &c=x9c_clients[slot];
  if(!c.bound||c.generation!=x9q_clients[slot].generation)return X9Q_NOT_READY;
- if(c.sim!=1)return X9Q_UNSUPPORTED; /* only the measured SIM2 MO subset */
- if(x9c_end_job.used)return X9Q_BUSY;
- struct x9cw_outbound_state state;unsigned native_id;
- if(x9_md_mipc_call_snapshot(&state)!=1||!x9cw_outbound_id(&state,&native_id)||
-    native_id!=id||state.mode!=20)return X9Q_NOT_READY;
+ if(c.sim!=1)return X9Q_UNSUPPORTED; /* only the measured SIM2 mode20 subset */
+ if(x9c_end_job.used||x9c_answer_job.used)return X9Q_BUSY;
+ struct x9cw_outbound_state state;struct x9cw_inbound_state in;
+ unsigned native_id,direction;uint64_t epoch;
+ if(x9_md_mipc_call_snapshot(&state)==1&&x9cw_outbound_id(&state,&native_id)&&
+    native_id==id&&state.mode==20){direction=0;epoch=state.epoch;}
+ else if(x9_md_mipc_call_incoming_snapshot(&in)==1&&x9cw_inbound_id(&in,&native_id)&&
+    native_id==id&&in.ios_state==3&&in.mode==20){direction=1;epoch=in.epoch;}
+ else return X9Q_NOT_READY;
  const uint64_t now=x9q_ms();if(now>UINT64_MAX-25000)return X9Q_BUSY;
  const uint64_t deadline=now+25000;
  uint64_t reply=x9c_response_reserve(slot,req,deadline);if(!reply)return X9Q_BUSY;
  uint64_t token=x9c_current_submit(c.sim);if(!token){x9c_response_release(reply);return X9Q_BUSY;}
  struct x9c_end_job &j=x9c_end_job;bzero(&j,sizeof(j));j.used=true;j.slot=slot;j.sim=c.sim;
  j.generation=c.generation;j.bridge_generation=c.bridge_generation;
- j.binding=c.binding;j.epoch=state.epoch;j.id=id;j.stage=1;j.token=token;j.reply=reply;
+ j.binding=c.binding;j.epoch=epoch;j.id=id;j.direction=direction;j.stage=1;j.token=token;j.reply=reply;
  /* Apple createEndThisCallReq19a00d4: explicit25000ms request guard. */
  j.deadline=deadline;j.transaction=(uint16_t)x9cw_u16(req+1);
  memcpy(j.req,req,sizeof(j.req));return 0;
@@ -542,7 +572,8 @@ static void x9c_end_poll(uint8_t *frame){
   if(j.stage==1){
    struct x9cw_current current;struct x9cw_end_target target;
    bool valid=x9cw_u16(frame+12)==token&&x9cw_current(frame,n,&current)&&!current.result&&
-    x9_md_mipc_call_end_snapshot(&target)==1&&target.epoch==j.epoch&&target.native_id==j.id&&target.sim==j.sim;
+    x9_md_mipc_call_end_snapshot(&target)==1&&target.epoch==j.epoch&&target.native_id==j.id&&
+    target.sim==j.sim&&target.direction==j.direction;
    bzero(frame,X9_MIPC_FRAME_MAX);
    /* take/snapshot may wait for the MD mutex while the actual QMUX client
     * is released, before this thread can dispatch DEL_CLIENT. Revalidate
@@ -566,10 +597,16 @@ static void x9c_end_poll(uint8_t *frame){
    x9c_end_answer(j,valid&&!result?0:X9Q_INTERNAL);j.stage=3;
    /* Do NOT force END, free the epoch, or send CallList from CNF result. */
   }else if(j.stage==4){
-   struct x9cw_current current;struct x9cw_outbound_state state;
-   bool retired=x9cw_u16(frame+12)==token&&x9cw_current(frame,n,&current)&&!current.result&&!current.count&&
-    x9_md_mipc_call_snapshot(&state)==1&&!state.blocked&&state.epoch==j.epoch&&state.ended&&
-    state.count_known&&!state.native_count;
+   struct x9cw_current current;
+   bool retired=x9cw_u16(frame+12)==token&&x9cw_current(frame,n,&current)&&!current.result&&!current.count;
+   if(retired&&j.direction){
+    struct x9cw_inbound_state in;
+    retired=x9_md_mipc_call_incoming_snapshot(&in)==1&&!in.blocked&&in.epoch==j.epoch&&in.ended;
+   }else if(retired){
+    struct x9cw_outbound_state state;
+    retired=x9_md_mipc_call_snapshot(&state)==1&&!state.blocked&&state.epoch==j.epoch&&state.ended&&
+     state.count_known&&!state.native_count;
+   }
    bzero(frame,X9_MIPC_FRAME_MAX);
    if(retired){bzero(&j,sizeof(j));return;}
    /* Single cleanup query; a stale/error snapshot holds the owner. No
@@ -578,9 +615,81 @@ static void x9c_end_poll(uint8_t *frame){
   }
  }
  if(j.stage==3){
-  struct x9cw_outbound_state state;
-  if(x9_md_mipc_call_snapshot(&state)==1&&!state.blocked&&state.epoch==j.epoch&&state.ended){
-   j.token=x9c_current_submit(j.sim);if(j.token)j.stage=4;
+  bool ended;
+  if(j.direction){
+   struct x9cw_inbound_state in;
+   ended=x9_md_mipc_call_incoming_snapshot(&in)==1&&!in.blocked&&in.epoch==j.epoch&&in.ended;
+  }else{
+   struct x9cw_outbound_state state;
+   ended=x9_md_mipc_call_snapshot(&state)==1&&!state.blocked&&state.epoch==j.epoch&&state.ended;
+  }
+  if(ended){j.token=x9c_current_submit(j.sim);if(j.token)j.stage=4;}
+ }
+}
+/* Bound VOICE22 only. Targets the owned MT identity while INCOMING2 (ECPI0
+ * observed). Android capture: ECPI0 -> 0907{} -> 0908/result0; the empty
+ * ANSWER cannot target a multi-call set, so the owned snapshot must hold
+ * exactly this one call. Apple createAnswerIncomingCallReq 1f1a05da8 stores
+ * an explicit 25000ms request guard; mirrored here, not an MD/network timer. */
+static uint16_t x9c_answer_begin(unsigned slot,const uint8_t *req,unsigned len){
+ unsigned op,id;
+ if(!x9cw_qmi_action(req,len,&op,&id)||op!=0x22||!id)return X9Q_ARG;
+ const struct x9c_client &c=x9c_clients[slot];
+ if(!c.bound||c.generation!=x9q_clients[slot].generation)return X9Q_NOT_READY;
+ if(c.sim!=1)return X9Q_UNSUPPORTED; /* only the measured SIM2 mode20 subset */
+ if(x9c_answer_job.used||x9c_end_job.used||x9c_dial_job.used)return X9Q_BUSY;
+ struct x9cw_inbound_state in;unsigned native_id;
+ if(x9_md_mipc_call_incoming_snapshot(&in)!=1||!x9cw_inbound_id(&in,&native_id)||
+    native_id!=id||in.ios_state!=2||in.mode!=20)return X9Q_NOT_READY;
+ const uint64_t now=x9q_ms();if(now>UINT64_MAX-25000)return X9Q_BUSY;
+ const uint64_t deadline=now+25000;
+ uint64_t reply=x9c_response_reserve(slot,req,deadline);if(!reply)return X9Q_BUSY;
+ uint64_t token=x9c_current_submit(c.sim);if(!token){x9c_response_release(reply);return X9Q_BUSY;}
+ struct x9c_answer_job &j=x9c_answer_job;bzero(&j,sizeof(j));j.used=true;j.slot=slot;j.sim=c.sim;
+ j.generation=c.generation;j.bridge_generation=c.bridge_generation;
+ j.binding=c.binding;j.epoch=in.epoch;j.id=id;j.stage=1;j.token=token;j.reply=reply;
+ j.deadline=deadline;j.transaction=(uint16_t)x9cw_u16(req+1);
+ memcpy(j.req,req,sizeof(j.req));return 0;
+}
+static void x9c_answer_poll(uint8_t *frame){
+ struct x9c_answer_job &j=x9c_answer_job;if(!j.used)return;
+ if(!x9c_answer_live(j)||(!j.answered&&x9q_ms()>=j.deadline)){
+  if(j.stage==2)x9_md_mipc_call_answer_abandon(j.token);
+  x9c_answer_answer(j,X9Q_NOT_READY);
+ }
+ if(j.token){
+  uint32_t n=0;int rc=x9_md_mipc_take(j.token,frame,X9_MIPC_FRAME_MAX,&n);
+  if(!rc)return;
+  if(rc<0){
+   x9c_answer_answer(j,X9Q_NOT_READY);
+   if(rc==-3){bzero(&j,sizeof(j));return;} /* proven pre-selection rejection */
+   return; /* uncertain physical owner retained, no retry */
+  }
+  uint64_t token=j.token;j.token=0;
+  if(j.stage==1){
+   struct x9cw_current current;struct x9cw_end_target target;
+   bool valid=x9cw_u16(frame+12)==token&&x9cw_current(frame,n,&current)&&!current.result&&
+    x9_md_mipc_call_answer_snapshot(&target)==1&&target.epoch==j.epoch&&target.native_id==j.id&&
+    target.sim==j.sim&&target.direction==1;
+   bzero(frame,X9_MIPC_FRAME_MAX);
+   if(j.answered||!valid||!x9c_answer_live(j)||x9q_ms()>=j.deadline){
+    x9c_answer_answer(j,X9Q_NOT_READY);bzero(&j,sizeof(j));return;
+   }
+   uint8_t action[16];unsigned k=x9cw_action(j.req,sizeof(j.req),action,sizeof(action),j.id,target.native_id,j.sim,1);
+   const struct x9_mipc_call_owner owner={CBQ_PORT_BASE+j.slot,X9BB_NODE,j.bridge_generation,j.deadline};
+   j.token=k?x9_md_mipc_call_answer_submit(action,k,&target,&owner):0;bzero(action,sizeof(action));
+   if(!j.token){
+    x9c_answer_answer(j,!x9c_answer_live(j)||x9q_ms()>=j.deadline?X9Q_NOT_READY:X9Q_BUSY);
+    bzero(&j,sizeof(j));return;
+   }
+   j.stage=2;return;
+  }
+  if(j.stage==2){
+   uint32_t result;bool valid=x9cw_answer_cnf(frame,n,token,&result);bzero(frame,X9_MIPC_FRAME_MAX);
+   x9c_answer_answer(j,valid&&!result?0:X9Q_INTERNAL);
+   /* No cleanup query: ANSWER does not end the call. The MD answer lease
+    * retires only through real END + owned empty + no busy mutation. */
+   bzero(&j,sizeof(j));
   }
  }
 }
@@ -656,6 +765,76 @@ static void x9c_mt_observe(const struct x9cw_inbound_state &in){
  printf("X9 CALL: SIM%u MT id %u %s (MD observation only; VOICE09 unannounced, no iOS call UI)\n",
         in.sim+1,in.native_id,s);
 }
+/* CallTechnology provenance for the CallList46 item+4 byte. The proven source
+ * is the real voice registration RAT: RIL requestVoiceRegistrationState 30f8f0
+ * sends a HEADER-ONLY MIPC 042f (timeout 300000ms), response 8100 forced 10B,
+ * networkType = u16LE@value+1 (30fa5c), cached per slot in RIL_CS_REG_STATE_CACHE
+ * (stride 0x28). x9cw_calltechnology collapses convertCSNetworkType 2fd710 ->
+ * voiceRat -> Apple RAT (语义对应, 推断) -> asWirelessTechnology 1f03304ac ->
+ * convertWirelessTechnologyToCallTechnology 1f03921e8 (实测 WT4->CT2/WT8->CT1/
+ * WT0x20->CT4/else->CT6; NR->CT6 is the real result, not a placeholder).
+ * The kernel 042f read-only query/8100 parse that POPULATES this cache is NOT
+ * implemented yet, and the NAS registration owner carries only local routing
+ * flags, not a parsed RAT. So the cache stays empty and this provider returns
+ * no technology: CallList publication is fail-closed until the query lands.
+ * docs 495-506 forbid rat2->LTE4 and Unknown placeholders; a real queried
+ * networkType mapped by x9cw_calltechnology is the only admitted source. */
+static struct {unsigned networkType;bool valid;} x9c_voice_rat[2]; /* 042f-populated; empty this round */
+static int x9c_call_technology(unsigned sim,unsigned *technology){
+ if(sim>=2||!x9c_voice_rat[sim].valid)return 0;
+ return x9cw_calltechnology(x9c_voice_rat[sim].networkType,technology);
+}
+/* CallList46 publication owner. Complete machinery, deliberately staged like
+ * x9c_dial_submit: it is NOT called from x9c_poll. Two independent gates must
+ * open before a live caller may admit it, and neither is satisfied this round:
+ *  (1) the VOICE09 announcement boundary stays closed until dial/status/SIM
+ *      routing and voice audio are reconciled (header comment; no bootarg);
+ *  (2) x9c_call_technology must return a proven CallTechnology (docs 495-506).
+ * It reconciles ONE owned call from the MD reducers (single-call SIM2 mode20
+ * subset), revision-tracked so an unchanged state is not republished, encodes
+ * via x9cw_calllist (no RemoteNumberList), and transfers an IOMallocData-owned
+ * frame through the MD->bb batch. No number, no audio, no readiness claim. */
+static bool x9c_calllist_announced=false; /* closed boundary; no bootarg override */
+struct x9c_calllist_publication {unsigned slot,sim;uint64_t generation;bb_x9_call_frame frame;};
+static int x9c_calllist_publish_callback(void *context){
+ struct x9c_calllist_publication &p=*static_cast<x9c_calllist_publication *>(context);
+ const struct x9c_client &c=x9c_clients[p.slot];
+ if(!x9w_control_ready||!c.registered||!x9c_bound_live(p.slot,p.sim,p.generation,c.binding))return 0;
+ return bb_x9_call_calllist(CBQ_PORT_BASE+p.slot,X9BB_NODE,c.bridge_generation,&p.frame,1)?1:0;
+}
+static void x9c_calllist_flush(unsigned slot){
+ static uint64_t last_epoch,last_revision;static unsigned last_direction,last_id;static bool last_valid;
+ if(!x9c_calllist_announced||slot>=CBQ_MAX_CLIENTS)return;
+ struct x9c_client &c=x9c_clients[slot];
+ if(!c.bound||!c.registered||c.generation!=x9q_clients[slot].generation||!x9c_event_transport_ready())return;
+ struct x9cw_outbound_state o;struct x9cw_inbound_state in;
+ bool mo=x9_md_mipc_call_snapshot(&o)==1;
+ bool mt=x9_md_mipc_call_incoming_snapshot(&in)==1;
+ unsigned id,ios_state,direction;struct x9cw_end_reason reason={0,0};uint64_t epoch,revision;
+ /* MT incoming drives the call UI; prefer its owned identity when present,
+  * else the owned MO call. Both reducers are single-call and block on foreign
+  * events, so this selects the one observed call, not a multi-call merge. */
+ if(mt&&in.seen&&!in.blocked&&!in.pending&&in.native_id&&in.native_id<=255){
+  id=in.native_id;ios_state=in.ios_state;direction=2;reason=in.end_reason;epoch=in.epoch;revision=in.revision;
+ }else if(mo&&o.seen&&!o.blocked&&o.native_id&&o.native_id<=255){
+  id=o.native_id;ios_state=o.ios_state;direction=1;reason=o.end_reason;epoch=o.epoch;revision=o.revision;
+ }else return;
+ if(last_valid&&last_epoch==epoch&&last_revision==revision&&last_direction==direction&&last_id==id)return;
+ unsigned technology;
+ if(!x9c_call_technology(c.sim,&technology))return; /* fail-closed: no proven RAT */
+ uint8_t sdu[25];unsigned size=x9cw_calllist(sdu,sizeof(sdu),id,ios_state,direction,technology,1,&reason);
+ if(!size)return;
+ uint32_t floor;
+ if(x9_md_mipc_call_cursor(&floor)!=1)return;
+ x9c_calllist_publication p={};p.slot=slot;p.sim=c.sim;p.generation=c.generation;
+ p.frame.sdu=sdu;p.frame.size=size;
+ p.frame.owned=static_cast<uint8_t *>(IOMallocData(CBQ_HDR+size));
+ if(!p.frame.owned)return;
+ int rc=x9_md_mipc_call_publish(floor,x9c_calllist_publish_callback,&p);
+ if(rc!=1){bzero(p.frame.owned,CBQ_HDR+size);IOFreeData(p.frame.owned,CBQ_HDR+size);}
+ else{last_valid=true;last_epoch=epoch;last_revision=revision;last_direction=direction;last_id=id;}
+ bzero(sdu,sizeof(sdu));
+}
 static void x9c_error(struct x9c_dial_job &j,uint16_t err){
  if(!j.answered&&x9c_live(j)){
   x9c_response_decide(j.reply,err);
@@ -700,6 +879,10 @@ static void x9c_del(unsigned slot){
   if(x9c_end_job.stage==2)x9_md_mipc_call_end_abandon(x9c_end_job.token);
   x9c_end_job.answered=true;bzero(x9c_end_job.req,sizeof(x9c_end_job.req));
  }
+ if(x9c_answer_job.used&&x9c_answer_job.slot==slot){
+  if(x9c_answer_job.stage==2)x9_md_mipc_call_answer_abandon(x9c_answer_job.token);
+  x9c_answer_job.answered=true;bzero(x9c_answer_job.req,sizeof(x9c_answer_job.req));
+ }
  if(slot<CBQ_MAX_CLIENTS)bzero(&x9c_clients[slot],sizeof(x9c_clients[slot]));
  if(x9c_dial_job.used&&x9c_dial_job.slot==slot){x9c_dial_job.answered=true;bzero(x9c_dial_job.req,sizeof(x9c_dial_job.req));}
  /* Keep token/epoch even if this QRTR client slot is reused. */
@@ -724,7 +907,9 @@ static void x9c_poll(){
  x9c_approve_poll();
  x9c_init_poll(frame);
  for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++)x9c_handover_flush(slot);
+ for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++)x9c_calllist_flush(slot);
  x9c_end_poll(frame);
+ x9c_answer_poll(frame);
  x9c_dial_poll(frame);
  x9c_response_poll();
 }
@@ -807,6 +992,14 @@ static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
       x9c_end_job.slot==slot&&x9c_end_job.generation==x9q_clients[slot].generation&&
       x9c_end_job.transaction==x9cw_u16(req+1)&&x9c_end_live(x9c_end_job))return true;
    err=x9c_bind_pending(slot,true)?X9Q_BUSY:x9c_end_begin(slot,req,len);if(!err)return true; /* asynchronous owned reply */
+  }else if(x9cw_u16(req+3)==0x22){
+   unsigned op,id;
+   /* Same repeat-transaction fence as END: the live allocation owns its
+    * target; a changed ID cannot append BUSY then the original result. */
+   if(x9cw_qmi_action(req,len,&op,&id)&&x9c_answer_job.used&&
+      x9c_answer_job.slot==slot&&x9c_answer_job.generation==x9q_clients[slot].generation&&
+      x9c_answer_job.transaction==x9cw_u16(req+1)&&x9c_answer_live(x9c_answer_job))return true;
+   err=x9c_bind_pending(slot,true)?X9Q_BUSY:x9c_answer_begin(slot,req,len);if(!err)return true;
   }
  }
  x9q_packet p(req,err);p.send(local,port);return true;

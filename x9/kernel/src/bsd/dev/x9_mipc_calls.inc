@@ -24,9 +24,15 @@ static struct x9cw_current x9_mc_current;
 static uint64_t x9_mc_dial_token;
 /* One end attempt for an epoch; a missing/failed CNF never releases it.
  * Retirement requires real END + a fresh owned empty snapshot and all
- * CALL mutations drained, not a timer or hangup result0. */
+ * CALL mutations drained, not a timer or hangup result0. direction records
+ * which reducer's epoch the leased end belongs to (0 MO, 1 MT). */
 static uint64_t x9_mc_end_token;
-static uint64_t x9_mc_dial_floor,x9_mc_end_epoch;
+/* One answer attempt per MT epoch, same conservative lease: a missing or
+ * failed0908 never releases it; only real MT END + owned empty retires it.
+ * END stays admissible while this lease is held, mirroring the dial lease. */
+static uint64_t x9_mc_answer_token;
+static uint64_t x9_mc_dial_floor,x9_mc_end_epoch,x9_mc_answer_epoch;
+static unsigned x9_mc_end_direction;
 static int x9mi_call_busy(void);
 /* This callback receives only an OWNED GET_STATUS confirmation, never an
  * unsolicited090a or a logger-derived reconstruction. No state/ID adoption
@@ -49,14 +55,33 @@ static void x9mc_current(const uint8_t *p,unsigned n,uint64_t revision){
     !x9mi_call_busy()){
   if(x9_mc_dial_token&&x9_mc_dial_floor!=UINT64_MAX&&x9_mc_outbound.epoch==x9_mc_dial_floor+1)
    x9_mc_dial_token=0;
-  if(x9_mc_end_token&&x9_mc_outbound.epoch==x9_mc_end_epoch)x9_mc_end_token=0;
+  if(x9_mc_end_token&&!x9_mc_end_direction&&x9_mc_outbound.epoch==x9_mc_end_epoch)x9_mc_end_token=0;
+ }
+ /* MT retirement is independent of the MO reducer: after8901 the outbound
+  * is permanently blocked, so its seen/ended can never prove MT emptiness.
+  * Only the CMD-owned inbound END plus the same fresh owned empty snapshot. */
+ if(!c.count&&x9_mc_inbound.seen&&x9_mc_inbound.ended&&!x9_mc_inbound.blocked&&
+    !x9mi_call_busy()){
+  if(x9_mc_end_token&&x9_mc_end_direction==1&&x9_mc_inbound.epoch==x9_mc_end_epoch)x9_mc_end_token=0;
+  if(x9_mc_answer_token&&x9_mc_inbound.epoch==x9_mc_answer_epoch)x9_mc_answer_token=0;
  }
 }
 int x9_md_mipc_call_end_snapshot(struct x9cw_end_target *out){
  if(!out)return -1;
  bzero(out,sizeof(*out));int rc=0;lck_mtx_lock(&x9_mi_lock);
  if(x9_mc_poisoned||x9_mi_poisoned||!x9_mi_online)rc=-1;
- else if(!x9_mc_end_token&&x9cw_end_target(&x9_mc_outbound,&x9_mc_current,out))rc=1;
+ else if(!x9_mc_end_token){
+  if(x9cw_end_target(&x9_mc_outbound,&x9_mc_current,out))rc=1;
+  else if(x9cw_end_target_inbound(&x9_mc_inbound,&x9_mc_current,out))rc=1;
+ }
+ lck_mtx_unlock(&x9_mi_lock);return rc;
+}
+int x9_md_mipc_call_answer_snapshot(struct x9cw_end_target *out){
+ if(!out)return -1;
+ bzero(out,sizeof(*out));int rc=0;lck_mtx_lock(&x9_mi_lock);
+ if(x9_mc_poisoned||x9_mi_poisoned||!x9_mi_online)rc=-1;
+ else if(!x9_mc_answer_token&&!x9_mc_end_token&&
+         x9cw_answer_target(&x9_mc_inbound,&x9_mc_current,out))rc=1;
  lck_mtx_unlock(&x9_mi_lock);return rc;
 }
 int x9_md_mipc_call_snapshot(struct x9cw_outbound_state *out){

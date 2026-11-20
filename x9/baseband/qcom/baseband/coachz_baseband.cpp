@@ -1546,7 +1546,7 @@ extern "C" int coachz_baseband_call_guard(const struct x9_mipc_call_owner *owner
   IOLockUnlock(bb_lock);return committed;
 }
 #endif
-// Only retained terminal03/20/21 and exact14B Bind44 replies. No MD callback or allocation
+// Only retained terminal03/20/21/22 and exact14B Bind44 replies. No MD callback or allocation
 // under this mutex; admission transfers owned, failure transfers nothing.
 static bool bb_x9_call_result(uint32_t dst_port,uint32_t src_node,uint64_t generation,
                              const uint8_t *sdu,uint32_t size,uint8_t *owned,uint32_t room,
@@ -1558,7 +1558,7 @@ static bool bb_x9_call_result(uint32_t dst_port,uint32_t src_node,uint64_t gener
      cbq_rd16(sdu+5)!=size-7||sdu[7]!=2||cbq_rd16(sdu+8)!=4||cbq_rd16(sdu+10)>1||
      (!!cbq_rd16(sdu+10))!=(!!cbq_rd16(sdu+12)))return false;
   const unsigned id=cbq_rd16(sdu+3);
-  if(id!=3&&id!=0x20&&id!=0x21&&id!=0x44)return false;
+  if(id!=3&&id!=0x20&&id!=0x21&&id!=0x22&&id!=0x44)return false;
   if(size==18&&(id!=0x20||cbq_rd16(sdu+10)||sdu[14]!=0x10||cbq_rd16(sdu+15)!=1||!sdu[17]))return false;
   if(size==14&&id==0x20&&!cbq_rd16(sdu+10))return false; // success requires the real call ID
   bool admitted=false;IOLockLock(bb_lock);
@@ -1588,22 +1588,40 @@ static bool bb_x9_call_result(uint32_t dst_port,uint32_t src_node,uint64_t gener
 // allocated by the single QMI owner before acquiring MD->bb mutexes; failure
 // transfers none of them and cannot grant a subscription or emit half a batch.
 struct bb_x9_call_frame { const uint8_t *sdu; uint32_t size; uint8_t *owned; };
+// kind: 0 handover54 batch, 1 registration Result03+54 batch, 2 CallList46.
 static bool bb_x9_call_publication(uint32_t dst_port,uint32_t src_node,uint64_t generation,
-                                   bb_x9_call_frame *frames,uint32_t count,bool registration,uint64_t deadline_ms)
+                                   bb_x9_call_frame *frames,uint32_t count,unsigned kind,uint64_t deadline_ms)
 {
   const uint32_t slot=dst_port-CBQ_PORT_BASE;
-  if(!bb_lock||!generation||!frames||!count||count>(registration?9u:8u)||(registration&&!deadline_ms)||
+  const uint32_t limit=kind==1?9u:kind==2?1u:8u;
+  if(!bb_lock||!generation||!frames||!count||count>limit||(kind==1&&!deadline_ms)||
      dst_port<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return false;
   for(uint32_t i=0;i<count;i++){
     const bb_x9_call_frame &f=frames[i];
-    const bool result=registration&&!i;
-    if(!f.sdu||!f.owned||f.size!=(result?14u:11u)||cbq_rd16(f.sdu+5)!=f.size-7)return false;
-    if(result){
-      if(f.size!=14||f.sdu[0]!=CBQ_QMI_RESPONSE||cbq_rd16(f.sdu+3)!=3||
-         f.sdu[7]!=2||cbq_rd16(f.sdu+8)!=4||cbd_rd32(f.sdu+10))return false;
-    }else if(f.size!=11||f.sdu[0]!=CBQ_QMI_INDICATION||cbq_rd16(f.sdu+1)||
-              cbq_rd16(f.sdu+3)!=0x54||f.sdu[7]!=1||cbq_rd16(f.sdu+8)!=1||
-              f.sdu[10]<1||f.sdu[10]>4)return false;
+    if(!f.sdu||!f.owned||cbq_rd16(f.sdu+5)!=f.size-7)return false;
+    if(kind==2){
+      // CallList46 indication: one 7-byte ordinary-voice item, optional END
+      // reason tag14. Shape mirrors x9cw_calllist; the host owner supplies a
+      // proven technology and fences subscription/readiness before this batch.
+      if(f.size!=18&&f.size!=25)return false;
+      if(f.sdu[0]!=CBQ_QMI_INDICATION||cbq_rd16(f.sdu+1)||cbq_rd16(f.sdu+3)!=0x2e||
+         f.sdu[7]!=1||cbq_rd16(f.sdu+8)!=8||f.sdu[10]!=1)return false;
+      if(!f.sdu[11]||f.sdu[13]||f.sdu[16]||f.sdu[17]||f.sdu[15]>7)return false;
+      const unsigned st=f.sdu[12];
+      if(st!=1&&st!=2&&st!=3&&st!=5&&st!=9)return false;
+      if(f.sdu[14]!=1&&f.sdu[14]!=2)return false;
+      if(f.size==25&&(st!=9||f.sdu[18]!=0x14||cbq_rd16(f.sdu+19)!=4||f.sdu[21]!=1||
+         f.sdu[22]!=f.sdu[11]||!cbq_rd16(f.sdu+23)))return false;
+    }else{
+      const bool result=kind==1&&!i;
+      if(f.size!=(result?14u:11u))return false;
+      if(result){
+        if(f.size!=14||f.sdu[0]!=CBQ_QMI_RESPONSE||cbq_rd16(f.sdu+3)!=3||
+           f.sdu[7]!=2||cbq_rd16(f.sdu+8)!=4||cbd_rd32(f.sdu+10))return false;
+      }else if(f.size!=11||f.sdu[0]!=CBQ_QMI_INDICATION||cbq_rd16(f.sdu+1)||
+                cbq_rd16(f.sdu+3)!=0x54||f.sdu[7]!=1||cbq_rd16(f.sdu+8)!=1||
+                f.sdu[10]<1||f.sdu[10]>4)return false;
+    }
   }
   IOLockLock(bb_lock);
   // The sleepable bridge lock itself can cross the host deadline. Compare
@@ -1611,7 +1629,7 @@ static bool bb_x9_call_publication(uint32_t dst_port,uint32_t src_node,uint64_t 
   // not bb_now_ms's diagnostic 32-bit clock or an earlier getter.
   uint64_t ticks,ns;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);
   const cbq_client &c=bb_qmux.client[slot];bool admitted=false;
-  if((!registration||ns/1000000<deadline_ms)&&c.used&&!c.release_pending&&!c.private_service&&
+  if((kind!=1||ns/1000000<deadline_ms)&&c.used&&!c.release_pending&&!c.private_service&&
      c.service==9&&c.channel<2&&c.generation==generation){
     bb_channel *ch=&bb_ch[c.channel==0?CBH_QMUX1:CBH_QMUX2];
     if(count<=BB_QUEUE-ch->count){
@@ -1635,12 +1653,18 @@ static bool bb_x9_call_publication(uint32_t dst_port,uint32_t src_node,uint64_t 
 }
 static bool bb_x9_call_registration(uint32_t dst_port,uint32_t src_node,uint64_t generation,
                                     bb_x9_call_frame *frames,uint32_t count,uint64_t deadline_ms){
-  return bb_x9_call_publication(dst_port,src_node,generation,frames,count,true,deadline_ms);
+  return bb_x9_call_publication(dst_port,src_node,generation,frames,count,1,deadline_ms);
 }
 static bool bb_x9_call_handover(uint32_t dst_port,uint32_t src_node,uint64_t generation,bb_x9_call_frame *frames,uint32_t count){
   // An event has no invented host request timeout. Readiness, generation,
   // subscription and native poison are fenced by the trusted MD callback.
-  return bb_x9_call_publication(dst_port,src_node,generation,frames,count,false,0);
+  return bb_x9_call_publication(dst_port,src_node,generation,frames,count,0,0);
+}
+static bool bb_x9_call_calllist(uint32_t dst_port,uint32_t src_node,uint64_t generation,bb_x9_call_frame *frames,uint32_t count){
+  // CallList46 is an unsolicited indication with no host request timeout.
+  // The trusted MD callback fences subscription, technology provenance and
+  // the announcement boundary before this batch; this is queue admission only.
+  return bb_x9_call_publication(dst_port,src_node,generation,frames,count,2,0);
 }
 // Unlike coachz_baseband_qrtr's "port recognized" result, this is an actual
 // host-queue admission receipt. An X9 SMS must keep its PDU on queue/OOM loss;
