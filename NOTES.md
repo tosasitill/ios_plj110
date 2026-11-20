@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 ATF setup_init 反汇编细化（所有权边界，实测 disassembly；CR0 使能仍待 boot 实证）
+
+- **目的**：履行目标「先 dump ATF `setup_init` 确定 MM SMMU 状态与所有权边界」，定位 CR0 使能与 protected-SID/ASID 赋值，填补路径 b 的空闲 ASID 缺口。对象 `tee.img.atf.original.bin`（load base `0x88800000`，下列地址为 file offset/VMA-from-0）。
+- **实测（disassembly）**：① `setup_init@0x34880` 循环 `cmp w2,#3`（3 个 SMMU）；每轮 `ldr x10,[x24,#1496]` 取 per-SMMU 结构，`str x8,[x9,#280]`=strtab base（取自 `global_table[0x128000]`）、`str w8=0x40000,[x9,#288]`=strtab size（256KiB），`ldrb w8,[x10,#36]; cmp #0` 读 per-SMMU enable 标志；`bl 0x21f5c`（w2=39/w3=40/w4=0x1000）分配一个 4KiB 页并 `str x0,[x8,#208]`（结构+208，疑 CMDQ 或 CD 页）。② 循环后 `bl 0x47670`。**修正先前假设**：`0x47670` 经反汇编是**通用数据结构初始化**（`memset` 两块 `0x1000`/`0x2000`、写 magic `0x80028002`、sentinel `0x7fe`=2046、置 `[0x132000+1223]=1`），**不是** SMMU CR0 使能。③ `0x52e3c` 在 `setup_init` 尾部被多次以 `adrp` 字符串页参数调用，是**日志助手**而非寄存器编程。
+- **推断（待证）**：`setup_init` 可见循环体**只做软件分配/标志**，未写 `0x30800000+0x20`(CR0)/`+0x80`(STRTAB_BASE) MMIO；硬件使能应在另一函数（消费 enable 标志 `[x10+36]` 者，或独立 initcall）。strtab `0x40000`/64=4096 STE → SID 空间 12-bit（与相机私有 STES=256 不同，MM SMMU 更大）。
+- **决策（避免冗余 RE）**：CR0 enable 态、STRTAB fmt/base、CMDQ 几何、STE 0x80/0x90/0xa0/0xa1 默认值由 **task #7 boot DIAG 快照实证给出更可靠**（运行时真值优于静态 RE）；空闲 ASID 可由 boot dump 的 STE 0xa1 `S1ContextPtr` 运行时 guarded 读 live CD 取得。故**不再深挖 ATF CR0-使能函数**（与 boot 实测冗余），critical path 仍门控于用户手动 boot 综合 DIAG 候选 `15634256…`。本轮无代码改动、无镜像、无设备操作。
+
 #### 2026-11-20 MM SMMU 只读状态快照诊断镜像（路径 b 先决条件实测，待上机）
 
 - **目的**：用实测取代昂贵的 ATF `setup_init` 反汇编，直接量取 VCP-boot 失败时刻 MM SMMU（`0x30800000`）的状态，为 task #8「路径 b：XNU 直接编程 SID 0xa0 STE+S1 页表」提供 gating 事实（NS EL1 能否访问、是否上电/enable、STRTAB 布局、SID 0x80/0x90/0xa0/0xa1 STE 默认值）。
