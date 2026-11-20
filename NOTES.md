@@ -160,6 +160,17 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 MM_2 errno=60 根因因果链源码实证：BACKUP1→VIP(MMUP) 备份投票未 ACK（验证 path-b 直击第一阻塞）
+
+- **目的**：在 boot 门控期间，用源码把「分歧 #2（SMMU 翻译缺口）」与「第一实机阻塞 MM_2 stage4 errno=60」之间的**因果链**实证出来，验证 path-b 确实直击第一阻塞（而非旁支），并定死 boot 日志中确认/推翻该链的具体行。此前审计覆盖启动顺序/重复投票语义，但**未**对 sta/done/fsm/int_raw 做 BACKUP1→VIP 逐位解码。
+- **寄存器身份（实测 `hwccf.h`）**：X9 `MM_POWER_STA 0x1135c`=`CCF_BACKUP1_STA`(:120)、`MM_POWER_DONE 0x1136c`=`CCF_BACKUP1_DONE`(:121)、`MM_POWER_GLOBAL 0x11358`=`CCF_BACKUP1_EN`(:119)——三者属 **「Backup VIP Status」** 块(:115)，即**转发给 VIP（远端 tinysys=MMUP）的备份投票器**，非主 MTCMOS 路径。`MM_POWER_FSM 0x10000`=`CCF_STATUS`(:64) bit0=`hwccf_idle`(:66)；`MM_POWER_ALL_STA 0x13704`=`CCF_ALL_MTCMOS_STA_0`(:108)；mt0sta `0x1131c`=`CCF_MTCMOS_STA_0`、mt1sta `0x11334`=`CCF_MTCMOS_STA_1`。`MM_POWER_INT_BACKUP1_TIMEOUT=(1<<5)`=`backup1_timeout_int_to_vip`(:150) ✓。
+- **VIP 中断/ACK 机制（实测 `hwccf.h`）**：`CCF_INT_STATUS 0x50` bit14=`backup_vote_int_to_vip`(:159)、bit30=`backup_vote_int_to_ap`(:176)；`CCF_OUTPUT_STATUS 0x10004` bit28-31=`hw_ccf_to_up_int_b_0..3`「interrupt event to vip」(:76-80)；`CCF_BACKUP1_VIP_STA_CLR 0x10`(:129) 由 **VIP w1c** 应答。即 BACKUP1 投票经中断送 VIP，**VIP 固件必须处理并 ACK**（DONE 置位 / VIP_STA_CLR）。
+- **Android 等待语义（实测 `hwccf_api.c:993-1067 _v1_hwccf_irq_voter_wait_done`）**：is_set 先轮询 `all_en_ofs`(=BACKUP1_EN/global) 位 SET(:1008-1021)，再轮询 `sta_ofs` 直到 `IS_MASK_CLR(val, done_ack_msk)`（**STA 位清=idle**，:1044-1053）。**与 X9 逐项一致**：stage3 `mm_irq_wait_global` 等 GLOBAL bit3 SET、stage4 `mm_irq_poll(STA,target=0)` 等 STA bit3==0。X9 `mm_irq_poll` 第三参是 `step_us`（非 mode），判据 `(reg&MM_POWER_BIT)==target`（:531）。
+- **356 状态逐位解码（实测日志 + 上述源码）**：`global=8`→BACKUP1_EN bit3 SET（**stage3 通过**）；`sta=8`→BACKUP1_STA bit3 **卡 1 不清**（**stage4 超时点**，timeout_off=1135c/raw=8）；`done=fffffff7`→BACKUP1_DONE **bit3=0**（VIP 从未 ACK 该备份投票）；`fsm=80000001`→CCF_STATUS **bit0=1=hwccf_idle**（本地 HWCCF FSM 空闲，卡在等远端 VIP；bit31 语义未在枚举定义，不臆断）；`int_raw=0x4000`→**bit14=backup_vote_int_to_vip**（HWCCF 已向 VIP 发出备份投票中断，NOTES:319 曾观察到此位）。
+- **因果链（推断，待 boot 实证）**：MM_2 备份投票已送 VIP（bit14），但 VIP/MMUP **从未 ACK**（DONE bit3=0、STA 卡 busy）。最可能根因：**MMUP（core1 RV33）固件未运行**——其从 VCP carve-out 取指经 MM SMMU SID 0xa0 翻译，而 X9 打包裸 PA 却无翻译（分歧 #2，已源码实证）→ MMUP 取指 fault/跑飞 → 不服务 backup_vote_int → BACKUP1 DONE 永不置位 → stage4 errno=60。**此链把第一阻塞直接归因于分歧 #2，验证 path-b 是正确修复方向。**
+- **boot 确认/推翻该链的具体行（dual 候选 `103e465f…` 会打印）**：① `X9 MM POWER VCP STATE: core0=… core1=… mmup_gpr=…`（`cfg_core1+0x70`=MMUP 状态——若 core1 halted/not-ready 而 core0 ready，支持「MMUP 未运行」）；② `X9 MM VCP STE a0:`（若 SID 0xa0 STE=ABORT/zero-invalid，支持「无翻译」）；③ `X9 MM VCP BOOT:` errno（VCP boot 本身成败）。**若 core1 ready 且 STE a0 已有有效 S1 翻译，则本因果链被推翻**，MM_2 超时另有根因（如 VIP 中断路由/GIC），需重定向——届时不坚持 path-b。
+- **诚实边界**：BACKUP1→VIP 机制、寄存器身份、Android 等待语义、356 位解码均**源码/日志实证**；「MMUP 因 SMMU 缺口未运行」是**推断**（MMUP 取指是否确经 SID 0xa0 需 boot core1 状态 + STE a0 实证）。本轮无代码改动、无镜像、无设备操作；commit 见下。
+
 #### 2026-11-20 SMMU 快照双失败路径触发修复 + 新候选 x9-camera-smmu-dual-20261120（取代 15634256，待上机）
 
 - **目的**：修复上一版 DIAG 候选（`15634256…`）的**诊断触发缺口**——SMMU 只读快照原仅在 **VCP-boot 失败**路径（`vcp_boot_diag_log`）输出，但 **356 基线实际失败在 MM_2 投票路径**（`mm_vote_take` stage4 `ETIMEDOUT`），VCP boot 当时已成功。若用户 boot 旧候选而失败仍落在投票路径，将**拿不到任何 SMMU 输出**，task #7 几何门控空转。
