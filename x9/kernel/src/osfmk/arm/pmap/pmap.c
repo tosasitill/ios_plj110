@@ -2588,7 +2588,7 @@ static void x9_ram_import(void) {
   if(!allowed)panic("X9 RAM: extent outside captured allowlist");
   x9_ram_live[i][0]=a;x9_ram_live[i][1]=z;total+=z-a;last=z;
  }
- if(x9_ram_live[0][0]!=X9_RAM_LO || x9_ram_live[0][1]!=x9_ram_ranges[0][1] ||
+ if(x9_ram_live[0][0]!=X9_RAM_LO || (x9_ram_live[0][1]!=x9_ram_ranges[0][1] && x9_ram_live[0][1]!=X9_VCP_LOADER_LO) ||
     total!=x9_ram_live_bytes || total<(8ULL<<30))
   panic("X9 RAM: live map capacity invalid");
  x9_ram_live_count=count;

@@ -7,6 +7,9 @@
 #define X9_RAM_LO 0x100000000ULL
 #define X9_RAM_HI 0x37FA00000ULL
 #define X9_RAM_SPAN (X9_RAM_HI-X9_RAM_LO)
+/* LK-allocated VCP/MMUP loader buffer (not in reserved-memory); keep out of XNU. */
+#define X9_VCP_LOADER_LO 0x106C00000ULL
+#define X9_VCP_LOADER_HI 0x106E00000ULL
 #define X9_RAM_USABLE 0x26F740000ULL
 static const unsigned long long x9_ram_ranges[][2] = {
  {0x100000000ULL,0x13CC00000ULL}, /* 159: no mblock below mtksmmu_mpool */

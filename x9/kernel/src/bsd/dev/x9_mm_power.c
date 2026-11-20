@@ -18,8 +18,10 @@
 #include <vm/vm_kern.h>
 #include <kern/cpu_data.h>
 #include "x9_mm_power.h"
+#include "../../../generated/x9_mmup_image.inc"
 extern int sweet_early_is_x9(void);
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+extern boolean_t pmap_valid_page(ppnum_t);
 extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
 LCK_GRP_DECLARE(mm_power_group, "x9-mm-power");
 LCK_MTX_DECLARE(mm_power_lock, &mm_power_group);
@@ -444,6 +446,49 @@ static void vcp_boot_diag_log(const struct vcp_core_snap *pre, const struct vcp_
         }
     }
 }
+
+/* LK loads vcp_b.img into a DRAM heap buffer; TF-A makes MMUP copy
+ * buf[0x2000:] into its SRAM at reset release (SRAM header at 0x31837000:
+ * +08 dst start, +0c packed DRAM src, +10 dst end). XNU/shim reuse that heap
+ * before this point (362: source holds non-firmware data, MMUP then jumps into
+ * zeros, nest=0x39879). Rewrite the bytes from the build-embedded image, but
+ * only into pages XNU does not manage. */
+static void mmup_restore_loader(void)
+{
+    if (!x9_mmup_image_bytes) { printf("X9 MM MMUP LOADER: no embedded image\n"); return; }
+    vm_offset_t hs = ml_io_map(0x31837000ULL, 0x1000);
+    if (!hs) return;
+    uint32_t d0 = mm_read(hs, 8), pk = mm_read(hs, 0xc), d1 = mm_read(hs, 0x10);
+    uint64_t src = ((uint64_t)(pk & 0xf) << 32) | (pk & ~0xfffu);
+    if (d0 != 0x2000 || d1 != 0x2000 + x9_mmup_image_bytes || (pk & 0xff0) ||
+        (pk & 0xf) == 0 || (pk & 0xf) > 3) {
+        printf("X9 MM MMUP LOADER: header mismatch %x %x %x, skip\n", d0, pk, d1);
+        return;
+    }
+    for (uint64_t pa = src & ~(uint64_t)(PAGE_SIZE - 1); pa < src + x9_mmup_image_bytes; pa += PAGE_SIZE)
+        if (pmap_valid_page((ppnum_t)(pa >> PAGE_SHIFT))) {
+            printf("X9 MM MMUP LOADER: %llx is XNU-managed RAM, refuse\n", pa);
+            return;
+        }
+    vm_offset_t dst = ml_io_map(src, (x9_mmup_image_bytes + 0xfff) & ~0xfffu);
+    if (!dst) return;
+    uint32_t before = mm_read(dst, 0), bad = 0;
+    volatile uint32_t *w = (volatile uint32_t *)dst;
+    for (unsigned i = 0; i < x9_mmup_image_bytes; i += 4) {
+        uint32_t v = x9_mmup_image[i] | x9_mmup_image[i + 1] << 8 |
+            x9_mmup_image[i + 2] << 16 | (uint32_t)x9_mmup_image[i + 3] << 24;
+        w[i / 4] = v;
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    for (unsigned i = 0; i < x9_mmup_image_bytes; i += 4) {
+        uint32_t v = x9_mmup_image[i] | x9_mmup_image[i + 1] << 8 |
+            x9_mmup_image[i + 2] << 16 | (uint32_t)x9_mmup_image[i + 3] << 24;
+        if (w[i / 4] != v) bad++;
+    }
+    printf("X9 MM MMUP LOADER: restored %u B to %llx (was %x) verify_bad=%u\n",
+        x9_mmup_image_bytes, src, before, bad);
+}
+
 static int vcp_boot_ensure(void)
 {
     int e;
@@ -470,6 +515,7 @@ static int vcp_boot_ensure(void)
         mm_write_reg(vcp_cfg_core1, VCP_DRAM_RESV_SIZE_OFF, VCP_MEM_TOTAL_SIZE);
         mm_write_reg(vcp_cfg_core1, VCP_DRAM_RESV_LOGGER_OFF,
             VCP_PACK_IOVA(vcp_mem_pa + VCP_MEM_LOGGER_OFFSET));
+        mmup_restore_loader();
         e = vcp_smc_ok(MMUP_OP_RESET_RELEASE, 1, &smc_r1);
         if (!e) { stage = 4; e = vcp_poll_ready(mmup_mbox4, &mmup_sz, &mmup_clr, &snap_1ms, &snap_1ms_ok); }
     }

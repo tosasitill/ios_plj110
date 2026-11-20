@@ -3524,3 +3524,10 @@ transfer code). Static audit finds no missing step. Signature (bus + EEPROM + AF
   power-domains; seninf-core is hwccf-apply (clock votes trigger MTCMOS via HWCCF).
 - Next: replace the unsupported 0x514 acquisition with the Android HWCCF mminfra path (needs care: MM infra
   shared with display/GPU).
+
+## 2026-11-20 相机 MMUP(VCP core1) 启动：362 结论与 restore 候选
+- **观测(362.txt)**：`stage=4 errno=60 lr=14e4 nest=39879` 与 361 完全相同；`0x1_06c39000` 处 `nz=39202`，首字 `8009c000 80011d60`，与 `tinysys-mmup-RV33_A.bin[0x2000]`(`c1350513 65a170ef`) 不符，即 LK 放的 MMUP 镜像已被覆盖。扣掉 `0x1_06c00000..0x1_06e00000`（fdt_ram.c/pmap.c）无效或不充分（写入者未证实，疑似 XNU 早期 first_avail 分配不走 hole 检查，仅推断）。
+- **静态推演**：LK `app_load_vcp` 把 vcp_b.img 的 mmup 段读入 LK 堆 buffer(`vcp_loader_phy`)，op7 把 buffer 基址交 TF-A；SRAM 头 `+08=0x2000,+0c=pack(src),+10=0x48c00`；MMUP boot 代码(0x3a8)复位后从 DRAM `src` 拷 0x46c00B 到自己 SRAM。SRAM 头 0x0..0x2000 由 TF-A 直接写，`0x2000..0x48c00` 依赖该 DRAM。
+- **修复(未上机)**：`x9/tools/mmup_image.py` 从 `.local/.../vcp_b.img` 提取 `tinysys-mmup-RV33_A`（段头 +0x200 起的 body，丢弃前 0x2000）生成 gitignored `generated/x9_mmup_image.inc`；`x9_mm_power.c:mmup_restore_loader()` 在 `MMUP_OP_RESET_RELEASE` 前按 SRAM 头(0x31837000)解出 src，校验头、拒绝 XNU 管理页，写入并回读校验，打印 `X9 MM MMUP LOADER: restored ... verify_bad=N`。
+- **候选**：`x9/out/x9-camera-mmup-restore2-20261120/boot.img`（15237120 B）。上机看 `X9 MM MMUP LOADER` 行（restored/refuse/header mismatch）及 `VCP BOOT` stage 是否越过 4。
+- 未解：vcp core0 的 op2 缓冲(`x20+0x200000`, `+0x800000` 第二段)是否同样被覆盖；若 MMUP 通过则再查。
