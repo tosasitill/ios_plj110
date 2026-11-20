@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 路径 b 组件① identity S1 构建器落地（纯页表构造，编译实证，非 attach；②③④仍 boot 门控）
+
+- **目的**：task #8 拆为 ①PA 输入 identity S1 构建器 ②live ATF MM SMMU host adapter ③STE 0xa0 模板安装 ④接入 vcp_boot_ensure。②③④依赖 boot DIAG（NS 写权限/CR0/STRTAB fmt/CMDQ shift/IDR5 granule/STE a0 默认），**仍 boot 门控不写**。①是**纯计算页表构造**（模块头明确「NOT attach path」），几何已锁定、runtime 门控 idr5，不依赖 boot 即可编译实证，先行落地以加速 boot 后关键路径。**无设备操作、无新镜像**（沿用候选 x9-camera-smmu-dual-20261120）。
+- **改动（实测编译）**：`x9/kernel/src/bsd/dev/x9_camera_s1.inc` 追加自包含 identity 构建器（新 `struct x9_camera_s1_id` + `CAM_S1_ID_MAGIC`），**不改任何现有函数**（零回归风险于已工作的 normal-camera 路径）。复用通用 helper `cam_s1_page/cam_s1_alloc_page/cam_s1_phys/cam_s1_free_page` 与常量 `CAM_S1_*`/`CAM_S1_PAGE_ATTR`/`CAM_S1_MAIR`/`cam_s1_oas`。新增 4 个外部函数：`x9_camera_s1_id_create(idr5,iova,pa,bytes,out)`/`_validate`/`_export(asid,out)`/`_discard`，声明加于 `x9_camera_s1.h`。
+- **与 normal create 的关键差异**：数据页**不分配**（leaf PTE = `(pa+off)|CAM_S1_PAGE_ATTR`，identity 时 pa==iova）；仅 root/leaf/CD 表页 kalloc。`cam_s1_id_check` 用外部 PA 范围/对齐/不重叠校验取代 `pmap_find_phys(m->raw)`（identity 无内核 VA）。`_export` 复用 `struct x9_camera_s1_export`（backing/raw=NULL，数据非内核 WB 内存），只 clean 表页到 PoC，once-only publication + asid 1..255 + EBUSY discard 规则与 normal 一致。
+- **编译实证（实测）**：`x9/out/camera-s1-id-20261120/camera-unit.py`（单对象驱动，选 sweet_x9_camera.c）→ `compile_one result True`；`llvm-nm sweet_x9_camera.o` 含 `_x9_camera_s1_id_create/_validate/_export/_discard`（T 全局符号）；`.inc` 新代码**零警告**（181 条均为 sweet_x9_camera.c 既有 -Wdeclaration-after-statement/-Wcast-align 风格警告）。**仅证明编译/符号正确，不证明运行时翻译有效**（runtime 门控 idr5 GRAN16K/IAS34/OAS，且 attach 未写）。
+- **几何核对（推断，与锁定设计一致）**：path-b iova=pa=0x15FC00000、bytes=0x400000 → first_root=0xAF=175、leaves=1、pages=256、root_end=176≤512、mapped=0x400000；pa&~CAM_S1_PA_MASK=0、pa<1<<48。与 NOTES「分歧 #2 映射设计锁定」条目完全吻合。
+- **未决/下一步**：②host adapter（map STRTAB/CMDQ/EVTQ、enter/guard/leave 证 NS 访问+串行化、lease SID 0xa0/SSID0/ASID=1）③STE 0xa0 word0=0xB|cd_pa/word1=0x82|S1STALLD|TCU_PF/word2=0 + BBM 安装 ④接入 vcp_boot_ensure MMUP_RELEASE 前——**全部待 boot DIAG 几何后作为单一完整编译实证 feature 写入**，写镜像前用户确认。当前关键路径仍硬件门控于用户手动 fastboot boot 候选镜像 + 下一份 ~/NNN.txt（最新 365 无 SMMU 输出）。commit 见下。
+
 #### 2026-11-20 日志 363 TBUF 专项分析：MMUP 早夭于 DRAM MPU 配置前 + RV33 自定义指令纠正「TBUF 垃圾」 framing
 
 - **目的**：NOTES 此前覆盖 356–360 与 365/366，但 **361–363 的 TBUF PC 轨迹未专项分析**。本轮离线分析 363（`~/363.txt:6697-6718`，含 SNAP/DIAG4/5/INTC1/TBUF/HDR/PROG/STK）+ 保存的 `x9/out/mmup.dis`（tinysys-mmup-RV33_A），细化 MMUP 首错位置并验证 path-b 几何。无代码改动、无镜像、无设备操作。

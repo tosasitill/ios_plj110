@@ -296,3 +296,205 @@ int x9_camera_s1_discard(struct x9_camera_s1 **map)
     }
     lck_mtx_unlock(&camera_s1_lock);return e;
 }
+
+/* Identity Stage-1 map for an EXTERNAL physical range (path-b VCP carve-out).
+ * Unlike x9_camera_s1_create, the data pages are NOT allocated here: leaf
+ * PTEs translate IOVA iova+off to a caller-supplied PA pa+off (identity when
+ * pa==iova). Only the root/leaf/CD table pages are kernel-allocated. This is
+ * pure table construction: no MMIO, queue, SMC/HVC, attach or READY. IDR5 is
+ * a runtime capability gate (16K granule, IAS34, OAS<=48), not authority to
+ * use the shared MM SMMU. The caller (future host adapter) reserves the SID
+ * and installs the STE; nothing here touches the controller.
+ */
+#define CAM_S1_ID_MAGIC 0x583943414d534944ull
+struct x9_camera_s1_id {
+    uint64_t magic, iova, pa;
+    uint32_t bytes, mapped_bytes, pages, leaves, first_root, oas, ips, asid;
+    struct cam_s1_page root, leaf[CAM_S1_MAX_LEAVES], cd;
+    bool published;
+    int last_errno;
+};
+
+static uint64_t cam_s1_id_cd_word0(const struct x9_camera_s1_id *m)
+{
+    return 30ull|(2ull<<6)|(2ull<<12)|(1ull<<30)|(1ull<<31)|
+        ((uint64_t)m->ips<<32)|(1ull<<41)|(1ull<<45)|(1ull<<46)|
+        (1ull<<47)|((uint64_t)m->asid<<48);
+}
+
+static void cam_s1_id_free_unpublished(struct x9_camera_s1_id *m)
+{
+    if(m->published)panic("X9 CAMERA: free of published identity Stage-1 map");
+    cam_s1_free_page(&m->cd);
+    for(unsigned i=0;i<CAM_S1_MAX_LEAVES;i++)cam_s1_free_page(&m->leaf[i]);
+    cam_s1_free_page(&m->root);
+    m->magic=0;
+    kfree_type(struct x9_camera_s1_id,m);
+}
+
+static int cam_s1_id_check(struct x9_camera_s1_id *m)
+{
+    const struct cam_s1_page *table[4];
+    unsigned count;
+    uint64_t pa_limit;
+    if(!m || m->magic!=CAM_S1_ID_MAGIC)return EINVAL;
+    if(m->last_errno)return m->last_errno;
+    if(PAGE_SHIFT!=CAM_S1_SHIFT || m->ips>=6 || m->oas!=cam_s1_oas[m->ips] ||
+        m->asid>255 || (m->asid && !m->published) ||
+        !m->bytes || m->bytes>X9_CAMERA_MAX_BYTES ||
+        m->mapped_bytes!=((m->bytes+CAM_S1_PAGE-1)&~(CAM_S1_PAGE-1)) ||
+        m->pages!=m->mapped_bytes/CAM_S1_PAGE || m->pages>CAM_S1_MAX_PAGES ||
+        !m->iova || (m->iova&(CAM_S1_PAGE-1)) || m->iova>=CAM_S1_IOVA_LIMIT ||
+        m->mapped_bytes>CAM_S1_IOVA_LIMIT-m->iova ||
+        !m->pa || (m->pa&(CAM_S1_PAGE-1)) ||
+        m->first_root!=m->iova>>CAM_S1_L2_SHIFT ||
+        m->leaves!=1+((m->iova+m->mapped_bytes-1)>>CAM_S1_L2_SHIFT)-m->first_root ||
+        !m->leaves || m->leaves>CAM_S1_MAX_LEAVES ||
+        m->first_root+m->leaves>CAM_S1_ROOT_ENTRIES ||
+        !m->root.va || !m->cd.va)return EFAULT;
+    pa_limit=1ull<<m->oas;
+    if(m->pa>=pa_limit || m->mapped_bytes>pa_limit-m->pa ||
+        (m->pa&~CAM_S1_PA_MASK))return ERANGE;
+    table[0]=&m->root;table[1]=&m->cd;table[2]=&m->leaf[0];table[3]=&m->leaf[1];
+    count=2+m->leaves;
+    for(unsigned i=m->leaves;i<CAM_S1_MAX_LEAVES;i++)
+        if(m->leaf[i].va || m->leaf[i].pa)return EFAULT;
+    for(unsigned i=0;i<count;i++) {
+        uint64_t pa=0;
+        int e=cam_s1_phys(table[i]->va,m->oas,&pa);
+        if(e)return e;
+        if(pa!=table[i]->pa)return ESTALE;
+        for(unsigned j=0;j<i;j++)if(pa==table[j]->pa)return EFAULT;
+    }
+    {
+        const volatile uint64_t *root=(const volatile uint64_t *)m->root.va;
+        for(unsigned i=0;i<CAM_S1_ENTRIES;i++) {
+            uint64_t expected=0;
+            if(i>=m->first_root && i<m->first_root+m->leaves)
+                expected=m->leaf[i-m->first_root].pa|3ull;
+            if(root[i]!=expected)return ESTALE;
+        }
+    }
+    for(unsigned t=0;t<m->leaves;t++) {
+        const volatile uint64_t *leaf=(const volatile uint64_t *)m->leaf[t].va;
+        uint64_t base=(uint64_t)(m->first_root+t)<<CAM_S1_L2_SHIFT;
+        for(unsigned i=0;i<CAM_S1_ENTRIES;i++) {
+            uint64_t va=base+((uint64_t)i<<CAM_S1_SHIFT),expected=0;
+            if(va>=m->iova && va-m->iova<m->mapped_bytes)
+                expected=(m->pa+(va-m->iova))|CAM_S1_PAGE_ATTR;
+            if(leaf[i]!=expected)return ESTALE;
+        }
+    }
+    {
+        const volatile uint64_t *cd=(const volatile uint64_t *)m->cd.va;
+        for(unsigned i=0;i<CAM_S1_ENTRIES;i++) {
+            uint64_t expected=0;
+            if(m->asid) {
+                if(i==0)expected=cam_s1_id_cd_word0(m);
+                else if(i==1)expected=m->root.pa;
+                else if(i==3)expected=CAM_S1_MAIR;
+            }
+            if(cd[i]!=expected)return ESTALE;
+        }
+    }
+    __asm__ volatile("dsb sy":::"memory");
+    return 0;
+}
+
+int x9_camera_s1_id_create(uint32_t idr5,uint64_t iova,uint64_t pa,
+    uint32_t bytes,struct x9_camera_s1_id **out)
+{
+    unsigned ips=idr5&7u;
+    uint32_t mapped;
+    struct x9_camera_s1_id *m;
+    int e=0;
+    if(!out || *out || !bytes || bytes>X9_CAMERA_MAX_BYTES || !iova ||
+        (iova&(CAM_S1_PAGE-1)) || iova>=CAM_S1_IOVA_LIMIT ||
+        !pa || (pa&(CAM_S1_PAGE-1)))return EINVAL;
+    if(PAGE_SHIFT!=CAM_S1_SHIFT || !(idr5&(1u<<5)) || ips>=6)return ENOTSUP;
+    mapped=(bytes+CAM_S1_PAGE-1)&~(CAM_S1_PAGE-1);
+    if(mapped>CAM_S1_IOVA_LIMIT-iova)return ERANGE;
+    m=kalloc_type(struct x9_camera_s1_id,Z_WAITOK|Z_ZERO);
+    if(!m)return ENOMEM;
+    m->magic=CAM_S1_ID_MAGIC;m->iova=iova;m->pa=pa;m->bytes=bytes;
+    m->mapped_bytes=mapped;m->pages=mapped/CAM_S1_PAGE;
+    m->oas=cam_s1_oas[ips];m->ips=ips;
+    m->first_root=(uint32_t)(iova>>CAM_S1_L2_SHIFT);
+    m->leaves=(uint32_t)((iova+mapped-1)>>CAM_S1_L2_SHIFT)-m->first_root+1;
+    if(m->leaves>CAM_S1_MAX_LEAVES || m->first_root+m->leaves>CAM_S1_ROOT_ENTRIES)
+        e=ERANGE;
+    if(!e)e=cam_s1_alloc_page(&m->root,m->oas);
+    for(unsigned i=0;i<m->leaves && !e;i++)e=cam_s1_alloc_page(&m->leaf[i],m->oas);
+    if(!e)e=cam_s1_alloc_page(&m->cd,m->oas);
+    if(!e) {
+        uint64_t *root=(uint64_t *)m->root.va;
+        for(unsigned i=0;i<m->pages;i++) {
+            uint64_t va=iova+((uint64_t)i<<CAM_S1_SHIFT);
+            unsigned t=(unsigned)(va>>CAM_S1_L2_SHIFT)-m->first_root;
+            unsigned slot=(unsigned)(va>>CAM_S1_SHIFT)&(CAM_S1_ENTRIES-1);
+            uint64_t *leaf=(uint64_t *)m->leaf[t].va;
+            leaf[slot]=(pa+((uint64_t)i<<CAM_S1_SHIFT))|CAM_S1_PAGE_ATTR;
+        }
+        for(unsigned i=0;i<m->leaves;i++)root[m->first_root+i]=m->leaf[i].pa|3ull;
+        e=cam_s1_id_check(m);
+    }
+    if(e){cam_s1_id_free_unpublished(m);return e;}
+    *out=m;return 0;
+}
+
+int x9_camera_s1_id_validate(struct x9_camera_s1_id *m)
+{
+    int e;
+    lck_mtx_lock(&camera_s1_lock);
+    e=cam_s1_id_check(m);
+    if(e && m && m->magic==CAM_S1_ID_MAGIC && !m->last_errno)m->last_errno=e;
+    lck_mtx_unlock(&camera_s1_lock);return e;
+}
+
+int x9_camera_s1_id_export(struct x9_camera_s1_id *m,uint32_t asid,
+    struct x9_camera_s1_export *out)
+{
+    int e;
+    uint64_t *cd;
+    if(!out || !asid || asid>255)return EINVAL;
+    lck_mtx_lock(&camera_s1_lock);
+    e=cam_s1_id_check(m);
+    if(!e && m->published)e=EBUSY;
+    if(!e) {
+        m->published=true;m->asid=asid;
+        cd=(uint64_t *)m->cd.va;
+        cd[1]=m->root.pa;cd[3]=CAM_S1_MAIR;
+        __asm__ volatile("dsb sy":::"memory");
+        cd[0]=cam_s1_id_cd_word0(m);
+        e=cam_s1_id_check(m);
+        /* External data pages are not kernel-owned WB memory; only the
+         * kernel-allocated table pages need PoC cleaning before NC walk.
+         */
+        for(unsigned i=0;i<m->leaves && !e;i++)
+            e=cam_cache_range(m->leaf[i].va,CAM_S1_PAGE,CAM_CACHE_CLEAN);
+        if(!e)e=cam_cache_range(m->root.va,CAM_S1_PAGE,CAM_CACHE_CLEAN);
+        if(!e)e=cam_cache_range(m->cd.va,CAM_S1_PAGE,CAM_CACHE_CLEAN);
+        if(!e)e=cam_s1_id_check(m);
+        if(!e) {
+            *out=(struct x9_camera_s1_export){.backing=NULL,.raw=NULL,
+                .iova=m->iova,.root_pa=m->root.pa,.cd_pa=m->cd.pa,
+                .bytes=m->bytes,.mapped_bytes=m->mapped_bytes,
+                .pages=m->pages,.oas=m->oas};
+        }
+    }
+    if(e && m && m->magic==CAM_S1_ID_MAGIC && e!=EBUSY && !m->last_errno)m->last_errno=e;
+    lck_mtx_unlock(&camera_s1_lock);return e;
+}
+
+int x9_camera_s1_id_discard(struct x9_camera_s1_id **map)
+{
+    struct x9_camera_s1_id *m;
+    int e=0;
+    if(!map)return EINVAL;
+    lck_mtx_lock(&camera_s1_lock);
+    m=*map;
+    if(!m || m->magic!=CAM_S1_ID_MAGIC)e=EINVAL;
+    else if(m->published)e=EBUSY;
+    else { *map=NULL;cam_s1_id_free_unpublished(m); }
+    lck_mtx_unlock(&camera_s1_lock);return e;
+}

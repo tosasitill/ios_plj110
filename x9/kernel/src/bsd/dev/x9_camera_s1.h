@@ -48,5 +48,21 @@ int x9_camera_s1_export(struct x9_camera_s1 *, uint32_t asid,
  * based on an adapter return code. Successful discard sets *map=NULL.
  */
 int x9_camera_s1_discard(struct x9_camera_s1 **map);
+
+/* Identity Stage-1 for an EXTERNAL physical range (path-b VCP carve-out).
+ * Same software-only contract as above: no MMIO/queue/attach/READY. Leaf
+ * PTEs map iova+off -> caller PA pa+off (identity when pa==iova); only the
+ * root/leaf/CD table pages are kernel-allocated, the data pages are not.
+ * export.backing/raw are NULL (data is not kernel-owned WB memory). IDR5 is
+ * a capability gate only; the future host adapter reserves SID/ASID and
+ * installs the STE. ASID 1..255, once-only export, same discard rules.
+ */
+struct x9_camera_s1_id;
+int x9_camera_s1_id_create(uint32_t idr5, uint64_t iova, uint64_t pa,
+    uint32_t bytes, struct x9_camera_s1_id **out);
+int x9_camera_s1_id_validate(struct x9_camera_s1_id *);
+int x9_camera_s1_id_export(struct x9_camera_s1_id *, uint32_t asid,
+    struct x9_camera_s1_export *);
+int x9_camera_s1_id_discard(struct x9_camera_s1_id **map);
 #endif
 #endif
