@@ -160,6 +160,18 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 SMMU 快照双失败路径触发修复 + 新候选 x9-camera-smmu-dual-20261120（取代 15634256，待上机）
+
+- **目的**：修复上一版 DIAG 候选（`15634256…`）的**诊断触发缺口**——SMMU 只读快照原仅在 **VCP-boot 失败**路径（`vcp_boot_diag_log`）输出，但 **356 基线实际失败在 MM_2 投票路径**（`mm_vote_take` stage4 `ETIMEDOUT`），VCP boot 当时已成功。若用户 boot 旧候选而失败仍落在投票路径，将**拿不到任何 SMMU 输出**，task #7 几何门控空转。
+- **356 是旧构建（实测 `.local/x9/logs/356.txt`）**：全文**无 `X9 MM VCP BOOT:` 行**（该打印由 `vcp_boot_ensure` 引入，356 早于此基础设施），仅 `:6086` 一行 `X9 MM POWER GET: client=1 backend=hwccf MM_2 bit=3 stage=4 owned=1 held=0 ap=8 global=8 sta=8 done=fffffff7 ack2=c2f10152 infra=e3fc0000 all_sta=0 fsm=80000001 … errno=60`。故 356 的失败点是投票 stage4，不是 VCP boot——印证触发缺口真实存在。
+- **改动（仅失败路径、只读，`x9/kernel/src/bsd/dev/x9_mm_power.c`）**：把内联 SMMU 快照抽成 static helper `vcp_smmu_snapshot(void)`（static 缓存 `smmu_mmio/smmu_stb/smmu_l2`，`ml_io_map(0x30800000,0x20000)`，读 IDR0/1/5、CR0/ACK、GBPA、STRTAB_BASE/CFG、CMDQ_BASE/PROD/CONS、EVTQ_BASE，按 fmt 线性/两级 dump SID 80/90/a0/a1 各 8 字 STE；`idr0` 无效门控）。`vcp_boot_diag_log` 改为调用该 helper；并在 `mm_vote_take` 的 `log_history` 块（stage4 `ETIMEDOUT`）`mm_irq_history_log` 之前**新增同一调用**。如此**无论哪条路径先失败，一次 boot 都采到 SMMU 状态**。无任何写操作。
+- **编译验证（实测）**：`kernel-unit.py` 单对象 `compile_one(x9_mm_power.o)` → `result True`、exit 0、2 条既有导出头 warning（kcdata.h:1612 / vm_param.h:607），`x9_mm_power.c` 零 warning。
+- **机器码实证诊断有效性（实测 objdump）**：unstripped 内核含 `_vcp_smmu_snapshot`（`0xfffffe00080cd000`）及静态局部 `.sids/.smmu_mmio/.smmu_stb/.smmu_l2`；`_mm_vote_take`（`0xfffffe00080cb270`）内 `+0x4cc`（`0xfffffe00080cb73c`）处 `bl 0xfffffe00080cd000 <_vcp_smmu_snapshot>`——**356 失败的投票超时路径确会输出快照**，非仅源码层面。
+- **打包修复（实测，环境）**：`build.py` 子脚本以 `sys.executable -I`（homebrew python3.15，**隔离模式忽略 user site**）运行；lz4 4.4.5 原仅在 user site `~/Library/Python/3.15/…`，故 `bootimg.py:35 import lz4.block` 报 `ModuleNotFoundError`。修复：`python3 -m pip install --break-system-packages --ignore-installed --target /opt/homebrew/lib/python3.15/site-packages lz4` → `python3 -I -c "import lz4.block"` OK。（先前误装到 framework python3.13 无效，因构建不用该解释器。）
+- **整包构建（实测）**：内核 104/104 对象 + 链接 + strip OK（19:58）；`build.py boot --kernel …/kernel.development.sweet` 单独打包 **exit 0**（`build.py all` 重跑会因 audio output bundle 已存在而 exit 2，故用 boot 步复用已构建内核）。`Image 32268288 B`、`shim-boot.img 15118336 B`、`entry 0x1000`、`PSTORE MIRROR`。**当前候选** `x9/out/x9-camera-smmu-dual-20261120/boot.img`，**boot.img sha256 `103e465f3f53c0a6ee9d955b4bc71aa48ab7d788ce82410ebe11bad21b3eb431`**、kernel sha256 `a068df1681051d211bcd333b81520778ecb96e6f2427a86c7fcce062adeb53ea`。类型 SWEET-XNU-candidate；无 UEFI、无设备写、**未硬件验证**。
+- **候选取代关系**：本 dual 版**取代** `15634256…`（x9-camera-smmu-full-20261120，仅 VCP-boot 失败触发）——快照内容相同但触发更稳健；`15634256` 仍有效但优先 boot dual 版。更早的 `edf59964…`（4 字 STE/无队列）已废弃，勿 boot。
+- **待上机（用户手动）**：`fastboot boot .worktrees/camera-integration/x9/out/x9-camera-smmu-dual-20261120/boot.img`，回传下一份 `~/NNN.txt`。抓取 `X9 MM VCP BOOT:`（errno 判 VCP boot 成败）、`X9 MM VCP SMMU:`、`X9 MM VCP SMMUQ:`、`X9 MM VCP STE 80/90/a0/a1:`（8 字）各行。功能性诊断候选（失败路径只读快照），非纯探针镜像。**task #8 写 SMMU 代码仍门控于此 boot 实测 + 用户确认，本轮未写任何 live-SMMU 代码、未上机。**
+
 #### 2026-11-20 RAW staging 格式审计：FORMAT_TAG1 固件中介证实 + X9 format=8 标记为未证推断
 
 - **目的**：闭合目标 RAW staging 阶段 NOTES:308/367 标记的未决项（CAMSV FORMAT_TAG1=1 vs 8 与 iOS RAW10 解包）。

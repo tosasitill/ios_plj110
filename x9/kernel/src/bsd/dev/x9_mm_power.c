@@ -247,6 +247,75 @@ static void vcp_print_snap(const char *tag, const struct vcp_core_snap *s)
         tag, s->status, s->pc, s->lr, s->sp, s->pc_latch, s->lr_latch, s->sp_latch,
         s->wptr, s->rstn_clr, s->rstn_set, s->sys);
 }
+/* Read-only MM SMMU (0x30800000) snapshot. Offsets follow
+ * x9_camera_native_smmu.inc (OPPO arm-smmu-v3): IDR0/1/5=0/4/14,
+ * CR0/ACK=20/24, GBPA=44, STRTAB_BASE=80(64), STRTAB_BASE_CFG=88,
+ * CMDQ_BASE=90(64)/PROD=98/CONS=9c, EVTQ_BASE=a0(64). STE layout per
+ * x9_camera_smmu_attach.inc: fmt=(cfg>>16)&3; linear STE@strtab+sid*64;
+ * 2-level L1[sid>>8] (span9) -> L2+(sid&255)*64. Dumps full 8-word STE
+ * (Config/S1Fmt/S1ContextPtr/S1CDMax/S2) for SID 80/90/a0/a1 plus queue
+ * geometry, so one boot fixes every path-b attach fact (NS access,
+ * enable, STRTAB fmt, CMDQ base/shift via IDR1, STE default). No write.
+ * Called from both VCP-boot failure and MM_2 vote stage-4 timeout so the
+ * snapshot is captured regardless of which path fails first (356 failed
+ * in the vote path with VCP boot already succeeded). */
+static void vcp_smmu_snapshot(void)
+{
+    static vm_offset_t smmu_mmio, smmu_stb, smmu_l2;
+    if (!smmu_mmio) smmu_mmio = ml_io_map(0x30800000, 0x20000);
+    if (smmu_mmio) {
+        uint32_t idr0 = mm_read(smmu_mmio, 0x00);
+        uint32_t idr1 = mm_read(smmu_mmio, 0x04);
+        uint32_t idr5 = mm_read(smmu_mmio, 0x14);
+        uint32_t cr0 = mm_read(smmu_mmio, 0x20);
+        uint32_t ack = mm_read(smmu_mmio, 0x24);
+        uint32_t gbpa = mm_read(smmu_mmio, 0x44);
+        uint32_t cfg = mm_read(smmu_mmio, 0x88);
+        uint64_t stb = (uint64_t)mm_read(smmu_mmio, 0x80) |
+            ((uint64_t)mm_read(smmu_mmio, 0x84) << 32);
+        uint64_t cmdq = (uint64_t)mm_read(smmu_mmio, 0x90) |
+            ((uint64_t)mm_read(smmu_mmio, 0x94) << 32);
+        uint32_t cprod = mm_read(smmu_mmio, 0x98);
+        uint32_t ccons = mm_read(smmu_mmio, 0x9c);
+        uint64_t evtq = (uint64_t)mm_read(smmu_mmio, 0xa0) |
+            ((uint64_t)mm_read(smmu_mmio, 0xa4) << 32);
+        printf("X9 MM VCP SMMU: idr0=%x idr1=%x idr5=%x cr0=%x ack=%x gbpa=%x stb=%llx cfg=%x\n",
+            idr0, idr1, idr5, cr0, ack, gbpa, stb, cfg);
+        printf("X9 MM VCP SMMUQ: cmdq=%llx prod=%x cons=%x evtq=%llx\n",
+            cmdq, cprod, ccons, evtq);
+        if (idr0 != 0 && idr0 != 0xffffffffu) {
+            uint64_t stb_pa = stb & 0x000fffffffffffc0ull;
+            unsigned fmt = (cfg >> 16) & 3u;
+            const unsigned sids[4] = {0x80u, 0x90u, 0xa0u, 0xa1u};
+            if (stb_pa && !smmu_stb) smmu_stb = ml_io_map(stb_pa, 0x10000);
+            for (unsigned i = 0; i < 4u; i++) {
+                unsigned sid = sids[i];
+                vm_offset_t sv = 0; unsigned soff = 0;
+                if (fmt == 0 && smmu_stb) {
+                    sv = smmu_stb; soff = sid * 64u;
+                } else if (fmt == 1 && smmu_stb) {
+                    unsigned lo = (sid >> 8) * 8;
+                    uint64_t desc = (uint64_t)mm_read(smmu_stb, lo) |
+                        ((uint64_t)mm_read(smmu_stb, lo + 4) << 32);
+                    uint64_t l2_pa = desc & 0x000fffffffffffc0ull;
+                    if ((desc & 31u) == 9u && l2_pa) {
+                        if (!smmu_l2) smmu_l2 = ml_io_map(l2_pa, 0x10000);
+                        if (smmu_l2) { sv = smmu_l2; soff = (sid & 255u) * 64u; }
+                    }
+                }
+                if (sv)
+                    printf("X9 MM VCP STE %x: %x %x %x %x %x %x %x %x (fmt=%x)\n", sid,
+                        mm_read(sv, soff), mm_read(sv, soff + 4),
+                        mm_read(sv, soff + 8), mm_read(sv, soff + 12),
+                        mm_read(sv, soff + 16), mm_read(sv, soff + 20),
+                        mm_read(sv, soff + 24), mm_read(sv, soff + 28), fmt);
+                else
+                    printf("X9 MM VCP STE %x: unresolved fmt=%x stb=%llx\n",
+                        sid, fmt, stb);
+            }
+        }
+    }
+}
 static void vcp_boot_diag_log(const struct vcp_core_snap *pre, const struct vcp_core_snap *rst,
                               const struct vcp_core_snap *early, bool early_taken)
 {
@@ -394,71 +463,7 @@ static void vcp_boot_diag_log(const struct vcp_core_snap *pre, const struct vcp_
             printf("X9 MMUP LOG: %s\n", line);
         }
     }
-    {
-        /* Read-only MM SMMU (0x30800000) snapshot at VCP-boot failure. Offsets
-         * follow x9_camera_native_smmu.inc (OPPO arm-smmu-v3): IDR0/1/5=0/4/14,
-         * CR0/ACK=20/24, GBPA=44, STRTAB_BASE=80(64), STRTAB_BASE_CFG=88,
-         * CMDQ_BASE=90(64)/PROD=98/CONS=9c, EVTQ_BASE=a0(64). STE layout per
-         * x9_camera_smmu_attach.inc: fmt=(cfg>>16)&3; linear STE@strtab+sid*64;
-         * 2-level L1[sid>>8] (span9) -> L2+(sid&255)*64. Dumps full 8-word STE
-         * (Config/S1Fmt/S1ContextPtr/S1CDMax/S2) for SID 80/90/a0/a1 plus queue
-         * geometry, so one boot fixes every path-b attach fact (NS access,
-         * enable, STRTAB fmt, CMDQ base/shift via IDR1, STE default). No write. */
-        static vm_offset_t smmu_mmio, smmu_stb, smmu_l2;
-        if (!smmu_mmio) smmu_mmio = ml_io_map(0x30800000, 0x20000);
-        if (smmu_mmio) {
-            uint32_t idr0 = mm_read(smmu_mmio, 0x00);
-            uint32_t idr1 = mm_read(smmu_mmio, 0x04);
-            uint32_t idr5 = mm_read(smmu_mmio, 0x14);
-            uint32_t cr0 = mm_read(smmu_mmio, 0x20);
-            uint32_t ack = mm_read(smmu_mmio, 0x24);
-            uint32_t gbpa = mm_read(smmu_mmio, 0x44);
-            uint32_t cfg = mm_read(smmu_mmio, 0x88);
-            uint64_t stb = (uint64_t)mm_read(smmu_mmio, 0x80) |
-                ((uint64_t)mm_read(smmu_mmio, 0x84) << 32);
-            uint64_t cmdq = (uint64_t)mm_read(smmu_mmio, 0x90) |
-                ((uint64_t)mm_read(smmu_mmio, 0x94) << 32);
-            uint32_t cprod = mm_read(smmu_mmio, 0x98);
-            uint32_t ccons = mm_read(smmu_mmio, 0x9c);
-            uint64_t evtq = (uint64_t)mm_read(smmu_mmio, 0xa0) |
-                ((uint64_t)mm_read(smmu_mmio, 0xa4) << 32);
-            printf("X9 MM VCP SMMU: idr0=%x idr1=%x idr5=%x cr0=%x ack=%x gbpa=%x stb=%llx cfg=%x\n",
-                idr0, idr1, idr5, cr0, ack, gbpa, stb, cfg);
-            printf("X9 MM VCP SMMUQ: cmdq=%llx prod=%x cons=%x evtq=%llx\n",
-                cmdq, cprod, ccons, evtq);
-            if (idr0 != 0 && idr0 != 0xffffffffu) {
-                uint64_t stb_pa = stb & 0x000fffffffffffc0ull;
-                unsigned fmt = (cfg >> 16) & 3u;
-                const unsigned sids[4] = {0x80u, 0x90u, 0xa0u, 0xa1u};
-                if (stb_pa && !smmu_stb) smmu_stb = ml_io_map(stb_pa, 0x10000);
-                for (unsigned i = 0; i < 4u; i++) {
-                    unsigned sid = sids[i];
-                    vm_offset_t sv = 0; unsigned soff = 0;
-                    if (fmt == 0 && smmu_stb) {
-                        sv = smmu_stb; soff = sid * 64u;
-                    } else if (fmt == 1 && smmu_stb) {
-                        unsigned lo = (sid >> 8) * 8;
-                        uint64_t desc = (uint64_t)mm_read(smmu_stb, lo) |
-                            ((uint64_t)mm_read(smmu_stb, lo + 4) << 32);
-                        uint64_t l2_pa = desc & 0x000fffffffffffc0ull;
-                        if ((desc & 31u) == 9u && l2_pa) {
-                            if (!smmu_l2) smmu_l2 = ml_io_map(l2_pa, 0x10000);
-                            if (smmu_l2) { sv = smmu_l2; soff = (sid & 255u) * 64u; }
-                        }
-                    }
-                    if (sv)
-                        printf("X9 MM VCP STE %x: %x %x %x %x %x %x %x %x (fmt=%x)\n", sid,
-                            mm_read(sv, soff), mm_read(sv, soff + 4),
-                            mm_read(sv, soff + 8), mm_read(sv, soff + 12),
-                            mm_read(sv, soff + 16), mm_read(sv, soff + 20),
-                            mm_read(sv, soff + 24), mm_read(sv, soff + 28), fmt);
-                    else
-                        printf("X9 MM VCP STE %x: unresolved fmt=%x stb=%llx\n",
-                            sid, fmt, stb);
-                }
-            }
-        }
-    }
+    vcp_smmu_snapshot();
 }
 
 static int vcp_boot_ensure(void)
@@ -651,6 +656,10 @@ out:
                 mm_read(vcp_cfg_core0, 0x70), mm_read(vcp_cfg_core1, 0x70),
                 mm_read(vcp_cfg_core1, 0x44), mm_read(vcp_cfg_core1, 0x48),
                 mm_read(vcp_cfg_core1, 0x4c));
+        /* MM_2 vote stage-4 timeout (356 baseline): VCP boot may have
+         * succeeded, so the VCP-boot failure snapshot would not run. Capture
+         * the MM SMMU state here too (read-only) to fix path-b geometry. */
+        vcp_smmu_snapshot();
         mm_irq_history_log(&history);
     }
     return e;
