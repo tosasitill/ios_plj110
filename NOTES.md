@@ -160,6 +160,16 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 蓝牙 rootboot14r2：当前 main 完整候选已构建，待实机（进行中）
+
+- **范围/基线**：单代理 `feat/bluetooth-continue-20261120`，功能树 `.worktrees/bluetooth-continue`，初始 main 输入 **343b2409**。根 checkout 的 SMS 未提交 NOTES 与 `x9/shim/fdt_ram.c` VCP 改动从未由本轮切换/写入。scratch `x9/out/bluetooth-continue-20261120/`（功能树内）。无设备/ADB/fastboot/mailbox/分区操作，无 CI run ID（本地构建）。
+- **动机/观察**：rootboot13（AKS wrap 修复 `fabf4d4e` + 振动透传 `66dd5f8c`）构建后从未上机；Mac 现存最新日志 356–365（11-20）全部是被动蓝牙（`board session unavailable errno=6`，未带 `x9_bt_init=1`），331–355 日志不在家目录。设备根盘仍装着某版自有七文件（launcher 回退 stock bluetoothd 在跑）。
+- **隔离 XNU**：观察共享 `.local/dxb/xnu/osfmk/arm64/sleh.c` 无 `x9_bluetooth_irq_filter`（0006 未应用，其它会话在用，不改共享树）。自合并归档 `x9/out/bluetooth-branch-archive-20261116/bluetooth-native/out/bluetooth-native/xnu-lifecycle-20261115/dxb` APFS 克隆至功能树，重写旧绝对路径（原 bluetooth-native worktree 路径→新路径，含只读 `kernel.development.sweet.linkarguments`）。`x9/xnu/build-xnu.sh macos --isolated-existing x9/out/bluetooth-continue-20261120/dxb` **exit0**：源码校验 tag+0001+0006 通过（补丁自 11-15 无变化），真实 `LD kernel.development.sweet.unstripped` 一次，日志 `xnu-rebuild.log`。
+- **输入**：launchd 两原件+权威 cache（796447 B）与 Apple originals 均取自同一合并归档；`bluetoothd` SHA256 **8b7c0a0b…** 与 §5.12 记录原件一致。boot 参数原样沿用 rootboot13 `inputs/boot.json`（**593 B**：als3/prox3 + `x9_bt_init=1 x9_bt_fc=1 x9_bt_root=1`）。
+- **升级链**：rootboot2..13 的 root-payload 按七文件 SHA 去重为 **5 个版本**（2 / 3–9 同 / 10 / 11 / 12–13 同），全部 `--previous-payload` 嵌入，共 **8 个可升级旧版本**（`embedded 7 files, 1110953 bytes`）。设备当前安装版未知（331–355 日志缺失），全链覆盖 rootboot2..13 任何状态；内容已等于新 payload 时只校验不写，未知内容整体拒绝。
+- **失败/修正**：r1 `bt-native-rootboot14-20261120` 的 kernel/userland-jobs/root-payload 三阶段成功，boot 阶段 **exit1**：`llvm-objcopy missing`（PATH 未含 `/opt/homebrew/opt/llvm/bin`，已知打包依赖）；失败目录与日志原样保留，无 manifest、未交付。r2 补 PATH 后全新名字 **`bt-native-rootboot14r2-20261120`** 完整 exit0：103/103 overlay（3 prebuilt）、四阶段全 exit0、Image 33038336 B / boot 15347712 B、rollback 569 B；manifest built_complete/candidate_ready=true，runtime/audio/stageable/root_installed=false。产物已迁主 checkout `x9/out/bt-native-rootboot14r2-20261120/`。
+- **版本边界（随后补记更新）**：构建期间 origin/main 已由其它任务推进 16 个提交（display fill/island 默认 on `bfbc0e51`、真实 SCP 方向接入 `266d3de9` 等生产更新）；r2 基于旧 main，**只作中间产物**。最终候选将基于最新 main 重建并另补确切结果；同期 orientation v2 整包虽也含 BT root1，但带 `x9_motion=3`，不作蓝牙单变量验收镜像。
+
 #### 2026-11-16 方向传感器：内核 + iOS 接入（整包候选已构建，待实机）
 
 - **最终v2交付（仅推荐此版）**：集成源码 **`147f9998`**；GitHub **PR #5** 第二次merge实际exit0，于`2026-11-16T12:20:41Z`合入main **`98f0be50`**，生产方向代码已发布。v2 `candidate.py`实际exit0/完整104/104 overlay（3 prebuilt）/iOS桥build+sign95456B；Image **33173504B**、boot **15372288B**。同kernel正常打包方向off-v2亦exit0，大小同上。两个整目录已无覆盖APFS复制到主checkout：**`x9/out/x9-orientation-native-v2-20261116/boot/boot.img`** 与 **`x9/out/x9-orientation-off-v2-20261116/boot.img`**。v2保留新main的fill/island默认on，off-v2仅关闭方向，不关闭显示功能；BT7文件/root1/UART IRQ、ALS3/PROX3、GPU280不变。双方参数605B，仍无测试/成功产物二次检查/设备结果/CI run。原非v2两版只作中间产物，**不要拿旧版off回退最新显示默认行为**。
