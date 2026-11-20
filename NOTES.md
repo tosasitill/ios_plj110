@@ -160,6 +160,21 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 日志 358 分析与 VCP/MMUP 保留内存重映射窗口修复
+
+- **358 实机结果（`/Users/tosasitill/358.txt`，镜像 `x9-camera-android-vcp-20261120`）**：
+  - `X9 MM VCP BOOT: stage=4 pa=11e2cc000 init=0/4 end=0/4 pc=0/0 rstn=ff00/ff01 smc=0/0/0/0 mmup=0/0 vcp=0/0 errno=60`。
+  - 四次 TF-A SMC（`VCP_OP_RESET_SET` / `MMUP_OP_RESET_SET` / `MMUP_OP_RESET_RELEASE`）均返回 `0`，`R_CORE1_SW_RSTN_CLR` 由 `0xff00` 变为 `0xff01`，但 MMUP 在 `3000ms` 内未发出 `IPI_IN_VCP_READY_1`，且 `R_CORE1_MON_PC=0`。
+  - 357 异常卸载修复已生效：`X9 CAMERA: start sensor=1 errno=60 cleanup=0 retained=0 step=configure`，无供电/MCLK 泄漏。
+  - 实机 FDT 含 `mblock-51-me_vcp_reserved reg=0xbd200000 size=0xe00000`，对照 `lk_b.img` 反汇编（`app_load_vcp` / `verify_load_vcp_image`）证实 LK 仅在 `SMC 0xc2000413` 装载 `vcp_b.img` 成功后才保留该 mblock。
+- **根因实证（反汇编原厂 `vcp_b.img`）**：
+  - `tinysys-mmup-RV33_A`（表 `@0x20440`，函数 `@0x15f64`）与 `tinysys-vcp-RV55_A`（表 `@0x1c220`）均硬编码 22 项 36-bit → 32-bit 重映射表，DRAM 仅接受 `[0x140000000, 0x1c0000000)`（16×128 MiB → VA `0x30000000..0xafffffff`，与 `live.dts` `mm_iommu_group_1 = <0x01 0x40000000 0x00 0x80000000>` 一致）。
+  - 358 分配的 `pa=0x11e2cc000 < 0x140000000`，导致 MMUP `0x15f64` 命中 `err ap_addr:0x%llx` 返回 `0`，破坏 MPU region 10–13 配置。
+- **修复与诊断**：
+  - 修改 `x9/kernel/src/bsd/dev/x9_mm_power.c`：`vcp_alloc_reserved()` 将连续保留内存约束在 `[0x140000000, 0x1c0000000)` 且不跨 128 MiB 重映射块边界（临时候选块不加 `KMA_PERMANENT` 并在选定后释放）。
+  - 在 `vcp_boot_ensure()` 仅失败路径增加只读诊断输出（`X9 MM VCP DIAG1/2`：读取 `VCP_PWR_ACK`/`VCP_PDN`/`VCP_FENC`/`VCP_R_SLP_EN`/`VCP_POWER_STATUS`/`VCP_SYS_CTRL`/`SEC_GPR2..3`/`WDT_IRQ`/Core1 `MON_PC_LATCH`/`LR`/`SP`/`GPR5`/SRAM 首字与异常记录），用于定位若仍超时时的 `pc=0` 根因。
+- **构建结果**：执行 `python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --name x9-camera-vcp-win-20261120`，exit 0，零新增 warning；Candidate 为 `x9/out/x9-camera-vcp-win-20261120/boot.img`（`15130624` B，`boot_sha256=0261e1e1f5fd776701ea96d08e23a167efbfdc5425d37e4064c8996c381723a7`，`kernel_sha256=0abe972644b09106e4f0611a9195bf740a2ffca6fc9cba54d9fb4605b2caabcc`，含 `x9_camera=2`）。未使用 CI，无 run ID，尚未上机测试。
+
 #### 2026-11-20 相机 Android VCP/MMUP 对齐测试镜像
 
 - 基于 `3736da1d` 执行 `python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --name x9-camera-android-vcp-20261120`，exit 0；Candidate 为 `x9/out/x9-camera-android-vcp-20261120/boot.img`（`15130624` B，`boot_sha256=73013650d8c4a05686a5a0083252668286826b7d147a641d943b31594a8c8ae8`，`kernel_sha256=ac38f2bd6630e6a7dacf16bfe4faa5824b52ed5207b6f25778331607110b25eb`，含 `x9_camera=2`）。未使用 CI，无 run ID。

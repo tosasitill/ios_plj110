@@ -69,6 +69,10 @@ LCK_MTX_DECLARE(mm_power_lock, &mm_power_group);
 #define VCP_MEM_ALLOC_BYTES ((VCP_MEM_TOTAL_SIZE + PAGE_MASK) & ~(vm_size_t)PAGE_MASK)
 #define VCP_MEM_LOGGER_OFFSET 0x08d000u
 #define VCP_MEM_LOGGER_SIZE 0x180000u
+#define VCP_MEM_WIN_BASE 0x140000000ULL /* mm_hfrp / MMUP & VCP remap window [0x140000000, 0x1c0000000) */
+#define VCP_MEM_WIN_END  0x1c0000000ULL
+#define VCP_MEM_REMAP_BLOCK 0x08000000ULL /* 128 MiB remap granularity */
+#define VCP_ALLOC_HELD_MAX 32u
 #define VCP_PLT_LOG_ENABLE 0x504C5402u
 #define VCP_DRAM_LOG_BUF_LEN 0x100000u
 #define VCP_PACK_IOVA(addr) ((uint32_t)(((addr) & 0xffffffffull) | (((addr) >> 32) & 0xfull)))
@@ -84,6 +88,7 @@ static struct { uint64_t token; uint32_t client, children; } parents[MM_POWER_PA
 static struct { uint64_t token, parent; } children[MM_POWER_CHILDREN];
 static uint64_t next_token = 1;
 static vm_offset_t hwv, mmup, power_ack, vcp_cfg_core0, vcp_cfg_core1, vcp_mbox2, mmup_mbox4;
+static vm_offset_t vcp_diag_pwr, vcp_diag_clk, vcp_diag_slp, vcp_diag_sec, vcp_diag_ap, vcp_diag_sram;
 static vm_offset_t vcp_mem_va;
 static uint64_t vcp_mem_pa;
 static bool power_fault, vote_owned, vote_held, vcp_booted, vcp_fault;
@@ -179,25 +184,68 @@ static int vcp_poll_ready(vm_offset_t mbox, uint32_t *img_size, uint32_t *clr_se
         delay_for_interval(100, NSEC_PER_USEC);
     }
 }
-static int vcp_alloc_reserved(void)
+static int vcp_check_contig_pa(vm_offset_t va, uint64_t *base_pa_out)
 {
-    vm_offset_t va = 0;
-    ppnum_t maximum = (ppnum_t)(((1ULL << 36) - 1) >> PAGE_SHIFT);
     uint64_t base_pa = 0;
-    int e = 0;
-    if (vcp_mem_va) return 0;
-    if (kmem_alloc_contig(kernel_map, &va, VCP_MEM_ALLOC_BYTES, PAGE_MASK,
-            maximum, 0, KMA_DATA | KMA_ZERO | KMA_PERMANENT,
-            VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS)
-        return ENOMEM;
     for (vm_size_t off = 0; off < VCP_MEM_ALLOC_BYTES; off += PAGE_SIZE) {
         ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)(va + off));
         uint64_t pa = ptoa_64(pn);
-        if (!pn || (pa & PAGE_MASK) || pa >= (1ULL << 36)) { e = EFAULT; break; }
+        if (!pn || (pa & PAGE_MASK) || pa >= (1ULL << 36)) return EFAULT;
         if (!off) base_pa = pa;
-        else if (pa != base_pa + off) { e = EFAULT; break; }
+        else if (pa != base_pa + off) return EFAULT;
     }
-    if (!e) {
+    *base_pa_out = base_pa;
+    return 0;
+}
+static bool vcp_pa_in_remap_window(uint64_t pa)
+{
+    uint64_t last = pa + VCP_MEM_TOTAL_SIZE - 1ULL;
+    if (pa < VCP_MEM_WIN_BASE || pa + VCP_MEM_ALLOC_BYTES > VCP_MEM_WIN_END)
+        return false;
+    return (pa & ~(VCP_MEM_REMAP_BLOCK - 1ULL)) == (last & ~(VCP_MEM_REMAP_BLOCK - 1ULL));
+}
+static int vcp_alloc_reserved(void)
+{
+    static const uint64_t aligns[] = {
+        0x40000000ULL, /* 1 GiB: lands directly on 0x140000000 / 0x180000000 */
+        0x20000000ULL, /* 512 MiB */
+        0x10000000ULL, /* 256 MiB */
+        0x08000000ULL, /* 128 MiB */
+        0x04000000ULL, /* 64 MiB */
+        0x02000000ULL, /* 32 MiB */
+        0x01000000ULL, /* 16 MiB */
+    };
+    vm_offset_t held[VCP_ALLOC_HELD_MAX];
+    unsigned held_cnt = 0;
+    vm_offset_t va = 0;
+    ppnum_t maximum = (ppnum_t)((VCP_MEM_WIN_END - 1ULL) >> PAGE_SHIFT);
+    uint64_t base_pa = 0;
+    int e = 0;
+    if (vcp_mem_va) return 0;
+    for (unsigned a = 0; a < sizeof(aligns) / sizeof(aligns[0]) && !va; a++) {
+        ppnum_t pnum_mask = (ppnum_t)((aligns[a] - 1ULL) >> PAGE_SHIFT);
+        while (held_cnt < VCP_ALLOC_HELD_MAX) {
+            vm_offset_t cand = 0;
+            uint64_t cand_pa = 0;
+            if (kmem_alloc_contig(kernel_map, &cand, VCP_MEM_ALLOC_BYTES, PAGE_MASK,
+                    maximum, pnum_mask, KMA_DATA | KMA_ZERO,
+                    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS)
+                break;
+            e = vcp_check_contig_pa(cand, &cand_pa);
+            if (!e && vcp_pa_in_remap_window(cand_pa)) {
+                va = cand;
+                base_pa = cand_pa;
+                break;
+            }
+            held[held_cnt++] = cand;
+            if (e) break;
+        }
+        if (e) break;
+    }
+    for (unsigned i = 0; i < held_cnt; i++)
+        kmem_free(kernel_map, held[i], VCP_MEM_ALLOC_BYTES);
+    if (!va) return e ? e : ENOMEM;
+    {
         struct vcp_log_ctrl *ctl = (struct vcp_log_ctrl *)(va + VCP_MEM_LOGGER_OFFSET);
         uint32_t info_ofs = sizeof(*ctl);
         uint32_t buff_ofs = (info_ofs + sizeof(struct vcp_log_buf_info) + 3u) & ~3u;
@@ -216,6 +264,35 @@ static int vcp_alloc_reserved(void)
     vcp_mem_va = va;
     vcp_mem_pa = base_pa;
     return 0;
+}
+static void vcp_boot_diag_log(void)
+{
+    if (!vcp_diag_pwr) vcp_diag_pwr = ml_io_map(0x1c00d000, 0x1000);
+    if (!vcp_diag_clk) vcp_diag_clk = ml_io_map(0x10040000, 0x1000);
+    if (!vcp_diag_slp) vcp_diag_slp = ml_io_map(0x31aa0000, 0x1000);
+    if (!vcp_diag_sec) vcp_diag_sec = ml_io_map(0x31a70000, 0x1000);
+    if (!vcp_diag_ap)  vcp_diag_ap  = ml_io_map(0x31bd0000, 0x1000);
+    if (!vcp_diag_sram) vcp_diag_sram = ml_io_map(0x31800000, 0x80000);
+    printf("X9 MM VCP DIAG1: pwr_ack=%x pdn=%x fenc=%x slp=%x/%x sys=%x sec=%x/%x wdt=%x/%x\n",
+        vcp_diag_pwr ? mm_read(vcp_diag_pwr, 0x4c) : 0xdeadbeefu,
+        vcp_diag_clk ? mm_read(vcp_diag_clk, 0x10) : 0xdeadbeefu,
+        vcp_diag_clk ? mm_read(vcp_diag_clk, 0x270) : 0xdeadbeefu,
+        vcp_diag_slp ? mm_read(vcp_diag_slp, 0x00) : 0xdeadbeefu,
+        vcp_diag_slp ? mm_read(vcp_diag_slp, 0x68) : 0xdeadbeefu,
+        mm_read(mmup, 0x00),
+        vcp_diag_sec ? mm_read(vcp_diag_sec, 0x48) : 0xdeadbeefu,
+        vcp_diag_sec ? mm_read(vcp_diag_sec, 0x4c) : 0xdeadbeefu,
+        vcp_diag_ap  ? mm_read(vcp_diag_ap, 0x50) : 0xdeadbeefu,
+        vcp_diag_ap  ? mm_read(vcp_diag_ap, 0x54) : 0xdeadbeefu);
+    printf("X9 MM VCP DIAG2: c1_latch=%x lr=%x sp=%x gpr5=%x c0_latch=%x gpr5=%x sram=%x/%x exc=%x/%x/%x\n",
+        mm_read(vcp_cfg_core1, 0xd0), mm_read(vcp_cfg_core1, 0x84),
+        mm_read(vcp_cfg_core1, 0x88), mm_read(vcp_cfg_core1, 0x54),
+        mm_read(vcp_cfg_core0, 0xd0), mm_read(vcp_cfg_core0, 0x54),
+        vcp_diag_sram ? mm_read(vcp_diag_sram, 0x00000) : 0xdeadbeefu,
+        vcp_diag_sram ? mm_read(vcp_diag_sram, 0x37000) : 0xdeadbeefu,
+        vcp_diag_sram ? mm_read(vcp_diag_sram, 0x37000 + 0x29b0c) : 0xdeadbeefu,
+        vcp_diag_sram ? mm_read(vcp_diag_sram, 0x37000 + 0x29b14) : 0xdeadbeefu,
+        vcp_diag_sram ? mm_read(vcp_diag_sram, 0x37000 + 0x29b1c) : 0xdeadbeefu);
 }
 static int vcp_boot_ensure(void)
 {
@@ -264,6 +341,7 @@ static int vcp_boot_ensure(void)
         (unsigned long long)smc_s0, (unsigned long long)smc_s1,
         (unsigned long long)smc_r1, (unsigned long long)smc_r0,
         mmup_clr, mmup_sz, vcp_clr, vcp_sz, e);
+    if (e) vcp_boot_diag_log();
     return e;
 }
 /* Android regmap_read_poll_timeout_atomic uses an elapsed-time budget and
