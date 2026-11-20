@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+> **ACTIVE HANDOFF（2026-11-20，冷启动接手先读此条）**
+> - **最早实机阻塞不变**：MM_2 `stage=4 sta=8 errno=60`（源码实证因果链：BACKUP1→VIP/MMUP 备份票未 ACK，因 MMUP 未运行——carve-out 取指缺 SID 0xa0 SMMU 翻译）。**无预览/照片/四镜头实证，目标未完成。**
+> - **唯一具体下一步＝用户手动 boot**：`fastboot boot x9/out/x9-camera-smmu-dual-20261120/boot.img`（sha256 `103e465f3f53c0a6ee9d955b4bc71aa48ab7d788ce82410ebe11bad21b3eb431`，15118336 B，已核验；①identity 构建器为未接线死代码，候选无需重建）。回传 `~/NNN.txt`（最新 365 无 SMMU 输出）。
+> - **boot 后判读**：读 `X9 MM VCP SMMU:`/`SMMUQ:`/`STE a0:` 行，按下方「DIAG→②③④门控映射」条立即定 ②host adapter 形态（GBPA 无 abort+STE 可读→NS 直写；secure-only→SMC）/③STE a0 接管（prior[0]≤1→proceed）/①几何（idr5 GRAN16K）。
+> - **②③④ 故意未写**（避免猜测/半成品）：拿到 boot 日志后作为**单一完整编译实证 feature** 写入（MM SMMU host adapter + SID 0x80→0xa0 参数化 + identity export 接入 + vcp_boot_ensure MMUP_RELEASE 前接线），写镜像前用户确认。离线关键路径已实质耗尽，勿重复已完成的 RE/审计。
+> - **进度**：task #1–#6 完成；#7 离线 RE 闭合（runtime 待 boot）；#8 ① 落地编译实证、②③④ boot 门控。分支 `feat/camera-integration` 全部 commit 已 push origin（tip `21d744d7`）。
+
 #### 2026-11-20 ATF setup_init 循环体精解码：不写任何 STE/不 memset strtab → SID 0xa0 默认 zero-invalid（非 ABORT），③接管门控通过（实测 disassembly）
 
 - **目的**：闭合 NOTES:293「唯一未直接 dump 的细节是 ATF setup_init 留给 SID 0xa0 的 STE 默认值」与 :266「ABORT 或 zero-invalid」开放推断。精读 `x9/out/atf-smmu-re-20261120/atf-full.dis` setup_init 循环体（0x34864–0x349ac），确定其是否编程 SID 0xa0 默认 STE。无代码/镜像/设备操作。
