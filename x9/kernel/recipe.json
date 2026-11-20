@@ -6217,6 +6217,11 @@
    "template": "bsd-c-4"
   },
   {
+   "name": "x9_vcp_probe.o",
+   "source": "bsd/dev/x9_vcp_probe.c",
+   "template": "bsd-c-4"
+  },
+  {
    "name": "sweet_x9_vdec.o",
    "source": "bsd/dev/sweet_x9_vdec.c",
    "template": "bsd-c-4"
