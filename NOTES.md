@@ -160,6 +160,18 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 路径 b STE 模板逐位源码实证（Android make_cdtable_ste + MTK setup_features）+ ASID 门控修正
+
+- **目的**：在 boot 几何门控期间，把 task #8 将写的 SID 0xa0 STE 模板**逐位对照 Android 源码定死**（非猜测），消除模板层面的不确定性。
+- **STE Config 编码（实测 `arm-smmu-v3-common.h:259-270`）**：`CFG[3:1]`：ABORT=0、BYPASS=4、**S1_TRANS=5**、S2_TRANS=6；`S1FMT[5:4]` LINEAR=0/64K_L2=2；`S1CTXPTR[51:6]`、`S1CDMAX[63:59]`。故 X9 `native_smmu.inc:163` 的 `1|(4<<1)`=0x9 是 **BYPASS 默认 STE**（非 S1_TRANS，先前用语需澄清）。
+- **权威模板（实测 `arm-smmu-v3.c:1437-1491 arm_smmu_make_cdtable_ste`）**：word0=`V|CFG=S1_TRANS(5)|S1FMT|cdtab_dma&S1CTXPTR_MASK|S1CDMAX`；word1=`S1DSS|S1CIR=WBRA|S1COR=WBRA|S1CSH=ISH|S1STALLD(若 FEAT_STALLS&&!stall_enabled)|EATS(ats?TRANS:0)|STRW(NSEL1)`；word2=`S2VMID=0`（NS-EL1 无 E2H）。普通 domain attach 用 `S1DSS=SSID0(2)`（:2847）。
+- **MTK 覆盖（实测 `mtk-smmu-v3.c:1592-1634 mtk_smmu_setup_features`）**：① TCU_PF：`FEAT_TCU_PF && !ats && s1_vld` → word1|=`TCU_PF(data->tcu_prefetch)`(bits57:56)。② **NC CD fetch：`!FEAT_COHERENCY && s1_vld` → 清 S1CIR/S1COR 并设 NC(0)**——MT6993 MM SMMU 非一致，故 NC 是 MTK 正确选择（证实 X9 相机注释）。③ MPAM：word4 PARTID/word5 PMG 从 prior STE 恢复（SID 0xa0 prior=ABORT→0）。④ MTK **不改 S1CSH**。
+- **X9 相机引擎已匹配（实测 `x9_camera_smmu.inc`）**：word0 `:206/281`=`1|(5<<1)|cd_pa`=0xB|cd_pa ✓；默认 `:247` ABORT(V=1)、DISPLAY `:248` BYPASS、`:249` ATTR_TYPES_OVR→SHCFG_INCOMING(1<<44) ✓；word1 `:82 cam_smmu_s1_ste_word1`=`2|(2<<6)|((idr0>>24)&3==0?1<<27:0)|tcu_prefetch<<56`。
+- **路径 b SID 0xa0 STE 模板（定死，镜像 X9 相机/MTK）**：word0=`0xB|cd_pa`（V+CFG5+S1FMT0+CDMAX0，cd_pa 16K 对齐）；word1=`0x82 | (IDR0.stall_model==0 ? 1<<27 : 0) | (TCU_PF<<56)`（S1DSS=SSID0、S1CIR/COR=NC、S1CSH=OSH、EATS=0、STRW=NSEL1）；word2=0；words3-7=0（MPAM=0）。**S1STALLD/TCU_PF 由 boot IDR0/MTK 策略运行时定**；TCU_PF 默认 DIS(0) 安全。
+- **一处真分歧（记录待决，非阻塞）**：X9 相机 word1 `S1CSH=OSH(2)`，Android mainline=`ISH(3)`（`ARM_SMMU_SH_ISH=3`，common.h:185），MTK 不覆盖 S1CSH。NC fetch + CD 已 PoC clean 下 OSH/ISH 皆一致安全；路径 b 暂镜像 X9 相机 OSH(2)（与已验证相机路径一致），如需严格 Android 对齐可改 ISH(3)。
+- **ASID 门控修正（推翻先前「空闲 ASID 缺口」 framing）**：attach 只写 SID 0xa0 自己的 STE/CD，**从不改 ATF protected SID 0xa1**；`TLBI_NH_ASID` 仅无效化 TLB（ATF 表仍有效会重 walk），故 ASID 编号与 ATF 碰撞**非破坏性**。选 ASID=1（或运行时按 IDR0.ASID16）即安全——**free-ASID 不是真门控**，无需 ATF RE 定 protected ASID。真门控（NS 写权限/CR0/STRTAB fmt/CMDQ shift/IDR5 granule/STE 0xa0 默认）全由 boot DIAG 覆盖。
+- **结论**：task #8 的 STE 模板与 CD/S1 描述符编码至此**完全源码实证**，仅剩 boot DIAG 的运行时几何/可行性门控。本轮无代码改动、无镜像、无设备操作；commit 见下。
+
 #### 2026-11-20 ATF setup_init 反汇编细化（所有权边界，实测 disassembly；CR0 使能仍待 boot 实证）
 
 - **目的**：履行目标「先 dump ATF `setup_init` 确定 MM SMMU 状态与所有权边界」，定位 CR0 使能与 protected-SID/ASID 赋值，填补路径 b 的空闲 ASID 缺口。对象 `tee.img.atf.original.bin`（load base `0x88800000`，下列地址为 file offset/VMA-from-0）。
