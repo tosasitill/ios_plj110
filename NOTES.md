@@ -167,7 +167,8 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **循环体只动 config 结构，不动 strtab（实测）**：`0x34894 bl 0x278d4`(memset, w2=0xf0 栈块)、`0x348a4/0x348b4 bl 0x27698`(memcpy, 0x38/0x128)、`0x348c4 bl 0x278d4`(memset, w2=0xe0 于 config+0x38)——均作用于栈/per-SMMU config（0x127c80+id*0x128），**无一触及 0x40000 strtab 区**。`0x3494c–0x34984` 循环 `bl 0x21f5c`(w2=39/w3=40/w4=0x40201000) 分配 2 页存 config+208+idx*8（CMDQ/CD 页）。
 - **关键结论（实测+推断）**：setup_init 可见循环**写 NO STE、不 memset strtab**。故 **ATF 不在 setup_init 编程 SID 0xa0 ABORT STE**（ABORT 需写 word0 V=1/Config=0，此处无任何 STE 写）→ 收窄 :266：默认应为 **zero-invalid（word0=0，V=0）**而非 ABORT，**前提是 strtab buffer 零初始化**（global_table 为 BSS/零初始化分配则成立；0x47670 只 memset 0x1000/0x2000 小块，不清 0x40000 strtab，故零初始化须来自 global_table 分配本身，**仍待 boot DIAG STE a0 实证**）。
 - **对③接管的门控意义（推断）**：`cam_shared_capture:365-366` 要求 `prior[0]≤1 且 prior[1..7]=0` 才可接管。zero-invalid（prior 全 0）**通过**；ABORT（prior[0]=1）也通过；仅 live/bypass-translated（prior[0]>1）EBUSY。setup_init 不写 STE 强化了「SID 0xa0 可被 path-b 直接接管」的预期，与「无任何 normal 窗映射请求」（NOTES:290）一致。**最终判据仍是 boot DIAG `X9 MM VCP STE a0` 八字**。
-- **诚实边界**：实测=disassembly 观察（无 STE 写/strtab 步长/config memset）；推断=zero-invalid 依赖 global_table 零初始化（未直接证）+ ③接管通过。不替代 boot 实证。commit 见下。
+- **BSS 零初始化佐证（实测二进制）**：`tee.img.atf.original.bin` 文件仅 `0x10b890` 字节，而 SMMU 管理器数据地址 `0x127c80`(per-SMMU config)/`0x128000`(global_table 指针槽)/`0x12d000` 均**超出文件末尾 → 属 BSS 区**（boot 期清零）。故 config/指针槽零初始化成立；`0x128000` 指针槽初值 0（setup_init `0x348f0 cbz x8,0x34a90` 检查非零），由 init 写入指向 strtab buffer。**strtab buffer 本身零初始化（→STE zero-invalid）仍未直接证**（buffer 经指针间接，须追 allocator 或 boot DIAG）；不追 allocator 兔子洞，**boot DIAG `X9 MM VCP STE a0` 八字为权威判据**。
+- **诚实边界**：实测=disassembly 观察（无 STE 写/strtab 步长/config memset）+ 二进制 BSS 区（file size 0x10b890 < 0x128000）；推断=zero-invalid 依赖 strtab buffer 零初始化（未直接证）+ ③接管通过。不替代 boot 实证。commit 见下。
 
 #### 2026-11-20 boot 候选完整性核验 + DIAG→②③④门控映射（候选就绪，待用户 fastboot boot）
 
