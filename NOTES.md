@@ -3544,3 +3544,8 @@ transfer code). Static audit finds no missing step. Signature (bus + EEPROM + AF
 - 改动: shim 在 live range 2 末尾预留 4MiB (0x15FC00000..0x160000000, X9_VCP_DRAM_LO/HI), vcp_alloc_reserved 改用 ml_io_map 映射。
 - 镜像 x9/out/x9-camera-vcp-carveout-20261120/boot.img 已构建, 未上机。
 - 推断: MMUP 仍可能 stage=4 errno=60 (SRAM 拷贝读到零, 与分配无关)。下一步看 365 日志。
+
+## 2026-11-20 365 结果
+- 观察: 365(carveout 镜像)日志止于 20.300 SENSOR CAL phase=mode 且行被截断; 对应 364 里 20.324 出现 vm_page_find_contiguous 的位置。无 "carve-out"/"X9 MM VCP BOOT" 行 -> 在 vcp_alloc_reserved 内 hang/panic。
+- 推断(未证实): ml_io_map 是 Device 映射, bzero(dc zva/stp)在 Device 内存 fault。
+- 修复: 改用 volatile 32-bit 逐字写, 映射前加 "mapping carve-out" 日志。镜像 x9-camera-vcp-carveout2-20261120/boot.img。待 366。

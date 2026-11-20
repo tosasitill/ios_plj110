@@ -244,18 +244,21 @@ static int vcp_alloc_reserved(void)
         !vcp_pa_in_remap_window(X9_VCP_DRAM_LO) ||
         pmap_valid_page((ppnum_t)(X9_VCP_DRAM_LO >> PAGE_SHIFT)))
         return ENXIO;
+    printf("X9 MM VCP MEM: mapping carve-out pa=%llx\n", (unsigned long long)X9_VCP_DRAM_LO);
     va = ml_io_map((vm_offset_t)X9_VCP_DRAM_LO, VCP_MEM_ALLOC_BYTES);
     if (!va) return ENOMEM;
-    bzero((void *)va, VCP_MEM_ALLOC_BYTES);
+    /* Device mapping: bzero (dc zva / unaligned stp) faults here; use 32-bit stores. */
+    for (vm_size_t o = 0; o < VCP_MEM_ALLOC_BYTES; o += 4)
+        *(volatile uint32_t *)(va + o) = 0;
     ctl = (struct vcp_log_ctrl *)(va + VCP_MEM_LOGGER_OFFSET);
     info_ofs = sizeof(*ctl);
     buff_ofs = (info_ofs + sizeof(struct vcp_log_buf_info) + 3u) & ~3u;
-    ctl->base = VCP_PLT_LOG_ENABLE;
-    ctl->size = sizeof(*ctl);
-    ctl->enable = 0;
-    ctl->info_ofs = info_ofs;
-    ctl->buff_ofs = buff_ofs;
-    ctl->buff_size = VCP_DRAM_LOG_BUF_LEN;
+    *(volatile uint32_t *)&ctl->base = VCP_PLT_LOG_ENABLE;
+    *(volatile uint32_t *)&ctl->size = sizeof(*ctl);
+    *(volatile uint32_t *)&ctl->enable = 0;
+    *(volatile uint32_t *)&ctl->info_ofs = info_ofs;
+    *(volatile uint32_t *)&ctl->buff_ofs = buff_ofs;
+    *(volatile uint32_t *)&ctl->buff_size = VCP_DRAM_LOG_BUF_LEN;
     __asm__ volatile("dsb sy" ::: "memory");
     vcp_mem_va = va;
     vcp_mem_pa = X9_VCP_DRAM_LO;
