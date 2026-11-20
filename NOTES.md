@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 MM SMMU 只读状态快照诊断镜像（路径 b 先决条件实测，待上机）
+
+- **目的**：用实测取代昂贵的 ATF `setup_init` 反汇编，直接量取 VCP-boot 失败时刻 MM SMMU（`0x30800000`）的状态，为 task #8「路径 b：XNU 直接编程 SID 0xa0 STE+S1 页表」提供 gating 事实（NS EL1 能否访问、是否上电/enable、STRTAB 布局、SID 0x80/0x90/0xa0/0xa1 STE 默认值）。
+- **改动（仅失败路径、只读）**：在 `x9/kernel/src/bsd/dev/x9_mm_power.c` 失败 DIAG 末尾追加 `X9 MM VCP SMMU:` 一行（`ml_io_map(0x30800000,0x20000)` 后读 IDR0/IDR1/IDR5=`0/4/14`、CR0/ACK=`20/24`、GBPA=`44`、STRTAB_BASE=`80`(64-bit)、STRTAB_BASE_CFG=`88`），再按 `x9_camera_smmu_attach.inc` 的 STE 布局解析 4 个 SID：`fmt=(cfg>>16)&3`；fmt0 线性 `STE@strtab+sid*64`；fmt1 两级 `L1[sid>>8]`（span 须=9）→`L2+(sid&255)*64`，输出 `X9 MM VCP STE 80/90/a0/a1:` 各前 4 字。**无任何写操作**；`idr0==0||0xffffffff` 时跳过 STE 读取（防 power-gated/总线挂死）；strtab/L2 各 `ml_io_map` 一次（static 缓存）。偏移与寄存器语义全部对照 `x9_camera_native_smmu.inc`（OPPO arm-smmu-v3）与既有相机 SMMU 基础设施，非猜测。
+- **编译验证（实测）**：`x9/out/camera-smmu-state-20261120/kernel-unit.py` 单对象 `compile_one(x9_mm_power.o)` → `result True`、exit 0、**2 条既有导出头 warning**（与 357 基线一致），`x9_mm_power.c` 零 warning（修掉一处 declaration-after-statement：`sids[4]` 移到所有语句之前）。
+- **整包构建（实测）**：`build.py all --boot-config x9/build/boot-device.json --name x9-camera-smmu-state-20261120` → **exit 0**。`Image 32268288 B`、`shim-boot.img 15134720 B`、`entry 0x1000`、`PSTORE MIRROR`、boot-arg 含 `x9_camera=2`。候选 `x9/out/x9-camera-smmu-state-20261120/boot.img`，**boot.img sha256 `edf599641c074f52a7e006aaf3de1f5414c198fbf8991fad108e421b4adfe702`**、kernel sha256 `eb9858b106d8d9ba71578f9de7624675aa24aea8dfb38ae9453cb29d92e50ff8`。类型 SWEET-XNU-candidate；无 UEFI、无设备写、**未硬件验证**。
+- **待上机（用户手动）**：`fastboot boot .worktrees/camera-integration/x9/out/x9-camera-smmu-state-20261120/boot.img`，回传下一份 `~/NNN.txt`。需抓取 `X9 MM VCP SMMU:` 与 `X9 MM VCP STE 80/90/a0/a1:` 各行。这是 358/359/360 同模式的**功能性诊断候选**（失败路径只读快照），非纯探针镜像。
+- **推断（待实测证实）**：① MM SMMU 此时应已上电——ATF boot 期用 MM SMMU 映射 protected VCP loader buf（IOVA `0x106c00000`），故 MMIO 可读概率高；若仍 power-gated，读 MMIO 有 365 式挂死风险，已用 `idr0` 有效性门控 STE 读取降低暴露。② 预期 SID 0xa0 STE 为 ABORT 或 zero-invalid（源码「STE 默认 ABORT + 无任何 normal 窗映射请求」支持），SID 0x90 可能 bypass（display）；实测将确认 NS EL1 是否真能读到这些 STE 以及 STRTAB 是线性还是两级，从而定死路径 b 的编程序列与所有权边界。
+
 #### 2026-11-20 VCP/MMUP 启动链静态审计（源码逐项对照）+ READY pin 证实 bug 修复
 
 - **范围/边界**：纯静态审计，不出镜像、不上机、不操作设备。对照 Android `rv_v2/vcp_helper.c`、`mmup.c`、`vcp_logger.c`、`mtk-mbox.c`、`arm-smmu-v3.c`、`mtk-smmu-v3.c`、`live.dts`，并只读反汇编原 ATF `tee.img.atf.original.bin`（load base `0x88800000`）与 `lk_b.img`。改了一处证实 bug + 删两个死函数；单对象交叉编译验证。提交 `e56b7f54`。
