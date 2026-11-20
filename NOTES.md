@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 通话 MD 层来电接收：boot 注册 + 已测量子集 auto-approve 候选已构建，待实机（进行中）
+
+- **范围/基线**：单代理 `feat/call-md-approve`，功能树 `.worktrees/call-md-approve`，main 输入 **3013a8be**，代码提交 **757b66f2**（`X9Calls.inc` +125/−16、`docs/call-ios-bridge.md` 新增 2026-11-20 节）。用户选定方向"MD 层通话收发（按安卓日志）"；`x9/shim/fdt_ram.c` 与根 checkout 未提交 NOTES 按用户指示**未动、未纳入本轮提交**。scratch `x9/out/call-md-approve-20261120/`（功能树内）。无设备/ADB/fastboot/mailbox/分区操作，无 CI run ID（本地构建）。
+- **增量（全部按安卓证据，无猜测字段）**：MD 在线即启动 CALL 注册（030b CMD mask ff + 每 SIM 0307 IND，镜像 Android RIL init：RIL 37c42c..470、rodata 133a44 静态）；对已实测 SIM2 mode20 子集的来电 8901 CMD 自动回 8902 approve=1。RSP 只从 CMD 字段构造（RIL requestSetCallIndication 382458..382548），实测依据 android-incoming-20261115-192820：8901 mask22/tx2a9a/72B 19:27:15.391 → 8902 mask02/同 tx/40B .478（**87ms，先于用户/IMS 框架动作**，approve=1、无 cause、id1、seq100）。approve 门要求注册 confirmed + MD inbox 快照 id/seq/txid/mask/sim 全匹配且 (pending||seen)&&!ended&&!blocked（seen 放行因 ECPI0 可先于惰性 IND 注册到达）。**VOICE09 仍不发布、不发拨号/接听**：audio/CallList 契约未闭合，文档边界与"不要猜测"禁止本轮打开。
+- **实测（host）**：`compile_one` X9Baseband.cpp.o **True**（34 警告全为既有，X9Calls.inc 仅既有 unused `x9c_dial_submit`）。完整构建第一次 `all`：内核编译+链接成功，boot-xnu.py 打包失败 `ModuleNotFoundError: lz4`（brew python3.15 的 lz4 在用户 site，`-I` 不可见）；在 scratch 建 venv 并复制同版本 lz4 后单独重跑 `boot --kernel …` **exit 0**。产物：`boot.img` **14,950,400 B**、`kernel.development.sweet` 31,043,288 B、shim Image 32,043,008 B；boot-device.json 含 x9_bb=1/x9_mipc=1/x9_dual_sim=1。候选路径 `.worktrees/call-md-approve/x9/out/call-md-approve-20261120/boot.img`。
+- **边界（推断/既有政策，非本轮实测）**：approve≠answer，iOS 不接听则网络侧持续振铃；iOS 无来电 UI 是预期边界（CallList 未闭合）；SIM1/其它 mode/evoltesi 来电只保留不 approve；多呼叫/ended/blocked 一律 fail-closed；8901 到达后 MO outbound 被既有政策永久 blocked（MO 基线需重启，本轮 MO 未放行故可接受）；tombstone 保留到 boot（退役未证实）。
+- **实机验收（待用户手动 `fastboot boot` 上述 boot.img）**：另一手机拨打本机 SIM2，串口预期序列：`boot registration start` → `Android CMD8901 registration confirmed; SIM2 incoming auto-approve armed` → incoming CMD owned → approve=1 queued → physical TX ok → MT INCOMING/CONVERSATION/END 有界状态日志（不打印号码）。未接听的呼叫不应出现 0907。iOS 电话 App 无 UI 属预期。
+- **下一步**：实机验收后把结果写回本条；worktree/分支**暂保留**（候选 boot.img 在其 gitignored `x9/out/` 内，删树会毁掉待验收产物，与蓝牙 rootboot15 同样处理）；验收完成后再删树删分支。MO 拨号/接听与 VOICE09 发布仍等 audio/CallList 契约闭合。
+
 #### 2026-11-20 蓝牙 rootboot15：最新 main 完整候选已构建，待实机（进行中）
 
 - **范围/基线**：单代理 `feat/bluetooth-continue-20261120`，功能树 `.worktrees/bluetooth-continue`，初始 main 输入 **343b2409**。根 checkout 的 SMS 未提交 NOTES 与 `x9/shim/fdt_ram.c` VCP 改动从未由本轮切换/写入。scratch `x9/out/bluetooth-continue-20261120/`（功能树内）。无设备/ADB/fastboot/mailbox/分区操作，无 CI run ID（本地构建）。
