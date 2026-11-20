@@ -39,7 +39,7 @@ static uint64_t now_ns(void)
 {mach_timebase_info_data_t t;mach_timebase_info(&t);return (uint64_t)((__uint128_t)mach_absolute_time()*t.numer/t.denom);}
 static bool qualified(const struct x9_haptic_status *s)
 {
-    return s->version==1 && s->mode==2 && s->input_rate==48000 && s->rtp_rate==12000 &&
+    return s->version==1 && (s->mode==2 || s->mode==3) && s->input_rate==48000 && s->rtp_rate==12000 &&
         (s->chip_id==0x9371 || s->chip_id==0x9381) &&
         (s->flags&(X9_HAPTIC_READY|X9_HAPTIC_FAULT|X9_HAPTIC_OFF_FAILED))==X9_HAPTIC_READY;
 }

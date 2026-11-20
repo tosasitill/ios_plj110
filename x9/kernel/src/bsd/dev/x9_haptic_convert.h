@@ -18,6 +18,8 @@
 struct x9_haptic_converter {
     uint32_t phase, step, conversion, intensity, sharpness, decimator;
     int32_t lowpass, sum, in_peak;
+    /* Stock mode (x9_haptic=3) onset detector: arm after 1 ms of silence. */
+    uint32_t stock_quiet, stock_armed;
 };
 /* Q15 sine approximation on a full unsigned 32-bit turn (scene synthesis). */
 static inline int32_t x9_haptic_sine(uint32_t phase)

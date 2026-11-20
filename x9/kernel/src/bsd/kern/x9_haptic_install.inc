@@ -15,7 +15,7 @@ int sweet_x9_haptic_boot_mount_allowed(const char *source)
 {
     return __atomic_load_n(&x9_haptic_mount_owner,__ATOMIC_ACQUIRE)==current_thread() &&
         proc_getpid(current_proc())==1 && sweet_early_is_x9() &&
-        sweet_x9_haptic_mode()==2 && sweet_x9_ufs_root_active() &&
+        sweet_x9_haptic_mode()>=2 && sweet_x9_ufs_root_active() &&
         sweet_x9_ufs_root_writable() && !strcmp(source,X9_HAPTIC_HAL_SOURCE);
 }
 
@@ -77,7 +77,7 @@ static int x9_haptic_bundle_equal(const char *base)
 }
 static int x9_haptic_install(proc_t p,user_addr_t scratch,user_addr_t end)
 {
-    if(!sweet_early_is_x9() || proc_getpid(p)!=1 || sweet_x9_haptic_mode()!=2)return 0;
+    if(!sweet_early_is_x9() || proc_getpid(p)!=1 || sweet_x9_haptic_mode()<2)return 0;
     if(x9_haptic_hal_mounted)return 0;
     if(!proc_is64bit(p) || !sweet_x9_ufs_root_active() || !sweet_x9_ufs_root_writable())return EROFS;
     struct x9_native_hal_view *lower=NULL;vfs_context_t ctx=vfs_context_kernel();

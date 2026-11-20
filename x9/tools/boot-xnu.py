@@ -96,7 +96,7 @@ def main():
                        bluetooth=x9_boot_defaults.value(bargs, 'x9_bt_init') == 1,
                        als=x9_boot_defaults.value(bargs, 'x9_als') == 3,
                        island=x9_boot_defaults.value(bargs, 'x9_ui') == 1,
-                       haptic=([t.split('=', 1)[1] for t in a.boot_args.split() if t.startswith('x9_haptic=')] or ['2'])[-1] == '2')  # kernel default 2
+                       haptic=([t.split('=', 1)[1] for t in a.boot_args.split() if t.startswith('x9_haptic=')] or ['2'])[-1] in ('2', '3'))  # kernel default 2; 3 = stock waves
     if a.microphone_mode is not None:
         chosen = next(n for n in tree.children if n.prop('name') == b'chosen\0')
         chosen.props.append(('x9-microphone-mode', 0, a.microphone_mode.to_bytes(4, 'little')))
