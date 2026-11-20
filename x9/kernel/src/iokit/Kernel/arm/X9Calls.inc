@@ -1,21 +1,31 @@
 /* iOS20H392 VOICE bridge staging. Wire translation lives in the shared codec
  * and is tested against the original formatters / MD consumers. No call
  * state is invented here. Do not add service9 to X9Baseband's announcement
- * until Android initialization, dial/status/SIM routing and voice audio are
- * reconciled. There is deliberately NO bootarg to override this boundary.
- * x9cw_dial now translates ordinary VOICE20 digits to the captured SIM2
+ * until dial/status/SIM routing and voice audio are reconciled. There is
+ * deliberately NO bootarg to override this boundary.
+ * MD-layer receive now runs at boot, mirroring Android RIL init: once the
+ * CALL transport is ready, the Android-derived registration subset (global
+ * CMD8901, per-SIM IND4901/4902, owned GET_STATUS baseline) starts without
+ * waiting for VOICE03, and a complete CMD8901 in the reconciled SIM2 mode20
+ * subset is auto-approved with the live-captured 8902 shape (approve=1, no
+ * cause, RIL-converted RSP mask, original txid, echoed id/seq). Approval is
+ * the RIL indication acknowledgement, NOT answer; no ANSWER, CallList or
+ * audio is produced, and VOICE09 stays unannounced, so iOS shows no call UI.
+ * Outside that subset (SIM1, other modes, multi-call, quarantine) approval
+ * is withheld fail-closed. Registration/approval are terminal for this boot
+ * on timeout or transport loss; no retry.
+ * x9cw_dial still translates ordinary VOICE20 digits to the captured SIM2
  * profile only when a caller explicitly supplies that verified context.
  * A verified single-call mapping is required before x9cw_action can be
- * submitted. A real native state producer and asynchronous DIAL join now
- * exist; initialization/profile/audio admission remains unconnected. No
- * MIPC call request/registration/approval is started at boot. Other
+ * submitted. The asynchronous DIAL join exists but has no production
+ * admission caller; profile/audio admission remains unconnected. Other
  * VOICE requests get unsupported, never a success bootstrap/readiness stub.
- * Explicit VOICE44 routing and guarded VOICE21 end-current-call now have
- * production dispatch. Bound VOICE03 explicit disables now cause actual
- * Android-derived CMD/IND registration and an owned initial snapshot;
- * handover14 now enables actual, ordered Android SRVCC -> Apple54 events;
- * extra CallEventsNotify13=1 remains unsupported. This does not publish VOICE,
- * admit a DIAL profile, or report network/call/audio readiness. */
+ * Explicit VOICE44 routing and guarded VOICE21 end-current-call keep their
+ * production dispatch. Bound VOICE03 explicit disables reuse the same
+ * Android-derived registration and owned initial snapshot; handover14
+ * enables actual, ordered Android SRVCC -> Apple54 events; extra
+ * CallEventsNotify13=1 remains unsupported. None of this publishes VOICE,
+ * admits a DIAL profile, or reports network/call/audio readiness. */
 #include "../../../bsd/dev/x9_call_state.h"
 #include "../../../bsd/dev/x9_call_init.h"
 #include "../../../bsd/dev/x9_call_handover.h"
@@ -29,6 +39,23 @@ static struct x9cw_outbound_state x9c_outbound;
 static struct x9cw_inbound_state x9c_inbound;
 static bool x9c_observed;
 static bool x9c_incoming_observed;
+/* Boot registration mirrors Android RIL init (RmmCallControlUrcHandler
+ * 37c42c..470 registers CMD8901; rodata133a44's first two IND are 4901/4902),
+ * not an iOS VOICE03 trigger. Starts once when the CALL transport is ready;
+ * timeout/loss stays terminal for this boot, like the VOICE03 owner. */
+static bool x9c_boot_started;
+/* Live incoming evidence (android-incoming-20261115-192820): Android sent
+ * 8902 87ms after CMD8901, before any user/IMS-framework action: approve
+ * 100/u8=1, no cause, RSP mask02 from CMD22 via the proved RIL slot
+ * conversion, original txid, id102/seq103 echoed. requestSetCallIndication
+ * 382458..382548 builds that RSP from CMD fields only. This owner tracks the
+ * delivered CMD identity until the physical RSP result; the CMD bytes (with
+ * the number) stay in the MD inbox, never copied here. No retry on failure. */
+struct x9c_approve_owner {
+ bool used,replied;uint32_t token;unsigned sim;uint32_t id,sequence;uint16_t txid;uint8_t mask;
+};
+#define X9_C_APPROVE_OWNERS 8u
+static struct x9c_approve_owner x9c_approve_owners[X9_C_APPROVE_OWNERS];
 /* VOICE binding is independent of NAS/WMS clients and has NO SIM default. */
 struct x9c_client {bool bound,registered,handover;unsigned sim;uint32_t handover_floor;uint64_t generation,bridge_generation,binding;
  struct x9cw_handover_queue pending;};
@@ -373,6 +400,15 @@ static void x9c_init_poll(uint8_t *frame){
   else wanted[w.sim]=true;
  }
  bool online=x9c_event_transport_ready();
+ if(online&&!x9c_boot_started){
+  x9c_boot_started=true;
+  printf("X9 CALL: boot registration start (Android RIL init subset; VOICE09 still unannounced)\n");
+ }
+ if(x9c_boot_started){
+  if(!x9c_cmd_init.confirmed&&!x9c_cmd_init.held){wanted[0]=true;wanted[1]=true;}
+  for(unsigned sim=0;sim<2;sim++)
+   if(!x9c_init[sim].held&&x9c_init[sim].stage!=X9_CI_DONE)wanted[sim]=true;
+ }
  if(!online){
   for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){x9c_clients[i].registered=false;x9c_clients[i].handover=false;
    bzero(&x9c_clients[i].pending,sizeof(x9c_clients[i].pending));}
@@ -391,7 +427,7 @@ static void x9c_init_poll(uint8_t *frame){
    x9c_cmd_init.token=0;bzero(frame,X9_MIPC_FRAME_MAX);
    if(!good||result)x9c_cmd_init.held=true;
    if(!x9c_cmd_init.held){x9c_cmd_init.confirmed=true;
-    printf("X9 CALL: Android CMD8901 registration confirmed; no automatic approval\n");}
+    printf("X9 CALL: Android CMD8901 registration confirmed; SIM2 incoming auto-approve armed\n");}
   }else if(rc<0)x9c_cmd_init.held=true; /* keep uncertain physical token */
  }
  if(online&&!x9c_cmd_init.held&&!x9c_cmd_init.confirmed&&!x9c_cmd_init.token&&(wanted[0]||wanted[1])){
@@ -551,6 +587,75 @@ static void x9c_end_poll(uint8_t *frame){
 static bool x9c_live(const struct x9c_dial_job &j){
  return x9c_bound_live(j.slot,j.sim,j.generation,j.binding);
 }
+/* Called with the owned CMD copy from the MD inbox drain. Only the measured
+ * SIM2 ordinary IMS mode20 subset is tracked; SIM1/other shapes keep their
+ * MD tombstone without approval (no captured profile). The number is never
+ * copied out of the MD owner. */
+static void x9c_incoming_deliver(const uint8_t *frame,unsigned n,uint32_t token){
+ struct x9cw_incoming c;
+ if(!x9cw_incoming(frame,n,&c))return;
+ if(c.sim!=1||c.mode!=20||c.evoltesi_flow){
+  printf("X9 CALL: incoming CMD id %u outside measured SIM2 mode20 subset; retained, not approved\n",c.call_id);
+  return;
+ }
+ for(struct x9c_approve_owner &o:x9c_approve_owners)if(o.used&&o.token==token)return;
+ for(struct x9c_approve_owner &o:x9c_approve_owners)if(!o.used){
+  o.used=true;o.replied=false;o.token=token;o.sim=c.sim;o.id=c.call_id;
+  o.sequence=c.sequence;o.txid=c.txid;o.mask=c.mask;
+  printf("X9 CALL: SIM2 incoming CMD id %u seq %u owned; auto-approve pending (Android RSP shape)\n",c.call_id,c.sequence);
+  return;
+ }
+ printf("X9 CALL: approve owner pool full; incoming CMD id %u retained, not approved\n",c.call_id);
+}
+/* Approval gates: live CALL transport, confirmed CMD8901 registration, and
+ * the MD-owned inbound identity still matching this CMD (pending or already
+ * ECPI0-seen, never ended/blocked). ECPI0 may outrun the lazy boot IND
+ * registration; the RSP is built from CMD fields only, so seen is admitted.
+ * A lost/ended/blocked identity can never grant approval. rc==0 keeps the
+ * owner for the next poll's re-gate; physical failure is terminal, no retry. */
+static void x9c_approve_poll(){
+ const bool ready=x9c_event_transport_ready();
+ struct x9cw_inbound_state in;
+ const bool observed=ready&&x9_md_mipc_call_incoming_snapshot(&in)==1;
+ for(struct x9c_approve_owner &o:x9c_approve_owners){
+  if(!o.used)continue;
+  if(!ready){bzero(&o,sizeof(o));continue;}
+  if(o.replied){
+   int result;int rc=x9_md_mipc_call_reply_take(o.token,&result);
+   if(rc==1){
+    printf("X9 CALL: SIM2 incoming id %u approve RSP physical TX %s\n",o.id,result==X9_AT_OK?"ok":"failed");
+    bzero(&o,sizeof(o));
+   }else if(rc<0)bzero(&o,sizeof(o));
+   continue;
+  }
+  if(!x9c_cmd_init.confirmed)continue;
+  if(!observed||in.blocked||in.ended||(!in.pending&&!in.seen)||
+     in.native_id!=o.id||in.sequence!=o.sequence||in.txid!=o.txid||in.mask!=o.mask||in.sim!=o.sim){
+   printf("X9 CALL: incoming id %u approve withheld; identity no longer pending\n",o.id);
+   bzero(&o,sizeof(o));continue;
+  }
+  int rc=x9_md_mipc_call_reply(o.token,1,0,0);
+  if(rc==1){
+   o.replied=true;
+   printf("X9 CALL: SIM2 incoming id %u approve=1 queued (no cause, original txid %u)\n",o.id,(unsigned)o.txid);
+  }else if(rc<0)bzero(&o,sizeof(o));
+ }
+}
+/* Observation only: the MD reducer already owns MT state. No CallList, no
+ * VOICE publication, no number. Logged on change so a boot log can verify
+ * the incoming signalling chain without a probe image. */
+static void x9c_mt_observe(const struct x9cw_inbound_state &in){
+ static bool valid;static unsigned pending,seen,ended,blocked,state;static uint32_t id;
+ if(valid&&pending==in.pending&&seen==in.seen&&ended==in.ended&&blocked==in.blocked&&
+    state==in.ios_state&&id==in.native_id)return;
+ valid=true;pending=in.pending;seen=in.seen;ended=in.ended;blocked=in.blocked;
+ state=in.ios_state;id=in.native_id;
+ if(in.blocked){printf("X9 CALL: MT reducer blocked; incoming approval/publication fail-closed\n");return;}
+ if(!in.pending&&!in.seen)return;
+ const char *s=in.ended?"END":in.ios_state==3?"CONVERSATION":in.ios_state==2?"INCOMING":"pending";
+ printf("X9 CALL: SIM%u MT id %u %s (MD observation only; VOICE09 unannounced, no iOS call UI)\n",
+        in.sim+1,in.native_id,s);
+}
 static void x9c_error(struct x9c_dial_job &j,uint16_t err){
  if(!j.answered&&x9c_live(j)){
   x9c_response_decide(j.reply,err);
@@ -601,18 +706,22 @@ static void x9c_del(unsigned slot){
 }
 static void x9c_dial_poll(uint8_t *frame);
 static void x9c_poll(){
- /* Drain raw CALL events, but do not approve or answer CMD8901. The MD
-  * owner has already reduced every complete4901 under its lock. Number
-  * buffers are erased immediately; CMD identity tokens remain in MD owner. */
+ /* Drain raw CALL events. CMD8901 is auto-approved in the measured subset
+  * (Android RSP shape); ANSWER is never sent. The MD owner has already
+  * reduced every complete4901 under its lock. Number buffers are erased
+  * immediately; CMD identity tokens remain in MD owner. */
  uint8_t frame[X9_MIPC_FRAME_MAX];uint32_t n,token,sequence;
  for(unsigned i=0;i<8;i++){
   int rc=x9_md_mipc_call_event_ordered(frame,sizeof(frame),&n,&token,&sequence);
   if(rc!=1)break;
   if(x9cw_u16(frame+10)==0x4902)x9c_handover_event(frame,n,sequence);
+  else if(x9cw_u16(frame+10)==0x8901)x9c_incoming_deliver(frame,n,token);
   bzero(frame,sizeof(frame));
  }
  x9c_observed=x9_md_mipc_call_snapshot(&x9c_outbound)==1;
  x9c_incoming_observed=x9_md_mipc_call_incoming_snapshot(&x9c_inbound)==1;
+ if(x9c_incoming_observed)x9c_mt_observe(x9c_inbound);
+ x9c_approve_poll();
  x9c_init_poll(frame);
  for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++)x9c_handover_flush(slot);
  x9c_end_poll(frame);

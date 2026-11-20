@@ -11,18 +11,19 @@
 | 拨出状态生产者 | 完整 `4901` 的真实 ID / ECPI reducer；已实现、单对象可编译；未有完整真机 wire 重放或 iOS 运行验收 |
 | 空快照与异步确认 | 完整 owned `090a` 数组解析、号码与原始presentation有界owner；`0902 + 新 MO epoch` 汇合生成 VOICE20/tag10/u8；DIAL 仍无生产 profile/admission 调用者 |
 | 单通话挂断 / SIM 绑定 | VOICE44/tag01/u8 独立绑定，实际host queue receipt后提交路由；显式 VOICE21 → owned current query → 同 MO epoch/真实 ID/完整单通话 snapshot → guarded0905 → 同token0906 → 原iOS txn 的 result；未设备验收 |
-| 初始化 / 事件注册 | 明确绑定后的 VOICE03：13=0 与14=0/1 可独立并发 → 全局 CMD8901 → 逐 SIM IND4901/4902 → owned0909/090a；逐token确认，13=1仍拒绝；仅编译、未运行 |
+| 初始化 / 事件注册 | **MD 在线即启动**（2026-11-20，镜像 Android RIL init）：全局 CMD8901 → 逐 SIM IND4901/4902 → owned0909/090a；逐token确认，超时/掉线本 boot 终态。绑定后的 VOICE03 13=0/14=0/1 复用同一注册；13=1仍拒绝；未设备验收 |
 | NAS 本地订阅注册 | NAS03保存原txn/localgen/QMUXgen，真实host queue receipt后才原子提交tag13/18/19订阅patch；FIFO、重复结果缓存及旧background IND gate；不是网络注册/IMS-ready |
 | handover 通知 | 严格 MD4902/EVENT3 → Android SRVCC → Apple54/tag1/u8；订阅cursor/generation/SIM隔离、注册与live事件均整批queue receipt后释放，queue/OOM保序等待；未设备验收，未迁移handover后的ID/RAT/profile |
-| 来电 CMD / 状态 | `8901` 的字段、长度和唯一 tag 验证；独立 pending ID → 完整 ECPI0/132/6/133 的 MT reducer / iOS observer；未发布 CallList |
+| 来电 CMD / 状态 | `8901` 的字段、长度和唯一 tag 验证；独立 pending ID → 完整 ECPI0/132/6/133 的 MT reducer / iOS observer；状态变化有界日志；未发布 CallList |
 | END 原因 metadata | 成功完整解析、被当前 MO/MT 身份接受的 `133/mode20/10a=16` → 内部 Apple reason145；无cause/其它cause未知，不从无ID0910补归属；只编译，未发布 END |
-| 来电许可 RSP | `8902` 的正确 approve/call-id 字段；显式调用才构造，保留原 txid；按已核实 RIL slot 转换生成 RSP mask |
+| 来电许可 RSP | **已测量 SIM2 mode20 子集自动 approve**（2026-11-20）：按 11-15 真实来电 8902 形状（approve=1、无cause、RIL slot 转换 mask、原 txid、echo id/seq），注册确认+MD owned 身份匹配才准入；子集外/多通话/隔离 fail-closed 不批准；物理结果一次性日志，不重试 |
 | 物理 transport | 独立 call inbox / CMD owner，复用原有唯一 MD tick writer；SMS ACK 保持优先 |
 | 超时 / 重复 / 失败 | 无自动重发；重复 outstanding CMD 去重；内容变化及未知退休规则隔离 calls；不清空 mutation owner |
-| 默认启动 | **不发布 QMI VOICE09、不主动注册 CALL CMD/IND、不发通话请求、不自动 approve，无强制开启 bootarg**；注册只由绑定后的有效 VOICE03 触发 |
+| 默认启动 | **不发布 QMI VOICE09、不发拨号/接听请求、无强制开启 bootarg**；CALL 注册与已测量子集来电 auto-approve 随 MD 在线启动（2026-11-20）；approve 不是 answer，iOS 无来电 UI |
 
 `X9Calls.inc` 当前接明确的 VOICE44 路由绑定、VOICE03 已核实13=0/14=0或1注册与handover订阅，以及 VOICE21 单普通 MO 挂断；其它 VOICE 请求仍拒绝。
-绑定成功只代表本地路由保存，不代表 MD 注册、bootstrap 或音频已可用；VOICE09 仍不发布。
+2026-11-20 起 CALL 注册随 MD 在线自动启动，已测量 SIM2 mode20 来电按安卓 RSP 形状自动 approve（见末节）；仍不发布 VOICE09、不发 ANSWER。
+绑定成功只代表本地路由保存，不代表 bootstrap 或音频已可用；VOICE09 仍不发布。
 `x9cw_action()` 仅生成报文，生产 VOICE21 调用它后还必须过 MD 锁内 / writer 的 target guard；VOICE22 接听尚未准入，CallList 尚未发布。
 `x9cw_dial()` 同样仅编码：必须显式提供已验证的卡2 profile、无现存通话；当前没有 profile provider。
 原 transport 已允许这一严格 DIAL 子集；上一版宿主测试闭合发送/CNF。新增异步 join / 空快照 / 发送前 guard 目前只有编译结果，没有执行验证，也没有 iOS 自动拨号调用者。
@@ -2970,3 +2971,49 @@ reply为kSmsMessageWasAcknowledged；bool/queue imports复用旧精确proof。
 chain页重采，无测试/人工向量/构建/CI/设备动作。server Registry/current concrete选择
 仍条件化。下一沿旧parser helper1007f7720的ACK function virtual+30追真实callback
 类型/安装及原token→WMS37，不重采本轮body；完整保存/物理ACK/MO与CALL媒体仍缺。
+
+## 2026-11-20：MD 层来电接收启用（boot 注册 + 已测量子集 auto-approve）
+
+分支 `feat/call-md-approve`，自 main `3013a8be`。只改 `X9Calls.inc` 策略层；
+codec/MD owner/物理 writer 白名单均未动。单对象 `Builder.compile_one()` 真实 recipe
+交叉编译 `X9Baseband.cpp.o` 通过（scratch `x9/out/call-md-approve-20261120/`），
+新增代码无新警告；未执行测试套件、未设备验收。
+
+**启用的两条生产路径（均有安卓证据，非猜测）：**
+
+1. boot 注册：`x9c_event_transport_ready()`（WDS control OPEN + MIPC online +
+   CALL inbox cursor 可用）首次为真即启动既有注册子集——全局 CMD8901(ff) →
+   逐 SIM IND4901/4902 → owned GET_STATUS 基线。证据：RIL
+   `RmmCallControlUrcHandler 37c42c..470` 注册 CMD8901，rodata `133a44` 前两项
+   IND 为 4901/4902（静态，已在 codec 核实）；形状与 CNF 判定沿用
+   `x9_call_init.h`。不再等 VOICE03；VOICE03 仍复用同一 owner。超时/掉线本 boot
+   终态，不重试。
+2. 来电 auto-approve：drain 到完整 CMD8901 后，仅 SIM2/普通 IMS mode20/
+   evoltesi_flow=0 子集进入 8 项 approve owner；门控为 CMD8901 注册已确认 +
+   MD owned inbound 身份（id/seq/txid/mask/sim）仍 pending 或已 ECPI0-seen、
+   未 ended/blocked，然后 `x9_md_mipc_call_reply(token,1,0,0)` 构造 8902。
+   证据：`android-incoming-20261115-192820` 实测 Android 在 CMD 后 87ms、
+   用户/IMS framework 动作之前发 RSP（mask22→RSP02、同 txid、approve100/u8=1、
+   无 cause、id102/seq103 echo）；RIL `requestSetCallIndication 382458..382548`
+   仅用 CMD 字段构造 RSP。**approve 是 RIL 层指示确认，不是 ANSWER**；
+   0907 从不自动发送。ECPI0 可能先于 lazy IND 注册到达，故 seen 也准入
+   （RSP 与通话状态无关，wire 形状不变）。
+
+**fail-closed 边界（不变或明确不启用）：**
+
+- SIM1/其它 mode/evoltesi_flow CMD：保留 MD tombstone，不批准（无实测 profile）。
+- 多来电：第二个 8901 使 inbound reducer blocked，全部不批准。
+- 身份 ended/blocked/丢失、注册未确认、transport 掉线：不批准；物理 TX 失败
+  走既有全局 offline，不重试。CMD 身份 tombstone 保留到 boot（退休规则未证明）。
+- 8901 到达即把 MO outbound 置 blocked（既有策略）：本轮 MO dial 本就不准入，
+  无功能损失；MT 之后 MO 基线需重启重建，记录为已知限制。
+- **VOICE09 仍不公告**：CommCenter 不会发 VOICE 请求，iOS 无来电显示/接听/拨号
+  UI；`x9c_dial_submit` 仍无生产 caller，VOICE22 未准入，CallList/音频未闭合。
+  文档"输入闭合前不发布 VOICE"的边界继续有效。
+- 来电被 approve 后网络侧继续振铃直至对端挂断/网络超时；MD 侧 ECPI0→132/6→133
+  由既有 reducer 跟踪，状态变化有界日志（不含号码），供 boot 日志核对信令链。
+
+**验收方式（用户手动 `fastboot boot` 候选后）：** 另一手机拨打本机 SIM2，
+串口应出现 boot registration → CMD8901 confirmed → incoming CMD owned →
+approve=1 queued → physical TX ok → MT INCOMING/CONVERSATION/END 序列；
+iOS 屏幕无来电 UI 是预期边界，不是失败。未接听的来电不应产生 0907。
