@@ -288,6 +288,13 @@ static uint16_t x9c_bind_begin(unsigned slot,const uint8_t *req,unsigned sim,uin
 }
 static struct x9cw_call_init x9c_init[2];
 static struct {uint64_t token,deadline;bool confirmed,held;} x9c_cmd_init;
+/* Voice RAT cache fed by the read-only MIPC 042f query
+ * (requestVoiceRegistrationState 0x30f8f0 -> 0430, TLV8100/10B,
+ * networkType u16LE@+1). Empty until a response lands; the CallList
+ * technology gate stays fail-closed while invalid. One query per SIM per
+ * registration epoch, issued only after CS registration is confirmed. */
+static struct {unsigned networkType;bool valid;} x9c_voice_rat[2];
+static struct {uint64_t token,deadline;bool done,held;} x9c_rat_query[2];
 static bool x9c_reg_live(unsigned slot,const struct x9c_reg_wait &w){
  return x9c_bound_live(slot,w.sim,w.generation,w.binding)&&
   x9c_clients[slot].bridge_generation==w.bridge_generation;
@@ -415,6 +422,12 @@ static uint64_t x9c_register_submit(unsigned id,unsigned sim){
  uint8_t frame[24];unsigned n=x9cw_call_register(frame,sizeof(frame),id,sim,x9_md_sim_count());
  uint64_t token=n?x9_md_mipc_submit(frame,n):0;bzero(frame,sizeof(frame));return token;
 }
+/* Header-only 042f voice-registration query (libmipc addMipcReq, no addMipcVal);
+ * the 0430 CNF is matched generically by id+1/txid and parsed host-side. */
+static uint64_t x9c_voice_rat_submit(unsigned sim){
+ uint8_t query[16];x9cw_header(query,sizeof(query),0x42f,1u<<sim,0);
+ uint64_t token=x9_md_mipc_submit(query,sizeof(query));bzero(query,sizeof(query));return token;
+}
 static void x9c_init_poll(uint8_t *frame){
  bool wanted[2]={false,false};uint64_t now=x9q_ms();
  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++)for(unsigned index=0;index<X9_C_REG_WAITS;index++){
@@ -441,6 +454,10 @@ static void x9c_init_poll(uint8_t *frame){
   }
   if(x9c_cmd_init.token||x9c_cmd_init.confirmed)x9c_cmd_init.held=true;
   for(unsigned sim=0;sim<2;sim++)if(x9c_init[sim].stage||x9c_init[sim].token)x9c_init[sim].held=1;
+  for(unsigned sim=0;sim<2;sim++){
+   if(x9c_rat_query[sim].token||x9c_rat_query[sim].done)x9c_rat_query[sim].held=true;
+   x9c_rat_query[sim].token=0;x9c_voice_rat[sim].valid=false;
+  }
  }
  if(x9c_cmd_init.token){
   if(now>=x9c_cmd_init.deadline)x9c_cmd_init.held=true;
@@ -487,6 +504,29 @@ static void x9c_init_poll(uint8_t *frame){
   s.token=s.stage==X9_CI_BASELINE?x9c_current_submit(sim):
    x9c_register_submit(s.stage==X9_CI_STATUS?0x4901:0x4902,sim);
   if(s.token)s.deadline=now+25000;
+ }
+ /* Read-only voice RAT query, one per SIM after CS registration is confirmed.
+  * The 0430 CNF carries TLV8100/10B; only networkType u16LE@+1 is consumed
+  * (x9cw_voice_rat). Fail-closed: a malformed/absent response leaves the cache
+  * empty, so the CallList technology gate stays closed. */
+ for(unsigned sim=0;sim<x9_md_sim_count();sim++){
+  auto &q=x9c_rat_query[sim];
+  if(q.token){
+   if(now>=q.deadline)q.held=true;
+   uint32_t n=0;int rc=x9_md_mipc_take(q.token,frame,X9_MIPC_FRAME_MAX,&n);
+   if(rc==1){
+    unsigned networkType=0;
+    bool good=n>=16&&x9cw_u16(frame+12)==q.token&&x9cw_voice_rat(frame,n,&networkType);
+    q.token=0;
+    if(!q.held&&good){x9c_voice_rat[sim].networkType=networkType;x9c_voice_rat[sim].valid=true;q.done=true;
+     printf("X9 CALL: SIM%u voice RAT networkType %u cached (042f)\n",sim+1,networkType);}
+    bzero(frame,X9_MIPC_FRAME_MAX);
+   }else if(rc<0)q.held=true;
+  }
+  if(!online||q.held||q.done||q.token||!x9c_cmd_init.confirmed||
+     x9c_init[sim].held||x9c_init[sim].stage!=X9_CI_DONE)continue;
+  q.token=x9c_voice_rat_submit(sim);
+  if(q.token)q.deadline=now+25000;else q.held=true;
  }
  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++)for(unsigned index=0;index<X9_C_REG_WAITS;index++){
   struct x9c_reg_wait &w=x9c_reg_wait[i][index];if(!w.used||w.answered)continue;
@@ -779,7 +819,6 @@ static void x9c_mt_observe(const struct x9cw_inbound_state &in){
  * no technology: CallList publication is fail-closed until the query lands.
  * docs 495-506 forbid rat2->LTE4 and Unknown placeholders; a real queried
  * networkType mapped by x9cw_calltechnology is the only admitted source. */
-static struct {unsigned networkType;bool valid;} x9c_voice_rat[2]; /* 042f-populated; empty this round */
 static int x9c_call_technology(unsigned sim,unsigned *technology){
  if(sim>=2||!x9c_voice_rat[sim].valid)return 0;
  return x9cw_calltechnology(x9c_voice_rat[sim].networkType,technology);

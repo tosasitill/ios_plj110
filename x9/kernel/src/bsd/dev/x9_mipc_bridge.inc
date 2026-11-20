@@ -173,6 +173,10 @@ static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbou
   if(x9mi_u16(p+32)!=0x101||x9mi_u16(p+34)!=4||p[36]||p[37]||p[38]||p[39]||
      x9mi_u16(p+40)!=0x102||x9mi_u16(p+42)!=1||p[44]!=1||p[45]||p[46]||p[47])return 0;
  }
+ /* requestVoiceRegistrationState 0x30f8f0: header-only MIPC 042f -> 0430
+  * (addMipcReq, no addMipcVal). Read-only per-SIM voice RAT query feeding the
+  * call technology cache; not a NW control or registration mutation. */
+ else if(id==0x42f){if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||n!=16)return 0;}
  /* PLJ110 2d19d8..2d1a34: PS-only attach/detach, not combined CS/PS
   * 0403 and not RESET/CFUN. Only exact two raw u8 TLVs, original single
   * SIM route, zero padding. WDS attach owner retains each token. */

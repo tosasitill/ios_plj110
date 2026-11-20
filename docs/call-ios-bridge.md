@@ -509,7 +509,9 @@ networkType来自value+1/u16LE，再经convertCSNetworkType进入ServiceState.vo
 networkType→RIL voiceRat：{1,2}→16(GSM)；{4,8,16,24,32,48,64,72,96,136,152,160,176,200,224}→3(UMTS)；
 256→6(1xRTT)；512→8(EVDO_A)；1024→13(EHRPD)；{4096,8192,16384}→14(LTE)；32768→20(NR)；其余→0。
 这只是MIPC networkType→Android voiceRat一段；voiceRat→Apple WirelessTechnology→CallTechnology
-以及内核侧042f只读query/8100解析仍未实现，故technology provider仍fail-closed（见下）。
+全链已离线折叠为`x9cw_calltechnology`（见下，唯一推断步显式标注）。内核侧042f只读query/8100解析
+**已实现并编译验证**（`x9cw_voice_rat`+`x9c_voice_rat_submit`+`x9c_init_poll`查询job），缓存待实机0430响应填充，
+故technology provider在缓存有效前仍fail-closed（见下）。
 
 ### CallList46 编码器/发布 owner 已实现，technology 与公告双门仍闭合（2026-11-20）
 
@@ -526,9 +528,10 @@ bb侧`bb_x9_call_publication`扩为kind 0/1/2（handover54/registration03+54/Cal
 revision-tracked reconciliation单呼（MT优先，其次MO），经`x9_md_mipc_call_publish`→callback→`bb_x9_call_calllist`
 转移IOMallocData-owned帧。**双门fail-closed**：(1)`x9c_calllist_announced=false`，VOICE09公告边界仍闭合
 （audio/拨号/状态/SIM路由未 reconcile，无bootarg override，沿用header既有政策）；(2)`x9c_call_technology`
-读per-slot `x9c_voice_rat[2]`缓存（042f填充，本轮为空）经`x9cw_calltechnology`映射，缓存无效则返回0。
+读per-slot `x9c_voice_rat[2]`缓存（042f查询已实现，待实机0430响应填充，当前为空）经`x9cw_calltechnology`映射，缓存无效则返回0。
 两门任一未开则不发布。这是完整机制（非empty encoder冒充完成），已接入x9c_poll但被门 inert；
-打开需先实现042f查询填缓存+闭合audio契约，二者本轮均未满足，故iOS来电UI仍不出现（预期边界）。
+042f查询job已实现并编译验证（CS注册confirmed后每SIM一次，离线invalidate缓存），technology门待实机响应即可开；
+audio契约门仍闭合，故iOS来电UI仍不出现（预期边界，需实机验收）。
 
 **technology真实来源链（2026-11-20离线反汇编闭合，唯一推断步显式标注；
 证据`x9/out/call-ios-flow-20261120/q7-tech-tables.txt`）：**
@@ -549,8 +552,12 @@ processSystemInfo_sync1f191c440吃QMI rat，RIL voiceRat仅供Android ServiceSta
 {1,2}/1024/UMTS集→2；其余→6。**CT6对NR/无服务是实测真实映射(WT0x80→CT6)，非Unknown占位绕过**，
 故495-506禁令不被违反（禁的是CLCC rat2→LTE4臆造与无源占位，真实查询RAT经此映射是已证来源）。
 tech字节唯一消费点=setPreferredFormatter(1f1abf374)：{2,3,5}→GSM、1→C2K、{0,4,6,7}→不改（INCOMING UI路径null-guarded）。
-内核侧042f只读查询/8100解析填`x9c_voice_rat`缓存尚未实现（NAS registration owner只带本地路由flag，非解析RAT），
-是下一轮具体步骤；本轮缓存为空，technology门闭合。
+内核侧042f只读查询/8100解析填`x9c_voice_rat`缓存**已实现**（2026-11-20，编译+整包构建验证，待实机）：
+`x9mi_submit`白名单接受header-only 042f（n==16，mask per-SIM）；`x9cw_voice_rat`（`x9_call_wire.h`）校验0430帧（RX通用CNF匹配`id==s->id+1`+txid echo，`x9_mipc_bridge.inc:520`），
+镜像已证042a NW query（`x9n_result`）要求**CNF result tag0/u32==0**，再取8100/10B、networkType u16LE@+1
+（libmipc TLV key=`tag&0x7fff`，wire 0x8100≡0x0100皆接受）；regState@+0与+3..+9 libmipc从不解释，只消费networkType；
+`x9c_voice_rat_submit`+`x9c_init_poll`查询job在CS注册confirmed（`x9c_cmd_init.confirmed`且`x9c_init[sim].stage==X9_CI_DONE`）后
+每SIM一次，offline invalidate缓存fail-closed。缓存有效后technology门即开；audio门仍闭合（需实机验收）。
 
 ### Apple 普通号码类型不证明 IMS command context（原件架构纠错）
 
