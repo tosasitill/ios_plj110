@@ -254,14 +254,21 @@ static int cam_sensor_session_close_locked(uint64_t epoch,struct x9_camera_probe
      * do not lower sensor supplies after a receiver/MM conflict. This is
      * only retirement of an unprogrammed receive lifetime, not DMA drain. */
     if(!off && cam_rx_sensor_held_locked(epoch)) {
+        bool mm2_failed=cam_rx_sensor_mm2_take_failed_locked(epoch);
         step="sensor-isolate";
         off=cam_cold_isolate(&cam_journal);
         if(!off) {
             step="receiver-close";
             off=cam_rx_sensor_close_locked(epoch);
+            if(!off || mm2_failed) {
+                int restore_err=cam_restore(&cam_journal);
+                if(restore_err) {
+                    step="supplier-restore";
+                    off=restore_err;
+                }
+            }
         }
-    }
-    if(!off) {
+    } else if(!off) {
         step="supplier-restore";
         off=cam_restore(&cam_journal);
     }

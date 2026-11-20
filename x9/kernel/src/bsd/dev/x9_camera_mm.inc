@@ -1,5 +1,5 @@
 /* MT6993 MM resource lifecycle, under camera_control_lock in thread context.
- * Live DT: mminfra voter 55/BACKUP_GRP0, AO bit0 / infra0 bit1;
+ * clk-mt6993-pd.c:315-329: mm_infra_ao MTCMOS0 bit31, mm_infra0 MTCMOS0 bit29;
  * clk-mt6993-pd: VCORE16 -> MAIN15 -> MRAW8, all bank0;
  * clk-mt6993: CAM is AL (no AP enable), CAMTM mux3 / SENINF0 mux17,
  * SENINF3 mux20. clk-mt6993-cam: CAM CG22, MRAW/CAMSV CG34.
@@ -26,8 +26,8 @@ struct cam_mm_desc {
     unsigned cfg, shift, width, parents;
 };
 static const struct cam_mm_desc cam_mm_descs[X9_CAM_MM_SLOTS]={
-    {CAM_MM_BACKUP,0x20724,0x11358,0x1135c,0x12900,1,1u<<31,0,0,0,0},
-    {CAM_MM_BACKUP,0x20724,0x11358,0x1135c,0x12900,2,1u<<29,0,0,0,0},
+    {CAM_MM_DOMAIN,0x20700,0x11318,0x1131c,0x12900,1u<<31,1u<<31,0,0,0,0},
+    {CAM_MM_DOMAIN,0x20700,0x11318,0x1131c,0x12900,1u<<29,1u<<29,0,0,0,0},
     {CAM_MM_BACKUP,0x20724,0x11358,0x1135c,0x1135c,0xc00,0xc00,0,0,0,0},
     {CAM_MM_DOMAIN,0x20700,0x11318,0x1131c,0x12900,1u<<16,1u<<16,0,0,0,0},
     {CAM_MM_DOMAIN,0x20700,0x11318,0x1131c,0x12900,1u<<15,1u<<15,0,0,0,0},
@@ -238,12 +238,12 @@ static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera
             /* Unvoted-but-ungated is an unknown direct owner. A later
              * last HWV CLR would gate it and destroy that owner's state. */
             if((~before[2]&~before[1]&d->mask)!=0)return EBUSY;
+        } else if(n<X9_CAM_MM_VMM) {
+            /* MM_2/display hold AO/infra0 via parent-domain autolink; their own
+             * MTCMOS0 bits may be zero while PM_ACK (0x12900) is already one. */
+            if(!(before[2]&d->effect_mask))return ENXIO;
         } else if(d->kind==CAM_MM_DOMAIN) {
             if(!!(before[1]&d->mask)!=!!(before[2]&d->effect_mask))return EBUSY;
-        } else if(n<X9_CAM_MM_VMM) {
-            /* MM_2 holds AO/infra0 via its parent-domain chain.
-             * Their own BACKUP bits may be zero while PM_ACK is one. */
-            if(!(before[2]&d->effect_mask))return ENXIO;
         }
         uint32_t add=d->mask&~ap;
         if(add) {
@@ -325,7 +325,7 @@ static int cam_mm_slot_restore(struct cam_mm_journal *j,unsigned n,struct x9_cam
                  * last-owner check in that case: do not drop dependencies
                  * under a new aggregate owner just because gate_changed=0. */
                 if(!e && (j->gate_before[n]&global))e=ESTALE;
-            } else if(d->kind==CAM_MM_DOMAIN && !global)
+            } else if(d->kind==CAM_MM_DOMAIN && n>=X9_CAM_MM_VMM && !global)
                 e=cam_wait_bits(b,d->effect,d->effect_mask,0,10000);
             if(e)return e;
             j->owned[n]=0;j->gate_changed[n]=0;

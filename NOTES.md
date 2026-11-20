@@ -160,6 +160,17 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 357 逐项审计与 Android 流程对齐修复（VCP/MMUP 启动、MM 槽位、异常卸载、RAW10P）
+
+- **357 实机硬阻塞实证**：对原厂固件 `.local/x9/backups/partitions/firmware-originals/vcp-real-android-active-b/vcp_b.img` 检索直接证实 `hwccf_irq_init`、`hwccf_backup_handler`、`hwccf_backup1_cnt[]`、`mminfra_framework_on_off` 位于 **MMUP（VCP Core 1）**；`357.txt` 中 `BACKUP1`（`0x20724`）slot12 投票触发 `int_raw=0x4000`（`backup_vote_int_to_vip`）后因 X9 未执行 Android `vcp_helper.c` + `mmup.c` 启动链而在 `stage=4`（`CCF_BACKUP1_STA` bit3）超时。
+- **已实施修改（均未出整包镜像，待上机验证）**：
+  1. **`x9_mm_power.c` 对齐 Android VCP/MMUP 启动链**：按 `vcp_helper.c`（`vcp_device_probe`、`reset_vcp`、`vcp_reserve_memory_ioremap`）、`vcp_logger.c`、`mmup.c` 与 `live.dts`（`vcp@31800000` / `mmup@31a00000`），分配连续 36-bit 可寻址、清零并 `dc civac` 到 PoC 的 `0x20e000`（`0x210000` 页对齐）保留内存（含偏移 `0x08d000` `VCP_A_log_ctl` 头初始化、`enable=0`）；发 SMC `0xc200052c` `VCP_OP_RESET_SET(2)` + `MMUP_OP_RESET_SET(5)`；写 Core 1 GPR1/2/3（`cfg_core1+0x44/48/4c`）后发 `MMUP_OP_RESET_RELEASE(6)` 并轮询 `mmup` mbox1/hw mbox4（`0x31bc010c` bit7、`0x31bc0038`、`3000ms`）；再写 Core 0 GPR1/2/3 后发 `VCP_OP_RESET_RELEASE(3)` 并轮询 `vcp` mbox2（`0x31ba010c` bit7、`0x31ba0038`、`3000ms`），失败时锁存 `vcp_fault` 且不释放硬件已引用内存。
+  2. **`x9_camera_mm.inc` 修正 `mm_infra_ao`/`mm_infra0` 投票器**：按 Android `clk-mt6993-pd.c:315-329` 将 Slot 0/1 从 `CAM_MM_BACKUP`（`0x20724` bit0/1）改为 `CAM_MM_DOMAIN`（`MTCMOS0` `0x20700` bit31 与 bit29）；`cam_mm_slot_take` 对 `n < X9_CAM_MM_VMM` 保持允许 `MM_2`/显示继承 `0x12900` ACK 为 1（不强求 `0x11318` 同步），`cam_mm_slot_restore` 卸载 Slot 0/1 时不等待 `0x12900` bits 31/29 归零（因 `MM_2`/显示仍持有）。
+  3. **`x9_camera_sensor_session.inc` 修复 MM_2 失败后供电泄漏**：`cam_sensor_session_close_locked` 在 `cam_cold_isolate` 成功后，若 `cam_rx_sensor_mm2_take_failed_locked(epoch)` 为真（CSI/MM/DMA 从未准入），即使 `cam_rx_sensor_close_locked` 返回 MM 错误仍执行 `cam_restore(&cam_journal)` 关闭传感器供电/MCLK/I2C，并保留 `receiver-close` 错误码。
+  4. **`x9_camera_pipeline.inc` 对齐 MIPI RAW10P 格式**：`p->format` 由 `1`（`SV_FMT_RAW10` MTISP 打包）改为 `8`（`SV_FMT_MIPI_RAW10`，`mtk_cam-sv.h:142` / `V4L2_PIX_FMT_S*10P`），与用户态 `x9/camera/camera_isp.c:unpack_line` 匹配；帧头 `head.format=1` ABI 不变。
+- **单对象交叉编译验证**：`x9/out/camera-android-vcp-mm-20261120/kernel-r2/build.log` 中 `x9_mm_power.o` 与 `sweet_x9_camera.o` `compile_one` 均返回 `True`、exit 0、零新增 warning（总计 183 条既有 warning：2 条 `x9_mm_power` 导出头 + 181 条 `sweet_x9_camera`）。未构建整包 `boot.img`，未上机测试。
+- **后续待验证项**：构建测试镜像上机验证 VCP/MMUP READY、MM_2、VMM（`0xc00`）、MMDVFS/MMQOS、MM_SMMU 安全/非安全接受状态（`mtk-smmu-v3.c` `SMMU_SEC_EN`）及 CAMSV 首帧图像；传感器 open/EEPROM 8.22 秒耗时（378 kHz FIFO + 双遍 3456B + 每笔 WL guard）暂保留并在通图后再按 Android 1 MHz + 缓存优化。
+
 #### 2026-11-19 MMUP/VCP 启动路径与只读核状态
 
 - **Android 启动链核实**：rv_v2 `vcp_helper.c` 在 probe 中按 `core-nums=2` 调 `mmup_init()`，注册 `IPI_IN_VCP_READY_1`；probe 末尾对 core0/core1 发 RESET_SET，再 `vcp_register_feature(RTOS_FEATURE_ID)` 触发首次 power/clk。`vcp_enable_pm_clk()` 在两核未 ready 时调用 `reset_vcp()`：写 MMUP/VCP 保留内存 GPR，经 `MTK_SIP_TINYSYS_VCP_CONTROL(c200052c)` 的 `MMUP_KERNEL_OP_RESET_RELEASE` 与 `VCP_KERNEL_OP_RESET_RELEASE` 释放复位，并等待 IPI READY。HWCCF feature 位于 MMUP 核。这段说明原 Android 的 MMUP/VCP 并非无需初始化；但 X9 可能由 LK 遗留其运行态，当前无 357 中的直接状态证据。

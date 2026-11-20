@@ -14,9 +14,13 @@
 #include <mach/clock_types.h>
 #include <mach/mach_time.h>
 #include <mach/mach_types.h>
+#include <vm/pmap.h>
+#include <vm/vm_kern.h>
+#include <kern/cpu_data.h>
 #include "x9_mm_power.h"
 extern int sweet_early_is_x9(void);
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
 LCK_GRP_DECLARE(mm_power_group, "x9-mm-power");
 LCK_MTX_DECLARE(mm_power_lock, &mm_power_group);
 #define MM_POWER_PARENTS 32u
@@ -44,11 +48,45 @@ LCK_MTX_DECLARE(mm_power_lock, &mm_power_group);
 #define MM_IRQ_VOTE_TIMEOUT_US 1250u
 #define MM_IRQ_DONE_TIMEOUT_US 10000u
 #define MM_IRQ_GLOBAL_MAX_RETRIES 10000u
+
+/* Android rv_v2 vcp_helper.c + mmup.c + vcp_logger.c boot parameters. */
+#define VCP_SIP_CONTROL 0xc200052cu
+#define VCP_OP_RESET_SET 2u
+#define VCP_OP_RESET_RELEASE 3u
+#define MMUP_OP_RESET_SET 5u
+#define MMUP_OP_RESET_RELEASE 6u
+#define VCP_DRAM_RESV_ADDR_OFF 0x44u
+#define VCP_DRAM_RESV_SIZE_OFF 0x48u
+#define VCP_DRAM_RESV_LOGGER_OFF 0x4cu
+#define VCP_CORE_STATUS_OFF 0x70u
+#define VCP_CORE_MON_PC_OFF 0x80u
+#define VCP_CORE_RSTN_CLR_OFF 0x00u
+#define VCP_MBOX_READY_MSG_OFF 0x38u /* offset 14 * MBOX_SLOT_SIZE(4) */
+#define VCP_MBOX_CLR_OFF 0x10cu
+#define VCP_MBOX_READY_BIT (1u << 7) /* pin_index 7 for IPI_IN_VCP_READY_0/1 */
+#define VCP_READY_TIMEOUT_MS 3000u
+#define VCP_MEM_TOTAL_SIZE 0x20e000u
+#define VCP_MEM_ALLOC_BYTES ((VCP_MEM_TOTAL_SIZE + PAGE_MASK) & ~(vm_size_t)PAGE_MASK)
+#define VCP_MEM_LOGGER_OFFSET 0x08d000u
+#define VCP_MEM_LOGGER_SIZE 0x180000u
+#define VCP_PLT_LOG_ENABLE 0x504C5402u
+#define VCP_DRAM_LOG_BUF_LEN 0x100000u
+#define VCP_PACK_IOVA(addr) ((uint32_t)(((addr) & 0xffffffffull) | (((addr) >> 32) & 0xfull)))
+
+struct vcp_log_ctrl {
+    uint32_t base, size, enable, info_ofs, buff_ofs, buff_size;
+};
+struct vcp_log_buf_info {
+    uint32_t r_pos, w_pos;
+};
+
 static struct { uint64_t token; uint32_t client, children; } parents[MM_POWER_PARENTS];
 static struct { uint64_t token, parent; } children[MM_POWER_CHILDREN];
 static uint64_t next_token = 1;
-static vm_offset_t hwv, mmup, power_ack, vcp_cfg_core0, vcp_cfg_core1;
-static bool power_fault, vote_owned, vote_held;
+static vm_offset_t hwv, mmup, power_ack, vcp_cfg_core0, vcp_cfg_core1, vcp_mbox2, mmup_mbox4;
+static vm_offset_t vcp_mem_va;
+static uint64_t vcp_mem_pa;
+static bool power_fault, vote_owned, vote_held, vcp_booted, vcp_fault;
 static uint32_t holders;
 struct mm_irq_timeout {
     unsigned offset;
@@ -61,10 +99,14 @@ static uint32_t mm_read(vm_offset_t base, unsigned off)
     __asm__ volatile("dsb sy" : : : "memory");
     return value;
 }
+static void mm_write_reg(vm_offset_t base, unsigned off, uint32_t value)
+{
+    *(volatile uint32_t *)(base + off) = value;
+    __asm__ volatile("dsb sy" : : : "memory");
+}
 static void mm_write(unsigned off, uint32_t value)
 {
-    *(volatile uint32_t *)(hwv + off) = value;
-    __asm__ volatile("dsb sy" : : : "memory");
+    mm_write_reg(hwv, off, value);
 }
 static int mm_wait(vm_offset_t base, unsigned off, uint32_t mask,
                    uint32_t target, unsigned count, unsigned step_us)
@@ -74,6 +116,155 @@ static int mm_wait(vm_offset_t base, unsigned off, uint32_t mask,
         if (n != count) delay(step_us);
     }
     return ETIMEDOUT;
+}
+static int vcp_cache_clean_invalidate(vm_offset_t va, vm_size_t bytes)
+{
+    uint64_t ctr;
+    vm_offset_t line, end;
+    disable_preemption();
+    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+    line = (vm_offset_t)4 << ((ctr >> 16) & 15u);
+    if (!line || line > PAGE_SIZE || ((va | bytes) & (line - 1))) {
+        enable_preemption();
+        return EINVAL;
+    }
+    end = va + bytes;
+    __asm__ volatile("dsb sy" : : : "memory");
+    for (vm_offset_t p = va; p < end; p += line)
+        __asm__ volatile("dc civac, %0" : : "r"(p) : "memory");
+    __asm__ volatile("dsb sy" : : : "memory");
+    enable_preemption();
+    return 0;
+}
+static uint64_t vcp_smc(uint32_t op, uint32_t val)
+{
+    register uint64_t x0 __asm__("x0") = VCP_SIP_CONTROL;
+    register uint64_t x1 __asm__("x1") = op;
+    register uint64_t x2 __asm__("x2") = val;
+    register uint64_t x3 __asm__("x3") = 0;
+    register uint64_t x4 __asm__("x4") = 0;
+    register uint64_t x5 __asm__("x5") = 0;
+    register uint64_t x6 __asm__("x6") = 0;
+    register uint64_t x7 __asm__("x7") = 0;
+    __asm__ volatile("dsb sy\nsmc #0\ndsb sy\nisb"
+        : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3),
+          "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7)
+        : : "memory", "cc", "x8", "x9", "x10", "x11",
+            "x12", "x13", "x14", "x15", "x16", "x17");
+    return x0;
+}
+static int vcp_smc_ok(uint32_t op, uint32_t val, uint64_t *raw)
+{
+    uint64_t r = vcp_smc(op, val);
+    *raw = r;
+    if (!r) return 0;
+    return ((int64_t)r == -1 || r == 0xffffffffULL) ? ENOTSUP : EIO;
+}
+static int vcp_poll_ready(vm_offset_t mbox, uint32_t *img_size, uint32_t *clr_seen)
+{
+    uint64_t deadline;
+    clock_interval_to_deadline(VCP_READY_TIMEOUT_MS, NSEC_PER_MSEC, &deadline);
+    for (;;) {
+        uint32_t clr = mm_read(mbox, VCP_MBOX_CLR_OFF);
+        if (clr & VCP_MBOX_READY_BIT) {
+            *clr_seen = clr;
+            *img_size = mm_read(mbox, VCP_MBOX_READY_MSG_OFF);
+            mm_write_reg(mbox, VCP_MBOX_CLR_OFF, VCP_MBOX_READY_BIT);
+            return 0;
+        }
+        if (mach_absolute_time() >= deadline) {
+            *clr_seen = mm_read(mbox, VCP_MBOX_CLR_OFF);
+            return ETIMEDOUT;
+        }
+        delay_for_interval(100, NSEC_PER_USEC);
+    }
+}
+static int vcp_alloc_reserved(void)
+{
+    vm_offset_t va = 0;
+    ppnum_t maximum = (ppnum_t)(((1ULL << 36) - 1) >> PAGE_SHIFT);
+    uint64_t base_pa = 0;
+    int e = 0;
+    if (vcp_mem_va) return 0;
+    if (kmem_alloc_contig(kernel_map, &va, VCP_MEM_ALLOC_BYTES, PAGE_MASK,
+            maximum, 0, KMA_DATA | KMA_ZERO | KMA_PERMANENT,
+            VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS)
+        return ENOMEM;
+    for (vm_size_t off = 0; off < VCP_MEM_ALLOC_BYTES; off += PAGE_SIZE) {
+        ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)(va + off));
+        uint64_t pa = ptoa_64(pn);
+        if (!pn || (pa & PAGE_MASK) || pa >= (1ULL << 36)) { e = EFAULT; break; }
+        if (!off) base_pa = pa;
+        else if (pa != base_pa + off) { e = EFAULT; break; }
+    }
+    if (!e) {
+        struct vcp_log_ctrl *ctl = (struct vcp_log_ctrl *)(va + VCP_MEM_LOGGER_OFFSET);
+        uint32_t info_ofs = sizeof(*ctl);
+        uint32_t buff_ofs = (info_ofs + sizeof(struct vcp_log_buf_info) + 3u) & ~3u;
+        ctl->base = VCP_PLT_LOG_ENABLE;
+        ctl->size = sizeof(*ctl);
+        ctl->enable = 0;
+        ctl->info_ofs = info_ofs;
+        ctl->buff_ofs = buff_ofs;
+        ctl->buff_size = VCP_DRAM_LOG_BUF_LEN;
+        e = vcp_cache_clean_invalidate(va, VCP_MEM_ALLOC_BYTES);
+    }
+    if (e) {
+        kmem_free(kernel_map, va, VCP_MEM_ALLOC_BYTES);
+        return e;
+    }
+    vcp_mem_va = va;
+    vcp_mem_pa = base_pa;
+    return 0;
+}
+static int vcp_boot_ensure(void)
+{
+    int e;
+    uint32_t init_c0, init_c1;
+    uint64_t smc_s0 = 0, smc_s1 = 0, smc_r1 = 0, smc_r0 = 0;
+    uint32_t mmup_sz = 0, mmup_clr = 0, vcp_sz = 0, vcp_clr = 0;
+    unsigned stage = 1;
+    if (vcp_booted) return 0;
+    if (vcp_fault) return EIO;
+    e = vcp_alloc_reserved();
+    if (e) return e;
+    init_c0 = mm_read(vcp_cfg_core0, VCP_CORE_STATUS_OFF);
+    init_c1 = mm_read(vcp_cfg_core1, VCP_CORE_STATUS_OFF);
+    e = vcp_smc_ok(VCP_OP_RESET_SET, 1, &smc_s0);
+    if (!e) { stage = 2; e = vcp_smc_ok(MMUP_OP_RESET_SET, 1, &smc_s1); }
+    if (!e) {
+        stage = 3;
+        vcp_fault = true; /* Never free or re-release after first release attempt */
+        mm_write_reg(vcp_cfg_core1, VCP_DRAM_RESV_ADDR_OFF, VCP_PACK_IOVA(vcp_mem_pa));
+        mm_write_reg(vcp_cfg_core1, VCP_DRAM_RESV_SIZE_OFF, VCP_MEM_TOTAL_SIZE);
+        mm_write_reg(vcp_cfg_core1, VCP_DRAM_RESV_LOGGER_OFF,
+            VCP_PACK_IOVA(vcp_mem_pa + VCP_MEM_LOGGER_OFFSET));
+        e = vcp_smc_ok(MMUP_OP_RESET_RELEASE, 1, &smc_r1);
+        if (!e) { stage = 4; e = vcp_poll_ready(mmup_mbox4, &mmup_sz, &mmup_clr); }
+    }
+    if (!e) {
+        stage = 5;
+        mm_write_reg(vcp_cfg_core0, VCP_DRAM_RESV_ADDR_OFF, VCP_PACK_IOVA(vcp_mem_pa));
+        mm_write_reg(vcp_cfg_core0, VCP_DRAM_RESV_SIZE_OFF, VCP_MEM_TOTAL_SIZE);
+        mm_write_reg(vcp_cfg_core0, VCP_DRAM_RESV_LOGGER_OFF,
+            VCP_PACK_IOVA(vcp_mem_pa + VCP_MEM_LOGGER_OFFSET + VCP_MEM_LOGGER_SIZE));
+        e = vcp_smc_ok(VCP_OP_RESET_RELEASE, 1, &smc_r0);
+        if (!e) { stage = 6; e = vcp_poll_ready(vcp_mbox2, &vcp_sz, &vcp_clr); }
+    }
+    if (!e) {
+        vcp_fault = false;
+        vcp_booted = true;
+    }
+    printf("X9 MM VCP BOOT: stage=%u pa=%llx init=%x/%x end=%x/%x pc=%x/%x rstn=%x/%x "
+        "smc=%llx/%llx/%llx/%llx mmup=%x/%x vcp=%x/%x errno=%d\n",
+        stage, (unsigned long long)vcp_mem_pa, init_c0, init_c1,
+        mm_read(vcp_cfg_core0, VCP_CORE_STATUS_OFF), mm_read(vcp_cfg_core1, VCP_CORE_STATUS_OFF),
+        mm_read(vcp_cfg_core0, VCP_CORE_MON_PC_OFF), mm_read(vcp_cfg_core1, VCP_CORE_MON_PC_OFF),
+        mm_read(vcp_cfg_core0, VCP_CORE_RSTN_CLR_OFF), mm_read(vcp_cfg_core1, VCP_CORE_RSTN_CLR_OFF),
+        (unsigned long long)smc_s0, (unsigned long long)smc_s1,
+        (unsigned long long)smc_r1, (unsigned long long)smc_r0,
+        mmup_clr, mmup_sz, vcp_clr, vcp_sz, e);
+    return e;
 }
 /* Android regmap_read_poll_timeout_atomic uses an elapsed-time budget and
  * takes one final sample when the deadline has passed. */
@@ -313,12 +504,15 @@ int x9_mm_power_acquire(uint32_t client, uint64_t *token, uint32_t *a0)
     if (!hwv) hwv = ml_io_map(0x31c00000, 0x22000);
     if (!mmup) mmup = ml_io_map(0x31a04000, 0x1000);
     if (!power_ack) power_ack = ml_io_map(0x31b50000, 0x1000);
-    /* Live DT vcp@31800000 reg-names: vcp_cfgreg_core0/core1 at
-     * 31a0a000/31a0d000. The read-only status diagnostic is mapped lazily so
-     * an unrelated mapping failure cannot change the existing vote path. */
+    /* Live DT vcp@31800000 + mmup@31a00000: core0/1 cfg + mbox2/4 READY. */
     if (!vcp_cfg_core0) vcp_cfg_core0 = ml_io_map(0x31a0a000, 0x1000);
     if (!vcp_cfg_core1) vcp_cfg_core1 = ml_io_map(0x31a0d000, 0x1000);
-    if (!hwv || !mmup || !power_ack) { e = ENOMEM; goto out; }
+    if (!vcp_mbox2) vcp_mbox2 = ml_io_map(0x31ba0000, 0x1000);
+    if (!mmup_mbox4) mmup_mbox4 = ml_io_map(0x31bc0000, 0x1000);
+    if (!hwv || !mmup || !power_ack || !vcp_cfg_core0 || !vcp_cfg_core1 ||
+        !vcp_mbox2 || !mmup_mbox4) { e = ENOMEM; goto out; }
+    e = vcp_boot_ensure();
+    if (e) goto out;
     if (!holders) {
         if (vote_held || vote_owned) { e = EIO; goto out; }
         e = mm_vote_take(client);
