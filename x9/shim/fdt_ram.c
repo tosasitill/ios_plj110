@@ -139,13 +139,9 @@ int fdt_ram_build_live(uintptr_t fdt)
    live[i][1]=a;live[i+1][0]=end;live[i+1][1]=hi;live_count++;
   }
  }
- /* LK allocates the VCP/MMUP firmware loader buffer in plain free DRAM and
-  * never lists it in reserved-memory. TF-A points MMUP at its DRAM image
-  * (header 0x06c37001 -> 0x1_06c37000, copy source 0x1_06c39000, 0x46c00 B).
-  * Android boots MMUP before the buddy allocator touches it; XNU zeroes/reuses
-  * it, so MMUP copies zeros over its own SRAM. Keep it out of the XNU map. */
+ /* Reserve the MMUP/VCP DRAM block outside the XNU map (see x9_ram_ranges.h). */
  {
-  const uint64_t vlo=X9_VCP_LOADER_LO,vhi=X9_VCP_LOADER_HI;
+  const uint64_t vlo=X9_VCP_DRAM_LO,vhi=X9_VCP_DRAM_HI;
   for(i=0;i<live_count;){
    uint64_t lo=live[i][0],hi=live[i][1];
    if(hi<=vlo||lo>=vhi){i++;continue;}
@@ -164,7 +160,7 @@ int fdt_ram_build_live(uintptr_t fdt)
  live_bytes=0;
  for(i=0;i<live_count;i++)live_bytes+=live[i][1]-live[i][0];
  if(!live_count || live[0][0]!=X9_RAM_LO ||
-    (live[0][1]!=x9_ram_ranges[0][1] && live[0][1]!=X9_VCP_LOADER_LO))
+    live[0][1]!=x9_ram_ranges[0][1])
   return fail("live map changed bootstrap extent",0,0);
  if(live_bytes<(8ULL<<30))return fail("live map below 8 GiB",live_bytes,8ULL<<30);
  return 1;

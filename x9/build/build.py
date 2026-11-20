@@ -325,11 +325,6 @@ class Builder:
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/tfa_container.py'), '--src', str(tfa)] +
                          (['--required'] if self.cfg.get('tfa_container') else []), ROOT,
                          label='tfa_container.py')
-        # MMUP SRAM image (LK loader buffer is clobbered before reset release) -> generated/x9_mmup_image.inc
-        mmup = Path(self.cfg.get('mmup_image') or ROOT / '.local/x9/backups/partitions/firmware-originals/vcp-real-android-active-b/vcp_b.img').expanduser()
-        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/mmup_image.py'), '--src', str(mmup)] +
-                         (['--required'] if self.cfg.get('mmup_image') else []), ROOT,
-                         label='mmup_image.py')
         cbn = [sys.executable, '-I', str(X9 / 'tools/carrier_cbn_pack.py'), '--metadata', str(self.out / 'carrier-cbn.json')]
         if self.cfg.get('carrier_cbn_ipcc'):
             cbn += ['--src', self.cfg['carrier_cbn_ipcc'], '--expected-sha1', self.cfg.get('carrier_cbn_sha1', '')]

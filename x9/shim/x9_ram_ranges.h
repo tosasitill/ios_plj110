@@ -7,9 +7,11 @@
 #define X9_RAM_LO 0x100000000ULL
 #define X9_RAM_HI 0x37FA00000ULL
 #define X9_RAM_SPAN (X9_RAM_HI-X9_RAM_LO)
-/* LK-allocated VCP/MMUP loader buffer (not in reserved-memory); keep out of XNU. */
-#define X9_VCP_LOADER_LO 0x106C00000ULL
-#define X9_VCP_LOADER_HI 0x106E00000ULL
+/* Boot-time carve-out for the MMUP/VCP DRAM (VCP_MEM_TOTAL_SIZE 0x20e000). Runtime
+ * contiguous allocation inside the remap window fails once memory is fragmented (364),
+ * so the shim removes it from the XNU map and the kernel maps it with ml_io_map. */
+#define X9_VCP_DRAM_LO 0x15FC00000ULL
+#define X9_VCP_DRAM_HI 0x160000000ULL
 #define X9_RAM_USABLE 0x26F740000ULL
 static const unsigned long long x9_ram_ranges[][2] = {
  {0x100000000ULL,0x13CC00000ULL}, /* 159: no mblock below mtksmmu_mpool */

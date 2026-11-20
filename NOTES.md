@@ -3538,3 +3538,9 @@ transfer code). Static audit finds no missing step. Signature (bus + EEPROM + AF
 - **静态**：LK `0x53d4c` 的 `0x200e8` 恒返回 0 → 走 else 分支分配(align 2MiB, limit `0xC0000000`)，与 `mblock-51-me_vcp_reserved 0xbd200000` 吻合：加载缓冲很可能在 `0xbd200000`，no-map，不在 XNU 内存里，内容应完好。MMUP 通过 TF-A 建立的保护 SMMU(SID 0xa1, mm_smmu@0x30800000) 把 IOVA 译到该 PA；读到 0 说明翻译/总线路径在 reset release 时不可用（SMMU 时钟/MM 电源域未开，或翻译态丢失）。Android `reset_vcp()` 在 release 前没有额外 SMMU 操作，依赖 LK/TF-A 留下的状态与 MM/SMMU 时钟已就绪。
 - **下一步（未做）**：确认 reset release 前 MM 电源域/SMMU 时钟状态（`DIAG5 bus=a1/21` 是 bus tracker）；对比 Android 启动顺序里 MM_2/HWCCF 与 VCP 的先后；必要时在 MMUP release 前先拉起 MM 电源。
 - **续（静态，2026-11-20）**：Android `x9/out/call-owned-runtime/dmesg.txt` 显示每次系统 resume 都重新 `RESET_RELEASE` MMUP 并 `core id 1 ready`（内核已运行、无 LK 参与），说明 MMUP 加载镜像留在内核不会回收的保留 DRAM（与 `me_vcp_reserved 0xbd200000` 吻合）且 TF-A/SMMU 翻译态长期有效；Android `reset_vcp()` 前无任何额外 SMMU/MM 动作。本机差异只能在“SMMU/总线翻译态被改动”“MM_2/mminfra 路径时钟”“0xbd200000 内容”三者中。当前 VCP boot 发生在首次 `x9_mm_power_acquire`、先于 MM_2 vote（`mm_vote_take` 本身依赖 MMUP 的 hwccf，存在先后环），仅凭现有日志无法再缩小。现成的一次性判定镜像 `x9/out/x9-camera-vcp-loader2-20261120/boot.img`（含 `X9 MM VCP LOADER2` 读 `0xbd200000` 的 `sig@`），未被使用；用户暂不要探针镜像，故未上机。
+
+## 2026-11-20 camera: 364 finding + VCP DRAM carve-out
+- 观察: 364.txt 在 ~20.3s 止于 vm_page_find_contiguous(num=132, low=458751) found 0 pages (vcp_alloc_reserved 的 kmem_alloc_contig 在碎片化系统失败)。
+- 改动: shim 在 live range 2 末尾预留 4MiB (0x15FC00000..0x160000000, X9_VCP_DRAM_LO/HI), vcp_alloc_reserved 改用 ml_io_map 映射。
+- 镜像 x9/out/x9-camera-vcp-carveout-20261120/boot.img 已构建, 未上机。
+- 推断: MMUP 仍可能 stage=4 errno=60 (SRAM 拷贝读到零, 与分配无关)。下一步看 365 日志。

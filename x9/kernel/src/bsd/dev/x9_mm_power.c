@@ -18,7 +18,6 @@
 #include <vm/vm_kern.h>
 #include <kern/cpu_data.h>
 #include "x9_mm_power.h"
-#include "../../../generated/x9_mmup_image.inc"
 extern int sweet_early_is_x9(void);
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern boolean_t pmap_valid_page(ppnum_t);
@@ -74,7 +73,9 @@ LCK_MTX_DECLARE(mm_power_lock, &mm_power_group);
 #define VCP_MEM_WIN_BASE 0x140000000ULL /* mm_hfrp / MMUP & VCP remap window [0x140000000, 0x1c0000000) */
 #define VCP_MEM_WIN_END  0x1c0000000ULL
 #define VCP_MEM_REMAP_BLOCK 0x08000000ULL /* 128 MiB remap granularity */
-#define VCP_ALLOC_HELD_MAX 32u
+/* Keep in sync with x9/shim/x9_ram_ranges.h: shim-reserved, never in the XNU map. */
+#define X9_VCP_DRAM_LO 0x15FC00000ULL
+#define X9_VCP_DRAM_HI 0x160000000ULL
 #define VCP_PLT_LOG_ENABLE 0x504C5402u
 #define VCP_DRAM_LOG_BUF_LEN 0x100000u
 #define VCP_PACK_IOVA(addr) ((uint32_t)(((addr) & 0xffffffffull) | (((addr) >> 32) & 0xfull)))
@@ -233,63 +234,33 @@ static bool vcp_pa_in_remap_window(uint64_t pa)
 }
 static int vcp_alloc_reserved(void)
 {
-    static const uint64_t aligns[] = {
-        0x40000000ULL, /* 1 GiB: lands directly on 0x140000000 / 0x180000000 */
-        0x20000000ULL, /* 512 MiB */
-        0x10000000ULL, /* 256 MiB */
-        0x08000000ULL, /* 128 MiB */
-        0x04000000ULL, /* 64 MiB */
-        0x02000000ULL, /* 32 MiB */
-        0x01000000ULL, /* 16 MiB */
-    };
-    vm_offset_t held[VCP_ALLOC_HELD_MAX];
-    unsigned held_cnt = 0;
-    vm_offset_t va = 0;
-    ppnum_t maximum = (ppnum_t)((VCP_MEM_WIN_END - 1ULL) >> PAGE_SHIFT);
-    uint64_t base_pa = 0;
-    int e = 0;
+    /* The shim removes [X9_VCP_DRAM_LO, X9_VCP_DRAM_HI) from the XNU map, so no
+     * runtime contiguous allocation (it failed when fragmented, 364). */
+    struct vcp_log_ctrl *ctl;
+    uint32_t info_ofs, buff_ofs;
+    vm_offset_t va;
     if (vcp_mem_va) return 0;
-    for (unsigned a = 0; a < sizeof(aligns) / sizeof(aligns[0]) && !va; a++) {
-        ppnum_t pnum_mask = (ppnum_t)((aligns[a] - 1ULL) >> PAGE_SHIFT);
-        while (held_cnt < VCP_ALLOC_HELD_MAX) {
-            vm_offset_t cand = 0;
-            uint64_t cand_pa = 0;
-            if (kmem_alloc_contig(kernel_map, &cand, VCP_MEM_ALLOC_BYTES, PAGE_MASK,
-                    maximum, pnum_mask, KMA_DATA | KMA_ZERO,
-                    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS)
-                break;
-            e = vcp_check_contig_pa(cand, &cand_pa);
-            if (!e && vcp_pa_in_remap_window(cand_pa)) {
-                va = cand;
-                base_pa = cand_pa;
-                break;
-            }
-            held[held_cnt++] = cand;
-            if (e) break;
-        }
-        if (e) break;
-    }
-    for (unsigned i = 0; i < held_cnt; i++)
-        kmem_free(kernel_map, held[i], VCP_MEM_ALLOC_BYTES);
-    if (!va) return e ? e : ENOMEM;
-    {
-        struct vcp_log_ctrl *ctl = (struct vcp_log_ctrl *)(va + VCP_MEM_LOGGER_OFFSET);
-        uint32_t info_ofs = sizeof(*ctl);
-        uint32_t buff_ofs = (info_ofs + sizeof(struct vcp_log_buf_info) + 3u) & ~3u;
-        ctl->base = VCP_PLT_LOG_ENABLE;
-        ctl->size = sizeof(*ctl);
-        ctl->enable = 0;
-        ctl->info_ofs = info_ofs;
-        ctl->buff_ofs = buff_ofs;
-        ctl->buff_size = VCP_DRAM_LOG_BUF_LEN;
-        e = vcp_cache_clean_invalidate(va, VCP_MEM_ALLOC_BYTES);
-    }
-    if (e) {
-        kmem_free(kernel_map, va, VCP_MEM_ALLOC_BYTES);
-        return e;
-    }
+    if (X9_VCP_DRAM_HI - X9_VCP_DRAM_LO < VCP_MEM_ALLOC_BYTES ||
+        !vcp_pa_in_remap_window(X9_VCP_DRAM_LO) ||
+        pmap_valid_page((ppnum_t)(X9_VCP_DRAM_LO >> PAGE_SHIFT)))
+        return ENXIO;
+    va = ml_io_map((vm_offset_t)X9_VCP_DRAM_LO, VCP_MEM_ALLOC_BYTES);
+    if (!va) return ENOMEM;
+    bzero((void *)va, VCP_MEM_ALLOC_BYTES);
+    ctl = (struct vcp_log_ctrl *)(va + VCP_MEM_LOGGER_OFFSET);
+    info_ofs = sizeof(*ctl);
+    buff_ofs = (info_ofs + sizeof(struct vcp_log_buf_info) + 3u) & ~3u;
+    ctl->base = VCP_PLT_LOG_ENABLE;
+    ctl->size = sizeof(*ctl);
+    ctl->enable = 0;
+    ctl->info_ofs = info_ofs;
+    ctl->buff_ofs = buff_ofs;
+    ctl->buff_size = VCP_DRAM_LOG_BUF_LEN;
+    __asm__ volatile("dsb sy" ::: "memory");
     vcp_mem_va = va;
-    vcp_mem_pa = base_pa;
+    vcp_mem_pa = X9_VCP_DRAM_LO;
+    printf("X9 MM VCP MEM: carve-out pa=%llx size=%x mapped\n",
+        (unsigned long long)vcp_mem_pa, (unsigned)VCP_MEM_ALLOC_BYTES);
     return 0;
 }
 static void vcp_print_snap(const char *tag, const struct vcp_core_snap *s)
@@ -445,48 +416,6 @@ static void vcp_boot_diag_log(const struct vcp_core_snap *pre, const struct vcp_
             printf("X9 MMUP LOG: %s\n", line);
         }
     }
-}
-
-/* LK loads vcp_b.img into a DRAM heap buffer; TF-A makes MMUP copy
- * buf[0x2000:] into its SRAM at reset release (SRAM header at 0x31837000:
- * +08 dst start, +0c packed DRAM src, +10 dst end). XNU/shim reuse that heap
- * before this point (362: source holds non-firmware data, MMUP then jumps into
- * zeros, nest=0x39879). Rewrite the bytes from the build-embedded image, but
- * only into pages XNU does not manage. */
-static void mmup_restore_loader(void)
-{
-    if (!x9_mmup_image_bytes) { printf("X9 MM MMUP LOADER: no embedded image\n"); return; }
-    vm_offset_t hs = ml_io_map(0x31837000ULL, 0x1000);
-    if (!hs) return;
-    uint32_t d0 = mm_read(hs, 8), pk = mm_read(hs, 0xc), d1 = mm_read(hs, 0x10);
-    uint64_t src = ((uint64_t)(pk & 0xf) << 32) | (pk & ~0xfffu);
-    if (d0 != 0x2000 || d1 != 0x2000 + x9_mmup_image_bytes || (pk & 0xff0) ||
-        (pk & 0xf) == 0 || (pk & 0xf) > 3) {
-        printf("X9 MM MMUP LOADER: header mismatch %x %x %x, skip\n", d0, pk, d1);
-        return;
-    }
-    for (uint64_t pa = src & ~(uint64_t)(PAGE_SIZE - 1); pa < src + x9_mmup_image_bytes; pa += PAGE_SIZE)
-        if (pmap_valid_page((ppnum_t)(pa >> PAGE_SHIFT))) {
-            printf("X9 MM MMUP LOADER: %llx is XNU-managed RAM, refuse\n", pa);
-            return;
-        }
-    vm_offset_t dst = ml_io_map(src, (x9_mmup_image_bytes + 0xfff) & ~0xfffu);
-    if (!dst) return;
-    uint32_t before = mm_read(dst, 0), bad = 0;
-    volatile uint32_t *w = (volatile uint32_t *)dst;
-    for (unsigned i = 0; i < x9_mmup_image_bytes; i += 4) {
-        uint32_t v = x9_mmup_image[i] | x9_mmup_image[i + 1] << 8 |
-            x9_mmup_image[i + 2] << 16 | (uint32_t)x9_mmup_image[i + 3] << 24;
-        w[i / 4] = v;
-    }
-    __asm__ volatile("dsb sy" ::: "memory");
-    for (unsigned i = 0; i < x9_mmup_image_bytes; i += 4) {
-        uint32_t v = x9_mmup_image[i] | x9_mmup_image[i + 1] << 8 |
-            x9_mmup_image[i + 2] << 16 | (uint32_t)x9_mmup_image[i + 3] << 24;
-        if (w[i / 4] != v) bad++;
-    }
-    printf("X9 MM MMUP LOADER: restored %u B to %llx (was %x) verify_bad=%u\n",
-        x9_mmup_image_bytes, src, before, bad);
 }
 
 static int vcp_boot_ensure(void)
