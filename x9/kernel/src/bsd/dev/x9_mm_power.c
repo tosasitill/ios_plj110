@@ -89,10 +89,14 @@ static struct { uint64_t token, parent; } children[MM_POWER_CHILDREN];
 static uint64_t next_token = 1;
 static vm_offset_t hwv, mmup, power_ack, vcp_cfg_core0, vcp_cfg_core1, vcp_mbox2, mmup_mbox4;
 static vm_offset_t vcp_diag_pwr, vcp_diag_clk, vcp_diag_slp, vcp_diag_sec, vcp_diag_ap, vcp_diag_sram;
+static vm_offset_t vcp_diag_intc1, vcp_diag_busdbg;
 static vm_offset_t vcp_mem_va;
 static uint64_t vcp_mem_pa;
 static bool power_fault, vote_owned, vote_held, vcp_booted, vcp_fault;
 static uint32_t holders;
+struct vcp_core_snap {
+    uint32_t status, pc, lr, sp, pc_latch, lr_latch, sp_latch, wptr, sys, rstn_clr, rstn_set;
+};
 struct mm_irq_timeout {
     unsigned offset;
     uint32_t value;
@@ -165,9 +169,25 @@ static int vcp_smc_ok(uint32_t op, uint32_t val, uint64_t *raw)
     if (!r) return 0;
     return ((int64_t)r == -1 || r == 0xffffffffULL) ? ENOTSUP : EIO;
 }
-static int vcp_poll_ready(vm_offset_t mbox, uint32_t *img_size, uint32_t *clr_seen)
+static void vcp_snap_core1(struct vcp_core_snap *s)
+{
+    s->status   = mm_read(vcp_cfg_core1, 0x70);
+    s->pc       = mm_read(vcp_cfg_core1, 0x80);
+    s->lr       = mm_read(vcp_cfg_core1, 0x84);
+    s->sp       = mm_read(vcp_cfg_core1, 0x88);
+    s->wptr     = mm_read(vcp_cfg_core1, 0x8c);
+    s->pc_latch = mm_read(vcp_cfg_core1, 0xd0);
+    s->lr_latch = mm_read(vcp_cfg_core1, 0xd4);
+    s->sp_latch = mm_read(vcp_cfg_core1, 0xd8);
+    s->rstn_clr = mm_read(vcp_cfg_core1, 0x00);
+    s->rstn_set = mm_read(vcp_cfg_core1, 0x04);
+    s->sys      = mm_read(mmup, 0x00);
+}
+static int vcp_poll_ready(vm_offset_t mbox, uint32_t *img_size, uint32_t *clr_seen,
+                          struct vcp_core_snap *early_snap, bool *early_taken)
 {
     uint64_t deadline;
+    unsigned polls = 0;
     clock_interval_to_deadline(VCP_READY_TIMEOUT_MS, NSEC_PER_MSEC, &deadline);
     for (;;) {
         uint32_t clr = mm_read(mbox, VCP_MBOX_CLR_OFF);
@@ -177,11 +197,16 @@ static int vcp_poll_ready(vm_offset_t mbox, uint32_t *img_size, uint32_t *clr_se
             mm_write_reg(mbox, VCP_MBOX_CLR_OFF, VCP_MBOX_READY_BIT);
             return 0;
         }
+        if (early_snap && early_taken && !*early_taken && polls == 10u) {
+            vcp_snap_core1(early_snap);
+            *early_taken = true;
+        }
         if (mach_absolute_time() >= deadline) {
             *clr_seen = mm_read(mbox, VCP_MBOX_CLR_OFF);
             return ETIMEDOUT;
         }
         delay_for_interval(100, NSEC_PER_USEC);
+        polls++;
     }
 }
 static int vcp_check_contig_pa(vm_offset_t va, uint64_t *base_pa_out)
@@ -265,14 +290,25 @@ static int vcp_alloc_reserved(void)
     vcp_mem_pa = base_pa;
     return 0;
 }
-static void vcp_boot_diag_log(void)
+static void vcp_print_snap(const char *tag, const struct vcp_core_snap *s)
 {
+    printf("X9 MM VCP SNAP %s: st=%x pc=%x lr=%x sp=%x latch=%x/%x/%x wptr=%x rstn=%x/%x sys=%x\n",
+        tag, s->status, s->pc, s->lr, s->sp, s->pc_latch, s->lr_latch, s->sp_latch,
+        s->wptr, s->rstn_clr, s->rstn_set, s->sys);
+}
+static void vcp_boot_diag_log(const struct vcp_core_snap *pre, const struct vcp_core_snap *rst,
+                              const struct vcp_core_snap *early, bool early_taken)
+{
+    struct vcp_core_snap end;
     if (!vcp_diag_pwr) vcp_diag_pwr = ml_io_map(0x1c00d000, 0x1000);
     if (!vcp_diag_clk) vcp_diag_clk = ml_io_map(0x10040000, 0x1000);
     if (!vcp_diag_slp) vcp_diag_slp = ml_io_map(0x31aa0000, 0x1000);
     if (!vcp_diag_sec) vcp_diag_sec = ml_io_map(0x31a70000, 0x1000);
     if (!vcp_diag_ap)  vcp_diag_ap  = ml_io_map(0x31bd0000, 0x1000);
     if (!vcp_diag_sram) vcp_diag_sram = ml_io_map(0x31800000, 0x80000);
+    if (!vcp_diag_intc1) vcp_diag_intc1 = ml_io_map(0x31a0e000, 0x1000);
+    if (!vcp_diag_busdbg) vcp_diag_busdbg = ml_io_map(0x31a22000, 0x1000);
+    vcp_snap_core1(&end);
     printf("X9 MM VCP DIAG1: pwr_ack=%x pdn=%x fenc=%x slp=%x/%x sys=%x sec=%x/%x wdt=%x/%x\n",
         vcp_diag_pwr ? mm_read(vcp_diag_pwr, 0x4c) : 0xdeadbeefu,
         vcp_diag_clk ? mm_read(vcp_diag_clk, 0x10) : 0xdeadbeefu,
@@ -303,6 +339,78 @@ static void vcp_boot_diag_log(void)
         vcp_diag_sram ? mm_read(vcp_diag_sram, 0x37000 + 0x29b24) : 0xdeadbeefu,
         vcp_diag_sram ? mm_read(vcp_diag_sram, 0x37000 + 0x4430c) : 0xdeadbeefu,
         vcp_diag_sram ? mm_read(vcp_diag_sram, 0x37000 + 0x44310) : 0xdeadbeefu);
+    if (pre) vcp_print_snap("pre", pre);
+    if (rst) vcp_print_snap("rst", rst);
+    if (early && early_taken) vcp_print_snap("1ms", early);
+    vcp_print_snap("end", &end);
+    printf("X9 MM VCP DIAG4: gpr=%x/%x/%x/%x/%x/%x/%x/%x wdt_cfg=%x dbg=%x\n",
+        mm_read(vcp_cfg_core1, 0x40), mm_read(vcp_cfg_core1, 0x44),
+        mm_read(vcp_cfg_core1, 0x48), mm_read(vcp_cfg_core1, 0x4c),
+        mm_read(vcp_cfg_core1, 0x50), mm_read(vcp_cfg_core1, 0x54),
+        mm_read(vcp_cfg_core1, 0x58), mm_read(vcp_cfg_core1, 0x5c),
+        mm_read(vcp_cfg_core1, 0x34), mm_read(vcp_cfg_core1, 0x10));
+    printf("X9 MM VCP DIAG5: remap=%x/%x/%x tcm_bnd=%x/%x/%x/%x tcm_p=%x/%x/%x slp4=%x/%x/%x hint=%x/%x bus=%x/%x\n",
+        vcp_diag_sec ? mm_read(vcp_diag_sec, 0x490) : 0xdeadbeefu,
+        vcp_diag_sec ? mm_read(vcp_diag_sec, 0x4a8) : 0xdeadbeefu,
+        vcp_diag_sec ? mm_read(vcp_diag_sec, 0x4c8) : 0xdeadbeefu,
+        vcp_diag_sec ? mm_read(vcp_diag_sec, 0xa0) : 0xdeadbeefu,
+        vcp_diag_sec ? mm_read(vcp_diag_sec, 0xa4) : 0xdeadbeefu,
+        vcp_diag_sec ? mm_read(vcp_diag_sec, 0xa8) : 0xdeadbeefu,
+        vcp_diag_sec ? mm_read(vcp_diag_sec, 0xac) : 0xdeadbeefu,
+        vcp_diag_sec ? mm_read(vcp_diag_sec, 0x90) : 0xdeadbeefu,
+        vcp_diag_sec ? mm_read(vcp_diag_sec, 0x94) : 0xdeadbeefu,
+        vcp_diag_sec ? mm_read(vcp_diag_sec, 0x98) : 0xdeadbeefu,
+        vcp_diag_slp ? mm_read(vcp_diag_slp, 0x04) : 0xdeadbeefu,
+        vcp_diag_slp ? mm_read(vcp_diag_slp, 0x28) : 0xdeadbeefu,
+        vcp_diag_slp ? mm_read(vcp_diag_slp, 0x34) : 0xdeadbeefu,
+        mm_read(mmup, 0x140), mm_read(mmup, 0x150),
+        vcp_diag_busdbg ? mm_read(vcp_diag_busdbg, 0x00) : 0xdeadbeefu,
+        vcp_diag_sec ? mm_read(vcp_diag_sec, 0x450) : 0xdeadbeefu);
+    if (vcp_diag_intc1)
+        printf("X9 MM VCP INTC1: sta=%x/%x/%x/%x en=%x/%x/%x/%x\n",
+            mm_read(vcp_diag_intc1, 0x00), mm_read(vcp_diag_intc1, 0x04),
+            mm_read(vcp_diag_intc1, 0x08), mm_read(vcp_diag_intc1, 0x0c),
+            mm_read(vcp_diag_intc1, 0x20), mm_read(vcp_diag_intc1, 0x24),
+            mm_read(vcp_diag_intc1, 0x28), mm_read(vcp_diag_intc1, 0x2c));
+    {
+        /* Android mmup.c mmup_do_tbufdump_RV33(): 16-entry hardware PC trace. */
+        uint32_t wptr = mm_read(vcp_cfg_core1, 0x8c);
+        uint32_t orig_dbg = mm_read(vcp_cfg_core1, 0x10);
+        uint32_t base_dbg = orig_dbg & ~(7u << 4);
+        for (unsigned row = 0; row < 16u; row += 4u) {
+            uint32_t f[4], t[4];
+            for (unsigned k = 0; k < 4u; k++) {
+                unsigned idx = ((wptr + row + k) >> 1) & 7u;
+                unsigned off = ((wptr + row + k) & 1u) * 8u;
+                mm_write_reg(vcp_cfg_core1, 0x10, base_dbg | (idx << 4));
+                f[k] = mm_read(vcp_cfg_core1, 0xe0u + off);
+                t[k] = mm_read(vcp_cfg_core1, 0xe4u + off);
+            }
+            printf("X9 MMUP TBUF %02u: %x->%x %x->%x %x->%x %x->%x\n",
+                row, f[0], t[0], f[1], t[1], f[2], t[2], f[3], t[3]);
+        }
+        mm_write_reg(vcp_cfg_core1, 0x10, orig_dbg);
+    }
+    if (vcp_diag_sram) {
+        printf("X9 MMUP HDR: %x %x %x %x %x %x %x %x\n",
+            mm_read(vcp_diag_sram, 0x37000 + 0x00), mm_read(vcp_diag_sram, 0x37000 + 0x04),
+            mm_read(vcp_diag_sram, 0x37000 + 0x08), mm_read(vcp_diag_sram, 0x37000 + 0x0c),
+            mm_read(vcp_diag_sram, 0x37000 + 0x10), mm_read(vcp_diag_sram, 0x37000 + 0x14),
+            mm_read(vcp_diag_sram, 0x37000 + 0x18), mm_read(vcp_diag_sram, 0x37000 + 0x1c));
+        printf("X9 MMUP PROG: nest=%x/%x fpga=%x tpu=%x mask=%x mpu10=%x..%x mpu11=%x..%x\n",
+            mm_read(vcp_diag_sram, 0x37000 + 0x21ffc), mm_read(vcp_diag_sram, 0x37000 + 0x24e68),
+            mm_read(vcp_diag_sram, 0x37000 + 0x230bc), mm_read(vcp_diag_sram, 0x37000 + 0x2bc24),
+            mm_read(vcp_diag_sram, 0x37000 + 0x231e4),
+            mm_read(vcp_diag_sram, 0x37000 + 0x23168), mm_read(vcp_diag_sram, 0x37000 + 0x2316c),
+            mm_read(vcp_diag_sram, 0x37000 + 0x23178), mm_read(vcp_diag_sram, 0x37000 + 0x2317c));
+        for (unsigned off = 0x21f68u; off <= 0x21fe8u; off += 32u) {
+            printf("X9 MMUP STK %x: %x %x %x %x %x %x %x %x\n", off,
+                mm_read(vcp_diag_sram, 0x37000 + off + 0x00), mm_read(vcp_diag_sram, 0x37000 + off + 0x04),
+                mm_read(vcp_diag_sram, 0x37000 + off + 0x08), mm_read(vcp_diag_sram, 0x37000 + off + 0x0c),
+                mm_read(vcp_diag_sram, 0x37000 + off + 0x10), mm_read(vcp_diag_sram, 0x37000 + off + 0x14),
+                mm_read(vcp_diag_sram, 0x37000 + off + 0x18), mm_read(vcp_diag_sram, 0x37000 + off + 0x1c));
+        }
+    }
     if (vcp_diag_sram) {
         const unsigned ring_off = 0x37000u + 0x44314u;
         const unsigned ring_len = 0x3000u;
@@ -342,6 +450,8 @@ static int vcp_boot_ensure(void)
     uint32_t init_c0, init_c1;
     uint64_t smc_s0 = 0, smc_s1 = 0, smc_r1 = 0, smc_r0 = 0;
     uint32_t mmup_sz = 0, mmup_clr = 0, vcp_sz = 0, vcp_clr = 0;
+    struct vcp_core_snap snap_pre = {0}, snap_rst = {0}, snap_1ms = {0};
+    bool snap_1ms_ok = false;
     unsigned stage = 1;
     if (vcp_booted) return 0;
     if (vcp_fault) return EIO;
@@ -349,9 +459,11 @@ static int vcp_boot_ensure(void)
     if (e) return e;
     init_c0 = mm_read(vcp_cfg_core0, VCP_CORE_STATUS_OFF);
     init_c1 = mm_read(vcp_cfg_core1, VCP_CORE_STATUS_OFF);
+    vcp_snap_core1(&snap_pre);
     e = vcp_smc_ok(VCP_OP_RESET_SET, 1, &smc_s0);
     if (!e) { stage = 2; e = vcp_smc_ok(MMUP_OP_RESET_SET, 1, &smc_s1); }
     if (!e) {
+        vcp_snap_core1(&snap_rst);
         stage = 3;
         vcp_fault = true; /* Never free or re-release after first release attempt */
         mm_write_reg(vcp_cfg_core1, VCP_DRAM_RESV_ADDR_OFF, VCP_PACK_IOVA(vcp_mem_pa));
@@ -359,7 +471,7 @@ static int vcp_boot_ensure(void)
         mm_write_reg(vcp_cfg_core1, VCP_DRAM_RESV_LOGGER_OFF,
             VCP_PACK_IOVA(vcp_mem_pa + VCP_MEM_LOGGER_OFFSET));
         e = vcp_smc_ok(MMUP_OP_RESET_RELEASE, 1, &smc_r1);
-        if (!e) { stage = 4; e = vcp_poll_ready(mmup_mbox4, &mmup_sz, &mmup_clr); }
+        if (!e) { stage = 4; e = vcp_poll_ready(mmup_mbox4, &mmup_sz, &mmup_clr, &snap_1ms, &snap_1ms_ok); }
     }
     if (!e) {
         stage = 5;
@@ -368,7 +480,7 @@ static int vcp_boot_ensure(void)
         mm_write_reg(vcp_cfg_core0, VCP_DRAM_RESV_LOGGER_OFF,
             VCP_PACK_IOVA(vcp_mem_pa + VCP_MEM_LOGGER_OFFSET + VCP_MEM_LOGGER_SIZE));
         e = vcp_smc_ok(VCP_OP_RESET_RELEASE, 1, &smc_r0);
-        if (!e) { stage = 6; e = vcp_poll_ready(vcp_mbox2, &vcp_sz, &vcp_clr); }
+        if (!e) { stage = 6; e = vcp_poll_ready(vcp_mbox2, &vcp_sz, &vcp_clr, NULL, NULL); }
     }
     if (!e) {
         vcp_fault = false;
@@ -383,7 +495,7 @@ static int vcp_boot_ensure(void)
         (unsigned long long)smc_s0, (unsigned long long)smc_s1,
         (unsigned long long)smc_r1, (unsigned long long)smc_r0,
         mmup_clr, mmup_sz, vcp_clr, vcp_sz, e);
-    if (e) vcp_boot_diag_log();
+    if (e) vcp_boot_diag_log(&snap_pre, &snap_rst, &snap_1ms, snap_1ms_ok);
     return e;
 }
 /* Android regmap_read_poll_timeout_atomic uses an elapsed-time budget and

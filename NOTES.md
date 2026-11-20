@@ -160,6 +160,21 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 日志 360 分析与 MMUP TBUF/时间线/SRAM 里程碑诊断镜像
+
+- **360 实机结果（`/Users/tosasitill/360.txt`，镜像 `x9-camera-vcp-sramlog-20261120`）**：
+  - `X9 MM VCP BOOT: stage=4 pa=190000000 init=0/4 end=0/4 pc=0/0 rstn=ff00/ff01 smc=0/0/0/0 mmup=0/0 vcp=0/0 errno=60`。
+  - `X9 MM VCP DIAG1: pwr_ack=80f0010c pdn=8e8a8285 fenc=f0500180 slp=10100007/fccff11 sys=106c200 sec=0/0 wdt=0/0`。
+  - `X9 MM VCP DIAG2: c1_latch=0 lr=14e4 sp=fe1ce758 gpr5=1 c0_latch=0 gpr5=1 sram=1a0b5/1a0b5 exc=0/0/0`。
+  - `X9 MM VCP DIAG3: mbox4=0/0/0/0 msg=0 init=0 exc2=0/0/0 sram_w=0 r=0`；无 `X9 MMUP LOG:` 输出（`0x31837000+0x4430c..0x44b14` 全 0）。
+- **观察与静态核对**：
+  - **已证实**：`x9_mm_power.c` 相对 Android `vcp_helper.c`/`mmup.c`/`vcp_logger.c`/`vcp_helper.h`/`vcp_reservedmem_define.h` 的启动序列（SMC `VCP_OP_RESET_SET=2`、`MMUP_OP_RESET_SET=5`、`GPR1/2/3` 打包与偏移 `0x8d000` / 总长 `0x20e000`、`MMUP_OP_RESET_RELEASE=6`）逐项一致；`0x190000000` 落在重映射窗口 `[0x140000000, 0x1c0000000)` 内，MPU region 10–13 均非空。
+  - **已证实**：反汇编 `tinysys-mmup-RV33_A` 表明 `0x15d1c`（`MPU_setting`）在 region 5（`0x500000==0x500000`）必调 `0x1965e`（`printf`）写非缓存区 `0x4430c`（MPU region 3 `w1=0x0e0`）；360 实测 `sram_w=0` 说明 MMUP 未完成 `0x15d7e` 处的 `printf`。
+  - **推断**：359（`sp=fe114830`）与 360（`sp=fe1ce758`）均满足 `(0x21ff0 - sp) % 8 == 0` 且约 `32 MiB`，同时 `lr` 固定在 `0x14e4`（`0x14e0: jal 0x1511a` 返回点），高度疑似 Core 1 在 `0x1511a` 之前/之内发生递归异常导致栈下穿 `0x21000`（MPU region 1 只读区）后在 `0x13f4: addi sp, sp, -8; 0x13f8: sw t0, 0(sp)` 死循环；`exc`/`exc2`（`0x29b00..24`）位于可写回缓存区（MPU region 2 `w1=0x3e0`），若 D-cache 已开则 AP 直读 SRAM 仍见 0。
+- **本轮改动**：
+  - 在 `x9/kernel/src/bsd/dev/x9_mm_power.c` 仅失败路径补充：`X9 MM VCP SNAP pre/rst/1ms/end`（在 `RESET_SET` 前、后、释放后 `1ms` 及超时各采样 Core 1 `STATUS/PC/LR/SP/LATCH/WPTR/RSTN/SYS`）、`X9 MM VCP DIAG4/5`、`X9 MM VCP INTC1`、按 Android `mmup.c mmup_do_tbufdump_RV33()` 导出 16 项硬件 `X9 MMUP TBUF` PC 轨迹（退出时恢复 `R_CORE1_DBG_CTRL`），以及只读 `X9 MMUP HDR`/`PROG`/`STK`（LK/TF-A 写入的 MMUP SRAM 头、进度里程碑与启动栈帧）。正常路径无额外写操作。
+- **构建结果**：`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --name x9-camera-vcp-tbuf-20261120`，exit 0，`x9_mm_power.c` 零新增 warning；Candidate 为 `x9/out/x9-camera-vcp-tbuf-20261120/boot.img`（`15134720` B，`boot_sha256=bb3db4dcda4f76cb024db9036922d7d806168492caba235ccc02fbdc28594692`，`kernel_sha256=22f66715e7e3085c9f819889f63ee2b7a2c83fa331b5f66e780b3ae885d9f986`，含 `x9_camera=2`）。未使用 CI，无 run ID，待用户手动 `fastboot boot` 实测并回传下一份日志以一次性定位首错指令。
+
 #### 2026-11-20 日志 359 分析与 MMUP SRAM 日志/MBOX 诊断镜像
 
 - **359 实机结果（`/Users/tosasitill/359.txt`，镜像 `x9-camera-vcp-win-20261120`）**：
