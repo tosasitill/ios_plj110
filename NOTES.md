@@ -160,6 +160,19 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 日志 359 分析与 MMUP SRAM 日志/MBOX 诊断镜像
+
+- **359 实机结果（`/Users/tosasitill/359.txt`，镜像 `x9-camera-vcp-win-20261120`）**：
+  - `X9 MM VCP BOOT: stage=4 pa=158000000 init=0/4 end=0/4 pc=0/0 rstn=ff00/ff01 smc=0/0/0/0 mmup=0/0 vcp=0/0 errno=60`（保留内存成功落在 `[0x140000000, 0x1c0000000)` 窗口内）。
+  - `X9 MM VCP DIAG1: pwr_ack=80f0010c pdn=8e8a8285 fenc=f0500180 slp=10100007/fccff11 sys=106c200 sec=0/0 wdt=0/0`（`mm_mmup_sel` FENC bit31=1 时钟正常，`VCP_SYS_CTRL` 已带 `0x8200`，但 `VCP_R_SLP_EN` 仍保留 bits 1/2=1，表明 MMUP 未运行到 `0x153de` `0xbc38`）。
+  - `X9 MM VCP DIAG2: c1_latch=0 lr=14e4 sp=fe114830 gpr5=1 c0_latch=0 gpr5=1 sram=1a0b5/1a0b5 exc=0/0/0`：
+    - `sram=1a0b5/1a0b5` 证实两核 SRAM 均已由 LK/TF-A 正确加载。
+    - `lr=14e4` 精确命中 `tinysys-mmup-RV33_A` 异常/系统调用入口 `0x14e0: jal 0x1511a`（`ecall` 分支跳过 `0x29b0c/14/1c`，仅写 `0x29b00`/`0x29b24`，随后由 `0x14c5e`/`0x14ecc` 处理 `a7=0x32` `configASSERT`）。
+- **本轮改动**：
+  - 反汇编 `tinysys-mmup-RV33_A` `0x1965e`（`printf`）→ `0x17810`（`logger_puts`）定位 MMUP 固件自带 12 KiB SRAM 日志环形缓冲：`w_pos` `@0x31837000+0x4430c`、`r_pos` `@+0x44310`、ASCII 数据 `@+0x44314`（长 `0x3000`）。
+  - 在 `x9/kernel/src/bsd/dev/x9_mm_power.c` 仅失败路径追加 `X9 MM VCP DIAG3`（读 `mmup_mbox4 +0x100/104/108/10c/038`、`mbox1_init`、`0x29b00/04/24`、`sram_w/r`）及 32-bit 对齐只读输出 `X9 MMUP LOG:`，直接读取 MMUP 真实启动/断言日志。
+- **构建结果**：`python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --name x9-camera-vcp-sramlog-20261120`，exit 0，零新增 warning；Candidate 为 `x9/out/x9-camera-vcp-sramlog-20261120/boot.img`（`15130624` B，`boot_sha256=492564bca799bc9efc46a9ec5dc8b72beed2050cc02fbada2b0f0e6b95018133`，`kernel_sha256=cd2880dbc8dc8c541b8b303b649061e8c3f1f53074d3a709da888abac45f6700`，含 `x9_camera=2`）。未使用 CI，无 run ID，尚未上机测试。
+
 #### 2026-11-20 日志 358 分析与 VCP/MMUP 保留内存重映射窗口修复
 
 - **358 实机结果（`/Users/tosasitill/358.txt`，镜像 `x9-camera-android-vcp-20261120`）**：

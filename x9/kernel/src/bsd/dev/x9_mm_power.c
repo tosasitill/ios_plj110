@@ -293,6 +293,48 @@ static void vcp_boot_diag_log(void)
         vcp_diag_sram ? mm_read(vcp_diag_sram, 0x37000 + 0x29b0c) : 0xdeadbeefu,
         vcp_diag_sram ? mm_read(vcp_diag_sram, 0x37000 + 0x29b14) : 0xdeadbeefu,
         vcp_diag_sram ? mm_read(vcp_diag_sram, 0x37000 + 0x29b1c) : 0xdeadbeefu);
+    printf("X9 MM VCP DIAG3: mbox4=%x/%x/%x/%x msg=%x init=%x exc2=%x/%x/%x sram_w=%x r=%x\n",
+        mm_read(mmup_mbox4, 0x100), mm_read(mmup_mbox4, 0x104),
+        mm_read(mmup_mbox4, 0x108), mm_read(mmup_mbox4, 0x10c),
+        mm_read(mmup_mbox4, 0x38),
+        vcp_diag_sec ? mm_read(vcp_diag_sec, 0x30) : 0xdeadbeefu,
+        vcp_diag_sram ? mm_read(vcp_diag_sram, 0x37000 + 0x29b00) : 0xdeadbeefu,
+        vcp_diag_sram ? mm_read(vcp_diag_sram, 0x37000 + 0x29b04) : 0xdeadbeefu,
+        vcp_diag_sram ? mm_read(vcp_diag_sram, 0x37000 + 0x29b24) : 0xdeadbeefu,
+        vcp_diag_sram ? mm_read(vcp_diag_sram, 0x37000 + 0x4430c) : 0xdeadbeefu,
+        vcp_diag_sram ? mm_read(vcp_diag_sram, 0x37000 + 0x44310) : 0xdeadbeefu);
+    if (vcp_diag_sram) {
+        const unsigned ring_off = 0x37000u + 0x44314u;
+        const unsigned ring_len = 0x3000u;
+        uint32_t wpos = mm_read(vcp_diag_sram, 0x37000u + 0x4430cu);
+        unsigned dump_len = (wpos > 0 && wpos <= ring_len) ? wpos : 2048u;
+        unsigned start = (dump_len > 2048u) ? (dump_len - 2048u) : 0u;
+        char line[97];
+        unsigned col = 0, emitted = 0;
+        start &= ~3u;
+        for (unsigned off = start; off < dump_len && emitted < 24u; off += 4u) {
+            uint32_t word = mm_read(vcp_diag_sram, ring_off + (off % ring_len));
+            for (unsigned b = 0; b < 4u && off + b < dump_len; b++) {
+                unsigned char ch = (unsigned char)((word >> (b * 8u)) & 0xffu);
+                if (ch == '\r' || ch == '\0') continue;
+                if (ch == '\n' || col == 96u) {
+                    if (col) {
+                        line[col] = '\0';
+                        printf("X9 MMUP LOG: %s\n", line);
+                        col = 0;
+                        emitted++;
+                        if (emitted >= 24u) break;
+                    }
+                    if (ch == '\n') continue;
+                }
+                line[col++] = (ch >= 0x20u && ch <= 0x7eu) ? (char)ch : '.';
+            }
+        }
+        if (col && emitted < 24u) {
+            line[col] = '\0';
+            printf("X9 MMUP LOG: %s\n", line);
+        }
+    }
 }
 static int vcp_boot_ensure(void)
 {
