@@ -397,11 +397,13 @@ static void vcp_boot_diag_log(const struct vcp_core_snap *pre, const struct vcp_
     {
         /* Read-only MM SMMU (0x30800000) snapshot at VCP-boot failure. Offsets
          * follow x9_camera_native_smmu.inc (OPPO arm-smmu-v3): IDR0/1/5=0/4/14,
-         * CR0/ACK=20/24, GBPA=44, STRTAB_BASE=80(64), STRTAB_BASE_CFG=88. STE
-         * layout per x9_camera_smmu_attach.inc: fmt=(cfg>>16)&3; linear
-         * STE@strtab+sid*64; 2-level L1[sid>>8] (span9) -> L2+(sid&255)*64.
-         * Proves NS EL1 access, enable state and SID 80/90/a0/a1 STE default
-         * at the moment MMUP needs normal-window translation. No write. */
+         * CR0/ACK=20/24, GBPA=44, STRTAB_BASE=80(64), STRTAB_BASE_CFG=88,
+         * CMDQ_BASE=90(64)/PROD=98/CONS=9c, EVTQ_BASE=a0(64). STE layout per
+         * x9_camera_smmu_attach.inc: fmt=(cfg>>16)&3; linear STE@strtab+sid*64;
+         * 2-level L1[sid>>8] (span9) -> L2+(sid&255)*64. Dumps full 8-word STE
+         * (Config/S1Fmt/S1ContextPtr/S1CDMax/S2) for SID 80/90/a0/a1 plus queue
+         * geometry, so one boot fixes every path-b attach fact (NS access,
+         * enable, STRTAB fmt, CMDQ base/shift via IDR1, STE default). No write. */
         static vm_offset_t smmu_mmio, smmu_stb, smmu_l2;
         if (!smmu_mmio) smmu_mmio = ml_io_map(0x30800000, 0x20000);
         if (smmu_mmio) {
@@ -414,8 +416,16 @@ static void vcp_boot_diag_log(const struct vcp_core_snap *pre, const struct vcp_
             uint32_t cfg = mm_read(smmu_mmio, 0x88);
             uint64_t stb = (uint64_t)mm_read(smmu_mmio, 0x80) |
                 ((uint64_t)mm_read(smmu_mmio, 0x84) << 32);
+            uint64_t cmdq = (uint64_t)mm_read(smmu_mmio, 0x90) |
+                ((uint64_t)mm_read(smmu_mmio, 0x94) << 32);
+            uint32_t cprod = mm_read(smmu_mmio, 0x98);
+            uint32_t ccons = mm_read(smmu_mmio, 0x9c);
+            uint64_t evtq = (uint64_t)mm_read(smmu_mmio, 0xa0) |
+                ((uint64_t)mm_read(smmu_mmio, 0xa4) << 32);
             printf("X9 MM VCP SMMU: idr0=%x idr1=%x idr5=%x cr0=%x ack=%x gbpa=%x stb=%llx cfg=%x\n",
                 idr0, idr1, idr5, cr0, ack, gbpa, stb, cfg);
+            printf("X9 MM VCP SMMUQ: cmdq=%llx prod=%x cons=%x evtq=%llx\n",
+                cmdq, cprod, ccons, evtq);
             if (idr0 != 0 && idr0 != 0xffffffffu) {
                 uint64_t stb_pa = stb & 0x000fffffffffffc0ull;
                 unsigned fmt = (cfg >> 16) & 3u;
@@ -437,9 +447,11 @@ static void vcp_boot_diag_log(const struct vcp_core_snap *pre, const struct vcp_
                         }
                     }
                     if (sv)
-                        printf("X9 MM VCP STE %x: %x %x %x %x (fmt=%x)\n", sid,
+                        printf("X9 MM VCP STE %x: %x %x %x %x %x %x %x %x (fmt=%x)\n", sid,
                             mm_read(sv, soff), mm_read(sv, soff + 4),
-                            mm_read(sv, soff + 8), mm_read(sv, soff + 12), fmt);
+                            mm_read(sv, soff + 8), mm_read(sv, soff + 12),
+                            mm_read(sv, soff + 16), mm_read(sv, soff + 20),
+                            mm_read(sv, soff + 24), mm_read(sv, soff + 28), fmt);
                     else
                         printf("X9 MM VCP STE %x: unresolved fmt=%x stb=%llx\n",
                             sid, fmt, stb);
