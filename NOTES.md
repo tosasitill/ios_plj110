@@ -160,6 +160,29 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 goal「完成全部的通话和短信」completion audit（prompt→artifact 清单；turn16）
+
+objective 拆为具体交付项，逐项对当前源码/原件证据核对。**结论：goal 未完成**——完整收发功能受 audio/MO/IMS 与实机验收阻塞，非纯离线可闭合；离线可闭合项已闭合。约束项（按安卓证据/不出探针/不猜测）全程满足。
+
+| objective 要求 | 证据/artifact | 状态 |
+|---|---|---|
+| 通话 MT 接收 | call-md-approve 757b66f2/72c84338 在 main；X9Calls.inc:470/754/775/789/805 实测在位 | 机制完整，**待实机** |
+| 通话接听 answer | X9Calls.inc:207-222 VOICE22 guarded 0907（CNF success≠CONVERSATION） | 机制完整，**待实机** |
+| 通话 end/CallList46 | x9cw_calllist + bb kind2 + x9c_calllist_flush（#7）；双门 fail-closed | 机制完整，**audio 门闭→inert** |
+| 通话 technology | **042f 本轮实现** commit 2679f53d；X9Calls.inc:296/427/519/522；r4 boot sha dcbd764f | 实现+构建 exit0，**待实机填缓存** |
+| 通话 audio（VOICE09） | DSP consumer 固件已捕获（audio_dsp_b ADSP rv32，MIXER_MD_DL/ADSP2MD IRQ/CCIF_CH_MD2AP_CALL/EMI_ADDR_DL/UL，findings.md PARTIAL）；**MD producer/3D00 ABI/runtime task_info/iOS provider 缺** | **阻塞**：深 rv32 RE+MD firmware+设备 runtime+用户态 |
+| 通话 MO 拨号 | x9c_dial_submit 在位但**无生产 admission caller**（用户态 Call provider） | **阻塞**：用户态 provider |
+| 短信 CS 收发 | X9Messages.inc:479(0x605)/185(0x607)/530(0xa04)/298(deliver)/329(publish)/512(SendAck) 实测在位；547「NOT delivery receipt」 | 生产链完整，**待实机** |
+| 短信 IMS | android capture read_only/no_calls_sms_tests→**IMS wire 抓包缺失**；显式 X9Q_UNSUPPORTED | **阻塞**：需 Android IMS 抓包+adapter |
+| iOS 侧流程 | SMS CS/通话机制已接 CommCenter；来电 UI audio-gated 不出现（805 自证 no iOS call UI）；VirtualAudio consumer 边界已析（call-audio-analysis/voice-provider-analysis） | 部分 wired；**来电 UI/Call/VirtualAudio provider 阻塞** |
+| 按安卓日志/原件证据 | 全部 grounded（libmipc 反汇编/MD/DSP firmware strings/Android capture） | ✓ 满足 |
+| 不出探针镜像 | 本轮仅 r4 生产候选（boot-device.json），无探针 | ✓ 满足 |
+| 不猜测字段 | fail-closed；唯一推断步 voiceRat→Apple RAT 显式标注；3D00 不补造 payload/地址/节拍 | ✓ 满足 |
+| 离线可闭合尽量闭合 | 042f 闭合；audio consumer 误判纠正+3D00 非立即数否定结果 | ✓ 已尽离线 frontier |
+| 需实机诚实标注 | 本清单 + r4 验收清单 + findings.md 边界 | ✓ 满足 |
+
+**未完成项均需用户控制**：实机验收（手动 boot r4 + 回传串口）、audio（批准 runtime task-info ioctl40046914 回读 + 深 rv32 ABI 解码 + MD producer + iOS VirtualAudio 用户态 provider）、MO（用户态 Call provider）、IMS（Android IMS 抓包）。**我不自刷/重启/探针/猜测，无法自行取得这些→goal 完成阻塞于用户/设备动作。**
+
 #### 2026-11-20 通话 iOS 侧流程：VOICE22 接听准入 + CallList46 发布 owner（双门闭合）候选已构建，待实机（进行中）
 
 - **范围/基线**：单代理 `feat/call-ios-flow`，功能树 `.worktrees/call-ios-flow`，main 输入 **72c84338**（call-md-approve 已合入 main），代码提交 **503e654a**（rebase 到 8244b20b 前为 41ae4ec7；8 文件 +509/−60：`X9Calls.inc`、`coachz_baseband.cpp`、`x9_call_state.h`、`x9_call_wire.h`、`x9_mipc_bridge.inc`、`x9_mipc_calls.inc`、`x9_modem_bridge.h`、`docs/call-ios-bridge.md`）。承接用户"继续完成通话和短信的全部流程及 ios 侧流程"，方向"MD 层通话收发（按安卓日志）"，**不出探针镜像、不猜测字段**。根 checkout 未提交 `x9/shim/fdt_ram.c` VCP 与 NOTES haptic 条按用户指示**未动、未纳入本轮**（功能树 fdt_ram.c 为干净 main 版）。scratch `x9/out/call-ios-flow-20261120/`（证据/编译日志）与 `x9/out/call-ios-flow-20261120r2/`（候选产物），均功能树内 gitignored。无设备/ADB/fastboot/mailbox/分区操作，无 CI run ID（本地构建）。
