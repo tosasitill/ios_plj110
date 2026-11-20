@@ -160,6 +160,11 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 相机 Android VCP/MMUP 对齐测试镜像
+
+- 基于 `3736da1d` 执行 `python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --name x9-camera-android-vcp-20261120`，exit 0；Candidate 为 `x9/out/x9-camera-android-vcp-20261120/boot.img`（`15130624` B，`boot_sha256=73013650d8c4a05686a5a0083252668286826b7d147a641d943b31594a8c8ae8`，`kernel_sha256=ac38f2bd6630e6a7dacf16bfe4faa5824b52ed5207b6f25778331607110b25eb`，含 `x9_camera=2`）。未使用 CI，无 run ID。
+- 尚未上机，等待用户手动 `fastboot boot` 实测并回传串口/pstore 日志（重点核查 `X9 MM VCP BOOT`、`X9 MM POWER GET`、`X9 CAMERA MM`、`NATIVE SMMU` 与后续 CAMSV/RAW 日志）。
+
 #### 2026-11-20 357 逐项审计与 Android 流程对齐修复（VCP/MMUP 启动、MM 槽位、异常卸载、RAW10P）
 
 - **357 实机硬阻塞实证**：对原厂固件 `.local/x9/backups/partitions/firmware-originals/vcp-real-android-active-b/vcp_b.img` 检索直接证实 `hwccf_irq_init`、`hwccf_backup_handler`、`hwccf_backup1_cnt[]`、`mminfra_framework_on_off` 位于 **MMUP（VCP Core 1）**；`357.txt` 中 `BACKUP1`（`0x20724`）slot12 投票触发 `int_raw=0x4000`（`backup_vote_int_to_vip`）后因 X9 未执行 Android `vcp_helper.c` + `mmup.c` 启动链而在 `stage=4`（`CCF_BACKUP1_STA` bit3）超时。
