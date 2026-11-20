@@ -160,6 +160,17 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 RAW staging 格式审计：FORMAT_TAG1 固件中介证实 + X9 format=8 标记为未证推断
+
+- **目的**：闭合目标 RAW staging 阶段 NOTES:308/367 标记的未决项（CAMSV FORMAT_TAG1=1 vs 8 与 iOS RAW10 解包）。
+- **寄存器偏移（实测 `isp8s/cam/mtk_cam-sv-regs.h:327/330/336`）**：`GRAB_PXL_TAG1=0x548`、`GRAB_LIN_TAG1=0x54C`、`FORMAT_TAG1=0x554`——与 X9 `pipeline.inc:44` 注释一致。
+- **正常路径 FORMAT_TAG1 由固件 CQ 编程（实测，证实 NOTES:308）**：main `mtk_cam_sv_dev_config@1894` 调 `mtk_cam_sv_df_config@1588`，后者**只写** `SHARE_SRAM_TIME_OUT=0x2000000` 与 `DMATOP_CTL=0x1C0`（auto mode），**不写 FORMAT_TAG1**。全 isp8s `cam/*.c` **无任何 `SV_FMT_MIPI_RAW10`/`SV_FMT_RAW10`/`camsv_fmt` 枚举的寄存器编程使用点**（grep 零命中）。内核唯一直接写 FORMAT_TAG1 是 **slave stress-test 路径** `mtk_cam_slave_sv_dev_config:1870`=`0x1`（配 `camsv_stress_buf`、stride `0x1400<<16|0x10`），非正常预览。
+- **IPI 侧（实测 `mtk_cam-fmt_utils.c`）**：`sensor_mbus_to_ipi_fmt`(:968) 把 V4L2 `S*10P`(packed)→`MTKCAM_IPI_IMG_FMT_BAYER10_MIPI`(:419-423)、`S*10`(unpacked)→`BAYER10_UNPACKED`、`MTISP_S*10`→`BAYER10`。`mtk_cam_get_pixel_bits`(:226)：**BAYER10_MIPI=10bpp packed**（4px/5byte，匹配 iOS `camera_isp.c:unpack_line`），BAYER10_UNPACKED=16bpp。IPI 格式经 `cfg_in_param->fmt` 传固件，由固件 CQ 翻成 CAMSV FORMAT_TAG1。
+- **X9 现状与分歧（实测代码）**：`pipeline.inc:49 p->format=8`（SV_FMT_MIPI_RAW10），注释引 `mtk_cam-sv.h:142`+`fmt_utils:419-423`。**NOTES:367「X9 FORMAT_TAG1=1 匹配 Android:1870」已过时**——代码现为 8。`=8` 是**推断**（MIPI packed payload ↔ SV_FMT_MIPI_RAW10=8 ↔ IPI BAYER10_MIPI 10bpp 三者命名/位宽一致），**非源码直证**（正常路径值固件中介，内核不可见）。slave=1 不能反推正常路径=1（不同数据路径）。
+- **决策（不猜测）**：**保留 `format=8`**（与 BAYER10_MIPI 10bpp packed + iOS 4px/5byte 解包一致的最强推断），**不**无证据翻回 1。1 与 8 离线均不可直证。
+- **实证验证计划（待 CAMSV 通流后，门控于 MM_2→boot）**：同一正常预览请求回读 `FORMAT_TAG1(0x554)` 实际值 + 抓 RAW payload 首行字节序样本，对照 iOS `unpack_line` 的 4px/5byte MIPI RAW10P 排列；若回读=1 且 payload 为 packed，则需重新评估寄存器语义（FORMAT_TAG1 可能非 payload packing 的唯一决定位，packing 另由 CQ/pak_sel 控制）。在此之前不把任何静态对照当作 RAW 格式验收。
+- 本轮无代码改动（避免无证据翻转）、无镜像、无设备操作；commit 见下。
+
 #### 2026-11-20 路径 b STE 模板逐位源码实证（Android make_cdtable_ste + MTK setup_features）+ ASID 门控修正
 
 - **目的**：在 boot 几何门控期间，把 task #8 将写的 SID 0xa0 STE 模板**逐位对照 Android 源码定死**（非猜测），消除模板层面的不确定性。
