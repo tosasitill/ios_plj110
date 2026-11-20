@@ -160,6 +160,22 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 VCP/MMUP 启动链静态审计（源码逐项对照）+ READY pin 证实 bug 修复
+
+- **范围/边界**：纯静态审计，不出镜像、不上机、不操作设备。对照 Android `rv_v2/vcp_helper.c`、`mmup.c`、`vcp_logger.c`、`mtk-mbox.c`、`arm-smmu-v3.c`、`mtk-smmu-v3.c`、`live.dts`，并只读反汇编原 ATF `tee.img.atf.original.bin`（load base `0x88800000`）与 `lk_b.img`。改了一处证实 bug + 删两个死函数；单对象交叉编译验证。提交 `e56b7f54`。
+- **证实 bug #1（已修）——READY 轮询 pin/offset 错误**：旧代码看 `clr_irq_reg(+0x10c)` **bit7**、消息槽 **+0x38**。按 `live.dts` recv-table + `mbox_setup_pin_table()`（`vcp_helper.c:2781` / `mmup.c:268`，`is64d=1`）逐项推导：`IPI_IN_VCP_READY_0`（vcp chan `0x05`）是 vcp mbox2（`0x31ba0000`）recv 表第一项，`IPI_IN_VCP_READY_1`（mmup chan `0x1a`）是 mmup mbox1（`0x31bc0000`）recv 表第一项 → 两者均 **pin_index 0 / offset 0**。DT 无 `mbox%d_recv`，故状态读 `clr_irq_reg` bit0、写同位清（`mtk-mbox.c mtk_mbox_read_recv_irq`/`mtk_mbox_clr_irq`），消息在 `base+0x00`。**旧常量即使 MMUP/VCP 已启动也永远看不到 READY**；357 handoff 曾称 bit7/+0x38「逐项一致」属误判，本轮纠正。修复：`VCP_MBOX_READY_BIT=(1u<<0)`、`VCP_MBOX_READY_MSG_OFF=0x00u`，DIAG3 消息槽同步改 +0x00。
+- **逐项一致（源码证实，无需改）**：SMC `0xc200052c` 值/序（RESET_SET 2 → MMUP_RESET_SET 5 → 写 core1 GPR → MMUP_RELEASE 6 → 轮询 → 写 core0 GPR → VCP_RELEASE 3 → 轮询）；GPR 偏移 `cfg+0x44/48/4c` 与 `VCP_PACK_IOVA` 打包；保留内存布局（总长 `0x20e000`、logger 偏移 `0x8d000`/size `0x180000`、buf 1 MiB）；`vcp_log_ctrl` 初始化（base=`0x504C5402`、enable=0、info_ofs=24、buff_ofs=32）；3000 ms 超时；`vcp_enable_pm_clk` 在本 DT 无 regulator 操作（仅 IRQ + reset）；mbox 读/清寄存器语义；TBUF dump 对应 `mmup_do_tbufdump_RV33`。
+- **差异 #2（证实的架构缺口，未修）——GPR 内容 IOVA vs 裸 PA**：
+  - **Android**：`vcp_alloc_iova`（`vcp_helper.c:1953`）经 `dma_heap_find("mtk_mm-uncached")` → `dma_buf_attach/map_attachment`（mm_smmu_hfrp 共享设备，SID `0xa0`，IOVA 窗 `[0x140000000,0x1c0000000)`）→ `sg_dma_address` 是 **IOVA**，写入 GPR。翻译由内核 DMA API 经 pKVM hypercall `HYP_PMM_SMMU_CONTROL=0xBB00FFAE`（`mtk-smmu-v3.c:80`）→ ATF 建立。STE 默认 **ABORT**（`arm-smmu-v3.c:1412 arm_smmu_make_abort_ste`），设备驱动 attach domain 后才切 S1_TRANS。
+  - **ATF（反汇编证实）**：内建完整 SMMU 管理器（`mtk_smmu_setup_init`、`map_smmu_pgtable`@`0x26954`、`smmu_aid2sid_linear_map`、SMC `MTK_SIP_TEE_SMMU_CONTROL=0xc2000831`/`MTK_SIP_HYP_SMMU_CONTROL=0xc2000834`）。boot 期映射经 region 表（`0x898d8`，8 项）：entry0–2 IOVA 全在 **protected 窗** `[0x100000000,0x140000000)`（entry1 = VCP loader buf，IOVA `0x106c00000`/size `0xe00000`），entry3–7 为 PA-direct 区。**没有任何 boot 期映射覆盖 normal hfrp 窗**。`map_smmu_pgtable` 仅按 IOVA 查 iovaGraph 按需写 PTE；调用者只有 region_map（boot 装载）与运行时 SMC handler（`0x337f8`）。
+  - **LK（扫描证实）**：`lk_b.img` 只调 `0xc2000413`（VCP 装载，ATF 内名 `MTK_SIP_TEE_UFS_CONTROL`，handler `0x54408`，op=2 装载），**不调任何 SMMU 控制 SMC**。
+  - **X9（审计证实）**：GPR 写裸 PA `0x15FC00000`（打包成 IOVA 形式），**从不为 SID 0xa0 attach domain / 建翻译**；VCP boot 前不写任何 SMMU 寄存器、不发 SMMU SMC。
+  - **结论**：X9 释放 MMUP 时，normal 口 DRAM 访问（GPR3 logger buf、MPU region 10–13）没有翻译。359/360 的异常环（`lr=14e4`、sp 下穿、`sram_w=0`）与此**吻合（推断，非实证）**。唯一未直接 dump 的细节是 ATF `setup_init` 留给 SID 0xa0 的 STE 默认值；但「STE 默认 ABORT 生命周期 + 无任何映射请求」使翻译失败成为源码支持的预期。
+- **顺序审计（task 3，证实）**：shim 的 camera/SMMU handoff（`camera_handoff.c`/`camera_smmu_handoff.c`）只读 FDT，无 SMMU MMIO 写；XNU 中仅相机代码引用 `0x30800000` 且在 MM acquire/VCP boot **之后**运行。loader buffer `0xbd200000`（mblock-51）低于 XNU 内存起点 `X9_RAM_LO=4 GiB`，**不被 XNU 映射/覆盖**（363「内容完好」推断现有源码支撑）。Android `call-owned-runtime/dmesg.txt` 每次 resume 重释放 MMUP 均 ready、无额外 SMMU 操作 → TF-A protected 翻译长期保持。**故 X9 在 VCP boot 前不破坏 SMMU/MM 电源状态**；stage=4 失败不能归因于 X9 早期扰动。
+- **365/366 状态**：365 hang 的 bzero(Device) 假说已用 volatile 32-bit store 修复（`97fe8e79`）；carveout2 镜像待 366 日志区分 `ml_io_map` hang vs bzero hang。**本轮未出镜像**。
+- **编译验证**：`x9/out/camera-vcp-ready-pin-20261120/kernel-unit.py` 单对象 `compile_one(x9_mm_power.o)` → `result True`、exit 0、**2 条既有导出头 warning**（与 357 基线一致；删死函数后 unused-function warning 清零）。无整包/boot.img。
+- **下一步具体动作**：为 SID 0xa0 建立 carve-out 的 IOVA→PA 翻译，再释放 MMUP。两条路径：(a) 调 ATF SMMU SMC（`0xc2000831` TEE / `0xc2000834` HYP）映射 carve-out——需先反汇编 handler（`0x21a50`/`0x4496c`）确定参数 ABI 与 NS EL1 可调用性；(b) 参照相机 native SMMU 代码直接从 XNU 编程 STE+页表——须先确认 ATF/pKVM 对 MM SMMU 安全上下文的所有权边界。先确定 ATF `setup_init`（`0x34880` 区，全局初始化 `0x47670`）留下的 STE 默认值，再选路径。本轮分析脚本在 `x9/out/camera-vcp-ready-pin-20261120/`（gitignored）。
+
 #### 2026-11-20 日志 360 分析与 MMUP TBUF/时间线/SRAM 里程碑诊断镜像
 
 - **360 实机结果（`/Users/tosasitill/360.txt`，镜像 `x9-camera-vcp-sramlog-20261120`）**：
