@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 路径 b ②③④ 复用缺口图（实测源码）：SID80 attach 引擎/STE 编码/host 接口已存在，缺 MM SMMU host adapter + SID 0xa0 参数化 + identity map 接入
+
+- **目的**：①落地后核查现有 SMMU attach 基础设施，厘清 path-b（MM SMMU@0x30800000 SID 0xa0）相对现有 camera SMMU（SID80）引擎的**精确复用 vs 新建缺口**，避免 boot 后重复 486 行 BBM/guard 机制。无代码改动、无镜像、无设备操作。
+- **③ STE 编码已存在且逐位吻合锁定模板（实测 `x9_camera_smmu.inc`）**：`:281` `ste[SID*8]=1|(5<<1)|m->view.map.cd_pa`=`0xB|cd_pa`（=锁定 word0）；`:82 cam_smmu_s1_ste_word1`=`2|(2<<6)|(((idr0>>24)&3)==0?1<<27:0)|(native?tcu_prefetch<<56:0)`=`0x82|S1STALLD|TCU_PF`（=锁定 word1，S1DSS=SSID0/S1CIR,COR=NC/S1CSH=OSH/EATS0/STRW NSEL1）；word2..7=0。**SID 0xa0 可直接复用此编码，仅 STE 索引 0x80→0xa0**。BBM 序列（清 V→CFGI_STE→写 word1..7→写 word0→CFGI_CD→TLBI_NH_ASID→SYNC）已在 `x9_camera_smmu_attach.inc:401-409` 实现。
+- **② host 接口已存在（实测 `x9_camera_smmu.h:79-98`）**：`struct x9_camera_smmu_host{context,lease,enter/guard/leave 回调,strtab/cmdq/strtab_l2 regions}`；enter「proves NS permission, leased SID80/SSID0/ASID1」+ 跨所有生产者（含固件）的表/队列串行化，guard 每次 mutation 前重验，leave 仅释放串行化（不释放 backing/power/lease）。`X9_CAM_SMMU_HOST_CMDQ_SHIFT=19`/`L1_MAX=4096`。**缺的是 MM SMMU@0x30800000 的具体 host adapter 实例**（map STRTAB/CMDQ/EVTQ、证 NS 写权限+串行化、lease SID 0xa0/SSID0/ASID=1）——**boot 门控**（NS 写权限/CR0/STRTAB fmt/CMDQ shift 须 boot DIAG 实证）。
+- **attach 引擎已存在但 SID80+normal-builder 耦合（实测 `x9_camera_smmu_attach.inc` 486 行 + `x9_camera_smmu.inc`）**：`x9_camera_smmu_attach/attached_check/detach` + `cam_shared_*`（capture/guard/submit/store/retire_timeout，继承表/队列逐字保护、foreign STE 不接管、prior-preserving、BBM、CMDQ_PROD 单点发布+双采样 CONS）。硬编码 `CAM_SMMU_SID=0x80`(:21)、`CAM_SMMU_ASID=1`；`cam_smmu_storage`(:148)/`cam_smmu_identity`(:127) 经 `x9_camera_s1_validate(m->map)` 深校验 **normal builder** 的 `raw_pa[]`/`raw` 字段。
+- **① export 接口兼容（实测）**：引擎 `m->view.map` 即 `struct x9_camera_s1_export`（`cam_smmu.inc:277 x9_camera_s1_export(m->map,ASID,&m->view.map)`），与新 `x9_camera_s1_id_export` 输出**同类型**（backing/raw=NULL）。**接入缺口**：`cam_smmu_storage` 校验 normal builder 字段（identity 无 raw backing），且 `m->map` 类型为 `x9_camera_s1*` 非 `x9_camera_s1_id*`。
+- **boot 后实现路线（推断，待 boot DIAG 几何门控）**：path-b 不应重写 BBM/guard，而应：(a) 写 MM SMMU host adapter 实例（②，boot 门控）；(b) 把 attach 引擎 SID 参数化（0x80→0xa0）+ 让 storage/identity 接受 identity map（或为 SID 0xa0 建复用 STE 编码/BBM 模式的 sibling 引擎）；(c) 用 ① identity export 填 `m->view.map.cd_pa`；(d) 接入 `vcp_boot_ensure` MMUP_RELEASE 前（④）。**全部待 boot DIAG（STE a0 默认/NS 写权限/CR0/STRTAB fmt/CMDQ shift/IDR5）后作为单一完整编译实证 feature 写入**，写镜像前用户确认。当前关键路径仍硬件门控于用户手动 fastboot boot 候选 x9-camera-smmu-dual-20261120 + 下一份 ~/NNN.txt（最新 365 无 SMMU 输出）。commit 见下。
+
 #### 2026-11-20 路径 b 组件① identity S1 构建器落地（纯页表构造，编译实证，非 attach；②③④仍 boot 门控）
 
 - **目的**：task #8 拆为 ①PA 输入 identity S1 构建器 ②live ATF MM SMMU host adapter ③STE 0xa0 模板安装 ④接入 vcp_boot_ensure。②③④依赖 boot DIAG（NS 写权限/CR0/STRTAB fmt/CMDQ shift/IDR5 granule/STE a0 默认），**仍 boot 门控不写**。①是**纯计算页表构造**（模块头明确「NOT attach path」），几何已锁定、runtime 门控 idr5，不依赖 boot 即可编译实证，先行落地以加速 boot 后关键路径。**无设备操作、无新镜像**（沿用候选 x9-camera-smmu-dual-20261120）。
