@@ -160,7 +160,7 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
-#### 2026-11-20 蓝牙 rootboot14r2：当前 main 完整候选已构建，待实机（进行中）
+#### 2026-11-20 蓝牙 rootboot15：最新 main 完整候选已构建，待实机（进行中）
 
 - **范围/基线**：单代理 `feat/bluetooth-continue-20261120`，功能树 `.worktrees/bluetooth-continue`，初始 main 输入 **343b2409**。根 checkout 的 SMS 未提交 NOTES 与 `x9/shim/fdt_ram.c` VCP 改动从未由本轮切换/写入。scratch `x9/out/bluetooth-continue-20261120/`（功能树内）。无设备/ADB/fastboot/mailbox/分区操作，无 CI run ID（本地构建）。
 - **动机/观察**：rootboot13（AKS wrap 修复 `fabf4d4e` + 振动透传 `66dd5f8c`）构建后从未上机；Mac 现存最新日志 356–365（11-20）全部是被动蓝牙（`board session unavailable errno=6`，未带 `x9_bt_init=1`），331–355 日志不在家目录。设备根盘仍装着某版自有七文件（launcher 回退 stock bluetoothd 在跑）。
@@ -168,7 +168,10 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **输入**：launchd 两原件+权威 cache（796447 B）与 Apple originals 均取自同一合并归档；`bluetoothd` SHA256 **8b7c0a0b…** 与 §5.12 记录原件一致。boot 参数原样沿用 rootboot13 `inputs/boot.json`（**593 B**：als3/prox3 + `x9_bt_init=1 x9_bt_fc=1 x9_bt_root=1`）。
 - **升级链**：rootboot2..13 的 root-payload 按七文件 SHA 去重为 **5 个版本**（2 / 3–9 同 / 10 / 11 / 12–13 同），全部 `--previous-payload` 嵌入，共 **8 个可升级旧版本**（`embedded 7 files, 1110953 bytes`）。设备当前安装版未知（331–355 日志缺失），全链覆盖 rootboot2..13 任何状态；内容已等于新 payload 时只校验不写，未知内容整体拒绝。
 - **失败/修正**：r1 `bt-native-rootboot14-20261120` 的 kernel/userland-jobs/root-payload 三阶段成功，boot 阶段 **exit1**：`llvm-objcopy missing`（PATH 未含 `/opt/homebrew/opt/llvm/bin`，已知打包依赖）；失败目录与日志原样保留，无 manifest、未交付。r2 补 PATH 后全新名字 **`bt-native-rootboot14r2-20261120`** 完整 exit0：103/103 overlay（3 prebuilt）、四阶段全 exit0、Image 33038336 B / boot 15347712 B、rollback 569 B；manifest built_complete/candidate_ready=true，runtime/audio/stageable/root_installed=false。产物已迁主 checkout `x9/out/bt-native-rootboot14r2-20261120/`。
-- **版本边界（随后补记更新）**：构建期间 origin/main 已由其它任务推进 16 个提交（display fill/island 默认 on `bfbc0e51`、真实 SCP 方向接入 `266d3de9` 等生产更新）；r2 基于旧 main，**只作中间产物**。最终候选将基于最新 main 重建并另补确切结果；同期 orientation v2 整包虽也含 BT root1，但带 `x9_motion=3`，不作蓝牙单变量验收镜像。
+- **同期 main 吸收/最终重建**：r2 构建期间 origin/main 已由其它任务推进 16 个提交（display fill/island 默认 on `bfbc0e51`、真实 SCP 方向接入 `266d3de9`/PR #5 等生产更新，head **6266ec76**）；r2 基于旧 main 343b2409，**只作中间产物，不推荐**。本轮 rebase 到 6266ec76（仅 NOTES 冲突，保留完整 incoming 后插入本段），XNU 补丁无变化、隔离树不重建；`prepare-local.py --check` exit0。同期 orientation v2 整包虽也含 BT root1/init1，但带 `x9_motion=3`（首次启动会向 backboardd 装自有 dylib），不作蓝牙单变量验收镜像。
+- **最终构建 rootboot15**：源码 **082a972b**（生产 = 6266ec76）；`candidate.py --name bt-native-rootboot15-20261120`，其余参数与 r2 完全相同（593 B boot 参数；新 main 的 `x9_motion` 默认 0 无需 token，fill/ui 按已发布默认 on），PATH 含 `/opt/homebrew/opt/llvm/bin`，实际 **exit0**；`candidate-build.log` **104/104 overlay**（3 prebuilt，含 motion 对象）、四阶段全 exit0；内置 packer **Image 33173504 B / boot 15372288 B**（<20 MiB），rollback 569 B；payload 仍 7 文件 1110953 B / 8 可升级旧版本。manifest built_complete/candidate_ready=true，runtime/audio/stageable/root_installed=false。按规则未二次解包/hash/反汇编；GPU280 不变、无 plugin-package，设备保持 280 时**无需 mailbox**。
+- **交付**：整个产物目录已无覆盖 APFS 复制至主 checkout **`x9/out/bt-native-rootboot15-20261120/`**（boot SHA 复制前后一致 a9dad241…）：`boot/boot.img`（安装/升级，`x9_bt_root=1`）与 `boot-rollback/boot.img`（`x9_bt_root=2` 恢复 Apple 原件）。r2 目录 `x9/out/bt-native-rootboot14r2-20261120/` 与 r1 失败目录（功能树内）保留作中间证据。root 写仅发生在用户手动 boot 时由 PID1 执行，属 11-15 已许可的七文件范围；本轮自身没有写设备。
+- **下一（用户实机）**：手动 `fastboot boot x9/out/bt-native-rootboot15-20261120/boot/boot.img`，保存新原始日志。先看 `X9 BT ROOT:`（upgrade/install errno、installed N/7）→ `X9 BT:` SSPM/vendor 全部 ACK/DONE、`complete firmware session chip=6653`、`kern.x9_bt_boot=0/power0` → `X9 BT USER:` constructor/路由安装/POSIX.open（330 的 AKS reason=130 循环应消失，bluetoothd 不再 10 s 重启）→ 真实 HCI Reset/capabilities/0c33/31/35 → 扫描→配对/UI/key 持久化→BLE→A2DP→HFP/SCO。launchd 异常用 rollback。振动为本镜像已含的 rootboot13 透传基线，光感 als3；fill/ui 默认 on 为首启既有已批准行为。音频 vendor 真实映射、活动连接 suspend/FW wake 仍未完成；**编译成功不是功能验收**，目标保持 active。功能树/分支保留等待实机日志，不删产物/备份。
 
 #### 2026-11-16 方向传感器：内核 + iOS 接入（整包候选已构建，待实机）
 
