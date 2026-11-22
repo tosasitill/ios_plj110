@@ -1,0 +1,269 @@
+/* Bounded HEVC configuration/independent-picture parser, shared with XNU.
+ * This is a syntax gate, NOT a decoder. Only base-layer Main/Main10 4:2:0
+ * are accepted; legacy independent-IDR, standalone IRAP and stateful AU gates
+ * are separate.
+ * Main-compatible 8-bit Main Still Picture
+ * uses the Main decode path; monochrome Rext alpha returns ENOTSUP (no fallback).
+ * config_inspect separately exposes bounded syntax facts, never admission.
+ */
+#ifndef X9_HEVC_BITSTREAM_H
+#define X9_HEVC_BITSTREAM_H
+#include <stdint.h>
+#include <stddef.h>
+#define X9_HEVC_MAX_CONFIG (64u * 1024u)
+#define X9_HEVC_MAX_INPUT (8u * 1024u * 1024u)
+#define X9_HEVC_MAX_DIM 4096u
+#define X9_HEVC_PROFILE_MAIN 1u
+#define X9_HEVC_PROFILE_MAIN10 2u
+#define X9_HEVC_PROFILE_MAIN_STILL 3u
+#define X9_HEVC_PROFILE_REXT 4u
+#define X9_HEVC_MAX_PARAMETER_SETS (16u + 16u + 64u)
+struct x9_hevc_parameter_set {
+    uint32_t offset, bytes;
+    uint8_t type, id, reference_id, reserved;
+};
+struct x9_hevc_config {
+    uint32_t coded_width, coded_height, width, height, crop_x, crop_y;
+    uint32_t profile, bit_depth, level, length_size, vps_id, sps_id, pps_id;
+    /* profile is the unmodified SPS/hvcC value. decoder_profile is the
+     * required Main/Main10 capability, NOT a newly advertised HW profile.
+     * Compatibility flags retain their big-endian bit numbering: profile 1
+     * is bit30, not bit1. This struct is private, not the vdec ioctl ABI. */
+    uint32_t decoder_profile, profile_compatibility;
+    /* Inspection facts from the actual SPS, not the primary image's depth or
+     * an hvcC label. Constraints retain all 48 bits in the low bits of u64.
+     * decoder_profile=0 means no existing decode admission, not profile Main.
+     * RExt bits: SPS bit8 rotation ... bit0 CABAC bypass alignment; PPS bit0
+     * cross-component prediction, bit1 chroma QP list. Extension flags are
+     * the exact 8 syntax bits (range in bit7, extension_4bits in bits3..0).
+     * PPS facts below describe only the representative linked PPS. */
+    uint32_t chroma_format_idc, separate_colour_plane_flag;
+    uint32_t bit_depth_luma_minus8, bit_depth_chroma_minus8;
+    uint32_t profile_space, tier_flag;
+    uint64_t profile_constraints;
+    uint32_t sps_extension_flags, sps_range_extension_flags;
+    uint32_t pps_extension_flags, pps_range_extension_flags;
+    uint32_t pps_log2_max_transform_skip_block_size_minus2;
+    uint32_t pps_log2_sao_offset_scale_luma, pps_log2_sao_offset_scale_chroma;
+    uint32_t ps_offset[3], ps_bytes[3], annexb_bytes;
+    uint32_t max_sub_layers, max_dpb, max_reorder;
+    /* All distinct VPS/SPS/PPS from the immutable hvcC, grouped in decoder
+     * dependency order. IDs, not array order, establish PPS->SPS->VPS links.
+     * ps_offset/ps_bytes and *_id above retain ONE representative linked
+     * chain for legacy callers, not a claim that the catalog has one set.
+     * All SPS must currently share output geometry/depth/profile/layer count;
+     * dimension-changing parameter sets need the native format-change path.
+     * DPB/reorder above are maxima across every retained SPS. */
+    uint32_t config_bytes, parameter_set_count;
+    struct x9_hevc_parameter_set parameter_sets[X9_HEVC_MAX_PARAMETER_SETS];
+};
+/* One selected SPS, never a VUI table in the kernel's full catalog. Presence
+ * and inferred values are separate: absent colour description means CICP2,
+ * not BT709; absent signal/range and chroma location infer limited/type0.
+ * Display-window offsets are in chroma units, NOT another conformance crop. */
+struct x9_hevc_vui {
+    uint8_t present, aspect_ratio_present, aspect_ratio_idc, overscan_present;
+    uint8_t overscan_appropriate, video_signal_present, video_format, full_range;
+    uint8_t colour_description_present, colour_primaries, transfer, matrix;
+    uint8_t chroma_location_present, chroma_top, chroma_bottom, neutral_chroma;
+    uint8_t field_seq, frame_field_info_present, display_window_present, timing_present;
+    uint8_t poc_proportional, hrd_present, restriction_present, tiles_fixed;
+    uint8_t motion_over_boundaries, restricted_ref_lists, reserved[2];
+    uint32_t sar_width, sar_height, display_window[4];
+    uint32_t num_units_in_tick, time_scale, ticks_poc_diff_one_minus1;
+    uint32_t min_spatial_segmentation, max_bytes_per_pic_denom, max_bits_per_min_cu_denom;
+    uint32_t log2_max_mv_horizontal, log2_max_mv_vertical;
+    uint32_t pps_id, sps_id, vps_id;
+};
+/* Returns 0 or a BSD errno. Rejects unsupported formats rather than inventing
+ * capabilities. The VPS/SPS/PPS spans refer to the unchanged hvcC snapshot. */
+int x9_hevc_config_parse(const uint8_t *, size_t, struct x9_hevc_config *);
+/* Read-only bounded inspection, NOT native/Annex B admission. Supports the
+ * existing Main/Main10/Main-compatible Still subset plus base-layer chroma0
+ * RExt (profile4 or explicit compatibility4), luma/chroma syntax depths8..15,
+ * nine SPS RExt flags and base/PPS RExt syntax through exact RBSP trailing
+ * bits. Chroma0 crop units are 1x1; separate colour planes, multilayer/3D/SCC
+ * and depth16 remain unsupported. Future extension_4bits tails are opaque,
+ * canonical RBSP-bounded, not interpreted. All SPS must share the retained
+ * PTL/geometry/depth/extension facts. Every PPS is checked against its own
+ * referenced SPS; VPS is only ID/PTL-prefix checked, not fully validated.
+ * This is not complete Annex A/profile/level or coded-slice conformance, not
+ * AUX_ALPHA association, and not a newly proved decoder capability. Original
+ * spans/bytes stay intact. Failure clears output; parse retains its old gate. */
+int x9_hevc_config_inspect(const uint8_t *, size_t, struct x9_hevc_config *);
+/* NULL dst performs the same validation and reports required size. */
+int x9_hevc_idr_annexb(const struct x9_hevc_config *, const uint8_t *hvcc,
+    const uint8_t *sample, size_t sample_bytes, uint8_t *dst, size_t capacity,
+    size_t *written);
+/* Raw syntax facts, not inferred NoRaslOutputFlag or hardware completion. */
+struct x9_hevc_irap_picture {
+    uint32_t nal_type, pps_id, no_output_of_prior_pics_flag;
+};
+/* Standalone base-layer BLA(16..18)/IDR(19..20)/CRA(21), TemporalId=0,
+ * exactly one picture, matching slice type/PPS/no_output_of_prior_pics_flag.
+ * Main-compatible Main Still Picture remains IDR-only. Checks bounded AU
+ * framing/catalog plus AUD/prefix/VCL/suffix/EOS/EOB ordering; no leading or
+ * inter pictures are accepted. Optional picture and required written are
+ * cleared on failure. NULL dst validates and reports the AU's Annex B size.
+ * Unlike legacy IDR, this does NOT prepend parameter sets: use a FRESH native
+ * session initialized with the full catalog and DRAIN for this one picture.
+ * Firmware must implement random-access/POC/DPB semantics; syntax cannot
+ * establish those capabilities or make a pending CRA into a decoded frame. */
+int x9_hevc_irap_annexb(const struct x9_hevc_config *, const uint8_t *hvcc,
+    const uint8_t *sample, size_t sample_bytes, uint8_t *dst, size_t capacity,
+    size_t *written, struct x9_hevc_irap_picture *picture);
+/* Stateful video AU gate. Firmware owns reference picture sets and the
+ * decoder's POC/DPB operation. The host POC helper below only derives metadata
+ * and checks real output order; it never drives references or sorts pictures.
+ * Allows base-layer TRAIL/TSA/STSA/RADL/RASL/BLA/IDR/CRA;
+ * excludes reserved types and multilayer profiles. One complete picture per
+ * sample, any retained PPS, all slices in one picture use the SAME PPS;
+ * in-band parameter sets must match one unchanged retained hvcC set.
+ * New parameter sets require a format-description/session change.
+ * config Annex B is supplied once to session create, not before every frame. */
+int x9_hevc_au_annexb(const struct x9_hevc_config *, const uint8_t *hvcc,
+    const uint8_t *sample, size_t sample_bytes, uint8_t *dst, size_t capacity,
+    size_t *written);
+int x9_hevc_parameter_sets_annexb(const struct x9_hevc_config *, const uint8_t *hvcc,
+    uint8_t *dst, size_t capacity, size_t *written);
+/* Validate the whole one-picture AU gate, then follow that picture's actual
+ * PPS->SPS. hvcC length must equal config_bytes. No representative-SPS guess,
+ * synthesized CM extensions or SEI override; output is cleared on failure. */
+int x9_hevc_sample_vui(const struct x9_hevc_config *, const uint8_t *hvcc,
+    size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes, struct x9_hevc_vui *);
+/* Resolved base-layer prefix SEI in THIS complete AU, not
+ * persistent video state or a transfer/tone-map policy. Direct TemporalId
+ * must match the picture. Bytes are the original big-endian
+ * payloads, after canonical emulation-prevention removal. No numeric scaling
+ * or RGB-primary reorder. Equal repeated messages are legal; conflicting
+ * values, malformed SEI lengths/trailing bits fail with cleared output.
+ * Mid-picture prefix repeats require the same type before the first VCL.
+ * D.2.1 defines suffix137/144/147/148 as reserved payloads, not these messages.
+ * Scalable nesting resolves layers/operation layer sets using the actual
+ * picture PPS->SPS->VPS; VCL-associated nested HDR requires NAL TemporalId0
+ * and every MaxTemporalId6 (D.3.24), not the direct SEI's Tid equality rule.
+ * Non-base scoped messages are not promoted. Unknown payload syntax and
+ * other nesting families remain uninterpreted, not complete SEI validation.
+ * SEI148 retains exact8 nominal-environment bytes; illuminance must be
+ * nonzero and both xy values <=50000. SEI147 retains the exact preferred u8,
+ * including unsupported code points; no label inference or tone mapper. */
+#define X9_HEVC_HDR_DIRECT 1u
+#define X9_HEVC_HDR_SCALABLE_LAYERS 2u
+#define X9_HEVC_HDR_SCALABLE_OPERATIONS 4u
+#define X9_HEVC_HDR_SOURCES 7u
+struct x9_hevc_hdr {
+    uint32_t mastering_present, light_present, ambient_present, preferred_present;
+    /* Bitstream provenance only, ORed for agreeing repetitions. CM/container
+     * readers leave these zero; presence/zero numeric payload are distinct. */
+    uint32_t mastering_sources, light_sources, ambient_sources, preferred_sources;
+    uint32_t preferred_transfer; /* exact u8 code point, not an inferred CFString code */
+    uint8_t mastering[24], light[4], ambient[8];
+};
+/* Shared shape/provenance and ambient numeric constraints for bitstream and
+ * exact CM/container snapshots. Does not invent absent fields or mastering
+ * chromaticities, rescale values, or validate complete colour conformance. */
+int x9_hevc_hdr_validate(const struct x9_hevc_hdr *);
+/* HDR-only still/HEIF preflight also validates SEI165/149: resolved base alpha
+ * and applicable CCV (including cancel) return ENOTSUP rather than being
+ * silently dropped. D.3.40's mandatory CCV ignore cases still pass through. */
+int x9_hevc_sample_hdr(const struct x9_hevc_config *, const uint8_t *hvcc,
+    size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes, struct x9_hevc_hdr *);
+/* F.14.2.8/F.14.3.8: exact resolved base-layer prefix SEI165 syntax in THIS AU.
+ * Sources use the same direct/scalable scope bits as HDR, not a carrier claim.
+ * Scalar fields are meaningful only when present && !cancel. Endpoint widths
+ * are bit_depth_minus8+9 (9..16 bits); equal and descending endpoints are legal.
+ * use_idc retains all 3 bits, including reserved3..7, without mapping to an
+ * alpha convention. Absent use_idc's normative inference2 is not a message.
+ * These facts do NOT establish AUX_ALPHA/associated primary/bit-depth equality
+ * or perform clip/increment/normalization. Persistence/cancel applies in OUTPUT
+ * order and must not be committed with SUBMIT/HDR input state. Until a genuine
+ * carrier/association/output consumer exists, decoding consumers reject any
+ * resolved base alpha message (including cancel); non-base messages are not
+ * promoted. Unknown payload extension bits are ignored as D.3.1 requires. */
+struct x9_hevc_alpha {
+    uint32_t present, sources, cancel, use_idc, bit_depth_minus8;
+    uint32_t transparent, opaque, incr, clip, clip_type;
+};
+/* D.2.40/D.3.40: resolved base-layer prefix SEI149 facts in THIS AU.
+ * Signed chromaticities retain their exact i(32) values and original component
+ * order; luminance is unscaled u(32), NOT cd/m2. Reserved bits are retained but
+ * ignored semantically. Scope/duplicate checks do not establish applicability:
+ * selected-SPS colour and CLVS alternative transfer must still be consulted.
+ * Persistence/cancel is OUTPUT-order state, never SUBMIT/HDR forward state.
+ * Existing still/video consumers reject applicable facts until that consumer
+ * exists, including cancel; the normative unspecified/transfer ignore cases
+ * stay ignored. Unknown suffix149 remains reserved, not a CCV message. */
+struct x9_hevc_ccv {
+    uint32_t present, sources, cancel, persistence;
+    uint32_t primaries_present, min_present, max_present, avg_present, reserved_zero;
+    int32_t primaries[3][2];
+    uint32_t min_luminance, max_luminance, avg_luminance;
+};
+/* D.3.40's mandatory ignore conditions from actual selected-SPS VUI and
+ * resolved CLVS SEI147 state, not a container/CFString guess. Returns errno;
+ * clears applicable on failure. Does not implement output-order persistence,
+ * colour-primary inference or an inverse transfer/tone mapping policy. */
+int x9_hevc_ccv_applicability(const struct x9_hevc_vui *, const struct x9_hevc_hdr *,
+    uint32_t *applicable);
+/* Complete AU/catalog/SEI validation before publishing any facts. EOS/EOB are
+ * observed NAL units, not inferred from DRAIN or no_output_of_prior_pics_flag.
+ * The metadata gate is bounded, not a complete validator of unknown SEI
+ * semantics or reserved payloads. Output is cleared on failure. */
+struct x9_hevc_au_metadata {
+    uint32_t nal_type, temporal_id, pps_id, no_output_of_prior_pics_flag;
+    uint32_t eos_present, eob_present;
+    /* Selected SPS's real POC width and every independent slice's agreeing
+     * LSB/output flag. IDR LSB and absent pic_output_flag are inferred 0/1
+     * by 7.4.7.1. first_slice_type is not a claim that all slice types agree.
+     * These are header facts, not full POC, display or DMA completion. */
+    uint32_t log2_max_poc_lsb, poc_lsb, pic_output_flag, first_slice_type;
+    struct x9_hevc_hdr hdr;
+    struct x9_hevc_alpha alpha;
+    struct x9_hevc_ccv ccv;
+};
+int x9_hevc_sample_metadata(const struct x9_hevc_config *, const uint8_t *hvcc,
+    size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes,
+    struct x9_hevc_au_metadata *);
+/* Base-layer 8.3.1 POC process, no external HandleCraAsBlaFlag. Keep the
+ * previous Tid0 picture EXCLUDING RADL/RASL/sub-layer-non-reference pictures,
+ * not the immediately previous AU. clvs follows genuine IRAP/EOS boundaries;
+ * slice no_output_of_prior_pics_flag and host DRAIN never reset it.
+ * Zero state starts a bitstream; commit next ONLY after accepted SUBMIT.
+ * Metadata must come from sample_metadata. Also derives 8.1.3 PicOutputFlag
+ * from raw pic_output_flag and the PREVIOUS IRAP in decoding order (3.3),
+ * including when a middle CRA updates the association without a new CLVS.
+ * This is eligibility only, not an output event. No POC sorting, RPS/DPB,
+ * pixels or buffer retirement is performed. Outputs are
+ * disjoint; failure clears them. current may equal next. */
+struct x9_hevc_poc_sequence {
+    uint64_t clvs;
+    int64_t prev_msb; /* can be below INT32_MIN even when full POC is in range */
+    uint32_t prev_lsb, prev_valid, started, eos_present, eob_present;
+    uint32_t associated_irap_no_rasl_output;
+};
+struct x9_hevc_poc_picture {
+    int32_t value;
+    uint32_t no_rasl_output_flag; /* for CURRENT IRAP, not an associated RASL */
+    uint32_t pic_output_flag; /* derived PicOutputFlag, not an observed output */
+    uint64_t clvs;
+};
+int x9_hevc_poc_sequence_next(const struct x9_hevc_poc_sequence *,
+    const struct x9_hevc_au_metadata *, struct x9_hevc_poc_sequence *next,
+    struct x9_hevc_poc_picture *);
+/* Prospective, resolved base-SEI-only state; zero initializes a fresh bitstream.
+ * Commit ONLY after the native provider accepts SUBMIT. Container/CM values
+ * are deliberately not stored here. No external HandleCraAsBlaFlag is used.
+ * Mastering, ambient and preferred transfer persist from the CLVS first picture;
+ * late CLLI is accepted and
+ * retained for current/future inputs. clvs is a local nonzero identity derived
+ * ONLY at the genuine boundaries below, not a provider token or POC. The VT
+ * owner may use it to prepare same-CLVS pending metadata replacements; this
+ * helper alone does not relabel pending or already-emitted pictures. */
+struct x9_hevc_hdr_sequence {
+    struct x9_hevc_hdr hdr;
+    uint64_t clvs;
+    uint32_t started, eos_present, eob_present;
+};
+int x9_hevc_hdr_sequence_next(const struct x9_hevc_hdr_sequence *,
+    const struct x9_hevc_au_metadata *, struct x9_hevc_hdr_sequence *);
+#endif
