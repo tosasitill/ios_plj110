@@ -160,6 +160,21 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-20 ColorOS 原厂 RTP 核对（部分观察；活机 sysfs 读取打崩手机，用户禁止此类操作）
+
+- **背景**：用户反馈 iOS 振动"特别轻特别散"，要求核对 ColorOS 原厂 RTP 波形。设备当时跑 ColorOS V17.0.0（PLJ110_17.0.0.101(CN01)），有 KernelSU root（`su 0`，context ksu）。
+- **观察（崩溃前）**：马达驱动 `aw_haptic` @i2c 5-005a（misc `awinic_haptic`，属性在 `leds/vibrator/`）。**实测 f0=1742（174.2 Hz）**、osc_cali=0、gain=0x79、vmax=0x11、cali=1715、lra_resistance=8705（8.7 Ω）。`/odm/firmware/` 有 974 个 aw8697 RTP 相关文件（去频率变体后 212 个基础名）：每效果 base/162/166/174/178 Hz 五变体（两个旧效果是 160–180 Hz 七变体），关键件 `aw8697_rtp.bin`、`aw8697_haptic.bin`/`_170`/`_170_soft`、`awinic_haptic_params.bin`（3980 B）。shell 用户读不了 `/odm/firmware`（vendor_file），需 root。清单归档 `x9/out/haptic-rtp-coloros-20261120/{odm-firmware-list.txt,base-names.txt}`。
+- **事故**：`su 0` 批量读 sysfs 属性循环（gain/vmax/cali/lra_resistance 成功后下一个是 drv_vboost）与 `su 0 cat` 固件拉取**并行**执行时整机崩溃重启（adb exit 255，11 个拉取全 0 字节，已删）。确切触发属性未证实；手机随后自行恢复 Android（adb transport 7→8）。**用户明确禁止再做此类活机操作**：不再读/写驱动 sysfs 属性（含只读循环）、不并行设备命令；优先离线材料（`.local/references/` OPPO 内核源码、既有 NOTES）。确需活机读取时给出单条命令等用户批准。已存长期记忆。
+- **拉取完成（用户批准"读这些文件没事，直接全部拉"）**：单条 `su 0 sh -c 'cd /odm/firmware && tar -cf - aw8697* 460ms_RTP_318* awinic_haptic*'`，**976 文件/241,678,434 B**，与 root 清单逐文件字节数核对 0 缺失 0 多余。首次尝试失败：glob 在 shell cwd 展开而 tar `-C` 只改自身目录，tar 收字面 `aw8697*` 报 No such file（设备无副作用），cd 后成功。全程无 sysfs 操作。归档 `x9/out/haptic-rtp-coloros-20261120/{rtp-all.tar,firmware/,root-firmware-list.txt,rtp-files.txt,analyze-rtp.py,results.txt}`。
+- **离线分析（观察，源码+文件）**：效果文件=裸 s8 PCM；**原厂 RTP 时钟 24 kHz**（`haptic_hv.c:2610` `set_pwm(AW_PWM_24K)` 是唯一调用，sysfs rtp 只收波形编号、无速率 ioctl）；**iOS 驱动 12 kHz**（`x9_haptic.h` `X9_HAPTIC_RTP_RATE=12000`，reg0x46=0xc1 bits5-6=2）。f0 选择表 `haptic_wave.h`+`haptic_common_driver.c:2254`：取第一个 `f0<thre` 的后缀→本机 1742<1760 用 **base `.bin`（170 Hz 名义）**，不是 _174Hz（纠正上条推断）。`aw8697_rtp.bin` 全零 120000 B 占位；`aw8697_haptic_170.bin` 是 RAM 容器（前 4 B 头，data[2..3] 大端 base_addr=2048，`aw8693xs.c:1862` ram_shift=4），payload 183 ms/peak127/rms64。样本：Threestagekey_365 base 201 ms/peak127/rms31、notification_clean 160 ms/peak127、stepable_regulate 17.6 ms/**peak12**（原厂音量格 tick 本来就轻）；能量主要在 >195 Hz 宽带瞬态（f0 带 154–194 Hz 仅 0–7%），不是纯 f0 正弦。
+- **与 iOS 的代码级差异（推断与"轻/散"相关，未实机验证）**：(1) 速率 12k vs 24k——原厂文件直接喂 iOS 管线会频率减半/时长翻倍，须重采样或改芯片速率；iOS 自产 converter 按 12k 生成、内部自洽。(2) 原厂 `aw_stream_mode`（`haptic_hv.c:2802`）每次流启动 set_bst_vol(max_boost_vol)（注释 8.414 V）+ `upload_lra(AW_OSC_CALI_LRA)`；iOS 未复现（11-16 已记）。(3) 原厂波形满幅宽带包络瞬态 15–200 ms；iOS converter 输出 6.75–33 ms 窄带正弦 burst（80/173/230/300 Hz）。(4) 非弱因：gain 原厂 0x79 vs iOS 0x80、vmax 均 0x11、auto-brake 两侧都开（PLAYCFG3=reg8 bit2，iOS `hcfg_bits(8,0x47,0x05)`）。
+- **下一步（待用户决定）**：A/B 候选——把真实原厂波形（如 haptic_170 payload 或键盘相关效果）24k→12k 重采样喂现有 RTP 通路，或芯片改 24k；同时考虑复现每流 boost/LRA upload。本轮无生产代码改动、无 build/CI、无设备操作（拉取除外）。
+- 本条在 `feat/sms-physical-ack-owner` 分支追加，未提交（SMS 未提交改动原样保留）。
+
+#### 2026-11-16 SMS physical ACK callback owner（进行中）
+
+- **开始/纠偏**：上一轮同ID内存退休13函数2128B/1import已合main/push，属progress；当前main/origin **343b2409** clean、旧句柄终态。单代理 `feat/sms-physical-ack-owner`，scratch `x9/out/sms-physical-ack-owner-20261116/`；完整通话短信goal仍active。复用原consumer确认 **1007f7720只是设置x2，实际ACK virtual+30 BLR在1007f7724**，修正上一交接近似地址。缓存已有原MT producer1f1971f78、callback AP20dd22a10/+30→1f197891c及heap clone1f19787f8，driver弱controller/current concrete/原SIM+transaction capture也已有证据，不重采这些旧范围；原root move helper10081429c..100814300/100B暂无旧body，下一只用保留库存资格以闭同callback跨parser move/copy。旧apple-mt-callback/apple-sendack汇编来自extracted dylib，先检查保留原cache bytes/provenance，不因旧标签冒称新root资格。无测试/人工向量/构建/成功kernel复检/设备/共享输入操作。
+
 #### 2026-11-20 goal「完成全部的通话和短信」completion audit（prompt→artifact 清单；turn16）
 
 objective 拆为具体交付项，逐项对当前源码/原件证据核对。**结论：goal 未完成**——完整收发功能受 audio/MO/IMS 与实机验收阻塞，非纯离线可闭合；离线可闭合项已闭合。约束项（按安卓证据/不出探针/不猜测）全程满足。
