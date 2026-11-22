@@ -220,7 +220,10 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     e=x9_camera_smmu_export(m,view);
     /* Addresses permanently escaped even when export's cache work fails. */
     if(m->exported)*out=m;
-    if(e)return e;
+    if(e) {
+        if(!m->exported)(void)x9_camera_smmu_discard(&m);
+        return e;
+    }
     lck_mtx_lock(&camera_smmu_lock);
     /* Keep the first failing step: the caller's prepare stage also covers
      * allocation and export, so a bare errno cannot identify which SMMU
