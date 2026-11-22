@@ -199,6 +199,24 @@ static inline int x9cw_dial_cnf(const uint8_t *p,unsigned n,uint32_t *result){
  if(!result||!x9cw_frame(p,n,0x902)||n!=24||x9cw_u16(p+16)||x9cw_u16(p+18)!=4)return 0;
  *result=x9cw_u32(p+20);return 1;
 }
+/* requestVoiceRegistrationState 0x30f8f0 sends header-only MIPC 042f
+ * (addMipcReq, no addMipcVal); the response is NW_GET_CS_CNF 0430 (libmipc
+ * name stub 0x15e24; RX CNF matched by id+1/txid, x9_mipc_bridge.inc:520).
+ * Mirrors the proven 042a NW query (x9n_result): CNF result tag0/u32==0, then
+ * TLV 8100. getMipcVal(0x8100) 0x30f9ec cmp w5,#0xa forces a 10-byte value:
+ * regState u8 @+0, networkType u16LE @+1 (0x30fa5c); +3..+9 are stored but never
+ * interpreted by libmipc, so only networkType is consumed here. libmipc looks
+ * up TLV key tag&0x7fff, so wire 0x8100 and 0x0100 are the same record; accept
+ * either. Fail-closed: any other frame/result/length leaves the cache empty. */
+static inline int x9cw_voice_rat(const uint8_t *p,unsigned n,unsigned *networkType){
+ const uint8_t *v;unsigned k;uint32_t result=~0u;
+ if(!networkType||!x9cw_frame(p,n,0x430))return 0;
+ if(!x9cw_word(p,n,0,&result)||result)return 0;
+ if(!x9cw_tlv(p,n,0x8100,&v,&k))return 0;
+ if(!v&&!x9cw_tlv(p,n,0x0100,&v,&k))return 0;
+ if(!v||k!=10)return 0;
+ *networkType=x9cw_u16(v+1);return 1;
+}
 /* AP request whitelist, zero padding, no wildcard hangup/cause/fanout.
  * DIAL is restricted to the explicit measured SIM2 profile above.
  * No status subscription or guessed call/voice configuration. */
@@ -232,6 +250,15 @@ static inline int x9cw_qmi_bind(const uint8_t *p,unsigned n,unsigned *sim){
  * CNF success means the command completed, NOT END or an empty call set. */
 static inline int x9cw_end_cnf(const uint8_t *p,unsigned n,uint64_t token,uint32_t *result){
  if(!result||!token||token>65534||!x9cw_frame(p,n,0x906)||n!=24||
+    x9cw_u16(p+12)!=token||x9cw_u16(p+16)||x9cw_u16(p+18)!=4)return 0;
+ *result=x9cw_u32(p+20);return 1;
+}
+/* MD mipc_call_answer_get_cnf9131bf98..bfbc emits the same tag0/result u32
+ * as hangup_cnf; capture shows0908/result0 after0907{}. Match the owned
+ * token. CNF success means ANSWER completed, not CONVERSATION: that state
+ * still requires the complete ECPI132/6 sequence. */
+static inline int x9cw_answer_cnf(const uint8_t *p,unsigned n,uint64_t token,uint32_t *result){
+ if(!result||!token||token>65534||!x9cw_frame(p,n,0x908)||n!=24||
     x9cw_u16(p+12)!=token||x9cw_u16(p+16)||x9cw_u16(p+18)!=4)return 0;
  *result=x9cw_u32(p+20);return 1;
 }
