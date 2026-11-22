@@ -28,6 +28,8 @@ static struct {
     int source_error;
     int error;
 } cam_irq_fbc;
+static int cam_repeat_note_locked(unsigned,uint32_t,uint32_t,bool *);
+static bool cam_repeat_done_target_locked(unsigned,uint32_t);
 static int cam_irq_fbc_fault_locked(int e)
 {
     if(!cam_irq_fbc.error)cam_irq_fbc.error=e;
@@ -97,11 +99,14 @@ static int cam_irq_fbc_note_locked(unsigned bank,uint32_t control,uint32_t count
        memcmp(&cam_irq_fbc.request,&cam_irq.request,sizeof(cam_irq.request)))
         return cam_irq_fbc_fault_locked(ESTALE);
     if(cam_irq_fbc.source_error)return cam_irq_fbc.source_error;
+    bool repeated=false;
+    int repeat_error=cam_repeat_note_locked(bank,control,counter,&repeated);
+    if(repeated)return repeat_error?cam_irq_fbc_fault_locked(repeat_error):0;
     if(cam_sv.credit_retired) {
         uint32_t original=cam_sv.before[bank][cam_sv.field[CAM_SV_FBC]];
         if(cam_sv.epoch!=cam_irq_fbc.epoch || !cam_irq.close_attempted ||
            cam_irq.owns || cam_irq.accepting || cam_irq.busy || cam_irq.count ||
-           !cam_irq_fbc.count_accepted || counter!=cam_sv.credit_spent_count[bank])
+           !cam_repeat_retirement_receipt_locked() || counter!=cam_sv.credit_spent_count[bank])
             return cam_irq_fbc_fault_locked(ESTALE);
         /* Preserve RCNT/WCNT/DROP/CNT exactly. Only OUR issued close may
          * return FBC EN to original; a sampled target cannot regress. */
@@ -165,6 +170,9 @@ static int cam_irq_fbc_live_sample(uint64_t epoch,unsigned bank,vm_offset_t view
 /* Actual IAR path, spin held. No callback, PTE/cache/RAW access, mutex,
  * status reread/ack, or counter write. The queue retains the raw evidence.
  * A DONE binds the already captured SOF, never a later group/sequence read.
+ * Native has one published request with CQ off. Initial arm and repeat
+ * observe FH_SPARE in both banks before publishing that request. Validate
+ * the outer shadow here as an ownership invariant. Completion uses inner.
  */
 static void cam_irq_fbc_event_locked(struct cam_irq_event *ev)
 {
@@ -236,7 +244,7 @@ static int cam_irq_fbc_done_locked(const struct cam_irq_event *ev)
             control=cam_irq_rd(cam_irq.view[bank],0x540);
             counter=cam_irq_rd(cam_irq.view[bank],0x544);
             e=cam_irq_fbc_note_locked(bank,control,counter);
-            if(counter!=cam_irq_fbc.target[bank])match=false;
+            if(!cam_repeat_done_target_locked(bank,counter))match=false;
         }
         if(!e)cam_irq_fbc.samples=match?cam_irq_fbc.samples+1:0;
         samples=cam_irq_fbc.samples;
@@ -258,7 +266,7 @@ static int cam_irq_fbc_done_locked(const struct cam_irq_event *ev)
         uint32_t control=cam_irq_rd(cam_irq.view[bank],0x540);
         uint32_t counter=cam_irq_rd(cam_irq.view[bank],0x544);
         e=cam_irq_fbc_note_locked(bank,control,counter);
-        if(!e && counter!=cam_irq_fbc.target[bank])e=ESTALE;
+        if(!e && !cam_repeat_done_target_locked(bank,counter))e=ESTALE;
     }
     if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
     if(e)e=cam_irq_fbc_fault_locked(e);

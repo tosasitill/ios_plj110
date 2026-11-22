@@ -17,12 +17,14 @@
 #include <kern/clock.h>
 #include <kern/locks.h>
 #include <kern/sched_prim.h>
+#include <kern/thread.h>
 #include "x9_camera.h"
 #include "../../../../camera/hakios.camera.h"
 #include "../../../generated/x9_camera_sensor_tables.inc"
 
 extern int sweet_early_is_x9(void);
 extern int sweet_x9_arg(const char *, int);
+extern kern_return_t thread_terminate(thread_t);
 LCK_GRP_DECLARE(camera_group, "x9-camera");
 LCK_MTX_DECLARE(camera_lock, &camera_group);
 /* Controls serialize separately so capture(off) may drain a completion worker
@@ -33,6 +35,8 @@ LCK_MTX_DECLARE(camera_camsv_lock, &camera_group);
 static struct x9_camera_status st = { .version = 1, .sensor = X9_CAMERA_BACK };
 static struct x9_camera_platform hw;
 static bool opened;
+static uint32_t cam_chip_ids[X9_CAMERA_SENSOR_COUNT];
+static uint32_t cam_native_mask=X9_CAMERA_DUAL_MASK;
 static bool control_stop_issued; /* sealed until a genuinely new cdev open */
 static struct x9_camera_stop cam_stop_last; /* historical, not a live lease */
 static uint8_t *frame;
@@ -53,6 +57,7 @@ _Static_assert(__builtin_offsetof(struct hakios_camera_frame,sof_time_lo)==100,"
  * partial state change. Kept after failed drain/restore; no retry on close. */
 static struct {
     bool power, capture, stream, latched, stopping;
+    bool first_raw_timeout_logged;
     uint64_t generation;
     int last_errno;
 } session;
@@ -78,14 +83,48 @@ static const struct x9_camera_power_step front_power[] = {
     {X9_CAM_DOVDD,1800000,1000}, {X9_CAM_DVDD,1104000,1000},
     {X9_CAM_DRIVE,4,1000}, {X9_CAM_RESET,1,4000}
 };
+static const struct x9_camera_power_step tele_power[] = {
+    {X9_CAM_MCLK,24,0}, {X9_CAM_RESET,0,1000},
+    {X9_CAM_AVDD,2804000,3000}, {X9_CAM_DVDD,1104000,4000},
+    {X9_CAM_DOVDD,1800000,3000}, {X9_CAM_AFVDD,3100000,1000},
+    {X9_CAM_DRIVE,4,6000}, {X9_CAM_RESET,1,2000}
+};
+static const struct x9_camera_power_step uw_power[] = {
+    {X9_CAM_MCLK,24,2000},{X9_CAM_RESET,0,1000},{X9_CAM_DOVDD,1800000,1000},
+    {X9_CAM_AVDD,2204000,1000},{X9_CAM_DVDD,1008000,1000},
+    {X9_CAM_DVDD1,1000000,0},{X9_CAM_AFVDD,2800000,0},
+    {X9_CAM_RESET,1,2000},{X9_CAM_DRIVE,4,10000}
+};
 static const struct x9_camera_sensor sensors[] = {
     /* main physical ID 0x9186: vendor maps it to HHMAIN_SENSOR_ID, which is
      * a software ID, NOT the value of the chip ID registers 0x16/0x17. */
     {1,4,0x1a,0x9186,4096,3072,3,4415,7546,65532,2,6,16384,16128,1,3,
-     main_power, sizeof(main_power)/sizeof(main_power[0])},
+     main_power, sizeof(main_power)/sizeof(main_power[0]),
+     0x16,3,3,1,3,9696,48,0,0,2196000000ull,3300004166ull},
     {2,2,0x10,0x0615,3264,2448,0,4361,7642,65530,1,16,1024,1008,0,4,
-     front_power, sizeof(front_power)/sizeof(front_power[0])}
+     front_power, sizeof(front_power)/sizeof(front_power[0]),
+     0x16,0,0,0,0,3768,48,0,0,864000000ull,2160000000ull},
+    /* Banked word tables, byte controls, one cold-owned SID5 DVDD alias.
+     * Common wire protocol caps requested gain at64x, not vendor's160x. */
+    {3,9,0x2d,0x38e5,4096,3072,1,5200,6408,65535,1,4,32,2048,0,4,
+     uw_power,sizeof(uw_power)/sizeof(uw_power[0]),0,0,2,1,3,4784,24,1,1,920000000ull,2848000000ull},
+    {4,7,0x1a,0x8202,4096,3072,1,8538,3888,65532,4,8,16384,16128,1,3,
+     tele_power, sizeof(tele_power)/sizeof(tele_power[0]),
+     0x16,2,1,0,0,7500,56,0,0,878400000ull,1624000000ull}
 };
+static const struct x9_camera_sensor *cam_sensor_profile(uint32_t which)
+{ return x9_camera_sensor_valid(which)?&sensors[which-1]:NULL; }
+static uint8_t cam_sensor_slave(uint32_t which)
+{ const struct x9_camera_sensor *s=cam_sensor_profile(which);return s?(uint8_t)s->slave:0; }
+static uint32_t cam_sensor_port(uint32_t which)
+{ const struct x9_camera_sensor *s=cam_sensor_profile(which);return s?s->csi_port:UINT32_MAX; }
+static void cam_sensor_id_record(uint32_t which,uint32_t id)
+{ cam_chip_ids[which-1]=id;if(which<=X9_CAMERA_FRONT)st.chip_id[which-1]=id; }
+static const struct x9_camera_sensor *sensor(void) { return &sensors[st.sensor-1]; }
+/* All cold/MM teardown paths consult the actual native controller's export
+ * journal even when configure failed before core attempted capture(on). */
+static int cam_native_sensor_retirement_guard_locked(uint64_t epoch);
+static void cam_native_capture_stop_locked(uint64_t epoch);
 #include "x9_camera_pipeline.inc"
 #include "x9_camera_s1.inc"
 #include "x9_camera_smmu.inc"
@@ -96,9 +135,9 @@ static const struct x9_camera_sensor sensors[] = {
 #include "x9_camera_sensor_session.inc"
 #include "x9_camera_standby.inc"
 #include "x9_camera_receiver.inc"
+#include "x9_camera_native_source.inc"
 _Static_assert(sizeof(struct x9_camera_status)==88,"camera status ABI");
 _Static_assert(sizeof(struct x9_camera_stop)==64,"camera stop ABI");
-static const struct x9_camera_sensor *sensor(void) { return &sensors[st.sensor-1]; }
 static int read16(const struct x9_camera_sensor *s, uint16_t reg, uint32_t *v)
 {
     uint8_t hi,lo; int e=hw.read8(s,reg,&hi);
@@ -116,14 +155,6 @@ static int write8(const struct x9_camera_sensor *s, uint16_t reg, uint8_t v)
     e=hw.write8(s,reg,v);
     if(!e)e=hw.read8(s,reg,&back); return e?e:back==v?0:EIO;
 }
-static int write16(const struct x9_camera_sensor *s, uint16_t reg, uint32_t v)
-{
-    int e=write8(s,reg,(uint8_t)(v>>8)); return e?e:write8(s,reg+1,(uint8_t)v);
-}
-static int cam_sensor_hw_read(void *s, uint16_t reg, uint8_t *v)
-{ return hw.read8(s,reg,v); }
-static int cam_sensor_hw_write(void *s, uint16_t reg, uint8_t v)
-{ return hw.write8(s,reg,v); }
 static int cam_drain_readers(void)
 {
     uint64_t span;nanoseconds_to_absolutetime(1000000000,&span);
@@ -150,6 +181,9 @@ static int stop(void)
     }
     session.stopping=true; /* before invalidating delivery, not a drained claim */
     st.generation++; st.flags&=~X9_CAMERA_STREAMING; frame_bytes=0; consumed=st.frames;
+    /* Close next-request admission even if the following source-off fails
+     * before core can invoke capture(off). This hook never claims drain. */
+    cam_native_capture_stop_locked(cam_sensor_live.epoch);
     thread_wakeup((event_t)&st.generation); /* queued first-frame IRQ worker */
     wakeup(&frame_bytes);
     if(session.power || session.capture || session.stream) {
@@ -237,8 +271,10 @@ static int cam_stop_cached_close(void)
 }
 static int start(uint32_t which, uint32_t mode)
 {
-    if(which!=1 && which!=2)return EINVAL;
+    const char *step="sensor-power";
+    if(!x9_camera_sensor_valid(which))return EINVAL;
     if(mode && mode!=UINT32_MAX)return ENOTSUP;
+    if(!(st.supported_mask&(1u<<which)))return ENOTSUP; /* before retiring an active lens */
     if(!(st.flags&X9_CAMERA_READY) || (st.flags&X9_CAMERA_FAULT))return ENXIO;
     if((st.flags&X9_CAMERA_STREAMING) && which==st.sensor)return 0;
     int e=stop(); if(e)return e;
@@ -249,6 +285,7 @@ static int start(uint32_t which, uint32_t mode)
     if(!frame)frame=kalloc_data(X9_CAMERA_MAX_BYTES,Z_WAITOK);
     if(!frame)return ENOMEM;
     session.generation=st.generation;
+    session.first_raw_timeout_logged=false;
     last_capture_id=last_capture_time=last_sof_time=0;
     session.power=true;
     /* Worker completions can enter camera_deliver during capture setup.
@@ -256,18 +293,31 @@ static int start(uint32_t which, uint32_t mode)
      * across power/I2C/capture callbacks. */
     lck_mtx_unlock(&camera_lock);
     e=hw.power(s,1);
-    if(!e)e=read16(s,0x0016,&id);
-    if(!e && id!=s->chip_id)e=ENODEV;
-    struct cam_sensor_io io={.context=(void *)s,.read=cam_sensor_hw_read,.write=cam_sensor_hw_write};
-    if(!e)e=cam_sensor_configure(&io,which,&config);
-    if(!e){session.capture=true;e=hw.capture(s,1,session.generation);}
-    if(!e){session.stream=true;e=write8(s,0x0100,1);}
+    if(!e) {
+        step="sensor-id";
+        e=read16(s,s->id_reg,&id);
+        if(!e && id!=s->chip_id)e=ENODEV;
+    }
+    if(!e) {
+        step="configure";
+        e=hw.configure(s,&config);
+    }
+    if(!e) {
+        step="capture-arm";
+        session.capture=true;
+        e=hw.capture(s,1,session.generation);
+    }
+    if(!e) {
+        step="sensor-stream-on";
+        session.stream=true;
+        e=write8(s,0x0100,1);
+    }
     lck_mtx_lock(&camera_lock);
     if(e) {
         st.flags|=X9_CAMERA_FAULT;st.last_errno=e;
         int cleanup=stop();st.last_errno=e;
-        printf("X9 CAMERA: start sensor=%u errno=%d cleanup=%d retained=%u\n",
-            which,e,cleanup,session.latched);
+        printf("X9 CAMERA: start sensor=%u errno=%d cleanup=%d retained=%u step=%s\n",
+            which,e,cleanup,session.latched,step);
         return e;
     }
     st.flags|=X9_CAMERA_STREAMING;st.width=s->width;st.height=s->height;st.last_errno=0;
@@ -277,10 +327,12 @@ static int start(uint32_t which, uint32_t mode)
 }
 int x9_camera_register_platform(const struct x9_camera_platform *p)
 {
-    if(!p || p->version!=X9_CAMERA_PLATFORM_VERSION || !p->power || !p->read8 || !p->write8 || !p->capture)return EINVAL;
+    if(!p || p->version!=X9_CAMERA_PLATFORM_VERSION || !p->power || !p->read8 ||
+       !p->write8 || !p->configure || !p->exposure || !p->capture)return EINVAL;
     struct x9_camera_config config={0};
-    int tables=cam_sensor_config_preflight(1,&config);
-    if(!tables)tables=cam_sensor_config_preflight(2,&config);
+    int tables=0;
+    for(uint32_t i=1;i<=X9_CAMERA_SENSOR_COUNT && !tables;i++)
+        if(cam_native_mask&(1u<<i))tables=cam_sensor_config_preflight(i,&config);
     if(tables)return tables; /* including preview/PLL, BEFORE any power callback */
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock); int e=0;
     if(st.mode!=2)e=EPERM;
@@ -290,12 +342,13 @@ int x9_camera_register_platform(const struct x9_camera_platform *p)
     else if(hw.version)e=EBUSY;
     else if(!X9_HHMAIN_INIT_COUNT || !X9_HHFRONT_INIT_COUNT)e=ENOTSUP;
     else {
-        hw=*p;
-        for(unsigned i=0;i<2 && !e;i++) {
+        hw=*p;int first=0;
+        for(unsigned i=0;i<X9_CAMERA_SENSOR_COUNT && !e;i++) {
+            if(!(cam_native_mask&(1u<<sensors[i].sensor)))continue;
             st.sensor=sensors[i].sensor;
             lck_mtx_unlock(&camera_lock);
             uint32_t id=0; e=hw.power(&sensors[i],1);
-            if(!e)e=read16(&sensors[i],0x16,&id);
+            if(!e)e=read16(&sensors[i],sensors[i].id_reg,&id);
             int off=hw.power(&sensors[i],0);
             lck_mtx_lock(&camera_lock);
             if(off) {
@@ -303,9 +356,19 @@ int x9_camera_register_platform(const struct x9_camera_platform *p)
                 st.flags|=X9_CAMERA_RETAINED;
             }
             if(!e)e=off; if(!e && id!=sensors[i].chip_id)e=ENODEV;
-            if(!e)st.chip_id[i]=id;
+            if(!e)cam_sensor_id_record(sensors[i].sensor,id);
+            else if(e==ENXIO && !off) {
+                /* Clean NACK with a clean power-off: still probe the next
+                 * sensor (logs 335-345: back NACKs; front shares WL/DOVDD
+                 * but not the module or i2c4, so its result splits shared
+                 * supply from rear-module causes). Report the first error. */
+                printf("X9 CAMERA REGISTER: sensor=%u NACK, continuing to next sensor\n",sensors[i].sensor);
+                if(!first)first=e;
+                e=0;
+            }
         }
-        if(!e){st.sensor=X9_CAMERA_BACK;st.supported_mask=(1u<<1)|(1u<<2);st.flags=X9_CAMERA_READY;}
+        if(!e && first)e=first;
+        if(!e){st.sensor=X9_CAMERA_BACK;st.supported_mask=cam_native_mask;st.flags=X9_CAMERA_READY;}
         else {st.flags|=X9_CAMERA_FAULT;st.last_errno=e;}
     }
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);return e;
@@ -313,7 +376,7 @@ int x9_camera_register_platform(const struct x9_camera_platform *p)
 static int cam_completed_layout(const struct x9_camera_sensor *s,
     const struct x9_camera_completed_frame *f)
 {
-    return f->version!=X9_CAMERA_PLATFORM_VERSION || f->reserved || !f->raw ||
+    return f->version!=X9_CAMERA_COMPLETED_VERSION || f->reserved || !f->raw ||
         f->stride!=((s->width/4*5+63)&~63u) ||
         (uint64_t)f->stride*s->height!=f->bytes || f->bytes>X9_CAMERA_MAX_BYTES ? EINVAL:0;
 }
@@ -322,8 +385,8 @@ static int cam_completed_controls(const struct x9_camera_sensor *s,
 {
     return f->frame_lines<s->frame_lines || f->frame_lines>s->frame_max ||
         f->frame_lines%s->exposure_step || f->exposure_lines<s->exposure_min ||
-        f->exposure_lines>f->frame_lines-48 || f->exposure_lines%s->exposure_step ||
-        f->gain_code>s->gain_max ? EIO:0;
+        f->exposure_lines>f->frame_lines-s->margin || f->exposure_lines%s->exposure_step ||
+        f->gain_code>s->gain_max || (s->gain_linear && f->gain_code<s->gain_unity) ? EIO:0;
 }
 int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
 {
@@ -332,17 +395,25 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
      * raw itself must remain immutable/cache-visible through this call. */
     const struct x9_camera_completed_frame f=*completed;
     lck_mtx_lock(&camera_lock);int e=0;const struct x9_camera_sensor *s=sensor();
+    const char *step="identity";
     if(!(st.flags&X9_CAMERA_STREAMING) || f.generation!=st.generation || f.sensor!=st.sensor)e=ESTALE;
-    else if(cam_completed_layout(s,&f) ||
-            !f.capture_id || !f.time || !f.sof_time || f.sof_time>f.time ||
-            f.time>mach_absolute_time())e=EINVAL;
-    else if(f.capture_id<=last_capture_id || f.time<=last_capture_time || f.sof_time<=last_sof_time)e=ESTALE;
-    else e=cam_completed_controls(s,&f);
+    if(!e) {
+        step="layout-time";
+        if(cam_completed_layout(s,&f) || !f.capture_id || !f.time || !f.sof_time ||
+            f.sof_time>f.time || f.time>mach_absolute_time())e=EINVAL;
+    }
+    if(!e) {
+        step="sequence";
+        if(f.capture_id<=last_capture_id || f.time<=last_capture_time || f.sof_time<=last_sof_time)e=ESTALE;
+    }
+    if(!e){step="controls";e=cam_completed_controls(s,&f);}
     if(!e) {
         last_capture_id=f.capture_id;last_capture_time=f.time;last_sof_time=f.sof_time;
+        step="reader-busy";
         if(frame_readers)e=EBUSY; /* retire, never overwrite/replay a pinned CPU copy */
     }
     if(!e) {
+        bool first_frame=!frame_bytes;
         memset(&head,0,sizeof(head));memcpy(head.magic,HAKIOS_CAMERA_MAGIC,8);
         head.header_bytes=sizeof(head);head.width=s->width;head.height=s->height;
         head.stride=f.stride;head.format=1;head.bayer=s->bayer;head.black=64;
@@ -351,18 +422,40 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
         head.timing_flags=HAKIOS_CAMERA_TIMING_SOF;
         /* HakiOS ISP expects linear gain. Sony registers encode reciprocal
          * gain: unity/(unity-reg), NOT reg/unity. ABI units are linear Q10. */
-        head.line_ns=s->line_ns;head.gain=1024*s->gain_unity/(s->gain_unity-f.gain_code);
+        head.line_ns=s->line_ns;head.gain=s->gain_linear?
+            1024*f.gain_code/s->gain_unity:1024*s->gain_unity/(s->gain_unity-f.gain_code);
         head.gain_unity=1024;head.gain_max=65536;
         head.frame_lines=f.frame_lines;head.frame_lines_min=s->frame_lines;head.frame_lines_max=s->frame_max;
-        head.margin=48;head.sensor=f.sensor;head.focus=HAKIOS_CAMERA_NO_FOCUS;
+        head.margin=s->margin;head.sensor=f.sensor;head.focus=HAKIOS_CAMERA_NO_FOCUS;
         memcpy(frame,f.raw,f.bytes);frame_bytes=f.bytes;wakeup(&frame_bytes);
-    } else {st.rejected++;st.last_errno=e;}
+        if(first_frame)
+            printf("X9 CAMERA RAW PUBLISH: sensor=%u generation=%llu capture_id=%llu "
+                "seq=%llu width=%u height=%u stride=%u bytes=%u sof=%llu done=%llu\n",
+                f.sensor,f.generation,f.capture_id,head.sequence,s->width,s->height,
+                f.stride,f.bytes,f.sof_time,f.time);
+    } else {
+        st.rejected++;st.last_errno=e;
+        printf("X9 CAMERA RAW REJECT: step=%s errno=%d sensor=%u current_sensor=%u "
+            "generation=%llu current_generation=%llu capture_id=%llu stride=%u bytes=%u "
+            "sof=%llu done=%llu readers=%u rejected=%llu\n",step,e,f.sensor,st.sensor,
+            f.generation,st.generation,f.capture_id,f.stride,f.bytes,f.sof_time,f.time,
+            frame_readers,st.rejected);
+    }
     lck_mtx_unlock(&camera_lock);return e;
 }
+#include "x9_camera_native_ae.h"
+static struct cam_native_ae_state cam_native_ae;
 #include "x9_camera_camsv.inc"
 #include "x9_camera_irq.inc"
-static int cam_open(__unused dev_t d,int f,__unused int t,struct proc *p)
+#include "x9_camera_native_ae.inc"
+#include "x9_camera_native_capture.inc"
+static int cam_open(dev_t d,int f,__unused int t,struct proc *p)
 {
+    /* Independent vnode/minor for non-mutating capability observers. A
+     * mediaserver vendor lookup may run while the RAW/control fd is owned;
+     * it must not acquire that open or close/STOP its active generation. */
+    if(minor(d)==1)return (f&FWRITE)?EPERM:0;
+    if(minor(d)!=0)return ENXIO;
     if(f&FWRITE) {
         char name[32];proc_name(proc_pid(p),name,sizeof(name));
         uid_t uid=kauth_cred_getuid(kauth_cred_get());
@@ -370,14 +463,26 @@ static int cam_open(__unused dev_t d,int f,__unused int t,struct proc *p)
         else if(st.mode!=2 || (uid && (uid!=501 || strcmp(name,"mediaserverd"))))return EPERM;
     }
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
-    int e=opened?EBUSY:0;
+    /* An asynchronous real platform registration needs opened=false while
+     * it admits/probes/restores. Reject an early mode2 controller open
+     * without taking that ownership; status observers and mode3 are separate.
+     * Callback presence alone is not READY, and fault/retained state cannot
+     * become a usable controller by reopening its cdev. */
+    int e=0;
+    if(st.mode==2 && (hw.version!=X9_CAMERA_PLATFORM_VERSION ||
+        !(st.flags&X9_CAMERA_READY)))e=ENXIO;
+    else if(st.mode==2 && (st.flags&(X9_CAMERA_FAULT|X9_CAMERA_RETAINED)))
+        e=st.last_errno?st.last_errno:EIO;
+    else if(opened)e=EBUSY;
     if(!e && st.mode==2 && (session.latched || cam_stop_owned() || frame_readers ||
         (st.flags&X9_CAMERA_RETAINED)))e=session.last_errno?session.last_errno:EBUSY;
     if(!e){opened=true;control_stop_issued=false;}
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);return e;
 }
-static int cam_close(__unused dev_t d,__unused int f,__unused int t,__unused struct proc *p)
+static int cam_close(dev_t d,__unused int f,__unused int t,__unused struct proc *p)
 {
+    if(minor(d)==1)return 0;
+    if(minor(d)!=0)return ENXIO;
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
     int e=control_stop_issued?cam_stop_cached_close():stop();opened=false;
     if(frame && !session.latched && !cam_stop_owned() && !frame_readers &&
@@ -386,14 +491,39 @@ static int cam_close(__unused dev_t d,__unused int f,__unused int t,__unused str
     }
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);return e;
 }
-static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused struct proc *p)
+static int cam_ioctl(dev_t d,u_long cmd,caddr_t data,int f,__unused struct proc *p)
 {
+    if(minor(d)>1)return ENXIO;
+    if(minor(d)==1 && cmd!=X9_CAMERA_GET_STATUS && cmd!=X9_CAMERA_GET_STOP &&
+        cmd!=X9_CAMERA_GET_LENSES && cmd!=X9_CAMERA_GET_SWITCH_CAPACITY)return EPERM;
     if(cmd==X9_CAMERA_GET_STATUS) {
         lck_mtx_lock(&camera_lock);memcpy(data,&st,sizeof(st));lck_mtx_unlock(&camera_lock);return 0;
+    }
+    if(cmd==X9_CAMERA_GET_LENSES) {
+        struct x9_camera_lenses r={.version=1,.count=X9_CAMERA_SENSOR_COUNT};
+        lck_mtx_lock(&camera_lock);r.supported_mask=st.supported_mask;
+        for(unsigned i=0;i<X9_CAMERA_SENSOR_COUNT;i++) {
+            r.lens[i].sensor=sensors[i].sensor;r.lens[i].chip_id=cam_chip_ids[i];
+            if(r.lens[i].chip_id==sensors[i].chip_id)r.lens[i].flags|=X9_CAMERA_PROBED;
+            if((st.flags&X9_CAMERA_READY) && (st.supported_mask&(1u<<sensors[i].sensor)))
+                r.lens[i].flags|=X9_CAMERA_READY;
+        }
+        lck_mtx_unlock(&camera_lock);memcpy(data,&r,sizeof(r));return 0;
     }
     if(cmd==X9_CAMERA_GET_STOP) {
         lck_mtx_lock(&camera_control_lock);memcpy(data,&cam_stop_last,sizeof(cam_stop_last));
         lck_mtx_unlock(&camera_control_lock);return 0;
+    }
+    if(cmd==X9_CAMERA_GET_SWITCH_CAPACITY) {
+        struct x9_camera_switch_capacity r={.version=1,.flags=X9_CAMERA_SWITCH_SERIAL,
+            .limit=CAM_NATIVE_MAX_PINNED_EPOCHS};
+        /* All native epoch writers hold this control lock. No MMIO, new
+         * reservation, map mutation or lease validation is performed here. */
+        lck_mtx_lock(&camera_control_lock);
+        r.retired=cam_native_epoch_count;
+        if(r.retired+1<r.limit)r.remaining=r.limit-r.retired-1;
+        lck_mtx_unlock(&camera_control_lock);
+        memcpy(data,&r,sizeof(r));return 0;
     }
     if(cmd==X9_CAMERA_STOP) {
         int e=0;
@@ -401,7 +531,7 @@ static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused str
         if(st.mode!=2 || !(f&FWRITE))return EPERM; /* cam_open enforces identity */
         memcpy(&r,data,sizeof(r));request.sensor=r.sensor;
         request.generation_before=r.generation_before;
-        if((r.sensor!=1 && r.sensor!=2) || memcmp(&r,&request,sizeof(r)))return EINVAL;
+        if((!x9_camera_sensor_valid(r.sensor)) || memcmp(&r,&request,sizeof(r)))return EINVAL;
         lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
         if(!opened)e=ENXIO;
         else if(control_stop_issued)e=EALREADY;
@@ -422,12 +552,12 @@ static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused str
         if(st.mode!=3 || !(f&FWRITE) || kauth_cred_getuid(kauth_cred_get()))return EPERM;
         struct x9_camera_config r,request={.version=1};
         memcpy(&r,data,sizeof(r));request.sensor=r.sensor;
-        if((r.sensor!=1 && r.sensor!=2) || memcmp(&r,&request,sizeof(r)))return EINVAL;
+        if((!x9_camera_sensor_valid(r.sensor)) || memcmp(&r,&request,sizeof(r)))return EINVAL;
         lck_mtx_lock(&camera_control_lock);(void)cam_standby(request.sensor,&r);
         lck_mtx_lock(&camera_lock);st.last_errno=r.last_errno;
         if(r.flags&X9_CAM_CFG_ATTEMPTED)st.probe_flags=r.probe.flags;
         if(!r.last_errno && (r.probe.flags&X9_CAM_PROBE_MATCHED)) {
-            st.chip_id[r.sensor-1]=r.probe.chip_id;st.probe_mask|=1u<<r.sensor;
+            cam_sensor_id_record(r.sensor,r.probe.chip_id);st.probe_mask|=1u<<r.sensor;
             st.flags|=X9_CAMERA_PROBED;
         }
         if(r.flags&X9_CAM_CFG_LATCHED)st.flags|=X9_CAMERA_FAULT;
@@ -477,7 +607,7 @@ static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused str
         if(st.mode!=3 || !(f&FWRITE) || kauth_cred_getuid(kauth_cred_get()))return EPERM;
         struct x9_camera_mm_status r,request={.version=1};
         memcpy(&r,data,sizeof(r));request.sensor=r.sensor;
-        if((r.sensor!=1 && r.sensor!=2) || memcmp(&r,&request,sizeof(r)))return EINVAL;
+        if((!x9_camera_sensor_valid(r.sensor)) || memcmp(&r,&request,sizeof(r)))return EINVAL;
         lck_mtx_lock(&camera_control_lock);
         (void)cam_mm_probe(request.sensor,&r);
         lck_mtx_lock(&camera_lock);st.last_errno=r.last_errno;
@@ -494,7 +624,7 @@ static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused str
         if(st.mode!=3 || !(f&FWRITE) || kauth_cred_getuid(kauth_cred_get()))return EPERM;
         struct x9_camera_receiver r,request={.version=1};
         memcpy(&r,data,sizeof(r));request.sensor=r.sensor;
-        if((r.sensor!=1 && r.sensor!=2) || memcmp(&r,&request,sizeof(r)))return EINVAL;
+        if((!x9_camera_sensor_valid(r.sensor)) || memcmp(&r,&request,sizeof(r)))return EINVAL;
         lck_mtx_lock(&camera_control_lock);(void)cam_rx_probe(request.sensor,&r);
         lck_mtx_lock(&camera_lock);st.last_errno=r.last_errno;
         if(r.flags&X9_CAM_RX_LATCHED)st.flags|=X9_CAMERA_FAULT;
@@ -506,7 +636,7 @@ static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused str
     if(st.mode!=3 || !(f&FWRITE) || kauth_cred_getuid(kauth_cred_get()))return EPERM;
     struct x9_camera_probe *r=(struct x9_camera_probe *)data;
     struct x9_camera_probe request={.version=1,.sensor=r->sensor};
-    if((r->sensor!=1 && r->sensor!=2) || memcmp(r,&request,sizeof(request)))return EINVAL;
+    if((!x9_camera_sensor_valid(r->sensor)) || memcmp(r,&request,sizeof(request)))return EINVAL;
     lck_mtx_lock(&camera_control_lock);
     if(cam_resources_latched) {
         memset(r,0,sizeof(*r));r->version=1;r->sensor=request.sensor;
@@ -516,7 +646,7 @@ static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused str
     st.probe_flags=r->flags;st.last_errno=r->last_errno;
     if((r->flags&(X9_CAM_PROBE_MATCHED|X9_CAM_PROBE_RESTORED))==
         (X9_CAM_PROBE_MATCHED|X9_CAM_PROBE_RESTORED) && !r->last_errno) {
-        st.chip_id[r->sensor-1]=r->chip_id;st.probe_mask|=1u<<r->sensor;
+        cam_sensor_id_record(r->sensor,r->chip_id);st.probe_mask|=1u<<r->sensor;
         st.flags|=X9_CAMERA_PROBED;
     }
     if(r->flags&X9_CAM_PROBE_LATCHED)st.flags|=X9_CAMERA_FAULT;
@@ -529,8 +659,9 @@ static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused str
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);
     return 0; /* operation/restore errors are in the copied-out result */
 }
-static int cam_write(__unused dev_t d,struct uio *uio,__unused int flags)
+static int cam_write(dev_t d,struct uio *uio,__unused int flags)
 {
+    if(minor(d)!=0)return EPERM;
     if(st.mode!=2)return EPERM; /* mode3 has only fixed standby table ioctl, no raw writer */
     struct hakios_camera_command c;if(uio_resid(uio)!=sizeof(c))return EINVAL;
     int e=uiomove((char*)&c,sizeof(c),uio);if(e)return e;if(c.bytes)return ENOTSUP;
@@ -540,27 +671,29 @@ static int cam_write(__unused dev_t d,struct uio *uio,__unused int flags)
     else if(c.command==HAKIOS_CAMERA_SENSOR)e=start(c.a,c.b);
     else if(c.command==HAKIOS_CAMERA_EXPOSURE && (st.flags&X9_CAMERA_STREAMING)) {
         const struct x9_camera_sensor *s=sensor();uint32_t lines=c.c?c.c:s->frame_lines;
-        if(!c.c && (uint64_t)c.a+48>lines) {
-            if(c.a>s->frame_max-48){
+        if(!c.c && (uint64_t)c.a+s->margin>lines) {
+            if(c.a>s->frame_max-s->margin){
                 lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);return EINVAL;
             }
-            lines=c.a+48;
+            lines=c.a+s->margin;
         }
         if(lines>s->frame_max || lines<s->frame_lines || c.a<s->exposure_min ||
-           c.a>lines-48 || c.a%s->exposure_step || lines%s->exposure_step || c.b<1024 || c.b>65536)e=EINVAL;
+           c.a>lines-s->margin || c.a%s->exposure_step || lines%s->exposure_step || c.b<1024 || c.b>65536)e=EINVAL;
         else {
-            e=write8(s,0x0104,1);
-            if(!e)e=write16(s,0x0340,lines);
-            if(!e)e=write16(s,0x0202,c.a);
-            if(!e)e=write16(s,0x0204,s->gain_unity-(s->gain_unity*1024/c.b));
-            int release=write8(s,0x0104,0);if(!e)e=release;
+            /* Worker SOF/DONE completion must not wait for the frame mutex
+             * across AP I2C/engine scheduling. Control serialization still
+             * pins this sensor/generation through the whole AE request. */
+            lck_mtx_unlock(&camera_lock);
+            e=hw.exposure(s,c.a,c.b,lines);
+            lck_mtx_lock(&camera_lock);
             if(e){st.flags|=X9_CAMERA_FAULT;st.last_errno=e;(void)stop();}
         }
     } else e=ENOTSUP; /* no fake focus, KEEP host export or arbitrary writes */
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);return e;
 }
-static int cam_read(__unused dev_t d,struct uio *uio,__unused int flags)
+static int cam_read(dev_t d,struct uio *uio,__unused int flags)
 {
+    if(minor(d)!=0)return ENOTSUP;
     if(uio_resid(uio)<sizeof(head))return EMSGSIZE;
     lck_mtx_lock(&camera_lock);int e=0;
     bool peek=uio_resid(uio)==sizeof(head),pinned=false;
@@ -579,6 +712,12 @@ static int cam_read(__unused dev_t d,struct uio *uio,__unused int flags)
             if(e || generation!=st.generation || !(st.flags&X9_CAMERA_STREAMING))break;
         }
         if(e==EWOULDBLOCK)e=EAGAIN;
+        if(e==EAGAIN && generation==st.generation && (st.flags&X9_CAMERA_STREAMING) &&
+           !frame_bytes && !session.first_raw_timeout_logged) {
+            session.first_raw_timeout_logged=true;
+            printf("X9 CAMERA RAW WAIT: sensor=%u generation=%llu errno=%d "
+                "(first RAW unavailable after read deadline)\n",st.sensor,generation,e);
+        }
         if(!e && generation!=st.generation)e=ESTALE;
         if(!e && (!(st.flags&X9_CAMERA_STREAMING)||!frame_bytes))e=ENXIO;
         if(!e && !peek && uio_resid(uio)!=(user_ssize_t)(sizeof(head)+frame_bytes))e=EMSGSIZE;
@@ -604,16 +743,53 @@ static int cam_read(__unused dev_t d,struct uio *uio,__unused int flags)
 static const struct cdevsw cam_cdev={.d_open=cam_open,.d_close=cam_close,.d_read=cam_read,
     .d_write=cam_write,.d_ioctl=cam_ioctl,.d_stop=eno_stop,.d_reset=eno_reset,
     .d_select=eno_select,.d_mmap=eno_mmap,.d_strategy=eno_strat};
+#include "x9_camera_native_sensor.inc"
+static void cam_native_register_worker(void *arg,wait_result_t result)
+{
+    (void)arg;(void)result;
+    /* A getter is not admission. This single ordinary thread performs the
+     * real engine admission and both physical power/ID/close probes. No
+     * retry after a partial probe, no boot-time stream or artificial READY.
+     * Configure later checks the live UFS floor and actual MM suppliers. */
+    int e=x9_camera_native_sensor_register(x9_camera_native_capture_engine());
+    lck_mtx_lock(&camera_lock);
+    if(e) {
+        st.flags|=X9_CAMERA_FAULT;
+        if(!st.last_errno)st.last_errno=e;
+    }
+    printf("X9 CAMERA NATIVE REGISTER: errno=%d platform=%u flags=%x IDs=%04x/%04x "
+        "(physical ID admission only; no RAW/preview claim)\n",
+        e,hw.version,st.flags,st.chip_id[0],st.chip_id[1]);
+    lck_mtx_unlock(&camera_lock);
+    (void)thread_terminate(current_thread());
+}
 void sweet_x9_camera_init(void)
 {
+    /* Additional physical lenses are opt-in pending device acceptance. */
+    if(sweet_x9_arg("x9_camera_tele",0)==1)cam_native_mask|=1u<<X9_CAMERA_TELEPHOTO;
+    if(sweet_x9_arg("x9_camera_uw",0)==1)cam_native_mask|=1u<<X9_CAMERA_ULTRAWIDE;
+    if(sweet_x9_arg("x9_camera_lenses",0)==1)cam_native_mask=X9_CAMERA_ALL_MASK;
     if(!sweet_early_is_x9())return;
     int mode=sweet_x9_arg("x9_camera",0);if(mode<1 || mode>3)return;
     if(st.mode)return;st.mode=mode;
     int major=cdevsw_add(-1,&cam_cdev);if(major<0){st.last_errno=ENXIO;return;}
     /* Captured 20H392 launchd plist runs mediaserverd as mobile (501:501),
      * not macOS _mediaserverd (32). The status device is
-     * NOT evidence of capture capability. No MMIO or rail changes at init. */
-    if(!devfs_make_node(makedev(major,0),DEVFS_CHAR,mode==3?0:501,mode==3?0:501,0600,"x9-camera"))st.last_errno=ENOMEM;
+     * NOT evidence of capture capability. Mode2 power/ID admission runs
+     * only in the separate one-shot registration thread below. */
+    if(!devfs_make_node(makedev(major,0),DEVFS_CHAR,mode==3?0:501,mode==3?0:501,0600,"x9-camera") ||
+       !devfs_make_node(makedev(major,1),DEVFS_CHAR,mode==3?0:501,mode==3?0:501,0400,"x9-camera-status"))
+        st.last_errno=ENOMEM;
     printf("X9 CAMERA: mode=%d hhmain(i2c4/1a) hhfront(i2c2/10); platform=%u, no fake frames\n",mode,hw.version);
     if(mode==3)printf("X9 CAMERA PROBE: root probe/standby ioctl only, no boot-time MMIO/power, no iOS install; shared providers required\n");
+    if(mode==2 && !st.last_errno) {
+        thread_t thread;
+        if(kernel_thread_start(cam_native_register_worker,NULL,&thread)==KERN_SUCCESS)
+            thread_deallocate(thread);
+        else {
+            lck_mtx_lock(&camera_lock);
+            st.last_errno=ENOMEM;st.flags|=X9_CAMERA_FAULT;
+            lck_mtx_unlock(&camera_lock);
+        }
+    }
 }

@@ -26,7 +26,7 @@ int x9_camera_camsv_arm(struct x9_camera_camsv_slot *slot,
     if(!slot || !request || !dma)return EINVAL;
     const struct x9_camera_camsv_request r=*request;
     const struct x9_camera_camsv_dma d=*dma;
-    if(r.frame.sensor!=X9_CAMERA_BACK && r.frame.sensor!=X9_CAMERA_FRONT)return EINVAL;
+    if(!x9_camera_sensor_valid(r.frame.sensor))return EINVAL;
     const struct x9_camera_sensor *s=&sensors[r.frame.sensor-1];
     int e=cam_completed_layout(s,&r.frame);
     if(!e)e=cam_completed_controls(s,&r.frame);

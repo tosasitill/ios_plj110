@@ -64,7 +64,7 @@ def node(name, props=(), children=()):
 
 
 def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_window="legacy512", wlan=False,
-          baseband=False, torch=False, haptic=False, bluetooth=False, als=False, island=False):
+          baseband=False, torch=False, haptic=False, bluetooth=False, als=False, camera=False, island=False):
     if ram_window not in RAM_WINDOWS:
         raise ValueError("unknown captured X9 RAM window")
     phys_base, mem_size = RAM_WINDOWS[ram_window]
@@ -97,6 +97,8 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
         ('x9-mic-dma-handoff', bytes(64)),  # ABI retained, zero: audio loader removed
         ('x9-camera-calibration', bytes(32)),  # only this boot's CSI0/3 LK devinfo words
         ('x9-camera-irq-layout', bytes(64)),  # live GIC4 topology only, never IRQ/DMA ownership
+        ('x9-camera-smmu-policy', bytes(32)),  # live MM/SID80 TCU policy, no hardware grant
+        ('x9-camera-smmu-irq', bytes(32)),  # live MM SMMU combined IRQ topology only
         ('x9-adsp-audio-irq', bytes(32)),  # ABI retained, zero: no audio IRQ topology grant
         ('x9-adsp-handoff', bytes(256)),  # ABI retained, zero: no DSP shared-memory grant
         ('x9-lk-wifi-dt', bytes(16384)),  # shim fdt_wifi_dump.c: read-only Wi-Fi DT facts as text
@@ -178,6 +180,15 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
         # compatible, no AOP MMIO.
         node('aop', [ph()], [node('iop-aop-nub', [ph()], [
             node('als', [ph(), ('device_type', cstr('als'))])])])] if als else []))
+    if camera:
+        # HakiOS's metadata-only ISP node: MobileGestalt reads camera-rear
+        # here for still-camera/rear-facing-camera (Camera.app discovery).
+        # Both physical sensors are present; only mode2 exposes the native
+        # capture path. No compatible/device_type/reg: do not match an Apple
+        # ISP driver or claim a working capture engine. READY remains gated
+        # by the kernel's actual ID probes and the bridge's status checks.
+        io.children.append(node('isp', [ph(), ('camera-rear', u32(1)),
+            ('camera-front', u32(1))]))
     fb = node('sweet-fbcon', [ph(), ('reg', u64(FB, FB_SIZE)),
         ('width', u32(FB_W)), ('height', u32(FB_H)), ('stride', u32(FB_STRIDE))])
     product = node('product', [ph()] + product_properties(island=island))
@@ -186,10 +197,10 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
         # by the native HAL; these are capabilities, not Apple GPIO/MMIO.
         product.children.append(node('haptics', [ph(), ('closed-loop', u32(1)),
             ('supports-3rd-party-haptics', u32(1))]))
-    if torch:
-        # D22AP camera-flash discovery, as in hackios. Only advertise a flash,
-        # not a supported ISP/capture camera or any Apple MMIO/GPIO routing.
-        product.children.append(node('camera', [ph(), ('flash', u32(1))]))
+    if torch or camera:
+        # The node itself is video-camera discovery; flash is independent.
+        # Neither describes an Apple ISP/MMIO/GPIO route or capture READY.
+        product.children.append(node('camera', [ph()] + ([('flash', u32(1))] if torch else [])))
     root = node('device-tree', [ph(),
         ('compatible', cstr(COMPATIBILITY_BOARD) + cstr(COMPATIBILITY_PRODUCT) +
          cstr('mediatek,MT6993') + cstr('oppo,x9') + cstr('xiaomi,sweet') + cstr('AppleARM')),
@@ -222,6 +233,7 @@ def main():
     ap.add_argument('--ram-window', choices=RAM_WINDOWS, default='legacy512')
     ap.add_argument('--baseband', action='store_true', help='include D22AP cellular discovery metadata (no hardware driver)')
     ap.add_argument('--torch', action='store_true', help='advertise flash capability for x9_torch=3 integration')
+    ap.add_argument('--camera', action='store_true', help='native dual-camera discovery metadata (no Apple ISP driver)')
     ap.add_argument('--haptic', action='store_true', help='enable closed-loop/native Actuator discovery')
     ap.add_argument('--bluetooth', action='store_true', help='publish /arm-io/bluetooth for bluetoothd')
     ap.add_argument('--als', action='store_true', help='publish the D22 AOP ALS path for MobileGestalt')
@@ -229,7 +241,8 @@ def main():
     ap.add_argument('--dump', action='store_true')
     a = ap.parse_args()
     root = build(timebase=a.timebase, console_base=a.console_base, console_size=a.console_size, ram_window=a.ram_window,
-                 baseband=a.baseband, torch=a.torch, haptic=a.haptic, bluetooth=a.bluetooth, als=a.als, island=a.island)
+                 baseband=a.baseband, torch=a.torch, haptic=a.haptic, bluetooth=a.bluetooth, als=a.als,
+                 camera=a.camera, island=a.island)
     a.out.parent.mkdir(parents=True, exist_ok=True)
     blob = adt.serialize(root)
     a.out.write_bytes(blob)

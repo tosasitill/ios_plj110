@@ -94,8 +94,8 @@ static int cam_out_top_guard(bool admission)
 static int cam_out_environment(void)
 {
     struct x9_camera_receiver_sample live,base;
-    unsigned port=cam_out.status.sensor==X9_CAMERA_BACK?3:0;
-    const struct cam_rx_maps *m=&cam_rx_maps[cam_out.status.sensor==X9_CAMERA_BACK?0:1];
+    unsigned port=cam_sensor_port(cam_out.status.sensor);
+    const struct cam_rx_maps *m=&cam_rx_maps[(cam_out.status.sensor-1)];
     int e=cam_rx_sample(m,&live);if(e)return e;
     e=cam_mac_guard();if(e)return e;
     e=cam_phy_guard();if(e)return e;
@@ -268,7 +268,7 @@ static int cam_out_open_locked(uint64_t epoch,struct x9_camera_outmux_status *r)
     e=cam_mac_guard();if(e)return cam_rx_session_fault(e);
     if(!cam_out.top)cam_out.top=ml_io_map(0x3a400000,0x1000);
     if(!cam_out.top)return ENOMEM;
-    m=&cam_rx_maps[r->sensor==X9_CAMERA_BACK?0:1];
+    m=&cam_rx_maps[(r->sensor-1)];
     cam_out.out[0]=m->out[0];cam_out.out[1]=m->out[1];
     e=cam_out_top_guard(true);if(e)return e;
     for(unsigned bank=0;bank<2;bank++) {
@@ -295,7 +295,7 @@ static int cam_out_open_locked(uint64_t epoch,struct x9_camera_outmux_status *r)
     }
     memcpy(cam_out.expected,cam_out.before,sizeof(cam_out.expected));
     cam_out.status=*r;cam_out.status.image_vc=plan.vc;
-    cam_out.status.first_vc=plan.vc;cam_out.status.last_vc=r->sensor==X9_CAMERA_BACK?3:0;
+    cam_out.status.first_vc=plan.vc;cam_out.status.last_vc=sensors[r->sensor-1].last_vc;
     cam_out.status.vcdt=plan.vcdt;cam_out.status.expected_size=plan.expected_size;
     cam_out.target[0]=0; /* not 16-pixel mode; CAMSV RAW10 ordinary path */
     cam_out.target[1]=(plan.csi_port<<4)|(plan.vc<<8)|(cam_out.status.last_vc<<16);
@@ -400,7 +400,7 @@ int x9_camera_sensor_session_configure_outmux(uint64_t epoch,struct x9_camera_ou
     if(!e && cam_out.held)e=EALREADY;
     if(!e && !cam_rx_sensor_held_locked(epoch))e=ENXIO;
     if(!e) {
-        ap=(struct cam_sensor_ap){&cam_journal.sensor,cam_sensor_live.probe.sensor==X9_CAMERA_BACK?0x1a:0x10};
+        ap=(struct cam_sensor_ap){&cam_journal.sensor,cam_sensor_slave(cam_sensor_live.probe.sensor)};
         e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e && byte)e=EBUSY;
         if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=EBUSY;
         if(e)cam_sensor_session_fault(e);

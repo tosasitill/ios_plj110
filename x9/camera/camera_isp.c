@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include "camera_isp.h"
+#include "camera_profile.h"
 
 #define WHITE           959             /* 1023 less the black level of 64 */
 #define LUT_WHITE       3836            /* WHITE in the gamma table's steps */
@@ -217,26 +218,64 @@ isp_measure(const struct isp *isp, const struct hakios_camera_frame *f, const ui
  * exposure, longest first: the frame's lines at the shortest frame, then gain to 16x, then frames up
  * to max_frame_lines, then gain to the most; beyond that, digital gain (up to 4x).
  */
+uint32_t isp_exposure_step(uint32_t sensor)
+{
+	return sensor == 1 ? 2 : sensor == 4 ? 4 : 1;
+}
+
+uint32_t isp_exposure_minimum(uint32_t sensor)
+{
+	return sensor == 1 ? 6 : sensor == 2 ? 16 : sensor == 3 ? 4 : 8;
+}
+
+bool
+isp_frame_rate(struct isp *isp, const struct hakios_camera_frame *f, double minimum, double maximum)
+{
+	if (!isfinite(minimum) || !isfinite(maximum) || minimum < X9_CAMERA_MIN_FRAME_RATE ||
+	    maximum > X9_CAMERA_MAX_FRAME_RATE || minimum > maximum ||
+	    !f->line_ns || f->frame_lines_min <= f->margin || f->frame_lines_max < f->frame_lines_min) return false;
+	uint32_t step = isp_exposure_step(f->sensor);
+	uint32_t fastest = (uint32_t)ceil(1e9 / maximum / f->line_ns);
+	uint32_t longest = (uint32_t)floor(1e9 / minimum / f->line_ns);
+	fastest = (fastest + step - 1) / step * step;
+	if (fastest < f->frame_lines_min) fastest = f->frame_lines_min;
+	if (fastest > f->frame_lines_max) return false;
+	if (longest > f->frame_lines_max) longest = f->frame_lines_max;
+	longest -= longest % step;
+	/* Equal requested min/max is a quantized fixed-rate mode, not a false
+	 * claim that fractional sensor lines can provide precisely 30.000fps. */
+	if (longest < fastest) longest = fastest;
+	isp->min_frame_lines = fastest;
+	isp->max_frame_lines = longest;
+	return true;
+}
+
 bool
 isp_ae(struct isp *isp, const struct hakios_camera_frame *f, const struct isp_stats *s, struct hakios_camera_command *c)
 {
 	double now = (double)f->exposure_lines * f->gain / f->gain_unity * isp->digital, ratio, want;
 	double target = 0.15 * WHITE, mean = s->mean[1] * isp->digital > 0.5 ? s->mean[1] * isp->digital : 0.5;
 	double bright = s->bright * isp->digital;
-	uint32_t fast = f->frame_lines_min - f->margin, longest = isp->max_frame_lines ? isp->max_frame_lines : 2 * f->frame_lines_min;
+	uint32_t shortest = isp->min_frame_lines > f->frame_lines_min ? isp->min_frame_lines : f->frame_lines_min;
+	uint32_t fast = shortest - f->margin, longest = isp->max_frame_lines ? isp->max_frame_lines : 2 * f->frame_lines_min;
 	uint32_t lines, gain, frame_lines = 0;
 	double digital = 1;
 
-	if (isp->asked && (f->exposure_lines != isp->asked_lines || abs((int)f->gain - (int)isp->asked_gain) > (int)(isp->asked_gain / 32 + 2))) {
+	if (longest > f->frame_lines_max) longest = f->frame_lines_max;
+	if (longest < shortest) return false;
+	if (isp->asked && (f->exposure_lines != isp->asked_lines ||
+	    f->frame_lines != isp->asked_frame_lines ||
+	    abs((int)f->gain - (int)isp->asked_gain) > (int)(isp->asked_gain / 32 + 2))) {
 		return false;                   /* (the last change not in the frames yet) */
 	}
+	isp->asked = false;
 	/* (the measured levels are the sensor's: digital gain is applied to the picture only) */
 	ratio = target / mean;
 	if (bright * ratio > 0.9 * WHITE && bright > 0) {
 		ratio = 0.9 * WHITE / bright > target / mean * 0.5 ? 0.9 * WHITE / bright : target / mean * 0.5;
 	}
 	ratio = ratio < 0.25 ? 0.25 : ratio > 4 ? 4 : ratio;
-	if (ratio > 0.94 && ratio < 1.06) {
+	if (ratio > 0.94 && ratio < 1.06 && f->frame_lines >= shortest && f->frame_lines <= longest) {
 		return false;
 	}
 	want = now * pow(ratio, 0.7);
@@ -259,13 +298,16 @@ isp_ae(struct isp *isp, const struct hakios_camera_frame *f, const struct isp_st
 		}
 		gain = (uint32_t)(g * f->gain_unity);
 	}
-	/* Main sensor coarse integration/frame length are even; minimum is 6.
-     * Front sensor's minimum is 16. Linear Q10 gain on the shared ABI is
-     * translated into Sony reciprocal gain registers in the kernel. */
-    uint32_t step = f->sensor == 1 ? 2 : 1;
-    uint32_t minimum = f->sensor == 1 ? 6 : 16;
+    /* Each physical profile has its own coarse-integration alignment.
+     * Tele is step4/min8; UW is step1/min4, not the front min16. */
+    uint32_t step = isp_exposure_step(f->sensor);
+    uint32_t minimum = isp_exposure_minimum(f->sensor);
     lines = lines < minimum ? minimum : lines - lines % step;
-    if (frame_lines) frame_lines = (frame_lines + step - 1) / step * step;
+    if (lines > longest - f->margin) lines = (longest - f->margin) / step * step;
+    frame_lines = lines + f->margin;
+    if (frame_lines < shortest) frame_lines = shortest;
+    frame_lines = (frame_lines + step - 1) / step * step;
+    if (gain > f->gain_max) gain = f->gain_max;
     isp->digital = (float)digital;
 	isp->asked_lines = lines;
 	isp->asked_gain = gain;

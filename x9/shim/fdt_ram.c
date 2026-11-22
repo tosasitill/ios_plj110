@@ -139,8 +139,28 @@ int fdt_ram_build_live(uintptr_t fdt)
    live[i][1]=a;live[i+1][0]=end;live[i+1][1]=hi;live_count++;
   }
  }
+ /* Reserve the MMUP/VCP DRAM block outside the XNU map (see x9_ram_ranges.h). */
+ {
+  const uint64_t vlo=X9_VCP_DRAM_LO,vhi=X9_VCP_DRAM_HI;
+  for(i=0;i<live_count;){
+   uint64_t lo=live[i][0],hi=live[i][1];
+   if(hi<=vlo||lo>=vhi){i++;continue;}
+   if(lo>=vlo&&hi<=vhi){
+    for(unsigned j=i+1;j<live_count;j++){live[j-1][0]=live[j][0];live[j-1][1]=live[j][1];}
+    live_count--;
+   }else if(lo>=vlo){live[i][0]=vhi;i++;}
+   else if(hi<=vhi){live[i][1]=vlo;i++;}
+   else{
+    if(live_count==128)return fail("live map split limit",vlo,vhi-vlo);
+    for(unsigned j=live_count;j>i+1;j--){live[j][0]=live[j-1][0];live[j][1]=live[j-1][1];}
+    live[i][1]=vlo;live[i+1][0]=vhi;live[i+1][1]=hi;live_count++;i+=2;
+   }
+  }
+ }
+ live_bytes=0;
  for(i=0;i<live_count;i++)live_bytes+=live[i][1]-live[i][0];
- if(!live_count || live[0][0]!=X9_RAM_LO || live[0][1]!=x9_ram_ranges[0][1])
+ if(!live_count || live[0][0]!=X9_RAM_LO ||
+    live[0][1]!=x9_ram_ranges[0][1])
   return fail("live map changed bootstrap extent",0,0);
  if(live_bytes<(8ULL<<30))return fail("live map below 8 GiB",live_bytes,8ULL<<30);
  return 1;

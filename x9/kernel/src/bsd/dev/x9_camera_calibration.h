@@ -6,6 +6,6 @@
 #define X9_CAM_CALIBRATION_LK_DATA 1u
 struct x9_camera_calibration {
     uint32_t version, flags, word_count, port_mask;
-    uint32_t front, main, reserved[2];
+    uint32_t front, main, telephoto, ultrawide; /* version2, ports0/3/1/2 */
 };
 #endif

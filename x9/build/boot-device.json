@@ -1,5 +1,5 @@
 {
-  "_comment": "Full device boot configuration used by every current image (GPU280 / cell / USB builds): build.py all|boot --boot-config x9/build/boot-device.json. boot.json carries only the base arguments. Recovered byte-exact from x9-gpu280-purge-20261112.",
+  "_comment": "Full device boot configuration (GPU280 / cell / USB / native camera): build.py all|boot --boot-config x9/build/boot-device.json. boot.json carries only the base arguments. Baseline recovered from x9-gpu280-purge-20261112; x9_camera=2 enables the native camera path.",
   "options": [
     "--ram-window",
     "segmented8g",
@@ -49,7 +49,7 @@
     "x9_als=1",
     "x9_torch=3",
     "x9_bt=1",
-    "x9_camera=1",
+    "x9_camera=2",
     "x9_dual_sim=1",
     "ug=5"
   ],

@@ -65,10 +65,18 @@ static int cam_rail_snapshot(struct cam_probe_journal *j, struct cam_probe_rail 
     *evidence=p->selector|((uint32_t)p->enable<<8)|((uint32_t)p->da<<16);
     if(!e)e=cam_rail_hw(j,p,&p->hw,&p->eint);
     if(e)return e;
+    printf("X9 CAMERA RAIL ENTRY: sid=%u sel=%02x en=%02x da=%02x hw_op=%02x eint=%02x\n",
+        p->sid,p->selector,p->enable,p->da,p->hw,p->eint);
     if((p->enable&2) || (p->da&4))return ENOTSUP;
     if(p->enable&1) {
         if(p->selector!=p->target || !(p->da&1))return ENOTSUP;
-    } else if((p->da&1) || p->hw || p->eint)return EBUSY;
+    } else if(p->da&1)return EBUSY;
+    /* Log 332: DOVDD LN60_7 was off (EN0/DA0) with HW_OP_EN0 nonzero.
+     * mt6661-regulator.c only uses HW_OP_EN0 bit1 as the HW1 normal-mode
+     * select (set_load), and the imgsensor power path enables the rail by
+     * RG EN alone over the inherited HW_OP/EINT configuration. Borrow that
+     * configuration: never write it, and cam_rail_check_locked still
+     * requires it unchanged for the whole session. */
     p->selector_expected=p->selector_prior=p->selector;
     p->enable_expected=p->enable_prior=p->enable;
     p->valid=true;
@@ -83,16 +91,31 @@ static int cam_shared_rails(struct cam_probe_journal *j, struct x9_camera_probe 
         .da_reg=0x2062,.hw_reg=0x206f,.target=0xd0};
     j->afvdd=(struct cam_probe_rail){.sid=6,.sel_reg=0x1e61,.en_reg=0x1f07,
         .da_reg=0x1f14,.hw_reg=0x1f20,.eint_reg=0x1f2f,.target=0x0a};
+    if(r->sensor==X9_CAMERA_TELEPHOTO)
+        j->afvdd=(struct cam_probe_rail){.sid=3,.sel_reg=0x1e62,.en_reg=0x1f47,
+            .da_reg=0x1f54,.hw_reg=0x1f60,.eint_reg=0x1f6f,.target=0x0b};
+    if(r->sensor==X9_CAMERA_ULTRAWIDE) {
+        j->afvdd=(struct cam_probe_rail){.sid=5,.sel_reg=0x1e62,.en_reg=0x1f47,
+            .da_reg=0x1f54,.hw_reg=0x1f60,.eint_reg=0x1f6f,.target=8};
+        /* mt6661 SN-LDO rounds the 1.008V request UP to1.010V (51),
+         * then the aliased DVDD1 request asks for1.000V (50). */
+        j->dvdd=(struct cam_probe_rail){.sid=5,.sel_reg=0x24d,.en_reg=0x2007,
+            .da_reg=0x2022,.hw_reg=0x202f,.target=0x51};
+    }
     if(X9PMIFAcquire())return EBUSY;
     int e=cam_rail_snapshot(j,&j->dovdd,&r->dovdd);
-    if(!e && r->sensor==X9_CAMERA_BACK)e=cam_rail_snapshot(j,&j->afvdd,&r->afvdd);
+    if(!e && r->sensor!=X9_CAMERA_FRONT)e=cam_rail_snapshot(j,&j->afvdd,&r->afvdd);
+    if(!e && r->sensor==X9_CAMERA_ULTRAWIDE) {
+        uint32_t evidence=0;e=cam_rail_snapshot(j,&j->dvdd,&evidence);
+        if(!e && (j->dvdd.enable&1))e=EBUSY; /* live alias cannot be borrowed/retuned */
+    }
     X9PMIFRelease();if(e)r->blockers|=X9_CAM_BLOCK_RAIL;return e;
 }
 static int cam_rails_guard_locked(struct cam_probe_journal *j,bool cleanup)
 {
     int guard=cam_pins_guard(j,cleanup);if(guard)return guard;
-    struct cam_probe_rail *rails[]={&j->dovdd,&j->afvdd};
-    for(unsigned i=0;i<2;i++) {
+    struct cam_probe_rail *rails[]={&j->dovdd,&j->afvdd,&j->dvdd};
+    for(unsigned i=0;i<3;i++) {
         struct cam_probe_rail *p=rails[i];
         if(!p->taken && !p->voltage_owned && !p->enable_owned && !p->conflict)continue;
         uint8_t sel=0,en=0,da=0;
@@ -103,7 +126,8 @@ static int cam_rails_guard_locked(struct cam_probe_journal *j,bool cleanup)
 static int cam_rails_guard(struct cam_probe_journal *j,bool cleanup)
 {
     if(!j->dovdd.taken && !j->dovdd.voltage_owned && !j->dovdd.enable_owned && !j->dovdd.conflict &&
-       !j->afvdd.taken && !j->afvdd.voltage_owned && !j->afvdd.enable_owned && !j->afvdd.conflict)return 0;
+       !j->afvdd.taken && !j->afvdd.voltage_owned && !j->afvdd.enable_owned && !j->afvdd.conflict &&
+       !j->dvdd.taken && !j->dvdd.voltage_owned && !j->dvdd.enable_owned && !j->dvdd.conflict)return 0;
     if(X9PMIFAcquire())return EBUSY;
     int e=cam_rails_guard_locked(j,cleanup);X9PMIFRelease();return e;
 }
@@ -161,6 +185,29 @@ static int cam_rail_take(struct cam_probe_journal *j,struct cam_probe_rail *p)
     int e=cam_rails_guard_locked(j,false);
     if(!e)e=cam_rail_take_locked(j,p);
     if(!e)e=cam_rails_guard_locked(j,false);
+    X9PMIFRelease();return e;
+}
+/* The only allowed live voltage transition: this boot's cold-owned UW
+ * DVDD/DVDD1 alias. No general live retune, borrowed load or second enable.
+ * An ambiguous selector transfer retains the rail and prerequisites. */
+static int cam_uw_dvdd_alias(struct cam_probe_journal *j)
+{
+    struct cam_probe_rail *p=&j->dvdd;uint8_t sel=0,en=0,da=0;
+    if(j->board.sensor!=X9_CAMERA_ULTRAWIDE || !p->taken || !p->enable_owned ||
+       (p->enable&1) || p->target!=0x51 || p->sid!=5)return EPERM;
+    if(X9PMIFAcquire())return EBUSY;
+    int e=cam_rails_guard_locked(j,false);
+    if(!e)e=cam_rail_check_locked(j,p,false,&sel,&en,&da);
+    if(!e && (sel!=0x51 || (en&3)!=1 || (da&5)!=1 || p->hw || p->eint))e=EBUSY;
+    if(!e) {
+        p->voltage_owned=true;p->selector_prior=sel;p->selector_expected=0x50;
+        p->selector_uncertain=true;p->target=0x50;
+        e=cam_pmic_w(j,p->sid,p->sel_reg,0x50);
+        if(!e)e=cam_pmic_r(j,p->sid,p->sel_reg,&sel);
+        if(!e && sel!=0x50)e=EIO;
+        if(!e)p->selector_uncertain=false;
+        if(!e)e=cam_rails_guard_locked(j,false);
+    }
     X9PMIFRelease();return e;
 }
 static int cam_rail_restore_locked(struct cam_probe_journal *j,struct cam_probe_rail *p)

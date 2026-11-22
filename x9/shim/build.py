@@ -18,9 +18,9 @@ from bootimg import check_image, pack, unpack
 from toolchain import CFLAGS, abs64_relocs, command, run, symbols
 
 # Audio handoffs link via one bounded collection (audio_handoff.c/fdt_collect.c).
-# Camera and GNSS handoff implementations are retained as source only.
-# Do not link their topology/DRAM walkers into the pre-XNU shim, even behind a switch.
-SOURCES = ['start.S', 'main.c', 'hw.c', 'plog.c', 'loader.c', 'validate.c', 'fdt.c', 'fdt_property.c', 'fdt_collect.c', 'audio_handoff.c', 'adsp_handoff.c', 'mic_dma_handoff.c', 'gpu_handoff.c', 'scp_handoff.c', 'display_lk.c', 'fbconsole.c', 'fdt_wifi_dump.c']
+# Camera IRQ/CSI/SMMU metadata uses the same bounded collector, never per-field walks.
+# GNSS handoff remains source-only; its walker is not restored.
+SOURCES = ['start.S', 'main.c', 'hw.c', 'plog.c', 'loader.c', 'validate.c', 'fdt.c', 'fdt_property.c', 'fdt_collect.c', 'audio_handoff.c', 'adsp_handoff.c', 'mic_dma_handoff.c', 'camera_handoff.c', 'camera_irq_handoff.c', 'camera_calibration.c', 'camera_smmu_handoff.c', 'gpu_handoff.c', 'scp_handoff.c', 'display_lk.c', 'fbconsole.c', 'fdt_wifi_dump.c']
 
 
 def validate_payload(blob, out):

@@ -3,6 +3,10 @@
  * existing different file or symlink. No mailbox/partition layout changes.
  */
 #include "../../../generated/x9_torch_bridge.inc"
+/* Defined by x9_camera_install.inc below in this translation unit. The camera
+ * has its own mode/install/hash gate; an unavailable camera never blocks torch.
+ * Compose before publishing the key, rather than adding a second DYLD key. */
+static const char *x9_camera_exec_library(void);
 static bool x9_torch_bridge_installed;
 static int x9_torch_install(proc_t p, user_addr_t scratch, user_addr_t end)
 {
@@ -33,10 +37,20 @@ static int x9_torch_exec_env(struct image_params *imgp, int ptr_size)
     if (x9_bbfw_equal(X9_TORCH_BRIDGE_PATH, x9_torch_bridge_sha, sizeof(x9_torch_bridge_data))) {
         printf("X9 TORCH: bridge changed/unreadable; mediaserverd left unmodified\n"); return 0;
     }
-    static const char env[] = "DYLD_INSERT_LIBRARIES=" X9_TORCH_BRIDGE_PATH;
-    if (imgp->ip_argspace < sizeof(env) + (size_t)ptr_size) return E2BIG;
+    static const char torch_env[] = "DYLD_INSERT_LIBRARIES=" X9_TORCH_BRIDGE_PATH;
+    const char *camera = x9_camera_exec_library();
+    char combined[sizeof(torch_env) + MAXPATHLEN];
+    const char *env = torch_env;
+    size_t bytes = sizeof(torch_env);
+    if (camera) {
+        int n = snprintf(combined, sizeof(combined), "%s:%s", torch_env, camera);
+        if (n < 0 || (size_t)n >= sizeof(combined)) return E2BIG;
+        env = combined; bytes = (size_t)n + 1;
+    }
+    if (imgp->ip_argspace < bytes + (size_t)ptr_size) return E2BIG;
     int e = exec_add_user_string(imgp, CAST_USER_ADDR_T(env), UIO_SYSSPACE, TRUE);
     if (!e) { imgp->ip_argspace -= ptr_size; imgp->ip_envc++;
-        printf("X9 TORCH: mediaserverd bridge environment appended\n"); }
+        printf("X9 TORCH: mediaserverd bridge environment appended%s\n",
+            camera ? " (camera included in the same DYLD key)" : ""); }
     return e;
 }

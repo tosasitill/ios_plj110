@@ -3,7 +3,8 @@
  * CMOS/VF arm is AFTER real S1/cache/address/FBC/GIC/receive-arm acceptance;
  * upstream PHY/MAC/OUTMUX DL and sensor source are still off. No frame,
  * one-shot write guarantee, RAW/AXI/map drain or ownership is inferred here.
- * Do not port normal disable's global DMA reset or all-tag clearing loop.
+ * This gate-only operation owns no global DMA reset or all-tag clearing
+ * loop. Normal final reset has a separate post-retirement journal.
  */
 enum { CAM_SV_GATE_SEN, CAM_SV_GATE_VF, CAM_SV_GATE_PATH,
     CAM_SV_GATE_ON_STEPS=3, CAM_SV_GATE_STOP_FIRST=3 };
@@ -110,6 +111,7 @@ static uint32_t cam_sv_gate_busy_exemption(unsigned offset)
 static uint32_t cam_sv_gate_compare_word(unsigned bank,unsigned offset,uint32_t value)
 {
     unsigned step=cam_sv_gate.pending;
+    if(!cam_sv.held)return value;
     if(bank<2 && cam_sv_gate.restore_issued && !cam_sv_gate.error &&
        offset==cam_sv_gate_offsets[CAM_SV_GATE_SEN] &&
        (cam_sv_gate.phase==X9_CAM_SV_GATE_RESTORING || cam_sv_gate.phase==X9_CAM_SV_GATE_RESTORED) &&
@@ -163,6 +165,7 @@ static int cam_sv_gate_sample_word(unsigned bank,vm_offset_t view,unsigned offse
     bool allowed=false;
     int e;
     if(cam_sv_gate.phase==X9_CAM_SV_GATE_IDLE)return 0;
+    if(cam_sv_controls_restored())return 0;
     if(bank>=2 || view!=cam_sv.view[bank] || !cam_sv.held || !cam_sv.request_held ||
        cam_sv.terminal || cam_sv_gate.epoch!=cam_sv.epoch)return cam_sv_fault(ESTALE);
     while(field<X9_CAM_SV_GATE_FIELDS && cam_sv_gate_offsets[field]!=offset)field++;

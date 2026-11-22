@@ -102,10 +102,10 @@ int main(int argc,char **argv)
     bool receiver=argc==3 && !strcmp(argv[1],"receiver");
     bool standby=argc==3 && !strcmp(argv[1],"standby");
     const char *which=(probe||pipeline||clocks||receiver||standby)?argv[2]:argc==2?argv[1]:"status";
-    unsigned sensor=!strcmp(which,"back")?1:!strcmp(which,"front")?2:0;
+    unsigned sensor=!strcmp(which,"back")?1:!strcmp(which,"front")?2:!strcmp(which,"tele")?X9_CAMERA_TELEPHOTO:!strcmp(which,"ultrawide")?X9_CAMERA_ULTRAWIDE:0;
     if(argc>3 || (argc==3 && !probe && !pipeline && !clocks && !receiver && !standby) || ((probe||pipeline||clocks||receiver||standby) && !sensor) ||
        (argc>=2 && !sensor && !resources && strcmp(which,"status"))) {
-        fprintf(stderr,"usage: cameractl [status|back|front|probe back|probe front|standby back|standby front|pipeline back|pipeline front|resources|clocks back|clocks front|receiver back|receiver front]\n");return 2;
+        fprintf(stderr,"usage: cameractl status|resources|{back,front,tele,ultrawide}|{probe,standby,pipeline,clocks,receiver} {back,front,tele,ultrawide}\n");return 2;
     }
     int fd=open(X9_CAMERA_DEVICE,((sensor && !pipeline)||resources?O_RDWR:O_RDONLY)|O_CLOEXEC);
     if(fd<0){perror(X9_CAMERA_DEVICE);return 1;}
@@ -116,6 +116,14 @@ int main(int argc,char **argv)
            s.version,s.mode,s.flags,s.supported_mask,s.sensor,s.last_errno,
            (unsigned long long)s.frames,(unsigned long long)s.rejected,s.chip_id[0],s.chip_id[1],s.probe_mask,s.probe_flags,
            s.cold_retained,s.cold_restore_step);
+    if(!sensor) {
+        struct x9_camera_lenses lenses={0};
+        if(ioctl(fd,X9_CAMERA_GET_LENSES,&lenses)) {
+            if(errno!=ENOTTY){perror("lens inventory");return finish(fd,1,false);}
+        } else for(unsigned i=0;i<X9_CAMERA_SENSOR_COUNT;i++)
+            printf("lens sensor=%u observed-ID=%04x flags=%x (unprobed ID=0, not catalog ID)\n",
+                lenses.lens[i].sensor,lenses.lens[i].chip_id,lenses.lens[i].flags);
+    }
     if(!sensor) {
         struct x9_camera_stop receipt={0};
         if(ioctl(fd,X9_CAMERA_GET_STOP,&receipt)!=0) {

@@ -17,7 +17,7 @@ static inline int x9_camera_stop_once(int fd, struct x9_camera_stop *receipt)
     memset(receipt,0,sizeof(*receipt));
     if(ioctl(fd,X9_CAMERA_GET_STATUS,&status)!=0)return errno;
     if(status.version!=1 || status.mode!=2 ||
-        (status.sensor!=X9_CAMERA_BACK && status.sensor!=X9_CAMERA_FRONT) ||
+        !x9_camera_sensor_valid(status.sensor) ||
         (status.flags&~states) || status.reserved[0] || status.reserved[1])return EPROTO;
     struct x9_camera_stop r={.version=1,.sensor=status.sensor,
         .generation_before=status.generation};

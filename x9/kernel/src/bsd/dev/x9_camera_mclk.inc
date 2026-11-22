@@ -148,11 +148,17 @@ static int cam_clock_take(struct cam_probe_journal *j,struct x9_camera_probe *r)
        cam_rr(j->pll,0x0c)!=j->pll_saved)return EBUSY;
     j->vote_expected=j->vote_prior=!!(ap&bit);j->clock_seen=true;
     all=cam_rr(j->hwv,cam_all_off(j));
-    if((ap|all)&bit) {
-        if((j->clk_saved&15)!=7 ||
-           !(cam_rr(j->vlp,0x270)&(1u<<j->board.clk_status_bit)))return EBUSY;
+    uint32_t fenc_on=cam_rr(j->vlp,0x270)&(1u<<j->board.clk_status_bit);
+    printf("X9 CAMERA MCLK ENTRY: cfg=%02x ap=%08x all=%08x fenc=%u bit=%x\n",
+        j->clk_saved,ap,all,!!fenc_on,bit);
+    /* Log 333: CAMTG4 entry cfg 07 (parent7, PDN0), no AP vote, FENC
+     * already on. Vendor MUX_GENERIC_HWV enable is only the HWCCF vote
+     * (pre-poll DONE, SET, EN, DONE) with no FENC-off precondition. A
+     * live/voted clock is borrowed: parent must already be 7 and is never
+     * changed under it; only the AP vote below is ours. */
+    if(((ap|all)&bit) || fenc_on) {
+        if((j->clk_saved&15)!=7)return EBUSY;
     } else {
-        if(cam_rr(j->vlp,0x270)&(1u<<j->board.clk_status_bit))return EBUSY;
         if((j->clk_saved&15)!=7){e=cam_mux_parent(j,7,true);if(e)return e;}
     }
     if(!(ap&bit)){e=cam_clock_vote(j,true);if(e)return e;}

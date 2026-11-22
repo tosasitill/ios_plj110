@@ -82,6 +82,7 @@ struct isp {
 	uint32_t        asked_lines, asked_gain, asked_frame_lines;     /* what AE asked for last */
 	bool            asked;
 	uint32_t        max_frame_lines;        /* the longest frame AE may ask for (0: twice the shortest) */
+	uint32_t        min_frame_lines;        /* rate ceiling, rounded UP to real sensor line granularity */
 	struct isp_tuning *tuning;              /* isp_load_tuning()'s, or none */
 };
 
@@ -96,6 +97,14 @@ float isp_sharpness(const struct hakios_camera_frame *f, const uint8_t *raw, flo
 void isp_measure(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, struct isp_stats *s);
 /* the exposure for the frames to come: true, and the command filled in, when it should change */
 bool isp_ae(struct isp *isp, const struct hakios_camera_frame *f, const struct isp_stats *s, struct hakios_camera_command *c);
+uint32_t isp_exposure_step(uint32_t sensor);
+uint32_t isp_exposure_minimum(uint32_t sensor);
+/* Frame duration is implemented through physical frame-length controls, not
+ * fake timestamps, sleeps or repeated frames. Requested rates are 4..30fps
+ * across all lenses; 2fps exceeds wide/front's physical frame-length limits.
+ * One-line quantization can put the actual rate slightly below the target;
+ * metadata still reports the actual sensor duration. */
+bool isp_frame_rate(struct isp *isp, const struct hakios_camera_frame *f, double minimum, double maximum);
 /*
  * The white balance: grey world -- of the nearly grey, when enough is -- kept to the line of the
  * tuning's reference lights when there is one, a little of the way at a time.

@@ -4,8 +4,16 @@
 #include <stdint.h>
 #include <sys/ioccom.h>
 #define X9_CAMERA_DEVICE "/dev/x9-camera"
+#define X9_CAMERA_STATUS_DEVICE "/dev/x9-camera-status"
 #define X9_CAMERA_BACK 1u
 #define X9_CAMERA_FRONT 2u
+#define X9_CAMERA_ULTRAWIDE 3u
+#define X9_CAMERA_TELEPHOTO 4u
+#define X9_CAMERA_SENSOR_COUNT 4u
+#define X9_CAMERA_DUAL_MASK ((1u<<X9_CAMERA_BACK)|(1u<<X9_CAMERA_FRONT))
+#define X9_CAMERA_ALL_MASK (X9_CAMERA_DUAL_MASK|(1u<<X9_CAMERA_ULTRAWIDE)|(1u<<X9_CAMERA_TELEPHOTO))
+static inline int x9_camera_sensor_valid(uint32_t sensor)
+{ return sensor>=X9_CAMERA_BACK && sensor<=X9_CAMERA_SENSOR_COUNT; }
 #define X9_CAMERA_READY 1u
 #define X9_CAMERA_STREAMING 2u
 #define X9_CAMERA_FAULT 4u
@@ -34,14 +42,31 @@ struct x9_camera_status {
 #define X9_CAM_COLD_PMIF 1024u
 #define X9_CAM_COLD_SENSOR_PARENT 2048u
 #define X9_CAM_COLD_WL_PARENT 4096u
+#define X9_CAM_COLD_DVDD 8192u
 enum x9_camera_cold_restore_step { X9_CAM_COLD_NONE, X9_CAM_COLD_QUIESCE,
     X9_CAM_COLD_RESTORE_DOVDD, X9_CAM_COLD_RESTORE_WL, X9_CAM_COLD_RESTORE_AFVDD,
     X9_CAM_COLD_RESTORE_WAKE, X9_CAM_COLD_RESTORE_PINS, X9_CAM_COLD_RESTORE_SENSOR_BUS,
     X9_CAM_COLD_RESTORE_WL_BUS, X9_CAM_COLD_RESTORE_ROUTES,
     X9_CAM_COLD_RESTORE_CLOCK, X9_CAM_COLD_RESTORE_VS, X9_CAM_COLD_RESTORE_DONE,
     X9_CAM_COLD_RESTORE_PMIF, X9_CAM_COLD_RESTORE_WL_PARENT,
-    X9_CAM_COLD_RESTORE_SENSOR_PARENT };
+    X9_CAM_COLD_RESTORE_SENSOR_PARENT, X9_CAM_COLD_RESTORE_DVDD };
 #define X9_CAMERA_GET_STATUS _IOR('C', 0x90, struct x9_camera_status)
+/* Additive read-only ABI; original 88B status and its two ID slots stay intact.
+ * Presence in a source catalog is NOT PROBED/READY. Only actual matched IDs
+ * with successful cold close populate these records. No MMIO on this ioctl. */
+struct x9_camera_lenses {
+    uint32_t version, count, supported_mask, reserved;
+    struct { uint32_t sensor, chip_id, flags, reserved; } lens[X9_CAMERA_SENSOR_COUNT];
+};
+#define X9_CAMERA_GET_LENSES _IOR('C', 0x9e, struct x9_camera_lenses)
+/* Read-only accounting, NOT a physical lease or nondisruptive-switch grant.
+ * Remaining is conservative: reserve one history slot for the current
+ * stream's eventual retirement before its replacement can be opened. */
+#define X9_CAMERA_SWITCH_SERIAL 1u
+struct x9_camera_switch_capacity {
+    uint32_t version, flags, limit, retired, remaining, reserved[3];
+};
+#define X9_CAMERA_GET_SWITCH_CAPACITY _IOR('C', 0x9f, struct x9_camera_switch_capacity)
 /* Explicit stop receipt; close(2)==0 is not proof that cdev d_close ran.
  * Requests contain version/sensor/generation_before only, all else zero.
  * owned_* journal ATTEMPTED callbacks, not DMA leases or hardware grants.
@@ -112,7 +137,7 @@ struct x9_camera_pipeline {
 #define X9_CAMERA_GET_PIPELINE _IOWR('C', 0x93, struct x9_camera_pipeline)
 /* Shared receive resources, separate 224-byte ABI. PROBE request is exactly
  * {.version=1}; GET returns the cached result without MMIO. mode3/root only.
- * This is CSI_BS_RX power + secure MM-SMMU power, NOT full MM camera clocks,
+ * This is CSI_BS_RX power + MM_2 HWCCF power, NOT full MM camera clocks,
  * translation ownership, PHY setup or capture readiness. */
 #define X9_CAM_RES_ATTEMPTED 1u
 #define X9_CAM_RES_CSI_POWER 2u
@@ -195,7 +220,7 @@ struct x9_camera_mm_sample {
 };
 struct x9_camera_mm_status {
     uint32_t version, sensor, flags, stage, slot, last_errno, restore_errno, blockers;
-    uint32_t cfg[3], retained; /* CAM/CAMTM byte, SENINF byte; slots + CSI30/secure31 */
+    uint32_t cfg[3], retained; /* CAM/CAMTM byte, SENINF byte; slots + CSI30/MM31 */
     struct x9_camera_mm_sample sample[X9_CAM_MM_SLOTS];
 };
 #define X9_CAMERA_GET_MM_CLOCKS _IOR('C', 0x96, struct x9_camera_mm_status)
@@ -255,14 +280,17 @@ struct x9_camera_receiver {
 #define X9_CAM_CFG_LATCHED 64u
 #define X9_CAM_CFG_FAB_READ 128u /* 3 fab bytes read + exit write ACK; not calibration. */
 #define X9_CAM_CFG_FAB_B4 256u /* ready=1, fab=b4/01; requires two init patches. */
-#define X9_CAM_CFG_NEED_FACTORY 1u /* QSC/LRC/actuator work not performed. */
+#define X9_CAM_CFG_MODULE_ACKED 512u /* Module QSC/SPC/LRC ACKs; not optical validation. */
+#define X9_CAM_CFG_NEED_FACTORY 1u /* Actuator/ISP tuning and remaining calibration. */
 #define X9_CAM_CFG_NEED_RECEIVER 2u
 #define X9_CAM_CFG_NEED_DMA_MAP 4u
 #define X9_CAM_CFG_NEED_DRAIN 8u
 enum x9_camera_config_stage { X9_CAM_CFG_NONE, X9_CAM_CFG_TABLE_CHECK,
     X9_CAM_CFG_COLD, X9_CAM_CFG_IDLE, X9_CAM_CFG_INIT, X9_CAM_CFG_PREVIEW,
     X9_CAM_CFG_MIRROR, X9_CAM_CFG_READBACK, X9_CAM_CFG_RESTORE, X9_CAM_CFG_DONE,
-    X9_CAM_CFG_FAB, X9_CAM_CFG_FAB_EXIT, X9_CAM_CFG_FAB_PATCH }; /* Append only. */
+    X9_CAM_CFG_FAB, X9_CAM_CFG_FAB_EXIT, X9_CAM_CFG_FAB_PATCH,
+    X9_CAM_CFG_EEPROM, X9_CAM_CFG_CALIBRATION, X9_CAM_CFG_CAL_MODE,
+    X9_CAM_CFG_OPEN, X9_CAM_CFG_VCM }; /* Append only. */
 #define X9_CAM_CFG_SAMPLES 48u
 struct x9_camera_config_sample { uint32_t reg, expected, observed; };
 struct x9_camera_config {
@@ -284,7 +312,7 @@ struct x9_camera_config {
  * one, bypassing SMMU, or feeding patterns is NOT a hardware implementation. */
 enum x9_camera_power_id { X9_CAM_MCLK, X9_CAM_RESET, X9_CAM_AVDD,
     X9_CAM_AVDD1, X9_CAM_AFVDD, X9_CAM_DVDD, X9_CAM_DOVDD,
-    X9_CAM_DRIVE, X9_CAM_SCL_AP, X9_CAM_SDA_AP };
+    X9_CAM_DRIVE, X9_CAM_SCL_AP, X9_CAM_SDA_AP, X9_CAM_DVDD1 };
 struct x9_camera_power_step { uint32_t id, value, delay_us; };
 struct x9_camera_sensor {
     uint32_t sensor, bus, slave, chip_id, width, height, bayer;
@@ -292,25 +320,41 @@ struct x9_camera_sensor {
     uint32_t gain_unity, gain_max, cphy, lanes;
     const struct x9_camera_power_step *power;
     uint32_t power_count;
+    /* Board/mode facts, independent of camera position and I2C slave address.
+     * UWIDE uses banked word TABLE writes but byte control/read APIs. */
+    uint32_t id_reg, mirror, csi_port, vc, last_vc, line_length, margin;
+    uint32_t table_word, gain_linear;
+    uint64_t pclk, data_rate;
 };
 struct x9_camera_platform {
-    /* Version3 also requires this request's actual SOF observation time.
-     * Version2's DONE-only timestamp cannot identify pre-shutter SOF;
-     * version1's late sensor sampling cannot identify frame state. */
+    /* Version4 delegates configuration to the real powered sensor service.
+     * Core must not bypass its CONFIGURED journal with independent table
+     * writes. Completion records retain their independent version3 ABI. */
     uint32_t version;
     /* power(true) follows sensor->power, power(false) restores ownership in
      * reverse order, including failures halfway through power(true). */
     int (*power)(const struct x9_camera_sensor *, int on);
     int (*read8)(const struct x9_camera_sensor *, uint16_t reg, uint8_t *);
     int (*write8)(const struct x9_camera_sensor *, uint16_t reg, uint8_t);
-    /* on: set up CSI VC0/DT0x2b, RAW10 DMA and SMMU before sensor stream-on.
+    /* Called after power/ID, before the capture attempt. Must load and
+     * verify this sensor's actual mode, and prepare its inactive receiver
+     * lifetime. Callback owns the same cold journal as power/read/write. */
+    int (*configure)(const struct x9_camera_sensor *, struct x9_camera_config *);
+    /* Accept one validated AE request as a unit, not independent live
+     * register writes that bypass the controller's frame/control journal.
+     * A queued request is not applied metadata: each completion must bind
+     * its actual applied exposure/gain/frame length. gain_q10 is linear. */
+    int (*exposure)(const struct x9_camera_sensor *, uint32_t exposure_lines,
+        uint32_t gain_q10, uint32_t frame_lines);
+    /* on: set up the actual image VC (back1/front0)/DT0x2b, RAW10 DMA and SMMU before sensor stream-on.
      * off: stop/drain DMA before returning, even after partial init failure.
      * generation tags every completion; old completions are rejected.
      * Nonzero off retains DMA mappings/clocks/rails: caller must NOT call
      * power(false), retry cleanup, or start another sensor in this boot. */
     int (*capture)(const struct x9_camera_sensor *, int on, uint64_t generation);
 };
-#define X9_CAMERA_PLATFORM_VERSION 3u
+#define X9_CAMERA_PLATFORM_VERSION 4u
+#define X9_CAMERA_COMPLETED_VERSION 3u
 /* Kernel-only record, not an ioctl or the userland RAW10 header. Provider
  * binds this to one owned DMA slot/request AFTER PASS1_DONE/group/tag/inner
  * sequence, error checks and CPU cache sync. capture_id is a nonzero, strictly
@@ -387,7 +431,8 @@ struct x9_camera_camsv_dma {
     int (*check)(void *, uint64_t lease, const struct x9_camera_camsv_request *);
 };
 enum x9_camera_camsv_slot_state {
-    X9_CAMSV_EMPTY, X9_CAMSV_ARMED, X9_CAMSV_RETIRED, X9_CAMSV_RETAINED
+    X9_CAMSV_EMPTY, X9_CAMSV_ARMED, X9_CAMSV_RETIRED, X9_CAMSV_RETAINED,
+    X9_CAMSV_CANCELLED /* exact never-issued request; not DONE/deliverable */
 };
 /* Zero-initialize a kernel-owned slot before its first arm. After that only
  * these APIs mutate it. The owner serializes result consumption/rearm/stop

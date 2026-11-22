@@ -1,9 +1,109 @@
-# X9 前后相机初步移植
+# X9 原生相机桥
 
-**已实现控制层、RAW10 帧接口、iOS 双流桥、冷启动 sensor-probe/standby 配置、共享接收电源与 MM 寄存器时钟事务、SENINF/CAMSV 接收计划及带供电前置的寄存器预检；采集后端仍缺失，不能拍摄。**
-没有假帧、测试图案、Android 代理或 Camera.app 成功状态伪造。默认关闭。
+## 当前状态（2026-11-18）
 
-**帧接口配套变更**：kernel-private platform/CAMSV 现为 version3；用户 RAW10 header 仍120B，但使用 `RWFRAME2` magic 与同帧 SOF 观察时间。旧 version1/2 provider 或 `RWFRAME1` 图像不能混用，不以 DONE 时间伪造缺失 SOF；ioctl/status/command 尺寸不变。此接口变更已编译，尚无实机采集结果。
+首帧错误按驱动实际执行顺序定位。`NATIVE CONFIG stage=9 completed=1fe errno=0` 表示 receiver 到 OUTMUX 全部通过。接下来 `NATIVE PREPARE step=` 覆盖 RAW 规划、控制线程和 SMMU 导出，`NATIVE FIRST ARM` / `IRQ ARM` 覆盖 DMA、CAMSV 请求、GIC、FBC 和接收源切换，随后才执行 `SENSOR STREAM`。cdev 在首个 RAW 尚未发布时按代记录一次 `RAW WAIT`。已取得 RAW 的 iOS worker 会分输出记录首次 PTS metadata、像素锁、渲染及 metadata 挂载错误。`first picture given` 表示相应输出已实际调用 handler。
+
+`x9_mm_power.c` 的 IRQ voter 轮询已按 OPPO `regmap_read_poll_timeout_atomic()` 对齐。EN 以 2 µs 为采样间隔、1250 µs 为总预算。pre-STA/final STA 使用 1 µs 间隔及 10000 µs 总预算。GET 在 pre-STA 前识别已有的 AP EN，借用票仍需通过 global EN 和 final STA。`x9_mm_power.o` 单对象编译 exit 0。最近一次实机日志仍是 356。
+
+`GLB_EN` 按 Android v1 `wait_done()` 每次读值后延迟 1 µs，再判断该次读值。采样上限为 10001 次，通过后进入 final STA。Android `mtk_mminfra_is_on()` 在 HWCCF 完成后单次检查 MM_2 ACK。native 在同一位置另以 MM_2 和 infra0/AO ACK 作为 token 发放条件。现有 Android MMINFRA 运行记录证实 CG_LINK、CMDQ、SMI 均使用过 MM_2，启动首笔请求的调用者尚未确认。出处见 `NOTES.md` §5。
+
+重复票语义复核：`_v1_hwccf_irq_voter_nowait()`的重复票`goto skip`只跳过nowait里的prepoll/SET/EN，外层`_v1_hwccf_irq_voter_ctrl()`仍调用`_v1_hwccf_irq_voter_wait_done()`继续等`all_en`和`STA`；`_v1_mm_hwccf_voter_ctrl()`的单函数skip不能混入这条组合语义。三套路径最终都要求`STA bit3=0`，因此`ap=8/global=8/sta=8`不是等待步长或重复票造成的假失败。原ATF中`28d48/28f08`对resource55/bit3的VOTE/UNVOTE与native同一资源；`28f08`丢弃内部HWCCF返回值并总返回0，外层PM成功不能证明内部成功，也无法替代native的最终STA判定。未据此改代码、清状态或延长等待。
+
+原ATF `21424(type1,0x37,bit3)`继续闭合到`37f4/385c/3988`：AP使用MM HWV `0x31c00000`，VOTE/UNVOTE写`+0x30724/+0x30728`（对应`XPU_B0_SET/CLR`）。按物理地址逐指令复核：`385c`检查并等待AP EN和global EN；`3988`再以`0x2710×1us`等待`w19/w20`清零，而`37f4`传入的是`0x1135c/STA`与bit3，所以ATF VOTE路径最终仍要求STA bit3清零。此前“3988只等global EN/没有再轮询STA”的表述错误，以此纠正。native按Android v1 voter的`wait_done()`同样要求STA bit3 idle，不能放宽。`21564`的`0x31c3748=2`只在VM型资源`0x38/0x39`成功后写，MM BACKUP0 `0x37`不写。新增只读`int=CCF_INT_STATUS&BIT(5)`用于观察backup1 timeout，不写W1C；`sta=8`仍按源码失败，不清W1C、不改bank、不延长。
+
+`CCF_INT_STATUS(0x50)`的bit5/bit21分别在`hwccf.h:150/167`命名为VIP/AP backup1 timeout；`hwccf_dbg.c:172` 将其列入寄存器 dump，`clkchk-mt6993.c:5163` 读取并判断是否触发 timeout dump。v1 IRQ voter 的成功条件仍由 global EN 和 STA 决定。新增的`int=`只用于下一次日志诊断，不能替代`CCF_BACKUP1_STA`判据，也不能在尚无新日志时宣称硬件已置位timeout。
+
+BACKUP_GRP0是共享资源：DPC/VMM也会以同一resource55投其它bit，但v1 wrapper只按resource选择同一组寄存器。MM_2由DT给的`vote_bit=3`；日志356的`ap/global/sta=8`未显示其它bit参与，且两个v1 retrigger handler要么只接受CG资源（backup SET直接bypass），要么要求`mtcmos_sta!=0 && all_mtcmos_sta==0`（日志全0）。没有源码依据把`sta=8`归因于共享FSM retrigger，native继续只CLR自己新增的bit3。
+
+这些共享票在Android里属于后续runtime PM：`mtk_cam.c`的CAMSYS CAM_SEL、`mtk_imgsys-sys.c`/`mtk_imgsys-cmdq.c`的IMG/IPE_SEL都在resume/suspend成对调用`vmm_enable/disable_cvfs()`，再经`hwccf_irq_voter_ctrl/multi_voter_ctrl`投bit14/15/16；DPC的bit0属于显示runtime路径。356在MM_2 acquire就返回errno60，尚未到这些阶段，不能提前补票来替代STA bit3。
+
+`irqhis=` 记录 `HW_CCF_VOTE_IRQ_HIS_INDEX_POINTER`（`0x124cc`）。MM_2 GET 的 final STA 超时还会输出 `X9 MM POWER IRQ HISTORY`，包含采样前后的指针和 `0x124d0..0x1253c` 的 14 组原始地址和数据字。指针变化表示采样期间发生更新。单对象编译 exit 0。
+
+`int_raw=` 保存与 `int=` 同一次 `CCF_INT_STATUS` 读取的完整值。bit5/21 对应 BACKUP1 VIP/AP timeout，bit9/25 对应 VIP/AP vote-before-ready。原始字段、`int=` 和 `irqhis=` 尚无实机值。live DT 的 `vcp-gipc` 使 `mminfra-debug` 的 `init-clk-on` 只增加软件计数。Android GCE0 本地 mailbox 在相应首末引用中管理 AO 和 MM_2。
+
+进一步按原ATF逐指令复核`28d48/28f08`：bit3投票只在ATF自身引用计数0→1且`0x1325dc bit0`置位时发生，UNVOTE只在计数归零且该flag仍置位时发生；native没有这套ATF私有状态，首个camera parent按Android `mminfra2_onoff()`直接投AP bit3。当前无ATF引用计数/flag日志，不能据此改native或清flag，仍要求`CCF_BACKUP1_STA` bit3 clear。
+
+`fsm=80000001`的高位bit31也不是失败条件：`hwccf_api.c:325`只看低16位，DPC和原ATF对同一`0x31c10000`只掩`0xfffe`。SMMU冷启动顺序（`CMDQEN+ACK→CFGI_ALL/TLBI→EVTQ/SMMU`）、CAMSV DDR/COH/BW_QOS的SW-mode SET/OR_CQ写回采样、SENINF core PM/clocks/vcore/PHY源选择/outmux disable，均已在native源码中有对应实现或资格检查。当前没有越过MM_2，因此这些不能当实际生效或画面通过证据。
+
+静态复查补充：`hwccf_drv_probe()`只做syscon→regmap、MMUP GPR映射和回调注册，不写HWCCF控制寄存器；参考树里的`HWCCF_INIT_DONE_REG`没有probe使用点。native的`0x31c00000+0x22000`覆盖所有已用XPU/诊断偏移，`0x31a04000+0x1000`和`0x31b50000+0x1000`覆盖MMUP dummy read与ACK。351–356从WL/EEPROM、校准FIFO推进到MM_2，355/356在`apply/mode/VCM INIT`通过后稳定停在`sta=8`。没有漏掉的Android HWCCF probe初始化或MMIO映射错误；`CCF_BACKUP1_VIP_STA_CLR`/`CCF_INT_STATUS`只是寄存器定义，v1 IRQ voter成功路径不清W1C，不能拿来伪造通过。Android SMI的MM_2入口同样只是`mtk_mminfra_on_off()`，larb/common resume不外加剧BACKUP1 bit3动作。新增只读`en6`日志用于观察`HWCCF_REG_EN6/block_voting`，不调用freeze/unfreeze、不绕过STA；单对象编译exit0，没有镜像。`ack2=c2f10152`和`infra=e3fc0000`按DT/HWV mask检查均满足，唯一硬失败仍是`STA bit3`。
+
+**最新日志 `~/356.txt` 已在 mode2 读到后/前摄真实 ID `9186/0615`、完成 native 注册、sensor-open 与 EEPROM 校准 preload（3456/3456 B）；r44的校准apply/mode与VCM init继续通过：`phase=apply writes=250 acked=250 applied=1 errno=0`、`phase=mode mode=1/1 errno=0`、`VCM INIT complete=1 errno=0`。** 当前最早失败仍是MM_2：`X9 MM POWER GET ... stage=4 ... ap=8 global=8 sta=8 done=fffffff7 ack2=c2f10152 infra=e3fc0000 all_sta=0 fsm=80000001 mt0sta=0 mt1sta=0 errno=60`，随后 NATIVE CONFIG stage1 errno60。按Android `hwccf_api.c`的v1 IRQ voter源码对照，356已达到v1 IRQ voter最后的`STA` bit3检查，`done`仅用于诊断。`fsm=80000001`的bit31不属于`hwccf_api.c:325`的`(val & 0xffff) <= 0x1` FSM idle判据；`all_sta/mt0sta/mt1sta=0`排除普通嵌套MTCMOS未完成解释。Android v1 ctrl失败后只assert+返回，注册的CG47 retrigger对BACKUP资源直接bypass，不能照搬。r44新增的`all_sta/fsm/mt0sta/mt1sta`只读日志不改变投票/等待/写入语义，不忽略`sta=8`。尚无真实预览、拍照、录像或切镜验收；详见`NOTES.md` §5。
+
+后续源码核查又修正了 SMMU 的 CMDQ 使能顺序（8→12→13）、接入 DT 对应的普通
+wrapper 和34个 CAMSV DMA/CQI FIFO 默认配置，修复退休快照未初始化 padding，以及四摄使用
+两元素 IRQ slot 的越界。配置与原值恢复仍受真实电源/请求/退休守卫约束；确切新候选见 NOTES。
+Android ISP8s runtime 冷复位、默认 DDR/COH/BW 请求与最终关闭复位已接入独立 journal，
+均未上机。SID80 的 DT 来源已核定；secure 平台策略与实际 DMA 路由仍需运行证据，
+没有因此宣告完整硬件初始化或实际画面已经通过。
+
+native 单路 MMQoS 的 L19/P0 OSTD 按 Android interconnect v2 计算：
+先按 ISP8s `calc_bw → to_qos_icc` 把 RAW 字节需求整除1024转换成 ICC KB/s，
+取 `max(avg,peak)`，再经 MMQoS `icc_to_MBps` 整除1000，
+再按 `bw_ratio=9` 与本机 `w-hrt-ostdl=3`（`OSTDL_3`）取
+`ceil(mix_MBps/512)*3`，不足1MB/s保留默认1，上限64。
+原实现将枚举3误认作`OSTDL_2`，已修正；有限带宽请求不套用 display/max-BW override。
+MMPC channel 的10/7 occupancy与16MB/s向上取整静态供给单独保留，不参与端口OSTD计算；
+它仍为字节需求的保守上界，可能高于Android按KB/s逐步向下取整的动态供给。
+`X9 CAMERA MMQOS TAKE` 同时记录 `mix_MBps` 与实际目标 OSTD，仍需新实机日志验证。
+
+传感器会话另按 Android `get_sensor_cali/set_sensor_cali` 接入本模组 EEPROM 校准载荷：
+主摄/长焦 `0x50` 的3072B QSC与384B SPC，前摄 `0x54` 的1560B QSC与260B LRC。
+按Android `adaptor_i2c_rd_p8`的顺序读取，每块最多16B（本机`mt6991_compat.fifo_size`），
+不跨校准block边界；无需APDMA。两个完整读取轮次及各轮前后 header 必须匹配，才在 init/fab patch 后、preview 前写入传感器；
+不写 EEPROM 数据，不使用其它模组缓存或固定标定。最终模式保持原 preview 的开关策略，
+前摄 `0x3621=0` 不被强行改回1。`MODULE_ACKED` 与 `SENSOR CAL` 日志只证明这些事务的
+ACK及最终开关读数；没有假设校准 SRAM 可读，也不替代光学效果、ISP LSC/CCM、AF/OIS验收。
+超广角的 banked 校准仍未接入，factory blocker 保留。mode2与mode3的同一sensor-session共用此路径。
+
+同一会话还补齐 Sony 主摄/长焦 `open()` 的 VCM 模式激活：主摄先向 i2c4/`0x0c`
+发送一字节地址的`02=00`，等待3ms后重读 sensor ID；长焦先重读 ID，再向 i2c7/`0x2d`
+发`02=00`并等待3ms。两者都在 init/校准/preview 前执行。只由独立 helper 访问这两个地址，
+原 sensor/EEPROM 地址范围不放宽。保存稳定原模式，激活与关闭恢复分别记录 issued/ACK/readback；
+关闭在原 native 退休检查通过后、reset/MM/rails 释放前恢复借用模式，失败保留依赖且不重发。
+sensor-open helper本身没有位置/PID存储命令；正常lens生命周期由下一段的独立journal负责。
+
+主摄/长焦的 AK7316M/T normal lens init/release 也接入同一mode2/mode3会话。
+沿用既有3.0V/3.1V VIN与DT地址；这两个节点没有可选`vcamaf_on/off`引脚组。
+正常5100us等待、首个mode读后3ms；主摄读`16` PID及`84`双字节原点，写原
+`g_last_pos=511`的`00,7f,c0`三字节位置命令，再发`02=00`。PID不同只记录，
+不触发另一路NVM更新；读/写错误保留原错与依赖，不猜中间位置。
+长焦原`g_origin_pos/g_last_pos`初值都511，正常init不发位置store，不把缓存当实测。
+V4L2 focus control初值0与init缓存独立保存；正常release按该control的100步长/1ms
+规则并无条件发最后0，再`02=20`，长焦另等2800us，实际mode双采样后才恢复
+sensor-open借用原模式并撤依赖。位置ACK不是物理到位或光学对焦证明。
+`session.stream`在core中保留至power(false)完成，因此关闭helper逐事务检查实际
+native退休回执，不要求提前清掉这份历史。journal随原exported epoch归档；
+部分命令失败不重发。公开FOCUS、帧绑定与AF/OIS仍未接通，RAW继续`NO_FOCUS`。
+前摄地址冲突和超广角VCM也仍未闭合。
+
+媒体时间按 ISP8s 正常 CAMSV SOF→controller runtime info→job timestamp→buffer done
+链路取同请求 SOF；bridge 的 metadata、PixelBufferHandler 参数和各输出单调门统一使用
+RAW v2 中的真实 SOF 观察值。RAW `time` 仍为 DONE，保留独立 SOF/DONE 顺序检查。
+这是 IRQ 观察时间，不是精确曝光开始，也不从曝光或帧率倒算。首次 handler 日志记录
+`PTS=SOF=... DONE=... host units`。切镜 `source_gap` 使用前后实际 handler 帧的 SOF，
+`done_gap/start_to_RAW` 单独报告 DONE 观察间隔；这些数值尚无本机运行结果。
+
+| 路径 | 源码能力与边界 |
+|---|---|
+| 原生采集 | `x9_camera=2` 才准入；真实 ID/probe/close、PHY/CSI/CAMSV、IRQ、SID80、RAW 与退休守卫必须逐项成功，不以注册代替画面 |
+| 镜头 | 默认广角/前置；`x9_camera_lenses=1` 候选才开启超广角与长焦的四路准入；没有多路并发 grant |
+| 后置变焦 | 后置广角逻辑流的 `ZoomFactor`：`0.6≤z<1` 超广角，`1≤z<3` 广角，`z≥3` 长焦；缺长焦时广角数字裁切。D22 保留独立长焦 ID:2，尚无原生 0.6/3 按钮或虚拟三摄合同 |
+| 切镜 | 目标稳定120ms、驻留至少450ms；先真实 STOP/close，再启动新镜头；保持 graph/输出池/host clock，曝光 seed 等待实际控制记录，8个真实新帧作有限亮度过渡。**仍有冷启动采集缺口，不是 iPhone 双路预热的无间断切换** |
+| 视频配置 | 精确20H392 UUID/IMP 守卫，原 D22 plist 读入后仅在内存适配单源 Photo、1080p30/720p30/640×480；保留原音频节点，禁用未实现的 HDR/防抖/depth/AF/闪光等能力；不改 Apple 磁盘资产 |
+| 视频编码 | 注册原 Apple `VCPHEVC` 软件 `hvc1` 工厂，并记录真实工厂创建结果；注册失败只公告 Photo。没有可用 AVC 软件工厂证据，不把 HEVC 冒充 H264；**没有硬件编码或持续实时吞吐证明** |
+| 帧率 | `MinimumFrameRate` / `MaximumFrameRate` / `MaximumAllowedFrameRate` 控制真实 frame length（四镜头共同可实现的4..30fps，广角/前置的帧长上限不足以固定2fps）；录像时固定到有效上限。按各传感器 line/step 量化，metadata 报告实际时长，不 sleep/改 PTS/重放帧；各输出拒绝重复/倒序 PTS |
+| 切镜预算 | 独立只读32B `GET_SWITCH_CAPACITY`，为当前流退休预留 history slot；耗尽时在 STOP 前拒绝新目标、保留旧流。八个 exported epoch pin 上限不解除，不复用未退休映射 |
+
+**尚未闭合的验收**：Camera.app 图标与视频模式是否出现、四 ID/close→真实 RAW→handler→移动画面、编码器真实选中/编码、视频 start/stop、QuickTime 音视频封装、Photos 保存/重开播放、切镜 `source_gap` 和画面。保持同 graph 或软件工厂 `result=0` 都不是录像完成证明。真正同步预热/无采集中断需要底层多路采集及 iOS 同步源合同；硬件 VENC、镜头标定、AF/OIS 与原生三摄 UI 仍未完成。
+
+设备由用户手动 `fastboot boot` 候选并提供新日志；沿用 GPU280 时无需 mailbox。不默认启用 `x9_mgwipe=3` 缓存重建。确切提交、候选路径、构建结果与下一动作见 `NOTES.md` §5。
+
+## 基础接口与历史实现记录
+
+以下保留逐层实现时的约束；“采集后端缺失”“无 native caller”“Photo-only”等为当时状态，**不是当前总状态**，以本节上方状态、当前源码与新候选日志为准。
+
+**接口版本**：kernel-private platform 现为 **version4**，mandatory `configure`/`exposure` callback 将真实 sensor-session 配置/曝光交给 provider；completed-frame 与 CAMSV completion 仍为 **version3**。用户 RAW10 header 仍120B，使用 `RWFRAME2` magic 与同帧 SOF 观察时间；ioctl/status/control 尺寸不变。旧 platform version1/2/3 provider 与 `RWFRAME1` 图像不能混用，不以 DONE 时间伪造缺失 SOF。native sensor adapter 尚无 engine 调用注册者，不是 capture READY 或实机预览证明。
 
 ## 实现边界
 
@@ -16,7 +116,7 @@
 | sensor-probe | MT6993 CAMTG voter/parent 申请与释放、AP I2C 父时钟及单控制器门控/FIFO/WRRD；WL28681C 指定通道电压/启停；reset/MCLK pinmux；真实 ID 检查与恢复日志。闲置 AP timing 初始化、禁用共享 rail 的申请/还原、GPIO203 局部唤醒。**I2C 父时钟可有条件从 off 开启；HWCCF autolink/所选 PLL 仍需已就绪，未上机验证** |
 | sensor-standby | 同一冷启动 journal 内，ID 匹配后经真实 AP I2C 写 init/preview 与镜像；前摄先做固定 fab 读端口识别，仅 B4/01 分支追加两项 init patch；读回稳定控制，然后 reset/恢复。mode3 显式命令；与未来 mode2 共用表验证/加载/读回。**不 stream-on、不做 QSC/LRC 标定；未上机** |
 | SENINF/CAMSV 计划 | 零 MMIO 查询实际 CSI 端口、主摄 VC1／前摄 VC0 RAW10、候选 outmux/CAMSV、尺寸/64B stride/WDMA 打包及 SID；**不是资源申请或采集** |
-| 接收电源接口 | TF-A MM-SMMU `PM_GET/PM_PUT`、CSI_BS_RX MM HWCCF 单 bit 申请/恢复；带供电前置检查的 SMMUv3 只读快照。**代码已构建，未上机；不是完整 MM power/clock provider 或 DMA mapping** |
+| 接收电源接口 | MM_2 HWCCF 电源引用、CSI_BS_RX 单 bit 申请和释放，以及通过供电检查后的 SMMUv3 只读快照。实机日志 356 到达 MM_2 的最终 STA 检查。 |
 | MM 寄存器时钟事务 | 显式 AO/infra0/VMM BACKUP 引用、CAM_VCORE/MAIN/MRAW 域、CAM autolink FENC、CAMTM/SENINF voter、CAM/CAMSV 寄存器 CG 申请/逆序恢复。**未上机；不改共享 AVS/CVFS/PLL，不申请 SMI larb，不证明采集速率** |
 | 接收寄存器预检 | 持有完整 MM 寄存器时钟链时，读取目标 MAC、async/AFIFO、outmux0 outer/inner、CAMSV0 central/DMA/CQ 控制，双采样验证稳定及使能位关闭。**只读，不提交配置，不证明 ownership 或 DMA 排空** |
 | 持久 sensor/receiver 生命周期 | kernel-private 冷会话可在 verified standby 后持有同一 MM 时钟与 CSI/secure 电源 journal；后续请求及撤销前检查完整已消费依赖与原始接收控制，先隔离 sensor reset/MCLK，再退休 MM，最后还原 sensor 供电。**无 native capture caller，不 stream-on；不是 DMA lease/drain** |
@@ -174,13 +274,13 @@ cameractl probe front
 
 - UNIVPLL 的已有 PCW/postdiv 配置在 `/104` 后为标称 24MHz（容差 ±1kHz）。不重编 PLL、不初始化 HWCCF 的全局/autolink 表；DONE 不就绪时有界退出。没有其他 XPU 投票且 CAMTG FENC 为 off 时，才允许把目标 mux 改为 parent7。已有投票则只接受正确 parent 和 FENC-on，不改 live parent。
 - i2c4/i2c2 和 **i2c12** 的共享 I2C_EAST/I2C_PERI parent 必须 CKSTA-idle，选用 PLL 时该 PLL 已 FENC-on；不修改共同 source。已 FENC-on 且 PDN-off 的 parent 只借用。若 FENC-off、PDN-on、该分组**全部**物理子控制器 gate-off（IMPE mask `0x3f`、IMPC mask `0x0d`），两次入口快照及源 PCW 稳定，才记录 journal 并单 bit CLR 父 PDN，等待 FENC-on。随后只 ungate 目标 IMPE/IMPC bit，退出恢复自己增加的门控。所有暴露 bank 必须无事务/IRQ/FIFO 残留，所有 DMA bank 均未运行；主/前各 8 个 I2C、3 个 DMA bank，WL 为 4/1。TIMING 非零时仅借用经 divider/high/low/EXT 资格检查的 20–100kHz 标准模式、open-drain/非 HS 配置；TIMING 为零且 MULTI 为零时，可按已验证 parent PCW 推导标准模式 ≤98kHz 的 high/low sample、step、divider 和 5µs EXT，保存/恢复 14 个 CSR。不会 reset 整个控制器、改 MCU IRQ 或共享 shadow mode。实际 DT 没有 `ch-offset-i2c`，使用 channel0，不能猜成 `+0x10000`。
-- AP I2C 引脚允许已为 mode1，或 mode0/input 后仅切目标引脚的 mode1，退出恢复；mode2/SCP、GPIO output 等未知 owner 一律拒绝。GPIO203 已 output-high 时只借用；output-low 或 mode0/input 且 DIN-low 时可记录 DIR/DOUT，先低→output→高，等 1ms 后读 WL ID。退出前必须读整个 WL enable 字节为零才恢复自己拉高的203；GPIO187/202 和 UVP 控制始终不写。
+- AP I2C 引脚按每个 pin 的 AP 功能号判定：sensor SCL/SDA（172-175、190/191、200/201）的 AP 功能是 mode1；WL28681C/RT5133 所在 i2c12 的 GPIO162/163 **mode1 是 SCP_SCL2/SDA2，AP SCL12/SDA12 是 mode2**（live DT 把唯一的另一组 SDA12 引脚 GPIO187 当作 WL28681C reset 组 GPIO 使用）。已处于该 AP 功能则借用，mode0/input 时只切到该 AP 功能，退出恢复；SCP 功能、GPIO output 等未知 owner 一律拒绝。日志 331 中旧代码把 162/163 只认 mode1，LK 交接的 mode2（AP i2c12）被判为 ROUTE blocker，主摄冷上电在读 ID 前 ENOTSUP。GPIO203 已 output-high 时只借用；output-low 或 mode0/input 且 DIN-low 时可记录 DIR/DOUT，先低→output→高，等 1ms 后读 WL ID。退出前必须读整个 WL enable 字节为零才恢复自己拉高的203；GPIO187/202 和 UVP 控制始终不写。
 - SID3 LN60_7 DOVDD、主摄 SID6 LDC0_3 AFVDD：已启用时只借精确电压/normal/DA-enabled。禁用时还必须 DA-off/HW_OP_EN0=0，AF 另要求 EINT_EN=0，才能记录 selector，设置电压并单 bit EN_SET。DOVDD 的实际编码是 **0xd0=1.8V**（coarse 高 nibble、fine 低 nibble），AF 0x0a=3V；此前 0x0d 检查不正确。每次 snapshot→ownership→写入→readback 同持共享 X9PMIF 锁；模糊写入保留 journal。主摄仅申请 SID3 0x178a 的 VS mask4，最后撤销自己的 vote，不清其他 bit。
 - 目标 sensor 的 reset 为 GPIO output-low，或 mode0/input 且 DIN-low（保存 DIR/DOUT 后可转 output-low）；MCLK pinmux 为 off、它的 WL 通道均 disabled。主摄使用 WL4/7/2，前摄使用 WL3/1；其他通道保持。
 
 `blockers` 位：`1=clock`、`2=shared rail`、`4=AP route`、`8=I2C state`、`16=inherited active/reset state`。
 阶段编号：`1=preflight`、`2=PMIC`、`3=bus`、`4=LDO`、`5=power`、`6=ID`、`7=restore`、`8=done`，追加 `9=clock`、`10=config`（不改旧编号）。
-一次 AP FIFO 请求的完成等待使用绝对时间 5ms deadline，另有1000次轮询上限；配置、clock guard 和收尾不包含在这个5ms预算内。单次 PMIF 状态等待最多约 1ms，DA 另有最多20次/100µs有界采样；单次 HWCCF DONE 等待最多 10ms，AP EN 最多 200µs，CKSTA/FENC 最多 1ms。未知继承状态不清 IRQ、不做总线 reset/retry。
+一次 AP FIFO 请求的完成观察沿用Android `I2C_POLLING_TIMEOUT=50ms`，每次先读STAT再判断时间，退出时补最终STAT采样；配置、clock guard 和收尾不包含在此预算内。线程调度可使实际观察晚于50ms，不将该预算冒充物理完成期限。只有真实terminal状态及完整停止/FIFO/配置资格检查通过才继续，尚无terminal的请求仍锁存、不重试。`AP WAIT`在无terminal或耗时达到50ms时记录真实START、polls和elapsed_us；旧`AP REQUEST start=ffffffff`可能只是未采样占位。单次 PMIF 状态等待最多约 1ms，DA 另有最多20次/100µs有界采样；单次 HWCCF DONE 等待最多 10ms，AP EN 最多 200µs，CKSTA/FENC 最多 1ms。未知继承状态不清 IRQ、不做总线 reset/retry。
 失败后先把 sensor reset 拉低、断开 MCLK，再按真实反向顺序撤 DOVDD、WL DVDD、AF/AVDD（前摄 DOVDD 在 DVDD 之后），恢复仅自己改过的电压/引脚/14个控制寄存器/单控制器门控，撤销 CAMTG vote 并在无人使用时还原 parent，最后撤自己的 VS vote。共享 rail 的 EN_CLR 确认/DA-off 后才恢复原 selector；已有 live rail 不动。继承投票和其他通道保持；恢复失败保留 journal、锁存并明确报告，不声称资源已恢复。
 
 **恢复采用首错即停的依赖屏障**：reset-low 和 MCLK-off 均确认后，先检查 sensor/WL AP 请求 journal、配置和空闲状态，再允许撤任何供电；未退休 FIFO/START、wedged 或可见配置/parent 冲突立即止于 bus 阶段，保留 supply/pins/bus/clock/VS。任一 rail/WL 通道失败不再撤更早启用的 supply，也不恢复 pins/撤 bus、clock、VS。sensor bus 或 gate 恢复失败，不继续撤 WL bus、AP routes 或 CAMTG。PMIF pending/fault 先尝试本地 reset/MCLK 隔离，再保留依赖退出，不冒领后来响应。此前“累计错误但继续恢复”会破坏保留依赖，这一行为已修正。
@@ -238,7 +338,7 @@ POWER、每次 AP control/FIFO/START/完成收尾、WL guard 及 PMIC rail 变�
 
 确定的源码反例（未执行测试、不代表实机状态）：26MHz source、TIMING=1、LTIMING=1、DIV=0、HS=0、IO=3，原借用分支会接受；high/low 各仅2计数，显然不是本次标准模式 profile。新分支在 bus 阶段拒绝，尚未发 WL ID 或 sensor 请求。
 
-按厂商 `mtk_i2c_set_speed_v2` 解码 separate high/low sample×step 和复制的 5-bit divider。只接受标准模式 profile：TIMING/LTIMING/DIV/EXT 无未知位、两份 divider 相同、HS/SDA/MIS 为零、IO 为 open-drain、LS EXT 启用。根据稳定入口 source/PCW 求向上取整的配置频率上界，完整周期扣一计数（与厂商 LS solver 的额外一计数余量对应）、每个 phase 再保守扣一计数，要求 rate 上界 ≤100kHz、保守下界 ≥20kHz、high ≥4µs、low ≥4.7µs、EXT ≥5µs。20kHz 下限仅限定现有约5ms请求预算，不保证 clock stretching 一定在预算内。
+按厂商 `mtk_i2c_set_speed_v2` 解码 separate high/low sample×step 和复制的 5-bit divider。只接受标准模式 profile：TIMING/LTIMING/DIV/EXT 无未知位、两份 divider 相同、HS/SDA/MIS 为零、IO 为 open-drain、LS EXT 启用。根据稳定入口 source/PCW 求向上取整的配置频率上界，完整周期扣一计数（与厂商 LS solver 的额外一计数余量对应）、每个 phase 再保守扣一计数，要求 rate 上界 ≤100kHz、保守下界 ≥20kHz、high ≥4µs、low ≥4.7µs、EXT ≥5µs。20kHz下限为标准模式资格范围，不保证clock stretching一定在50ms完成观察预算内。
 
 零 TIMING 求解仍优选 45% duty、上界 ≤98kHz；EXT 改为完整表达式向上取整，避免二次截断使其短于5µs。编码在第一笔 timing 写之前通过同一 profile 检查，全部写后沿原 journal 再检查；已有非零配置不通过时直接拒绝，不重新定时、不清 FIFO/IRQ、不发 START，不修改已有 timing。原 dirty/uncertain 和恢复屏障保持。
 
@@ -256,9 +356,9 @@ POWER、每次 AP control/FIFO/START/完成收尾、WL guard 及 PMIC rail 变�
 
 `probe/standby → cam_bus_transfer` 实际调用 `x9_camera_i2c_xfer.inc`。FIFO mutation 和 START **写前**分别标记 `fifo_owned/request_owned`，它们只是已尝试操作的 journal，不是硬件所有权。填完后要求 FIFO count 等于 tx 字节数；该寄存器定义来自厂商 common FIFO，厂商显式填充检查位于 SCP FIFO 分支，**本板 AP channel0 的行为尚待实测**。
 
-任意非零状态都会结束轮询；只接受停止且配置稳定、其他暴露 bank/APDMA 空闲的 COMP/ACKERR/HS_NACK（bits0–2）。deadline 后看到的完成不算成功。ARB_LOST、CONFERR、RS_TRANSFER、未知位、仍运行的 START 或模糊 FIFO/配置直接锁存，**不清 W1C/FIFO/START、不发 resume/reset、不重试**。合格 NACK 以 `ENXIO` 返回，不冒充应答成功。
+任意非零状态都会结束轮询；只接受停止且配置稳定、其他暴露 bank/APDMA 空闲的 COMP/ACKERR/HS_NACK（bits0–2）。沿用Android最终STAT采样，线程恢复后观察到的terminal仍须完整资格检查；不按wall time推断物理完成时刻。若最终仍无terminal则锁存，不再回头尝试读成成功。ARB_LOST、CONFERR、RS_TRANSFER、未知位、仍运行的 START 或模糊 FIFO/配置直接锁存，**不清 W1C/FIFO/START、不发 resume/reset、不重试**。合格 NACK 以 `ENXIO` 返回，不冒充应答成功。
 
-成功 read 必须恰有1个 RX 字节，write 必须无残留；RX 先放局部变量，只有状态、FIFO、START 收尾及最终完整空闲检查全部通过后才发布输出。收尾的 W1C 与 FIFO clear 后再次检查配置/其他 bank/START/新状态，失败立即停，不继续剩余清理。hot journal 只有确认完成收尾后才能退休；START 后来清零不能自行解除它。
+成功read的FIFO count必须恰好等于本次请求的RX长度（1..16B），write必须无残留；RX先放局部数组，只有状态、FIFO、START收尾及最终完整空闲检查全部通过后才发布输出。sensor/VCM的寄存器和长度检查不变，仅EEPROM使用16B连续读。收尾的 W1C 与 FIFO clear 后再次检查配置/其他 bank/START/新状态，失败立即停，不继续剩余清理。hot journal 只有确认完成收尾后才能退休；START 后来清零不能自行解除它，重复访问返回EBUSY而非参数错误EINVAL。
 
 冷恢复先隔离 reset/MCLK，再在 PMIC/WL/DOVDD/AFVDD 撤销前执行 AP 屏障；bus restore 与 parent restore 也拒绝 hot journal。`cold_retained` 原有 sensor/WL bus 位包含这些未退休状态，restore_step 仍用7/8，无 ABI 扩展。`X9 CAMERA AP REQUEST` 记录捕获状态和停止原因，`X9 CAMERA COLD AP` 仅输出最后 journal，撤时钟后不补读硬件。
 
@@ -277,6 +377,10 @@ stop 先失效 generation 并按原顺序 drain 硬件，再最多等 1 s 排空
 内核采集接口现为 **platform version3**，提交一个72B `x9_camera_completed_frame`：sensor、generation、非零 capture_id、完成 time、同请求 SOF 观察 sof_time、raw/stride/bytes，以及该帧实际应用的 exposure_lines、Sony gain_code、frame_lines。`x9_camera_deliver` 不再执行 I2C 读；旧的“DMA 完成后读当前曝光/增益/帧长”不能证明这些值属于已完成的帧，因此不保留该降级路径。没有已注册的 MT6993 provider，升级不会移除现有可工作的硬件后端。
 
 provider 必须先确认真实 PASS1_DONE/group/tag/inner sequence 与本次 owned slot/request 对应、检查错误并完成 CPU cache 同步，按 SOF/控制生效延迟绑定该帧 metadata。无法确认绑定时不交付；不能把最新 AP 命令、晚读寄存器或未资格化 IRQ 当作完成证明。capture_id 是 generation 内严格递增的 64-bit owned-request 标识，不是直接放宽/截断硬件 32-bit counter。
+
+native AE 在真实 RAW/CPU/no-credit 边界更新控制。长焦按 Android `hhtele_set_gain` 的实际 gain code 选择 OB：`>0x3df8` 为36db（type1），否则30db（type2）；新 cold epoch 从未选择的type0开始，首次增益请求即使与原值相同也执行选表，后续同type不重复发送。两个八对表由构建器从 `hhtelemipiraw_Sensor.c` 提取并保留原license/source hash，内核preflight限定完整寄存器序列。Android的OB立即发送、hold/gain/release缓冲到commit才发送，因此native也先发OB，再执行原group控制。三颗Sony增益统一采用厂商的 `unity - floor(unity*1024/gain)`，保留整数取整顺序；超广角线性增益不变。
+
+OB逐条记录attempt/ACK与最后一次table/serial，八条ACK齐全只更新`ob_acked`；仍须原group release、稳定控制读回、三次真实0005计数前进和边界守卫成功，才更新`ob_bound`并为下一owned request绑定metadata。未假定OB寄存器可读，不额外读回或声称物理黑电平已验收；部分写入或超时锁存首错、不重发、不提前改旧帧metadata。物理关闭后将完整AE/OB状态随epoch receipt归档，错误或ACK/bound不一致禁止recycle；八个exported epoch上限保持。新增AE日志的OB字段用于定位真实事务，尚无新实机控制或画质结果。
 
 控制层只验证记录版本/保留字、generation、preview 精确尺寸与 64B stride、字节范围、非零 sof_time≤time≤now、曝光/帧长步长和增益范围。重复或乱序 capture_id/time/sof_time 返回 `ESTALE`；有效但被 CPU reader 背压丢弃的记录也退休，再提交同一记录仍为 `ESTALE`，不冒充新帧。用户 RAW10 `sequence` 保持接受帧计数，独立于 provider capture_id。iOS 在 allocation/ISP/metadata/PixelBufferHandler 前验证固定 preview header，并拒绝重复、倒序或未来时间帧。
 
@@ -345,7 +449,7 @@ cameractl standby front
 1. 本地表长度/字节值/禁止寄存器检查，并检查最终 RAW10、尺寸、binning、PLL、行/帧长、曝光、增益、VC 关键值；不访问 MMIO。
 2. 复用原冷启动/AP timing/共享 rail journal，读取真实 `0x16/0x17` ID。匹配后仍持有同一供电/总线，不先恢复再另行上电。
 3. 读取 `0x0100` 与 `0x0104`，均为0才开始配置。前摄先执行下面的固定 fab 分支，再逐个 reg16/data8 FIFO 写 init/preview 和镜像（主3/前0）。**从不写 `0x0100/0x0103/0x0104`、OTP programming、EEPROM、AF/OIS**。生成器和内核仍拒绝 OTP 表项；仅已匹配前摄的固定 read-port 命令有独立例外，镜像也只能独立写固定值。
-4. 按稳定控制白名单读回，主 **41** 个、前普通分支 **38** 个、B4 分支 **40** 个字节（额外两项 patch，包括再次检查 stream/hold）。不读回全部厂商 microcode/write-only 命令。每个 I2C 请求完成等待预算5ms（不含配置/guard/收尾），配置段总 deadline5s，调用前后检查预算；超时不重试、不继续 init。fab read-port exit 可独立尝试一次清理写、使用同样的完成等待预算，不延长初始化预算；AP hot/fault 时拒绝实际发出该写。
+4. 按稳定控制白名单读回，主 **41** 个、前普通分支 **38** 个、B4 分支 **40** 个字节（额外两项 patch，包括再次检查 stream/hold）。不读回全部厂商 microcode/write-only 命令。每个I2C请求按Android FIFO路径以50ms预算观察terminal（不含配置/guard/收尾）；配置段总deadline为带校准15s、其余5s，调用前后检查预算。配置总预算耗尽不继续init，也不重试已失败AP请求。fab read-port exit可独立尝试一次清理写，使用同样的完成观察规则，不延长初始化预算；AP hot/fault时拒绝实际发出该写。
 5. 无论中途写入/读回是否失败，均调用 `cam_restore`：先 reset-low/MCLK-off，再逆序恢复自己的依赖；任一恢复失败立即停在该屏障，保留 journal、FAULT/RETAINED，不在 close 或另一 sensor 上重试。
 
 结果包括原80B probe、独立操作/恢复错误、成功 ACK/实际尝试写入数、决定阶段/寄存器/index、expected/observed 与逐字节读数；`observed=ffffffff` 表示没有被接受的读数，不能当硬件值。预算耗尽而未发出的写不计 attempted；成功 ACK 即使随后发现总预算耗尽也计 written，但仍返回超时。index 在 init/preview 阶段为表 pair offset，在 readback 阶段为 sample offset。阶段1..9不变：1=table-check、2=cold、3=idle、4=init、5=preview、6=mirror、7=readback、8=restore、9=done；追加10=fab、11=fab-exit、12=fab-patch。
@@ -368,7 +472,7 @@ B4/01 分支在 init 后、preview 前仅写 `0x574b=1`、`0x5765=0x33`，并纳
 | sensor PLL `0306/030e` | `016e / 0226` | `010e / 0438` |
 | vendor nominal pclk | 2196000000 | 864000000 |
 
-标称 pclk、sensor PLL 读回或 `VERIFIED` **不是实测 lane/trio 速率、PHY 校准或 rate lease**。主 preview 的图像为 **VC1/DT2b/4096×3072**，另有 **VC3/DT30/4096×768 PDAF**；前摄图像为 **VC0/DT2b/3264×2448**。这来自两枚 sensor 的 `mode_struct[0].frame_desc_prev`，不是其它 custom mode 的推断；写表不代表接收器已过滤出图像通道。前摄 fab 分支已接入，但 vendor open 中的主摄 AF 激活/QSC 与 QSC/LRC 标定仍未执行，因此只称 **未标定 nominal standby**，不能称厂商完整 open 或成像质量验证。blockers `1=factory/calibration`、`2=receiver`、`4=DMA mapping`、`8=drain` 不因读回成功清除。
+标称 pclk、sensor PLL 读回或 `VERIFIED` **不是实测 lane/trio 速率、PHY 校准或 rate lease**。主 preview 的图像为 **VC1/DT2b/4096×3072**，另有 **VC3/DT30/4096×768 PDAF**；前摄图像为 **VC0/DT2b/3264×2448**。这来自两枚 sensor 的 `mode_struct[0].frame_desc_prev`，不是其它 custom mode 的推断；写表不代表接收器已过滤出图像通道。前摄 fab 分支、主/长焦 sensor-open 的 VCM 模式激活与本模组 QSC/SPC/LRC 载入现已接入，准确范围和候选结果见顶部当前状态及 NOTES；它们只说明源码/事务路径，不证明光学效果、完整马达初始化或厂商成像质量。blockers `1=factory/calibration`、`2=receiver`、`4=DMA mapping`、`8=drain` 不因读回成功清除。
 
 成功后器件已 reset/恢复原供电，**配置不持久、READY/supported仍0、不能拍摄**。未来 mode2 的 start 共用同一 preflight/表加载/稳定读回，再交由真实 capture provider 建立 CSI/DMA，最后才 stream-on；目前无该 provider。
 
@@ -442,6 +546,8 @@ cameractl status                 # 只读缓存，不重新触碰硬件
 ### 接通正常相机 DMA 要实现 stage1，不是调用 protected-memory MAP
 
 厂商正常路径是 `arm_smmu_attach_dev → arm_smmu_domain_finalise → ARM_64_LPAE_S1`，分配 ASID、建立 CD/STE 并同步命令队列；之后 `mtk_smmu_map_pages` 调用该 domain 的 `io_pgtable_ops.map_pages` 建立 IOVA→PA。仅有电源引用、可用 IOVA 范围或空闲控制寄存器，都没有提供这套主机映射服务。
+
+native STE还须经过Android `arm_smmu_install_ste_for_dev → mtk_smmu_setup_features`的实际平台策略。本机MM节点`tcu-prefetch=2`，SID80非ATS且使用有效S1 CD pointer时，写到STE word1 bits57:56。shim在原bounded两遍FDT收集内核定controller完整compatible/resource、SOC寻址、SID80 master引用及影响STE的属性，再经独立32B `/chosen/x9-camera-smmu-policy`传入本次值；未知/冲突只留下零占位。内核在MMIO和export前验证并保存该policy，安装及全表校验用相同word1构造；BBM phase1保留原字段，phase2/3清除为原abort/bypass目标，已pin namespace保留完整本次policy。旧IRQ64B/校准32B与公开ioctl ABI不变。该元数据不是MM上电、SID独占或DMA授权，继承host API不套用native policy；没有本boot输入不能回退到captured DT常数。日志新增`SMMU FDT ... prefetch2`与`NATIVE SMMU ... tcu_pf=2`，尚未证明实机TCU策略或RAW效果。
 
 `pkvm_smmu_host.c::smmu_host_hvc` 注册的 secure MAP/UNMAP 是另一条链：
 
@@ -671,18 +777,19 @@ cameractl status       # 读取缓存的资源快照，不再访问 MMIO
 
 具体顺序和成功边界：
 
-1. 只映射虚拟 MMIO 窗口，尚不读未供电的 MM-SMMU/CSI 寄存器。
-2. 调用 `0xc2000514`，`a1=0x803`（MM_SMMU/secure/PM_GET）。只有返回 0 才记录自己的引用；失败不调用 PM_PUT。
-3. 验证 HWCCF 的 MM_INFRA_AO/infra0 `PM_ACK`（bank0 bits31/29）且对应 `STA=0`，之后才读 MMUP 的 GPR11 dummy register。
-   前置不足返回 `ENXIO` 并平衡 secure 引用，不擅自触发 VMM backup IRQ 或初始化其固件处理链。
+1. 映射虚拟 MMIO 窗口，采集 HWCCF 的 CSI 投票基线。MM-SMMU 快照安排在供电校验通过后。
+2. 使用 `x9_mm_power_acquire()` 取得 MM_2 的 HWCCF 引用。若本次 SET 已发布但等待失败，保留带错误的 token。
+3. 验证 HWCCF 的 MM_INFRA_AO/infra0 `PM_ACK`（bank0 bits31/29）且对应 `STA=0`，之后才为 CSI voter 读 MMUP 的 GPR11 dummy register。
 4. CSI_BS_RX 使用 **MM HWCCF bank1 bit11**：XPU0 SET/CLR/EN 为 `+0x2070c/+0x20710/+0x20714`。
    按 `STA=0 → FSM idle → SET → AP EN → global EN → STA=0 → PM_ACK=1` 申请新增 vote。
+   AP EN 总期限为 200 µs，pre-STA、FSM、global EN 和 final STA 各为 10000 µs，轮询间隔为 1 µs。
+   `X9 CAMERA CSI POWER` 记录失败阶段，以及 HWCCF 超时对应的 `timeout_off/timeout_raw`。
    `DONE` 只作证据，**不能套 AP CAMTG 的 DONE 判据**。已继承 AP vote 仅借用；未知未投票但上电状态拒绝接管。
-5. 在 secure 引用内读取 MM-SMMUv3 的 IDR0/1/3/5、CR0/ACK、CR1/2、GBPA、STRTAB、CMDQ、EVTQ 和 GERROR/N。
+5. 在 MM_2 引用内读取 MM-SMMUv3 的 IDR0/1/3/5、CR0/ACK、CR1/2、GBPA、STRTAB、CMDQ、EVTQ 和 GERROR/N。
    EVTQ prod/cons 位于架构 page1 `+0x100a8/+0x100ac`；不读保留的 IDR2/4，不解引用继承的表地址。
    配置需两次快照一致；支持 stage1、SID80、SSID、16KiB granule 仅是未来映射的必要条件。
-6. 先撤自己的 CSI vote（CLR → AP EN=0 → 100µs → STA=0；最后全局 vote 消失时再等 PM_ACK=0），继承 vote 不撤。
-   最后 `a1=0x804` PM_PUT 平衡 secure 引用。撤票失败保留 secure 依赖；PUT 失败保留未释放引用，均锁存、不重试。
+6. 自有 CSI vote 按 CLR → AP EN=0 → 100 µs → STA=0 收尾。若全局 CSI vote 已消失，再等 PM_ACK=0。
+   借用票只复核状态。最后由 `x9_mm_power_release()` 释放 MM_2 引用，失败时锁存并保存尚未退休的票与供电依赖。
 
 `RESTORED` 只表示本次新增资源已释放/借用关系已验证，不表示其他 XPU 的 CSI/整个 MM 电源必须为 off。
 `CSI_POWER/SMMU_POWER/SMMU_SNAPSHOT` 是这次操作的历史观察，不是请求返回后仍然持有的资源。

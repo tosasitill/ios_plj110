@@ -385,7 +385,7 @@ int x9_camera_smmu_attach(struct x9_camera_smmu *m,const struct x9_camera_smmu_h
     if(!host || !host->context || !host->lease || !host->enter || !host->guard || !host->leave)return EINVAL;
     lck_mtx_lock(&camera_smmu_lock);
     e=cam_smmu_identity(m);
-    if(!e && (!m->exported || m->shared_attempted || cam_shared.owner || m->commands ||
+    if(!e && (!m->exported || m->native || m->shared_attempted || cam_shared.owner || m->commands ||
        m->pending || m->close_attempted))e=EBUSY;
     if(!e)e=cam_smmu_storage(m);
     if(!e) {

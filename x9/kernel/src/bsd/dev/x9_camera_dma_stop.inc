@@ -1,6 +1,9 @@
 /* Normal ISP8s CAMSV0 DMA-top stop request, after real streamed controls.
  * sv_reset writes base_dma+20=1 and polls bit1 (100ms); its subsequent
- * STG/CQ/central resets, inner stores/debug sweep/void-success are NOT used.
+ * STG/CQ/central resets, inner stores/debug sweep/void-success are NOT used
+ * by this natural-frame retirement operation. The independent final
+ * sv_shutdown journal runs only after translation/config/source restoration
+ * and preserves these original stop/port observations unchanged.
  * Restore only this stop command and our DCM inhibit after the real owned
  * OFF/DONE/CPU/worker/GIC boundary and observed ACK/port retirement. No
  * STG/CQ/central reset or claim of whole AXI/SMMU retirement. Native request

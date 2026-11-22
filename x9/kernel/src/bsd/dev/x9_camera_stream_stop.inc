@@ -31,7 +31,9 @@ static int cam_irq_slot_guard_locked(bool streamed_stop)
     int e;
     lck_mtx_lock(&camera_camsv_lock);
     e=!cam_irq.slot || cam_irq.slot!=cam_sv.request_slot ||
-        cam_irq.slot->state!=(streamed_stop?X9_CAMSV_RETIRED:X9_CAMSV_ARMED)?ESTALE:0;
+        (cam_irq.slot->state!=(streamed_stop?X9_CAMSV_RETIRED:X9_CAMSV_ARMED) &&
+         !(streamed_stop && cam_repeat_cancel_admitted_locked() &&
+           (cam_irq.slot->state==X9_CAMSV_ARMED || cam_irq.slot->state==X9_CAMSV_CANCELLED)))?ESTALE:0;
     lck_mtx_unlock(&camera_camsv_lock);return e;
 }
 /* No SV/OUTMUX recursion: the full caller guard independently samples its
@@ -55,8 +57,7 @@ static int cam_stream_close_guard_locked(uint64_t epoch)
     old=cam_irq_spin_take();
     e=cam_irq.error?cam_irq.error:cam_irq_fbc.error?cam_irq_fbc.error:cam_irq_fbc.source_error;
     if(!e && (!cam_irq.owns || cam_irq.accepting || cam_irq.count || cam_irq.busy ||
-       !cam_irq.sof_seen || !cam_irq_fbc.bound || !cam_irq_fbc.done_seen ||
-       !cam_irq_fbc.count_accepted || cam_irq_fbc.epoch!=epoch ||
+       !cam_irq_fbc.bound || !cam_repeat_retirement_receipt_locked() || cam_irq_fbc.epoch!=epoch ||
        cam_irq_fbc.source_phase!=CAM_STREAM_STOPPED ||
        cam_irq_fbc.source_issued!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||
        cam_irq_fbc.source_ack!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||
@@ -71,7 +72,7 @@ static int cam_stream_close_guard_locked(uint64_t epoch)
         e=cam_irq_fbc_note_locked(bank,cam_stream_close.fbc_control[bank],
             cam_stream_close.fbc_counter[bank]);
         if(!e && (cam_stream_close.fbc_control[bank]!=cam_irq_fbc.control[bank] ||
-           cam_stream_close.fbc_counter[bank]!=cam_irq_fbc.target[bank]))e=ESTALE;
+           !cam_repeat_done_target_locked(bank,cam_stream_close.fbc_counter[bank])))e=ESTALE;
     }
     cam_irq_spin_drop(old);return e;
 }
@@ -110,7 +111,7 @@ static int cam_stream_close_begin_locked(uint64_t epoch)
     cam_stream_close.checking=true;
     e=cam_stream_close_guard_locked(epoch);if(e)goto out;
     ap=(struct cam_sensor_ap){&cam_journal.sensor,
-        cam_stream_close.request.frame.sensor==X9_CAMERA_BACK?0x1a:0x10};
+        cam_sensor_slave(cam_stream_close.request.frame.sensor)};
     /* OFF ACK is necessary, not sufficient even for control stop. Read
      * fresh sensor state again; no command, reset, retry or new credit. */
     for(unsigned sample=0;sample<2 && !e;sample++) {

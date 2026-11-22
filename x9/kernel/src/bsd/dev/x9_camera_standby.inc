@@ -31,7 +31,7 @@ static int cam_standby(uint32_t which, struct x9_camera_config *r)
     }
     r->last_errno=e;cam_config_last=*r;
     printf("X9 CAMERA STANDBY: sensor=%u flags=%x stage=%u pairs=%u/%u writes=%u/%u "
-        "index=%u reg=%04x expected=%02x observed=%08x read=%u errno=%u restore=%u blockers=%x (no CSI/DMA, uncalibrated)\n",
+        "index=%u reg=%04x expected=%02x observed=%08x read=%u errno=%u restore=%u blockers=%x (no CSI/DMA or optical validation)\n",
         which,r->flags,r->stage,r->init_pairs,r->preview_pairs,r->written,r->attempted,
         r->table_index,r->reg,r->expected,r->observed,r->read_count,r->last_errno,
         r->restore_errno,r->blockers);

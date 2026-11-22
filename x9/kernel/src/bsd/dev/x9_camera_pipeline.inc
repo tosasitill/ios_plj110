@@ -12,7 +12,7 @@
 _Static_assert(sizeof(struct x9_camera_pipeline)==128,"camera pipeline ABI");
 static int cam_pipeline_plan(uint32_t which, struct x9_camera_pipeline *p)
 {
-    if(which!=X9_CAMERA_BACK && which!=X9_CAMERA_FRONT)return EINVAL;
+    if(!x9_camera_sensor_valid(which))return EINVAL;
     const struct x9_camera_sensor *s=&sensors[which-1];
     if(!s->width || s->width%4 || !s->height || s->width>65535 || s->height>65535)return EINVAL;
     uint32_t stride=(s->width/4*5+63)&~63u;
@@ -25,14 +25,14 @@ static int cam_pipeline_plan(uint32_t which, struct x9_camera_pipeline *p)
     if(st.probe_mask&(1u<<which)) {
         p->flags|=X9_CAM_PIPE_SENSOR_PROBED;p->blockers&=~X9_CAM_PIPE_NEED_ID;
     }
-    p->csi_port=which==X9_CAMERA_BACK?3:0;p->async=p->csi_port;
+    p->csi_port=cam_sensor_port(which);p->async=p->csi_port;
     p->cphy=s->cphy;p->lanes=s->lanes;
     p->width=s->width;p->height=s->height;p->stride=stride;p->bytes=(uint32_t)bytes;
     /* hhmain mode0 frame_desc_prev: image VC1/RAW10/4096x3072,
      * PDAF VC3/DT30/4096x768. hhfront mode0: image VC0/RAW10 only.
      * Do not route the main PDAF stream as pixels or assume both sensors
      * emit VC0. A future outmux must filter exactly this image VC/DT. */
-    p->vc=which==X9_CAMERA_BACK?1:0;p->dt=0x2b;
+    p->vc=s->vc;p->dt=0x2b;
     p->outmux_candidate=0;p->camsv_candidate=0;
     p->dma_bits=35;p->smmu_sid=0x80;
     /* Initial route config calls _config_outmux -> SET_TAG, not SET_TAG_V2:
@@ -41,10 +41,12 @@ static int cam_pipeline_plan(uint32_t which, struct x9_camera_pipeline *p)
      * this register's units from the header or the name exp_hsize. */
     p->vcdt=(p->dt<<16)|(p->vc<<8)|1;
     p->expected_size=((p->height-1)<<16)|(p->width/4*5-1);
-    /* CAMSV central tag1 grab +0x548/+0x54c, RAW10 packed +0x554.
+    /* CAMSV central tag1 grab +0x548/+0x54c, SV_FMT_MIPI_RAW10=8 at +0x554
+     * (mtk_cam-sv.h:142 / mtk_cam-fmt_utils.c:419-423 V4L2_PIX_FMT_S*10P),
+     * matching userspace camera_isp.c:unpack_line MIPI RAW10P unpacking.
      * DMA bank +0x210 has stride in HIGH16, max-burst in LOW5. */
     p->grab_pixels=p->width<<16;p->grab_lines=p->height<<16;
-    p->format=1;p->dma_basic=(stride<<16)|0x10;
+    p->format=8;p->dma_basic=(stride<<16)|0x10;
     p->csi_base=0x13880000ull+p->csi_port*0x8000ull;
     p->camsv_base=0x3a600000;p->smmu_base=0x30800000;
     /* DT mm_smmu_cam dma-range is 16GiB despite the 35-bit DMA mask.

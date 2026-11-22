@@ -22,6 +22,8 @@ static int cam_phy_close_locked(uint64_t);
 static int cam_smi_clock_guard(void);
 static int cam_smi_clocks_close_locked(uint64_t);
 static int cam_smi_retirement_guard(uint64_t);
+static bool cam_repeat_cancel_admitted_locked(void);
+static int cam_repeat_cancelled_check_locked(uint64_t,const struct x9_camera_camsv_request *,void *);
 static int cam_sv_guard(void);
 static uint32_t cam_sv_fbc_busy_exemption(void);
 static uint32_t cam_sv_fbc_compare_word(unsigned,uint32_t);
@@ -35,7 +37,12 @@ static int cam_sv_gate_sample_word(unsigned,vm_offset_t,unsigned,uint32_t);
 static int cam_sv_open_locked(uint64_t);
 static int cam_sv_close_locked(uint64_t);
 static void cam_sv_status_copy(uint64_t,struct x9_camera_sv_hw_status *);
+struct cam_rx_maps;
 static int cam_irq_prepare_locked(uint64_t);
+static int cam_irq_cold_reset_guard_locked(uint64_t,const struct cam_rx_maps *);
+static int cam_sv_cold_reset_retirement_guard(uint64_t);
+static int cam_sv_shutdown_locked(uint64_t);
+static int cam_sv_qos_release_guard(uint64_t);
 static int cam_irq_guard_locked(uint64_t);
 static int cam_irq_close_locked(uint64_t);
 static int cam_irq_credit_guard_locked(uint64_t);
@@ -64,7 +71,7 @@ static const unsigned cam_rx_sv_offsets[X9_CAM_RX_SV_WORDS]={
     0x1200,0x1204,0x1210,0x2100,0x2140
 };
 struct cam_rx_maps { vm_offset_t mac,async,out[2],sv[2]; };
-static struct cam_rx_maps cam_rx_maps[2];
+static struct cam_rx_maps cam_rx_maps[X9_CAMERA_SENSOR_COUNT];
 static struct {
     uint64_t epoch, sensor_epoch;
     bool close_attempted;
@@ -131,7 +138,10 @@ static uint32_t cam_rx_changed(const struct x9_camera_receiver_sample *a,
     const struct x9_camera_receiver_sample *b,unsigned port)
 {
     uint32_t changed=0;
-    const struct cam_rx_maps *m=&cam_rx_maps[port==3?0:1];
+    const struct cam_rx_maps *m=NULL;
+    for(unsigned i=0;i<X9_CAMERA_SENSOR_COUNT;i++)
+        if(sensors[i].csi_port==port) {m=&cam_rx_maps[i];break;}
+    if(!m)return UINT32_MAX; /* never compare a tele/UW observation through front maps */
     static const unsigned mac_offsets[4]={0,4,0x40,0x70};
     for(unsigned word=0;word<4;word++)
         if(cam_source_compare_word(m->mac,mac_offsets[word],a->mac[word])!=
@@ -166,9 +176,9 @@ static uint32_t cam_rx_changed(const struct x9_camera_receiver_sample *a,
 static int cam_rx_inspect(void *arg)
 {
     struct x9_camera_receiver *r=arg;
-    struct cam_rx_maps *m=&cam_rx_maps[r->sensor==X9_CAMERA_BACK?0:1];
+    struct cam_rx_maps *m=&cam_rx_maps[(r->sensor-1)];
     int e;
-    unsigned port=r->sensor==X9_CAMERA_BACK?3:0;
+    unsigned port=cam_sensor_port(r->sensor);
     r->stage=X9_CAM_RX_STAGE_MAP;
     r->mac_base=0x13884000ull+port*0x8000ull;
     r->out_base=0x3a200000;r->out_inner_base=0x3a208000;r->sv_base=0x3a600000;
@@ -246,8 +256,8 @@ static int cam_rx_session_guard(void)
 {
     struct x9_camera_receiver_sample a,b;
     struct x9_camera_receiver *r=&cam_rx_live.status;
-    const struct cam_rx_maps *m=&cam_rx_maps[r->sensor==X9_CAMERA_BACK?0:1];
-    unsigned port=r->sensor==X9_CAMERA_BACK?3:0;
+    const struct cam_rx_maps *m=&cam_rx_maps[(r->sensor-1)];
+    unsigned port=cam_sensor_port(r->sensor);
     uint32_t busy,changed,fbc0_mask,dma0_mask,cmos_mask,vf_mask,phy_mask,dl_mask;
     int e;
     if(!cam_rx_live.epoch || cam_rx_live.epoch!=cam_mm_live.epoch)return ESTALE;
@@ -286,15 +296,18 @@ static int cam_rx_session_close(struct x9_camera_receiver *r)
      * inactive CAMSV geometry/DB policy, OUTMUX with MAC/async clocks held,
      * restores/stops analog, then
      * restores MAC/async, then optional SMI clocks. The receiver must still
-     * match the initially captured disabled controls. Unconsumed SMI clock
+     * match consumed disabled controls (native cold reset has its own
+     * retained pre/post snapshots). Unconsumed SMI clock
      * requests or new owners retain the MM and sensor dependencies too. */
-    off=cam_irq_close_locked(cam_rx_live.sensor_epoch);
+    off=cam_sv_cold_reset_retirement_guard(cam_rx_live.sensor_epoch);
+    if(!off)off=cam_irq_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_smi_retirement_guard(cam_rx_live.sensor_epoch);
     if(!off)off=cam_phy_retirement_guard(cam_rx_live.sensor_epoch);
     if(!off)off=cam_sv_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_out_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_phy_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_mac_close_locked(cam_rx_live.sensor_epoch);
+    if(!off)off=cam_sv_shutdown_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_smi_clocks_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_mm.active?cam_rx_session_guard():0;
     if(!off)off=cam_mm_session_close(cam_rx_live.epoch,&cam_rx_live.status.mm);
@@ -309,12 +322,32 @@ static int cam_rx_session_close(struct x9_camera_receiver *r)
 }
 static bool cam_rx_sensor_held_locked(uint64_t epoch)
 { return cam_rx_live.epoch && cam_rx_live.sensor_epoch==epoch; }
+
+static bool cam_rx_sensor_mm2_take_failed_locked(uint64_t epoch)
+{
+    return epoch && cam_rx_sensor_held_locked(epoch) &&
+        cam_rx_live.epoch==cam_mm_live.epoch && !cam_rx_live.close_attempted &&
+        !cam_mm_live.close_attempted && cam_rx_live.status.stage==X9_CAM_RX_STAGE_MM &&
+        cam_rx_live.error && cam_mm_live.error &&
+        cam_mm_live.status.stage==X9_CAM_MM_STAGE_RECEIVE &&
+        cam_mm_live.receive.stage==X9_CAM_RES_STAGE_SMMU_POWER;
+}
 static int cam_rx_sensor_prepare_locked(uint64_t epoch,struct x9_camera_receiver *r)
 {
     int e;
     if(!epoch || epoch!=cam_sensor_live.epoch)return ESTALE;
     e=cam_rx_session_open(cam_sensor_live.probe.sensor,epoch,r);
-    if(e && cam_rx_sensor_held_locked(epoch))cam_sensor_session_fault(e);
+    if(e) {
+        bool held=cam_rx_sensor_held_locked(epoch);
+
+        /* Close may stop at a dependent sensor guard. Report the captured
+         * bring-up stages before attempting to unwind the receiver. */
+        if(held && r->mm.last_errno)cam_mm_log(r->sensor,&r->mm);
+        printf("X9 CAMERA RX OPEN: sensor=%u epoch=%llu stage=%u mm_errno=%u "
+            "busy=%x changed=%x retained=%x errno=%d\n",
+            r->sensor,epoch,r->stage,r->mm.last_errno,r->busy,r->changed,r->mm.retained,e);
+        if(held)cam_sensor_session_fault(e);
+    }
     return e;
 }
 static int cam_rx_sensor_guard_locked(uint64_t epoch)
@@ -335,6 +368,8 @@ static int cam_rx_sensor_close_locked(uint64_t epoch)
     struct x9_camera_receiver r;
     int off;
     if(!cam_rx_sensor_held_locked(epoch))return ESTALE;
+    off=cam_native_sensor_retirement_guard_locked(epoch);
+    if(off)return off;
     off=cam_rx_session_close(&r);
     cam_mm_log(r.sensor,&r.mm);
     printf("X9 CAMERA RX LIFETIME: sensor=%u sensor_epoch=%llu flags=%x errno=%u restore=%u "
