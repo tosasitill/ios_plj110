@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 366（revert-hevc 镜像）：进 XNU 成功；MM SMMU 的 NS 组全零，ATF 实际写的是 secure 组
+
+- **镜像**：`x9/out/x9-revert-hevc-20261123/boot.img`（sha256 75cab4eb…8558）。进 XNU/SpringBoard，相机 app 可开；日志 `~/366.txt` 已备份 `.local/x9/logs/366.txt`。因此 11-22 合并镜像不进 XNU 的原因与 HEVC vcp_handoff（逐字段整树遍历）一致（revert 后恢复；仍是推断，未单独对照）。
+- **相机观察**：双传感器 ID 9186/0615 读到，NATIVE REGISTER errno=0；开相机后 sensor open epoch=3、EEPROM cal 应用成功。随后 `X9 MM VCP BOOT: stage=4 errno=60`，与 356 同一阻塞，无 RAW/预览。
+- **新 DIAG（观察）**：MM SMMU(0x30800000) NS 读成功：idr0=080f363f idr1=0dd39d08 idr5=01000471；**cr0=0 ack=0 gbpa=0 STRTAB_BASE/CFG=0 CMDQ/EVTQ=0，STE 80/90/a0/a1 unresolved**，即 NS 组完全未被配置。MMUP/VCP 均未跑起来（mmup=0/0 vcp=0/0），SRAM 头 1a0b5/06c37001/2000/06c39001/48c00 与既有记录一致。
+- **关键静态实证（ATF 反汇编 `atf-full.dis`）**：ATF setup_init 写的偏移是 0x8080(STRTAB_BASE)/0x8088(CFG)/0x8090(CMDQ_BASE)/0x8098/0x809c(CMDQ CONS/PROD)/0x8020(CR0)，全在 SMMUv3 **secure 组（+0x8000）**。与 NS 组全零吻合：ATF 用 secure 组，NS 组从未被用。（未核实该 base 即 0x30800000，也未核对逐条写入对应的 SMMU 实例；偏移含义按 SMMUv3 架构手册。）
+- **结论（推断）**：`path-b`（在 NS 组建 identity STE 给 SID 0xa0）大概率无效——MMUP 的翻译由 ATF 的 secure strtab 决定，NS 组写了也不影响；原 ②host adapter 二分中「NS 直写」分支基本排除，剩「经 SMC/TEE 让 secure 侧建立 0xa0 映射」。这与 11-20 的 ATF 反汇编（TEE_SMMU_CONTROL 仅电源投票、setup_init 不写 STE）合起来：必须找出 Android 里谁、何时让 secure strtab 获得 SID 0xa0→loader buffer(0xbd200000) 的映射（Android dmesg 显示每次 MMUP resume 无额外 SMMU 操作，映射应在 boot 期已建立）。未解：iOS 经 LK→fastboot boot 与 Android 启动在此映射建立上的差异。
+- **未做**：无新镜像/代码/设备操作；②③④ 仍不写。
+
 #### 2026-11-23 撤销 HEVC 合并（f754c05d）：合并镜像连 XNU 都进不去
 
 - **现象（用户）**：`x9-integrate-20261122/boot.img` 上机后进不了 XNU、无日志。上一个能进 XNU 的是 `x9-camera-smmu-dual-20261120`。
