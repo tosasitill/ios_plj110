@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 377 + 镜像 x9-cam-seninf-mux-20261123
+
+- **377**：mac-open、phy-open、phy-timing 全部通过（completed=3e，CSI=312000000，counts 6144/6144）。期间日志：PHY INHERITED 多条（ANA/AFIFO 默认值）；`PHY ADOPT ANA9 613f0000/621b0000`（CPLT 位不可写，与 Android 一致不检查）；`CLOCK ADOPT meter hwmode=1`（借用 fmeter）。新失败点：`source-rate errno=45`，FAIL TRACE `cam_native_source_rate_locked:172`，即 `parent&0xf0`。SENINF mux 原始字节是 0x89，Android `clk-mt6993.c mm_seninf3_sel` 定义为 lsb 0、width 4，sel=9（312MHz），bit7 不属于 mux 选择字段。
+- **SLOW GUARD**：cam_mm_guard 8–27ms，mac/phy guard 约 2ms。
+- **改动**：native_source / phy_clock 中 6 处 mux 读取由 `&0xff` 改为 `&((1u<<d->width)-1)`（与 Android 宽度一致）；高位非零只打印 `X9 CAMERA SOURCE MUX: raw sel`。
+- `x9/out/x9-cam-seninf-mux-20261123/boot.img` sha256 `8e95a8d8a5a76cd85f8c56b1caae60684cf5ce95808291e444ab9143fff31469`，warning 2987。
+
 #### 2026-11-23 日志 376 + 镜像 x9-cam-mac-android-20261123
 
 - **376**：`CAMSV COLD RESET ... ack=3 complete=1 errno=0`，camsv-cold-reset 通过（completed=6）。`MAC ADOPT: CSI3 top reset ...`。新失败点：`mac-open errno=16`，FAIL TRACE `cam_mac_open_locked:259`，即 MAC+0x14 bit15 被当成「reset request」拒绝。查 Android `mtk_cam-seninf-csirx_mac_csi0.h`：0x14 是 CSI2_RESYNC_MERGE_CTRL2，bit15 是 `RG_RESYNC_LRTE_PKT_HSRST`（配置默认值）。Android 的 MAC 配置只做 RMW，不检查原值。

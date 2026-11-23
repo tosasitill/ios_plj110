@@ -30,7 +30,7 @@ static int cam_phy_clock_guard(void)
     if(!cam_phy_meter.active)return 0;
     e=cam_mm_guard(&cam_mm,true);if(e)return e;
     if(!(cam_rr(cam_mm.top,0x270)&cam_phy_meter.fenc))return CAM_FAIL(ESTALE);
-    if(((cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff)!=cam_phy_meter.source_cfg)return CAM_FAIL(ESTALE);
+    if(((cam_rr(cam_mm.top,d->cfg)>>d->shift)&((1u<<d->width)-1u))!=cam_phy_meter.source_cfg)return CAM_FAIL(ESTALE);
     if(cam_rr(cam_phy_meter.meter,0xc)&1)return CAM_FAIL(EBUSY);
     for(unsigned n=0;n<CAM_CLOCK_FIELDS;n++) {
         const struct cam_phy_meter_field *r=&cam_phy_meter.field[n];
@@ -47,7 +47,7 @@ static int cam_phy_meter_poll_guard(void)
 {
     unsigned slot=cam_phy_meter.source_slot;
     const struct cam_mm_desc *d=&cam_mm.desc[slot];
-    if(((cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff)!=cam_phy_meter.source_cfg ||
+    if(((cam_rr(cam_mm.top,d->cfg)>>d->shift)&((1u<<d->width)-1u))!=cam_phy_meter.source_cfg ||
        (cam_rr(cam_mm.top,0x330)&d->effect_mask) ||
        !(cam_rr(cam_mm.top,0x270)&cam_phy_meter.fenc) ||
        (cam_rr(cam_phy_meter.meter,0xc)&1))return CAM_FAIL(ESTALE);
@@ -143,7 +143,7 @@ static int cam_phy_meter_capture(unsigned slot)
     if(!cam_phy_meter.meter)cam_phy_meter.meter=ml_io_map(0x10041000,0x20);
     if(!cam_phy_meter.meter)return CAM_FAIL(ENOMEM);
     cam_phy_meter.source_slot=slot;cam_phy_meter.fenc=d->effect_mask;
-    cam_phy_meter.source_cfg=(cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff;
+    cam_phy_meter.source_cfg=(cam_rr(cam_mm.top,d->cfg)>>d->shift)&((1u<<d->width)-1u);
     for(unsigned n=0;n<CAM_CLOCK_FIELDS;n++) {
         struct cam_phy_meter_field *r=&cam_phy_meter.field[n];
         r->base=n?cam_phy_meter.meter:cam_mm.top;r->offset=offsets[n];r->mask=masks[n];

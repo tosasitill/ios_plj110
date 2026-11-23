@@ -104,7 +104,7 @@ static int cam_native_source_rate_guard_locked(uint64_t epoch)
     if(s->last_errno)return s->last_errno;
     if(!cam_native_source.rate_valid || s->sensor_epoch!=epoch || !cam_native_source.pll ||
        !cam_rx_sensor_held_locked(epoch) || !cam_mm.active)return CAM_FAIL(ESTALE);
-    if(((cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff)!=s->csi_parent ||
+    if(((cam_rr(cam_mm.top,d->cfg)>>d->shift)&((1u<<d->width)-1u))!=s->csi_parent ||
        (cam_rr(cam_mm.top,0x330)&d->effect_mask) ||
        !(cam_rr(cam_mm.top,0x270)&(1u<<(14-cam_phy.status.csi_port))) ||
        (cam_rr(cam_native_source.pll,0x34)&0x10)!=s->pll_fenc ||
@@ -168,8 +168,12 @@ static int cam_native_source_rate_locked(uint64_t epoch)
     if(!cam_phy.held || cam_phy.epoch!=epoch || cam_phy.error ||
        !(cam_phy.status.flags&X9_CAM_PHY_TIMING_CONFIGURED) ||
        cam_phy.status.clock_pending)return CAM_FAIL(ESTALE);
-    parent=(cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff;s->csi_parent=parent;
-    if(parent&0xf0)return CAM_FAIL(ENOTSUP);
+    parent=(cam_rr(cam_mm.top,d->cfg)>>d->shift)&((1u<<d->width)-1u);s->csi_parent=parent;
+    /* Android clk-mt6993.c mm_seninf*_sel: lsb 0, width 4 (sel only).
+     * Log 377 refused raw byte 0x89 (sel 9 = 312 MHz) on bit7. */
+    if((cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xf0u)
+        printf("X9 CAMERA SOURCE MUX: raw=%x sel=%x (upper bits outside Android width 4)\n",
+            (cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xffu,parent);
     for(step=0;step<sizeof(steps)/sizeof(steps[0]);step++)if(parent==steps[step].parent)break;
     if(step==sizeof(steps)/sizeof(steps[0]))return CAM_FAIL(ERANGE);
     s->inherited_step=step;s->required_vcore_uv=steps[step].uv;
@@ -199,7 +203,7 @@ static int cam_native_source_rate_locked(uint64_t epoch)
     e=cam_native_source_processing_locked();
     if(!e)e=cam_native_bw_take_locked(epoch);
     if(!e)e=cam_phy_dependencies();
-    if(!e && ((cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff)!=parent)e=CAM_FAIL(ESTALE);
+    if(!e && ((cam_rr(cam_mm.top,d->cfg)>>d->shift)&((1u<<d->width)-1u))!=parent)e=CAM_FAIL(ESTALE);
     if(!e) {
         cam_native_source.rate_valid=true;e=cam_native_source_rate_guard_locked(epoch);
         if(e)cam_native_source.rate_valid=false;
