@@ -630,7 +630,7 @@ static int cam_sv_commit(void)
     uint64_t span,deadline;
     uint32_t db;
     int e=cam_sv_environment();if(e)return e;
-    nanoseconds_to_absolutetime(10000000,&span);deadline=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);deadline=mach_absolute_time()+span;
     if(!cam_sv.commit_pending) {
         if(cam_sv.pending_slot<=CAM_SV_FIELDS)return CAM_FAIL(EBUSY);
         if(cam_sv.sequence==UINT64_MAX)return cam_sv_fault(CAM_FAIL(EOVERFLOW));
@@ -939,7 +939,7 @@ static int cam_sv_credit_issue_locked(uint64_t epoch,struct x9_camera_camsv_slot
     }
     e=cam_sv_request_guard_locked(epoch,slot);if(e)return e;
     e=cam_irq_credit_guard_locked(epoch);if(e)return e;
-    nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
     /* Journal BEFORE the single store. Once issued, failure is terminal and
      * leaves the SAME lease/RAW/controller/power pinned, with no cancellation.
      * RCNT is not put in geometry dirty/pending and no DB pulse follows it. */
@@ -1020,7 +1020,7 @@ static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
            cam_sv.expected[0][reg]!=expected ||
            (cam_sv.expected[1][reg]!=expected && cam_sv.expected[1][reg]!=0))return CAM_FAIL(ESTALE);
     }
-    nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
     cam_sv.receive_phase=off?X9_CAM_SV_RECEIVE_QUIESCING:X9_CAM_SV_RECEIVE_PENDING;
     /* DONE -> ERR -> SOF -> DMA, matching the normal disable writer's
      * ordering for this subset. CHANNEL/COMMON remain off; no history clear.
@@ -1098,7 +1098,7 @@ static int cam_sv_close_locked(uint64_t epoch)
     if(cam_sv.credit_issued && !cam_sv.credit_retired)return cam_sv_fault(CAM_FAIL(EBUSY));
     cam_sv.close_attempted=true;
     cam_sv.request_ready=cam_sv.fbc_ready=false;
-    nanoseconds_to_absolutetime(10000000,&span);deadline=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);deadline=mach_absolute_time()+span;
     e=cam_sv_environment();
     if(!e)e=cam_sv.commit_pending?cam_sv_commit():cam_sv_pending_wait(deadline);
     /* A shadow-only failure may have live-through effects even without

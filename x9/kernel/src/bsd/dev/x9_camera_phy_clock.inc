@@ -188,7 +188,7 @@ static int cam_phy_meter_measure(unsigned slot,unsigned id,uint32_t *result)
     if(!e)e=cam_phy_meter_change(2,0x03ff0000,0x03ff0000);
     if(!e)e=cam_phy_meter_change(3,0xff00001f,0x01000001); /* /2, CKGEN_CK2, ref0 */
     if(e)return e;
-    nanoseconds_to_absolutetime(2000000,&span);deadline=mach_absolute_time()+span; /* FQMTR_UDELAY_CNT */
+    nanoseconds_to_absolutetime(100000000 /* guard cost */,&span);deadline=mach_absolute_time()+span; /* FQMTR_UDELAY_CNT */
     e=cam_phy_meter_change(1,16,16);if(e)return e;
     for(unsigned i=0;i<4000;i++) {
         bool busy=(cam_rr(cam_phy_meter.meter,0x18)&1)!=0;

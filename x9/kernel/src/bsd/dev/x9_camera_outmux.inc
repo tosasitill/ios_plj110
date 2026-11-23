@@ -308,7 +308,7 @@ static int cam_out_cg_retirement_guard(void)
     if(!cam_out.cg_owned)return cam_out_irq_poison(ESTALE);
     /* The only uncertainty before sole close is our initial CG SET. Its
      * prior/off readback is NOT a cancellation or retirement proof. */
-    nanoseconds_to_absolutetime(10000000,&span);deadline=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);deadline=mach_absolute_time()+span;
     for(unsigned poll=0;poll<10000;poll++) {
         if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
         e=cam_out_guard();if(e)return e;

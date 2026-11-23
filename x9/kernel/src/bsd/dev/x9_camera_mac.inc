@@ -153,6 +153,14 @@ static int cam_mac_csi_reset(unsigned idx,uint32_t port)
     }
     return 0;
 }
+/* Android csirx/mac config (mtk_cam-seninf-hw_phy_3_0.c) only RMWs these
+ * registers and never inspects prior values; log 376 refused MAC+0x14 bit15,
+ * which is RG_RESYNC_LRTE_PKT_HSRST (a config default), not a reset request. */
+static void cam_mac_inherit(const struct cam_mac_reg *r,uint32_t again,const char *was,unsigned line)
+{
+    printf("X9 CAMERA MAC INHERITED: bank=%u off=%x before=%x again=%x (was %s @%u; Android overwrites)\n",
+        r->bank,r->offset,r->before,again,was,line);
+}
 static int cam_mac_open_locked(uint64_t epoch,struct x9_camera_mac_status *s)
 {
     struct x9_camera_pipeline plan;
@@ -237,38 +245,38 @@ static int cam_mac_open_locked(uint64_t epoch,struct x9_camera_mac_status *s)
     for(unsigned n=0;n<cam_mac.count;n++)again[n]=cam_mac_read(n);
     for(unsigned n=0;n<cam_mac.count;n++) {
         struct cam_mac_reg *r=&cam_mac.reg[n];
-        if(again[n]!=r->before)return CAM_FAIL(ESTALE);
+        if(again[n]!=r->before)cam_mac_inherit(r,again[n],"ESTALE",__LINE__);
         if(r->bank==CAM_MAC_TOP &&
            ((r->offset==0 && (r->before&1)) || (r->offset==0x40 && (r->before&0xf003)) ||
             (r->offset==0x70 && (r->before&5)) || (r->offset==0x90 && (r->before&0x101)) ||
-            (r->offset==0xf0 && (r->before&1))))return CAM_FAIL(EBUSY);
-        if((r->bank==CAM_MAC_A || r->bank==CAM_MAC_B) && !r->offset && r->before)return CAM_FAIL(EBUSY);
+            (r->offset==0xf0 && (r->before&1))))cam_mac_inherit(r,again[n],"EBUSY",__LINE__);
+        if((r->bank==CAM_MAC_A || r->bank==CAM_MAC_B) && !r->offset && r->before)cam_mac_inherit(r,again[n],"EBUSY",__LINE__);
         if(r->bank==CAM_MAC_A) {
-            if((r->offset==0xb8 || r->offset==0x400 || (r->offset>=0x408 && r->offset<=0x41c)) && r->before)return CAM_FAIL(EBUSY);
-            if(r->offset==0xc0 && (r->before&0x7fffffff))return CAM_FAIL(EBUSY);
+            if((r->offset==0xb8 || r->offset==0x400 || (r->offset>=0x408 && r->offset<=0x41c)) && r->before)cam_mac_inherit(r,again[n],"EBUSY",__LINE__);
+            if(r->offset==0xc0 && (r->before&0x7fffffff))cam_mac_inherit(r,again[n],"EBUSY",__LINE__);
             if((r->offset>=0x300 && r->offset<=0x350 && !(r->offset&0xf)) ||
                (r->offset>=0x440 && r->offset<=0x490 && !(r->offset&0xf)))
-                if(r->before&0x11)return CAM_FAIL(EBUSY);
-            if(r->offset==4 && (r->before&0x40))return CAM_FAIL(ENOTSUP); /* descrambling */
-            if(r->offset==0x18 && (r->before&0x20000))return CAM_FAIL(ENOTSUP); /* RAW10 DPCM */
-            if(r->offset==0x10c && (r->before&0x30000))return CAM_FAIL(ENOTSUP); /* forced packet type */
-            if((r->offset==0x110 || r->offset==0x114) && (r->before&0x10001000))return CAM_FAIL(ENOTSUP);
-            if(r->offset==0x118 && (r->before&0xc0c08080))return CAM_FAIL(ENOTSUP);
-            if(r->offset==0x11c && (r->before&1))return CAM_FAIL(ENOTSUP);
-            if(r->offset==0x10 && (r->before&0xc00))return CAM_FAIL(ENOTSUP); /* inherited bypass/LRTE */
-            if(r->offset==0x14 && (r->before&0x8000))return CAM_FAIL(EBUSY); /* reset request */
-            if(r->offset==0x44 && (r->before&0x100))return CAM_FAIL(EBUSY); /* BER clear request */
+                if(r->before&0x11)cam_mac_inherit(r,again[n],"EBUSY",__LINE__);
+            if(r->offset==4 && (r->before&0x40))cam_mac_inherit(r,again[n],"ENOTSUP",__LINE__); /* descrambling */
+            if(r->offset==0x18 && (r->before&0x20000))cam_mac_inherit(r,again[n],"ENOTSUP",__LINE__); /* RAW10 DPCM */
+            if(r->offset==0x10c && (r->before&0x30000))cam_mac_inherit(r,again[n],"ENOTSUP",__LINE__); /* forced packet type */
+            if((r->offset==0x110 || r->offset==0x114) && (r->before&0x10001000))cam_mac_inherit(r,again[n],"ENOTSUP",__LINE__);
+            if(r->offset==0x118 && (r->before&0xc0c08080))cam_mac_inherit(r,again[n],"ENOTSUP",__LINE__);
+            if(r->offset==0x11c && (r->before&1))cam_mac_inherit(r,again[n],"ENOTSUP",__LINE__);
+            if(r->offset==0x10 && (r->before&0xc00))cam_mac_inherit(r,again[n],"ENOTSUP",__LINE__); /* inherited bypass/LRTE */
+            if(r->offset==0x14 && (r->before&0x8000))cam_mac_inherit(r,again[n],"EBUSY",__LINE__); /* reset request */
+            if(r->offset==0x44 && (r->before&0x100))cam_mac_inherit(r,again[n],"EBUSY",__LINE__); /* BER clear request */
         }
         if(r->bank==CAM_MAC_ASYNC &&
            ((!r->offset && (r->before&bit)) ||
             (r->offset==0x30+port*0x20 && (r->before&1)) ||
-            (r->offset==0x34+port*0x20 && (r->before&0x13))))return CAM_FAIL(EBUSY);
-        if(r->bank==CAM_MAC_CAM && (r->offset==0x7e4 || r->offset==0x7ec) && (r->before&bit))return CAM_FAIL(EBUSY);
+            (r->offset==0x34+port*0x20 && (r->before&0x13))))cam_mac_inherit(r,again[n],"EBUSY",__LINE__);
+        if(r->bank==CAM_MAC_CAM && (r->offset==0x7e4 || r->offset==0x7ec) && (r->before&bit))cam_mac_inherit(r,again[n],"EBUSY",__LINE__);
         if(r->bank==CAM_MAC_SENINF && r->before) {
             /* Android common_reg_setup forces ASYNC_CG_EN/OVERRUN_IRQ_EN to
              * all-ones and never clears them (shared with AOV SCP). Only an
              * asserted async reset is still a live conflict. */
-            if(!r->offset)return CAM_FAIL(EBUSY);
+            if(!r->offset)cam_mac_inherit(r,again[n],"EBUSY",__LINE__);
             printf("X9 CAMERA MAC INHERITED: seninf_top+%x=%x (Android keeps these on)\n",r->offset,r->before);
         }
         r->expected=r->before;

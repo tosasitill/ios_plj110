@@ -109,7 +109,7 @@ static int cam_sv_cold_reset_locked(uint64_t epoch)
     if(cam_sv_reset.cq_before[0] || cam_sv_reset.cq_before[1] || cam_sv_reset.top_before)
         printf("X9 CAMERA CAMSV RESET INHERITED: cq=%x/%x mraw_rst=%x (Android overwrites)\n",
             cam_sv_reset.cq_before[0],cam_sv_reset.cq_before[1],cam_sv_reset.top_before);
-    nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
     /* Keep the upstream zero writes even with a zero prior. These are
      * command edges, not ordinary geometry fields or DB transactions.
      * Every store is journaled first and is issued once; no timeout retry. */
@@ -118,7 +118,7 @@ static int cam_sv_cold_reset_locked(uint64_t epoch)
      * re-running the ~94 ms guard inside this window spent the whole budget
      * before the first read although the ACK was set (dump cq_ctl=3). */
     e=cam_sv_cold_reset_guard(epoch);if(e)goto out;
-    nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
     cam_sv_reset.issued|=3u;
     cam_rw(m->sv[0],0x2010,0);
     cam_rw(m->sv[0],0x2010,1);

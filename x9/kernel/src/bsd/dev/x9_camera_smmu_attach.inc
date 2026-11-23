@@ -224,7 +224,7 @@ static void cam_shared_retire_timeout(struct x9_camera_smmu *m)
        (cam_shared.operation!=X9_CAM_SMMU_INSTALL &&
         cam_shared.operation!=X9_CAM_SMMU_RETIRE))return;
     cam_shared.close_attempted=true;
-    nanoseconds_to_absolutetime(10000000ull,&span);deadline=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);deadline=mach_absolute_time()+span;
     for(unsigned poll=0;poll<10000;poll++) {
         if(mach_absolute_time()>=deadline){e=CAM_FAIL(ETIMEDOUT);break;}
         e=cam_shared_batch_check();if(!e)e=cam_shared_guard(m);if(e)break;
@@ -395,7 +395,7 @@ int x9_camera_smmu_attach(struct x9_camera_smmu *m,const struct x9_camera_smmu_h
     if(!e) {
         m->shared_attempted=true;cam_shared.owner=m;cam_shared.host=*host;
         cam_shared.operation=X9_CAM_SMMU_INSTALL;
-        nanoseconds_to_absolutetime(100000000,&span);cam_shared.deadline=mach_absolute_time()+span;
+        nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);cam_shared.deadline=mach_absolute_time()+span;
         e=host->guard(host->context,host->lease,X9_CAM_SMMU_INSTALL,&m->view);
         if(!e)e=cam_shared_capture(m);
         /* Break-before-make. Clear V, synchronize the invalid STE before
@@ -456,7 +456,7 @@ int x9_camera_smmu_detach(struct x9_camera_smmu *m)
             X9_CAM_SMMU_RETIRE,&m->view);entered=!e;
     }
     if(!e) {
-        nanoseconds_to_absolutetime(100000000,&span);cam_shared.deadline=mach_absolute_time()+span;
+        nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);cam_shared.deadline=mach_absolute_time()+span;
         e=cam_shared_guard(m);
         /* CPU ownership is necessary, never a substitute for the independent
          * host RETIRE proof of full stopped RAW/AXI/IRQ/worker history. */

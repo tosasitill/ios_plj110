@@ -212,7 +212,7 @@ static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
     e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)return e;
     e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)return e;
     e=cam_irq_slot_guard_locked(off && session.stream);if(e)return e;
-    nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
     cam_sv_gate.phase=off?X9_CAM_SV_GATE_STOPPING:X9_CAM_SV_GATE_PENDING;
     for(unsigned step=first;step<last;step++) {
         unsigned field=cam_sv_gate_step_fields[step],offset=cam_sv_gate_offsets[field];
@@ -285,7 +285,7 @@ static int cam_sv_gate_restore_locked(uint64_t epoch)
     int e=0;
     if(cam_sv_gate.restore_attempted)return cam_sv_gate.error?cam_sv_gate.error:ESTALE;
     cam_sv_gate.restore_attempted=true;
-    nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
     if(!cam_sv.credit_retired || !cam_sv.close_attempted || cam_sv.epoch!=epoch ||
        !cam_sv_gate.captured || cam_sv_gate.epoch!=epoch || cam_sv_gate.error ||
        cam_sv_gate.phase!=X9_CAM_SV_GATE_STOPPED || cam_sv_gate.pending!=X9_CAM_SV_GATE_STEPS ||

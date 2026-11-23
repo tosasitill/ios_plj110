@@ -164,7 +164,7 @@ static int cam_sv_dma_stop_locked(uint64_t epoch)
                 cam_rr(cam_sv.view[bank],0x1020),&allowed);if(e)goto out;
         }
     }
-    nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
     e=cam_sv_dma_stop_guard_locked(epoch);if(e)goto out;
     if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
     /* Normal common_disable first inhibits DMA DCM (+7c=1). Do not issue
@@ -266,7 +266,7 @@ static int cam_sv_dma_stop_restore_locked(uint64_t epoch)
        cam_dma_stop.samples<2 || cam_dma_stop.port_samples!=2 ||
        cam_dma_stop.ostd_sampled!=3)return cam_dma_stop.error?cam_dma_stop.error:ESTALE;
     cam_dma_stop.restore_attempted=true; /* no retry even before first store */
-    nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
     /* Fresh ACK+P0-zero, original OFF/DONE/CPU/worker/GIC and current lease,
      * not the cached prior stop samples used as an independent grant. */
     for(unsigned sample=0;sample<2;sample++) {

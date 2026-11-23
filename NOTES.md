@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 376 + 镜像 x9-cam-mac-android-20261123
+
+- **376**：`CAMSV COLD RESET ... ack=3 complete=1 errno=0`，camsv-cold-reset 通过（completed=6）。`MAC ADOPT: CSI3 top reset ...`。新失败点：`mac-open errno=16`，FAIL TRACE `cam_mac_open_locked:259`，即 MAC+0x14 bit15 被当成「reset request」拒绝。查 Android `mtk_cam-seninf-csirx_mac_csi0.h`：0x14 是 CSI2_RESYNC_MERGE_CTRL2，bit15 是 `RG_RESYNC_LRTE_PKT_HSRST`（配置默认值）。Android 的 MAC 配置只做 RMW，不检查原值。
+- **SLOW GUARD 实测**：native_source_standby 17–86ms，rx_session_guard 10–17ms，rx_sample 约 5ms，smi_clock_guard 约 3.2ms。10ms 时限且每次迭代都跑 guard 的轮询基本只能读到 0–1 次。
+- **改动**：
+  - MAC 准入的 18 处拒绝（EBUSY/ENOTSUP/ESTALE）全部改为 `X9 CAMERA MAC INHERITED: bank off before again (was … @line)` 后继续。
+  - 所有每次迭代跑 guard 的软件轮询时限统一放宽：10ms/100ms → 1s，共 23 处（sv_gate/sv_hw/source/outmux/outmux_irq/irq_fbc/native_repeat/dma_stop/credit_retire/sv_qos/sv_shutdown/sv_reset/smmu_irq/smmu_attach）；phy fmeter 2ms → 100ms。只影响失败时的上限，正常路径不变。
+- `x9/out/x9-cam-mac-android-20261123/boot.img` sha256 `0a4239bc45458148e8ca6d3a62ab17dde634450859c8f3cd3e2fdfb5df077bbe`，warning 2987。
+
 #### 2026-11-23 日志 375 + 镜像 x9-cam-svreset-android-20261123
 
 - **375**：时钟补齐后 `CAMSV RESET DUMP: cq_ctl=3`，说明 CQ reset ack（bit1）其实已经置位。其余字段：gals_dbg=7，ppc_rdy=0/ffffffee，cam_m0=3fff01（bit1–7 已开），r1a0=c000000c（bit30/31 和 2/3 仍 gated），mraw CG=3f8fd9（larb/camtm/camsv_top/camsv_a 已开，cam_mr GALS0–5 gated）。超时是 x9 自己造成的：100ms 窗口内，写入前跑了 2 次 guard，进入轮询后又先跑 guard，一次 cold-reset guard 约 94ms（22.198→22.292），窗口在第一次读寄存器之前就耗尽了（cq_actual 停在 memset 后的 0）。

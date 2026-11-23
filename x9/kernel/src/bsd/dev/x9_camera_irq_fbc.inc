@@ -228,7 +228,7 @@ static int cam_irq_fbc_done_locked(const struct cam_irq_event *ev)
        memcmp(&cam_irq_fbc.done,&ev->frame,sizeof(ev->frame))))e=CAM_FAIL(ESTALE);
     if(!e)cam_irq_fbc.attempted=true;
     cam_irq_spin_drop(old);if(e)return e;
-    nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
     for(unsigned poll=0;poll<10000;poll++) {
         bool match=true;
         if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}

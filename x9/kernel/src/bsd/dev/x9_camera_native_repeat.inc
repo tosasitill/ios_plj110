@@ -488,7 +488,7 @@ static int cam_repeat_stopped_irqs_locked(uint64_t epoch)
        cam_irq.accepting || cam_irq.count || cam_irq.busy || !cam_irq.owns))e=CAM_FAIL(ESTALE);
     if(!e)for(unsigned role=0;role<3;role++)cam_irq_wr(cam_irq_bank(role,0x100),cam_irq_bit(role));
     cam_irq_spin_drop(old);if(e)return e;
-    uint64_t span;nanoseconds_to_absolutetime(10000000,&span);
+    uint64_t span;nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);
     uint64_t end=mach_absolute_time()+span;unsigned samples=0;
     for(unsigned poll=0;poll<5000;poll++) {
         e=cam_irq_power();if(!e)e=cam_irq_config(false);if(e)break;

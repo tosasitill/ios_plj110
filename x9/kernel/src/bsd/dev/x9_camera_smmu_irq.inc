@@ -277,7 +277,7 @@ static int cam_smmu_irq_shutdown(struct x9_camera_smmu *m)
             e=cam_smmu_irq_control_locked(m,&now,0,true);
     }
     lck_mtx_unlock(&camera_smmu_lock);if(e)return e;
-    nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
     for(;;) {
         bool busy,hardware_pending;uint32_t pending,active,enabled;
         old=cam_smmu_irq_spin_take();

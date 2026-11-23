@@ -104,7 +104,7 @@ static int cam_sv_credit_retire_locked(uint64_t epoch)
     int e=0;
     if(cam_sv.credit_retire_attempted)return cam_sv.error?cam_sv.error:ESTALE;
     cam_sv.credit_retire_attempted=true; /* no replay even before first sample */
-    nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
     ap=(struct cam_sensor_ap){&cam_journal.sensor,
         cam_sensor_slave(cam_sv.request.frame.sensor)};
     for(unsigned sample=0;sample<2;sample++) {

@@ -95,7 +95,7 @@ static int cam_sv_qos_start(void)
         if(step&1) {
             uint64_t span,end;
             unsigned samples=0;
-            nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
+            nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
             for(unsigned poll=0;poll<100000;poll++) {
                 if(mach_absolute_time()>=end)break;
                 e=cam_sv_environment();if(e)break;
