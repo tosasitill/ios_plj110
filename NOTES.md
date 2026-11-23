@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 SID 列表核对：0xa1 不在 ATF secure STE 列表里，「缺 SMMU_SECURE_INIT」假设被推翻
+
+- **观察**：`0x34714(kind,ptr)`（由 0x34360 在启动时调用）登记两张按域分行的 SID 表：kind0→`0x8b7c8`，kind1→`0x8b7a4`（每域一行、10 字节、0 结尾；0x47c9c 只处理 2 个域）。kind0：域0={0x8e,0x94}，域1={0x8d,0xc7,0xb7,0xad}；kind1：域0={0x12}，域1={0x08}。每 SMMU 平台表（`0x89c20`，步长 0x38）项0=MM_SMMU(base 0x30800000)，项1=APU_SMMU(0x4c000000)，项2=SOC 未启用。0xc7=199/0xb7=183 在 Android DT 里是 `mm_smmu_gce_d/gce_m`，故 kind0 为 MM（kind↔SMMU 的对应没有逐行追到赋值处，按此推断）。
+- **结论**：`SMMU_SECURE_INIT` 建的 secure STE 只覆盖 GCE 等安全路径 SID，**不含 0xa0/0xa1**。上条「iOS 缺 INIT 导致 MMUP 取指无翻译」的假设不成立，不应据此出镜像。
+- **另一发现**：ATF 有一个按数值 switch 取 `[cfg+偏移]` 字节的函数（0x23c44 一带，值 0x9c..0xa2 等都有分支，0xa1→`[cfg+246]`），含义未查；不能据此断言 ATF 对 0xa1 有特殊处理。
+- **现状**：SID 0xa1（loader，IOVA 0x1_06c00000 起 0xe00000）的翻译究竟由谁启用仍未知。剩余候选：(a) Linux/pKVM 在 NS 组为 0xa1 建 STE，页表指向 ATF 0x470d4 取出的表（域1）——需读 0x470d4 的表来源与 Android hyp 侧如何引用；(b) 0x2ec4c/0x26954 建的表由 TEE 另行使用；(c) MMUP 实际并未经 SMMU（IOVA 在总线侧恒等/旁路）。均未证实。
+
 #### 2026-11-23 ATF 静态三问结论（atf-full.dis + 原 ATF 二进制，未出镜像/代码）
 
 - **基址**：ATF 文件偏移 = 反汇编地址，运行时基址 0x88800000（SMC 描述符里的指针 = 0x88800000+偏移）。SiP SMC 表是 109 个 32 字节描述符（`0x781e0..0x78f80`，+0=handler，+8=FID 对，+24=索引变量指针），由 0x32500 在启动时填索引；分发器 0x2f45c→0x32494/0x33720 按索引调用。
