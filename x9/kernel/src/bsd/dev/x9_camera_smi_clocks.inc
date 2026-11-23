@@ -130,6 +130,29 @@ static int cam_smi_clock_guard(void)
     if(!e)e=cam_smi_a0_guard();
     return e?e:cam_native_bw_guard();
 }
+/* Android hwccf_api.c _v1_mm_hwccf_mtcmos_fsm_err_handle(), called by
+ * clk-gate.c mtk_cg_enable_generic_hwv() after the raw vote of every MM
+ * generic HWV gate: if the MTCMOS mapped to this CG group (INIT_CCF_CG_MAP_
+ * MTCMOS 0x15a0) has PM_ACK clear, pulse XPU0's CG47 vote to retrigger the
+ * FSM and wait for PM_ACK. Return 0x100a = bypass (like Android). */
+static int cam_smi_fsm_retrigger(unsigned rid)
+{
+    vm_offset_t b=cam_mm.receive.hwv;
+    uint32_t map=cam_rr(b,0x15a0+(rid/4)*4),id=(map>>(7*(rid%4)))&0x7f,ack_ofs,m;
+    int e;
+    if(id>=64)return 0x100a;
+    ack_ofs=id<32?0x12900:0x12904;m=id%32;
+    if(cam_rr(b,ack_ofs)&(1u<<m))return 0x100a;
+    printf("X9 CAMERA SMI FSM RETRIGGER: rid=%u mtcmos=%u ack_ofs=%x ack=%x (CG47 pulse as Android)\n",
+        rid,id,ack_ofs,cam_rr(b,ack_ofs));
+    cam_rw(b,0x20000+47*0xc,1);
+    e=cam_wait_bits(b,0x12200+47*4,1,1,200);if(e)return e;
+    e=cam_wait_bits(b,0x11800+47*4,1,0,10000);if(e)return e;
+    cam_rw(b,0x20004+47*0xc,1);
+    e=cam_wait_bits(b,0x12200+47*4,1,0,200);if(e)return e;
+    e=cam_wait_bits(b,0x11800+47*4,1,0,10000);if(e)return e;
+    return cam_wait_bits(b,ack_ofs,1u<<m,1u<<m,200);
+}
 static int cam_smi_slot_take(unsigned n)
 {
     struct cam_smi_gate *g=&cam_smi.gate[n];uint32_t a[3],b[3];
@@ -159,13 +182,18 @@ static int cam_smi_slot_take(unsigned n)
         if(!e)e=cam_smi_slot_idle(n,"set-final-sta");
         if(e)return e;
         cam_smi.pending=CAM_SMI_NONE;
+        {   /* Android generic MM HWV gate: FSM retrigger, then CG enable. */
+            int r=cam_smi_fsm_retrigger(n==0?35u:34u);
+            if(r && r!=0x100a)return r;
+        }
         cam_smi_sample(n,b);if(b[2]&~g->cg_before)return CAM_FAIL(ESTALE);
         g->cg_expected=b[2];
         if(b[2]) {
             e=cam_smi_clock_guard();if(e)return e;
             cam_smi.pending=CAM_SMI_CG_CLR;g->cg_expected=0;
             cam_rw(g->cg,8,b[2]);
-            e=cam_wait_bits(g->cg,0,g->mask,0,10000);if(e)return e;
+            /* Android __hwv_cg_dma_back: MTK_WAIT_HWV_DONE_CNT=5000000 x 1us. */
+            e=cam_wait_bits(g->cg,0,g->mask,0,100000);if(e)return e;
             cam_smi.pending=CAM_SMI_NONE;
         }
     }

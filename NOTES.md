@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 372 + 镜像 x9-cam-smi-fsm-20261123（未上机，随后做全量 Android 审计）
+
+- **372**：receiver-open 通过（`RX OUTMUX STATE: ctrl/rdy/done=21000000/1/0` 两 bank 一致，busy=0）。新失败 `smi-clocks-open errno=60`，FAIL TRACE `cam_wait_bits:124`（约 0.55 s，即 smi_clocks 投票后等物理 CG 清零的 10000 次轮询）。
+- **Android 对照**：MM generic HWV gate（`clk-mt6993-cam.c GATE_HWV_CAM_MR0`，ops=`mtk_clk_gate_generic_mm_hwv_ops`）在 `clk-gate.c mtk_cg_enable_generic_hwv` 里：raw 投票 → `hwccf_api.c _v1_mm_hwccf_mtcmos_fsm_err_handle`（查 INIT_CCF_CG_MAP_MTCMOS 0x15a0，对应 MTCMOS 的 PM_ACK 为 0 时对 XPU0 CG47 投票脉冲重触发 FSM，等 PM_ACK）→ 物理 CG clr → `__hwv_cg_dma_back` 等 sta 清零（MTK_WAIT_HWV_DONE_CNT=5000000×1µs）。x9 没做 FSM retrigger（旧策略只报告不处理），等待也只有约 0.5 s。
+- **改动**：`cam_smi_fsm_retrigger(rid)`（CG35/CG34）照 Android 实现并在投票后调用；物理 CG 等待加长到 100000 次；`cam_wait_bits` 改成记录调用点的宏，超时打印 `X9 CAMERA WAIT TIMEOUT: fn:line off mask want last`。
+- `x9/out/x9-cam-smi-fsm-20261123/boot.img` sha256 `565d52193229e62bc786e14445939d845368a38526eac8ad2a0b88df2cc3e050`。用户随即要求把后续全部按 Android 重审，此镜像先不交付。
+
 #### 2026-11-23 日志 371 + 镜像 x9-cam-outmux-android-20261123（未上机）
 
 - **371 实测**：INIT/BOOT stage6/MM_2 均正常；`CAM RATE ENTRY: cfg=4 pre=0 xpu0=0 targ/curr=0/0 rc_level=0 xpu9-12=0`（RC 本来全空，cfg=4 只是 AL mux 冷值，旧的 entry_cfg&15 门禁本身就是错的）；`CAM RATE TAKE cfg=4->a vote/target/current=2/2/2 rc_level=2 errno=0`；MM slot 0–10 全部 ACTIVE（flags=17：POWER|CLOCKS）。新拒绝点由 FAIL TRACE 直接给出：`cam_rx_inspect:205 errno=16`，RX OPEN `busy=4`。

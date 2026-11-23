@@ -114,15 +114,20 @@ static void cam_rw(vm_offset_t base, unsigned off, uint32_t value)
     *(volatile uint32_t *)(base+off)=value;
     __asm__ volatile("dsb sy" ::: "memory");
 }
-static int cam_wait_bits(vm_offset_t base, unsigned off, uint32_t mask,
-                         uint32_t value, unsigned limit)
+static int cam_wait_bits_at(vm_offset_t base, unsigned off, uint32_t mask,
+                         uint32_t value, unsigned limit,const char *fn,unsigned line)
 {
+    uint32_t v=0;
     for(unsigned i=0;i<limit;i++) {
-        if((cam_rr(base,off)&mask)==value)return 0;
+        v=cam_rr(base,off);
+        if((v&mask)==value)return 0;
         delay(1);
     }
-    return CAM_FAIL(ETIMEDOUT);
+    printf("X9 CAMERA WAIT TIMEOUT: %s:%u off=%x mask=%x want=%x last=%x limit=%u\n",
+        fn,line,off,mask,value,v,limit);
+    return cam_fail_note(ETIMEDOUT,fn,line);
 }
+#define cam_wait_bits(b,o,m,v,l) cam_wait_bits_at((b),(o),(m),(v),(l),__func__,__LINE__)
 static unsigned cam_vote_off(struct cam_probe_journal *j)
 { return 0x20000+j->board.clk_group*12; }
 static unsigned cam_done_off(struct cam_probe_journal *j)
