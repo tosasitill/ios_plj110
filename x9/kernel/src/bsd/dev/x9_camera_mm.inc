@@ -35,8 +35,10 @@ static const struct cam_mm_desc cam_mm_descs[X9_CAM_MM_SLOTS]={
     {CAM_MM_AL,0x20600,0x12330,0x12030,0x270,1u<<2,1u<<18,0x40,8,4,16},
     {CAM_MM_MUX,0x20600,0x12330,0x12030,0x270,1u<<3,1u<<17,0x40,16,3,5},
     {CAM_MM_MUX,0x20600,0x12330,0x12030,0x270,1u<<17,1u<<14,0x50,8,4,16},
-    {CAM_MM_GATE,0x20108,0x12258,0x11858,0,(1u<<1)|(1u<<6)|(1u<<7),
-        (1u<<1)|(1u<<6)|(1u<<7),0,0,0,0},
+    /* Android DT camisp@3a010000 clocks: cam_m CAM/SUBA/SUBB/SUBC/MRAW/
+     * CAMTG/SENINF = cam_m0 bits1..7 (CAM_MRAW feeds the camsv/mraw subsys;
+     * log 374 CAMSV CQ reset never ACKed without it). */
+    {CAM_MM_GATE,0x20108,0x12258,0x11858,0,0xfeu,0xfeu,0,0,0,0},
     /* Only register-access CAMSV clocks. DMA/SMI larbs remain gated/unowned. */
     {CAM_MM_GATE,0x20198,0x12288,0x11888,0,7u<<12,7u<<12,0,0,0,0}
 };
@@ -237,11 +239,14 @@ static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera
         if(ap)s->flags|=X9_CAM_MM_SLOT_BORROWED;
         if(d->kind==CAM_MM_GATE) {
             j->gate_before[n]=before[2]&d->mask;
-            /* Never repair an existing owner's gated-but-voted clock. */
-            if((before[2]&before[1]&d->mask)!=0)return CAM_FAIL(EBUSY);
-            /* Unvoted-but-ungated is an unknown direct owner. A later
-             * last HWV CLR would gate it and destroy that owner's state. */
-            if((~before[2]&~before[1]&d->mask)!=0)return CAM_FAIL(EBUSY);
+            /* Android mtk_cg_enable_generic_hwv: always vote, then CG clr;
+             * neither state below is a refusal there. */
+            if((before[2]&before[1]&d->mask)!=0)
+                printf("X9 CAMERA MM SLOT %u ADOPT: voted but gated cg=%x global=%x (CG clr follows, as Android)\n",
+                    n,before[2]&d->mask,before[1]&d->mask);
+            if((~before[2]&~before[1]&d->mask)!=0)
+                printf("X9 CAMERA MM SLOT %u ADOPT: ungated without vote bits=%x (Android votes anyway)\n",
+                    n,~before[2]&~before[1]&d->mask);
         } else if(n<X9_CAM_MM_VMM) {
             /* MM_2/display hold AO/infra0 via parent-domain autolink; their own
              * MTCMOS0 bits may be zero while PM_ACK (0x12900) is already one. */
@@ -263,7 +268,8 @@ static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera
         if(d->kind==CAM_MM_GATE) {
             vm_offset_t cg=cam_mm_effect_base(j,n);
             uint32_t gated=cam_rr(cg,0)&d->mask;
-            if(gated&~j->gate_before[n])return CAM_FAIL(ESTALE);
+            if(gated&~j->gate_before[n])
+                printf("X9 CAMERA MM SLOT %u ADOPT: gate moved %x->%x before CG clr\n",n,j->gate_before[n],gated);
             if(gated) {
                 e=cam_sv_sibling_guard(j);if(e)return e;
                 j->gate_changed[n]=gated;

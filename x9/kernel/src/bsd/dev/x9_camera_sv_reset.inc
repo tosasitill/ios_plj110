@@ -86,7 +86,7 @@ static int cam_sv_cold_reset_guard(uint64_t epoch)
 }
 static int cam_sv_cold_reset_locked(uint64_t epoch)
 {
-    const struct cam_rx_maps *m;
+    const struct cam_rx_maps *m=NULL;
     uint64_t span,end;
     int e;
     if(cam_sv_reset.attempted && cam_sv_reset.epoch==epoch)
@@ -168,6 +168,14 @@ static int cam_sv_cold_reset_locked(uint64_t epoch)
     e=cam_rx_session_guard();
 out:
     cam_sv_reset.error=e;
+    if(e && m) /* Android sv_reset "cq dma timeout" dump + gate state */
+        printf("X9 CAMERA CAMSV RESET DUMP: sen_mode=%x cq_ctl=%x gals_dbg=%x ppc_rdy=%x/%x "
+            "cam_m0/m1=%x/%x r1a0/r1a1=%x/%x mraw=%x larb19 stat=%x ostd=%x/%x\n",
+            cam_rr(m->sv[0],0x140),cam_rr(m->sv[0],0x2010),cam_rr(cam_mm.cam_cg,0x414),
+            cam_rr(cam_mm.cam_cg,0x588),cam_rr(cam_mm.cam_cg,0x58c),
+            cam_rr(cam_mm.cam_cg,0),cam_rr(cam_mm.cam_cg,0x4c),
+            cam_rr(cam_smi.gate[0].cg,0),cam_rr(cam_smi.gate[0].cg,0x10),cam_rr(cam_mm.sv_cg,0),
+            cam_rr(cam_smi.larb[0],0),cam_rr(cam_smi.larb[0],0x280),cam_rr(cam_smi.larb[0],0x780));
     printf("X9 CAMERA CAMSV COLD RESET: sensor=%u epoch=%llu issued=%x cq=%x/%x "
         "ack=%x ack_samples=%u top=%x/%x post_samples=%u complete=%u errno=%d "
         "(ISP8s resume; before request/credit/source)\n",

@@ -356,8 +356,11 @@ static int cam_smi_clocks_open_locked(uint64_t epoch,unsigned sensor)
     cam_smi.parent_cfg=(cam_rr(cam_mm.top,0x10)>>16)&0xff;
     /* CG35 R1A subcomm1/2/3 bits13/14/15, CG34 CAM_MRAW larb14/19/29
      * bits1/2/5. Real CG35 is 3c80d000, NOT adjacent CCU 3c800000. */
+    /* Android DT camisp-vcore (mt6993-camisp-vcore) enables cam_v_r1a0 G,
+     * SV0/SV1 GALS, TX GALS, SUB_COMM0..3 and X* GALS: bits 0,4..31. Bits
+     * 30/31 (x60/x90, parent mm_ccusys_ck) are CCU-only and left alone. */
     cam_smi.gate[0]=(struct cam_smi_gate){.set=0x201a4,.global=0x1228c,.sta=0x1188c,
-        .mask=7u<<13,.cg=cg[0]};
+        .mask=0x3ffffff1u,.cg=cg[0]};
     cam_smi.gate[1]=(struct cam_smi_gate){.set=0x20198,.global=0x12288,.sta=0x11888,
         .mask=0x26,.cg=cg[1]};
     memcpy(cam_smi.larb,larb,sizeof(larb));

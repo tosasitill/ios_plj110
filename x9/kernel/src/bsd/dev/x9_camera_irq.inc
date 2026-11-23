@@ -177,7 +177,7 @@ static int cam_irq_power(void)
     uint32_t ack=CAM_RES_MM_INFRA|(1u<<16)|(1u<<15)|(1u<<8);
     if((cam_irq_rd(cam_irq.hwv,0x12900)&ack)!=ack||
        !(cam_irq_rd(cam_irq.hwv,CAM_RES_CSI_ACK)&CAM_RES_CSI_BIT))return CAM_FAIL(ENXIO);
-    if((cam_irq_rd(cam_irq.cam_cg,0)&((1u<<1)|(1u<<6)|(1u<<7)))||
+    if((cam_irq_rd(cam_irq.cam_cg,0)&0xfeu)||
        (cam_irq_rd(cam_irq.sv_cg,0)&(7u<<12))||
        (cam_irq_rd(cam_irq.top,0x270)&cam_irq.fence)!=cam_irq.fence)return CAM_FAIL(ESTALE);
     return 0;

@@ -13,7 +13,7 @@ static const unsigned cam_smi_shared_cg[CAM_SMI_SHARED_GROUPS]={35,34,30,22};
 /* L44's two DT SMI clocks are RAW_C larbx bit0 AND cam bit1. */
 /* Freeze ALL SMI clock bits actually consumed, not only COMM33/L19.
  * A foreign owner of L14/L29 or COMM1/2 can be hidden by our AP vote. */
-static const uint32_t cam_smi_shared_mask[CAM_SMI_SHARED_GROUPS]={7u<<13,0x26,3,1};
+static const uint32_t cam_smi_shared_mask[CAM_SMI_SHARED_GROUPS]={0x3ffffff1u,0x26,3,1};
 static const unsigned cam_smi_shared_offsets[CAM_SMI_SHARED_WORDS]={0x100,0x244,0x444,0x24,0x40};
 static const uint32_t cam_smi_shared_targets[CAM_SMI_SHARED_WORDS]={0xa,0x4146,1,0x370456,1};
 static struct {

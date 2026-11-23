@@ -160,6 +160,19 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 374 + 镜像 x9-cam-camisp-clocks-b-20261123
+
+- **374 进展**：`READBACK ADOPT: cam_smi_a0_write:131 off=200 wrote=1 read=101`，smi-clocks-open 通过。新失败点：`camsv-cold-reset errno=60`，FAIL TRACE `cam_sv_cold_reset_locked:122`。CQ SW_RST_CTL 冷值是 2/2；按 Android 写 0、1 之后一直读到 0，bit1 ack 始终不出现。另有 INHERITED：sv+0x240 为 0x5f3700。
+- **Android 对照**：`mtk_camsv_runtime_resume` 先对 3 个 larb 调 `mtk_smi_larb_enable`，再开 camsv 时钟，然后 `sv_reset_by_camsys_top`。在此之前，camisp 主设备和 camisp-vcore 已经 resume。DT 显示：
+  - `camisp@3a010000` 的时钟是 cam_main_r1a 的 CAM/SUBA/SUBB/SUBC/MRAW/CAMTG/SENINF，即 cam_m0 bit1–7。x9 只开了 1/6/7，缺 **CAM_MRAW**（mraw/camsv 子系统时钟）。
+  - `camisp-vcore` 的时钟是 cam_v_r1a0 的 G、SV0/SV1 GALS、TX GALS、SUB_COMM0–3、X* GALS，即 bit0 和 bit4–31。x9 只开了 bit13–15，缺 **SV0 GALS**（camsv DMA 出口）等。
+  - Android 的 CQ 超时诊断会读 cam_main+0x414（gals dbg）和 +0x588/0x58c（ppc_prot_rdy）。
+- **改动**：
+  - MM cam_main GATE 掩码改为 0xfe；SMI gate[0]（CG35 r1a0）掩码改为 0x3ffffff1（不含 CCU 专用的 bit30/31）；smi_shared mask[0] 和 irq power 检查同步。
+  - MM GATE 准入里「已投票但 gated」「未投票但已开」改为打印 ADOPT 后继续，与 Android 一致。
+  - cold reset 失败时打印 `X9 CAMERA CAMSV RESET DUMP`：sen_mode、cq_ctl、gals_dbg、ppc_rdy、cam_m0/m1、r1a0/r1a1、mraw CG、larb19 状态。
+- `x9/out/x9-cam-camisp-clocks-b-20261123/boot.img` sha256 `19fb0caa1f0c2b63c8aef5c2d857d3ac396f5c9c8791649032bc1a95caca1f31`，warning 2987。（`x9-cam-camisp-clocks-20261123` 目录是编译失败留下的半成品。）
+
 #### 2026-11-23 日志 373 + 镜像 x9-cam-smi-readback-20261123
 
 - **373 进展**：SMI 两个 HWV gate（CG35/CG34）通过，未出现 FSM RETRIGGER（PM_ACK 本来就是 1），smi_shared 的 misc 写入也通过。新失败点：`X9 CAMERA WAIT TIMEOUT: cam_smi_a0_write:131 off=200 mask=ffffffff want=1 last=101`，即 L19 OSTDL_PORT0 写 1，读回 0x101（bit8 写不进，或是只读/粘滞位）。
