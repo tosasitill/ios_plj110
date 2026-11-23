@@ -137,8 +137,14 @@ static int cam_smi_slot_take(unsigned n)
     e=cam_smi_slot_idle(n,"pre-sta");if(e)return e;
     cam_smi_sample(n,a);delay(10);e=cam_smi_slot_idle(n,"pre-sta");if(e)return e;
     cam_smi_sample(n,b);if(memcmp(a,b,sizeof(a)))return CAM_FAIL(ESTALE);
-    /* No voted-but-gated repair, or unvoted direct-clock owner takeover. */
-    if((a[0]&~a[1]) || (a[2]&a[1]) || ((~a[2]&~a[1])&g->mask))return CAM_FAIL(EBUSY);
+    /* No voted-but-gated repair. An unvoted-but-ungated clock (direct
+     * owner, e.g. the now-running VCP/MMUP mmqos) is NOT refused: Android's
+     * clk/HWV path just adds its own vote; our later CLR leaves the gate to
+     * the HWV aggregate. Logged so a shared clock is visible. */
+    if((a[0]&~a[1]) || (a[2]&a[1]))return CAM_FAIL(EBUSY);
+    if((~a[2]&~a[1])&g->mask)
+        printf("X9 CAMERA SMI SLOT %u: clock ungated without vote ap=%x global=%x cg=%x (shared, not refused)\n",
+            n,a[0],a[1],a[2]);
     g->ap_before=g->ap_expected=a[0];g->borrowed=a[0];
     g->cg_before=g->cg_expected=a[2];cam_smi.seen|=1u<<n;
     g->owned=g->mask&~a[0];

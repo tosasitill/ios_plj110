@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 371 + 镜像 x9-cam-outmux-android-20261123（未上机）
+
+- **371 实测**：INIT/BOOT stage6/MM_2 均正常；`CAM RATE ENTRY: cfg=4 pre=0 xpu0=0 targ/curr=0/0 rc_level=0 xpu9-12=0`（RC 本来全空，cfg=4 只是 AL mux 冷值，旧的 entry_cfg&15 门禁本身就是错的）；`CAM RATE TAKE cfg=4->a vote/target/current=2/2/2 rc_level=2 errno=0`；MM slot 0–10 全部 ACTIVE（flags=17：POWER|CLOCKS）。新拒绝点由 FAIL TRACE 直接给出：`cam_rx_inspect:205 errno=16`，RX OPEN `busy=4`。
+- **busy=4 的来源**：OUTMUX（0x3a200000/0x3a208000）的 +0x20 CSR_CFG_CTRL.SENINF_DL_EN(bit12) / +0x2c CAM_CFG_RDY / +0x38 SW_CFG_DONE_STATUS。查 Android `mtkcam/camsys/isp8s/cam/mtk_csi_phy_3_0/mtk_cam-seninf-hw_phy_3_0.c`：config 时显式写 CAM_CFG_RDY=0（注释「write rdy_msk sw is 0 as default」），tag 配置时写 DL_EN=1，`_wait_outmux_cfg_done` 只等 CFG_DONE_STATUS 清零——都不作为「有别人在用」的拒绝条件。x9 把冷复位值当成了外来占用。
+- **本镜像改动**：① `cam_rx_busy` 去掉这三个握手位（bit4），并新增 `X9 CAMERA RX OUTMUX STATE` 行打印两个 bank 的 ctrl/rdy/done；② `cam_out_open_locked` 准入不再因 DL_EN/RDY_GRP_EN/CFG_RDY_EN/CAM_CFG_RDY 拒绝，SW_CFG_DONE_STATUS 按 Android 最多等 10 ms 清零（打印 `X9 CAMERA OUTMUX ADMIT`），新增日志化写入 CAM_CFG_RDY=0（CAM_OUT_WRITES 7→8，关闭时按 dirty 恢复）；未写 DL_EN（outmux IRQ 代码另管 0x20，避免冲突）；③ `cam_smi_slot_take` 对「无投票但时钟已开」（VCP/MMUP mmqos 可能直接开了 SMI 时钟）不再拒绝，只打印 `X9 CAMERA SMI SLOT n: clock ungated without vote`，照 Android 加自己的投票。
+- 未改、靠 FAIL TRACE 定位的：smi_shared 的外来 XPU 投票精确快照（VCP 若动态改 SMI 投票会 ESTALE）、MMQoS AP 表全零要求、outmux 两 bank memcmp 等。
+- `x9/out/x9-cam-outmux-android-20261123/boot.img` 15310848 B，sha256 `05d5ed9c3951c05106c81efcc1acde9c9f1df4ba6ffa8cd3d2a4f1df255ba103`，boot-arg `x9_mmup_smmu_init=1`，warning 数 2987 不变。
+
 #### 2026-11-23 镜像 x9-camrate-failtrace-20261123（按 Android 改 CAM rate + 全栈失败追踪，未上机）
 
 - `x9/out/x9-camrate-failtrace-20261123/boot.img` 15306752 B，sha256 `0ed65250ae4cebc4db4d12e1fdd186e6de7bc73338da79e3213708bfaa298a3e`，boot-arg `x9_mmup_smmu_init=1`；warning 数与改动前基线相同（2987）。（中间版 x9-camrate-android-20261123 未交付。）

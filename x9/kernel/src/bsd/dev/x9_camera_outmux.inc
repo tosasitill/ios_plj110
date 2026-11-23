@@ -10,7 +10,7 @@
  * camera_control_lock holds the journal for every entry/cleanup/poll.
  */
 #include "x9_camera_outmux.h"
-enum { CAM_OUT_FIXED=16, CAM_OUT_REGS=CAM_OUT_FIXED+8*5, CAM_OUT_WRITES=7 };
+enum { CAM_OUT_FIXED=16, CAM_OUT_REGS=CAM_OUT_FIXED+8*5, CAM_OUT_WRITES=8 };
 static const unsigned cam_out_fixed[CAM_OUT_FIXED]={
     0,4,8,0xc,0x10,0x14,0x18,0x20,0x2c,0x34,0x40,0x48,0xa0,0xa4,0xa8,0x50
 };
@@ -19,7 +19,8 @@ struct cam_out_field { unsigned reg; uint32_t mask; };
 static const struct cam_out_field cam_out_fields[CAM_OUT_WRITES]={
     {2,1}, {3,0x1f1f73}, {6,0x73}, {4,0x1f},
     {CAM_OUT_FIXED+4,0xf}, {CAM_OUT_FIXED+1,UINT32_MAX},
-    {CAM_OUT_FIXED,0x3f1f31}
+    {CAM_OUT_FIXED,0x3f1f31},
+    {8,1} /* CAM_CFG_RDY=0: Android "write rdy_msk sw is 0 as default" */
 };
 static struct {
     vm_offset_t top, out[2];
@@ -279,14 +280,24 @@ static int cam_out_open_locked(uint64_t epoch,struct x9_camera_outmux_status *r)
         e=cam_out_top_guard(true);if(e)return e;
         for(unsigned n=0;n<CAM_OUT_REGS;n++)again[n]=cam_rr(cam_out.out[bank],cam_out_offset(n));
         if(memcmp(again,cam_out.before[bank],sizeof(again)))return CAM_FAIL(ESTALE);
-        if(cam_rr(cam_out.out[bank],0x1c) || cam_rr(cam_out.out[bank],0x38))return CAM_FAIL(EBUSY);
+        /* Android _wait_outmux_cfg_done: wait for SW_CFG_DONE_STATUS to clear. */
+        for(unsigned w=0;w<100 && (cam_rr(cam_out.out[bank],0x38)&1);w++)delay(100);
+        if(cam_rr(cam_out.out[bank],0x1c) || cam_rr(cam_out.out[bank],0x38)) {
+            printf("X9 CAMERA OUTMUX ADMIT: bank=%u cmd=%x done_status=%x (still pending after 10ms)\n",
+                bank,cam_rr(cam_out.out[bank],0x1c),cam_rr(cam_out.out[bank],0x38));
+            return CAM_FAIL(EBUSY);
+        }
     }
+    printf("X9 CAMERA OUTMUX ADMIT: outer ctrl/rdy=%x/%x inner=%x/%x src=%x/%x\n",
+        cam_out.before[0][7],cam_out.before[0][8],cam_out.before[1][7],cam_out.before[1][8],
+        cam_out.before[0][0],cam_out.before[1][0]);
     /* A commit transfers more than tag0. Reject any inherited staged
      * difference rather than accidentally publishing another owner's tags. */
     if(memcmp(cam_out.before[0],cam_out.before[1],sizeof(cam_out.before[0])))return CAM_FAIL(EBUSY);
     if((cam_out.before[0][0]&0x3f0103) || (cam_out.before[0][1]&3) ||
-       (cam_out.before[0][7]&((1u<<12)|(1u<<28)|(1u<<29))) ||
-       cam_out.before[0][8] || cam_out.before[0][9] || cam_out.before[0][10] ||
+       /* DL_EN/RDY_GRP_EN/CFG_RDY_EN and CAM_CFG_RDY are overwritten by
+        * Android's config path, not evidence of another owner. */
+       cam_out.before[0][9] || cam_out.before[0][10] ||
        cam_out.before[0][11] || (cam_out.before[0][12]&0x80) ||
        (cam_out.before[0][13]&0x71311) || cam_out.before[0][15])return CAM_FAIL(EBUSY);
     for(unsigned tag=0;tag<8;tag++) {
@@ -301,7 +312,7 @@ static int cam_out_open_locked(uint64_t epoch,struct x9_camera_outmux_status *r)
     cam_out.target[1]=(plan.csi_port<<4)|(plan.vc<<8)|(cam_out.status.last_vc<<16);
     cam_out.target[2]=plan.csi_port<<4; /* unsplit init_port => src_sen=0 */
     cam_out.target[3]=plan.vc;cam_out.target[4]=1;
-    cam_out.target[5]=plan.expected_size;cam_out.target[6]=plan.vcdt;
+    cam_out.target[5]=plan.expected_size;cam_out.target[6]=plan.vcdt;cam_out.target[7]=0;
     cam_out.epoch=epoch;cam_out.held=true;cam_out.close_attempted=false;
     cam_out.cg_owned=cam_out.cg_uncertain=false;cam_out.consumed=cam_out.commit_pending=false;
     cam_out.pending_slot=CAM_OUT_WRITES;cam_out.dirty=0;cam_out.error=0;

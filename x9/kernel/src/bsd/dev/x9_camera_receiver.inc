@@ -122,7 +122,12 @@ static uint32_t cam_rx_busy(const struct x9_camera_receiver_sample *s,unsigned p
     if(s->mac[0]&1)busy|=32;
     for(unsigned bank=0;bank<2;bank++) {
         const uint32_t *out=s->out[bank],*sv=s->sv[bank];
-        if((out[7]&(1u<<12)&~dl_mask) || (out[8]&1) || (out[10]&1))busy|=4;
+        /* OUTMUX CSR_CFG_CTRL.DL_EN / CAM_CFG_RDY / SW_CFG_DONE_STATUS are
+         * config-handshake state, not an active stream: Android
+         * (mtk_cam-seninf-hw_phy_3_0.c) writes CAM_CFG_RDY=0 and DL_EN=1
+         * itself and only waits for CFG_DONE_STATUS. Log 371 refused the
+         * cold reset values here (busy=4). Recorded, not a busy owner. */
+        (void)dl_mask;
         if(out[9]&1)busy|=32;
         if((sv[0]&~dma0_mask) || sv[1] || (sv[2]&1&~cmos_mask) || (sv[3]&1&~vf_mask))busy|=8;
         for(unsigned tag=0;tag<8;tag++) {
@@ -199,6 +204,9 @@ static int cam_rx_inspect(void *arg)
     r->flags|=X9_CAM_RX_SNAPSHOT;r->blockers&=~X9_CAM_RX_NEED_SNAPSHOT;
     r->stage=X9_CAM_RX_STAGE_CHECK;
     r->busy=cam_rx_busy(&r->before,port,0,0,0,0,0,0)|cam_rx_busy(&r->after,port,0,0,0,0,0,0);
+    printf("X9 CAMERA RX OUTMUX STATE: outer ctrl/rdy/done=%x/%x/%x inner=%x/%x/%x busy=%x\n",
+        r->after.out[0][7],r->after.out[0][8],r->after.out[0][10],
+        r->after.out[1][7],r->after.out[1][8],r->after.out[1][10],r->busy);
     r->changed=cam_rx_changed(&r->before,&r->after,port);
     if(r->changed)return CAM_FAIL(ESTALE);
     r->flags|=X9_CAM_RX_STABLE;
