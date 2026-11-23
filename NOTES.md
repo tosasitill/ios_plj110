@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 续：Android 侧 SMMU 初始化顺序（静态，修正上条「NS 侧 path-b 大概率无效」过强）
+
+- **Android 源码顺序（观察）**：`arm-smmu-v3.c:3373-3390 / 4265-4287`：`smmu_hw_init`（内部 `smmu_sec_wpcfg` → SMC `MTK_IOMMU_SECURE_CONTROL=0xC2000514` cmd=WPCFG(12)）→ `arm_smmu_device_reset`（**Linux 自己编程 NS 组**：strtab/cmdq/CR0）→ `smmu_hw_sec_init`（SMC cmd=INIT(0)，`SMMU_SEC_EN`，MM_SMMU 带此标志）。cmd 格式 `cmd_id | smmu_type<<8 | sec<<11`，MM_SMMU=0；PM_GET=0x803。
+- **pKVM（观察）**：MM_SMMU 另带 `SMMU_HYP_EN`；`pkvm_smmu/hyp/pkvm_smmu_hyp.c` 在 EL2 虚拟化 NS 组（guest cmdq/STE 被 trap 后影子写入真实寄存器）。即 Android 里 NS 组确由 host 驱动正常配置，只是经 hyp 转写；iOS 无 hyp，等于自己直写真实 NS 组。log 350 已知 `0xC2000514` 在本机 ATF 返回 x0 原值（未支持），Android 实际走 EL2 的 `MTK_SIP_HYP_SMMU_CONTROL(0xC2000831)`。
+- **修正**：上条据 ATF 写 +0x8000 偏移推出「NS path-b 大概率无效」过强——ATF 的 secure 组是 SMMU_SEC_INIT 为 TEE/安全流服务，NS 组本来就是 host 用的；NS 组全零只说明 iOS 没做 Linux 那套 reset。对 SID 0xa0（`mm_smmu_hfrp`，普通 Linux S1 组，DT iommus=<&mm_smmu 160>）NS 编程仍是正路；但 MMUP loader 镜像 IOVA 0x1_06c37000 落在 `mm_smmu_hfrp_protected`（SID **0xa1**=161，`mtk,iommu-dma-range=<0x1 0 0 0x40000000>`）区间，该 IOVA 在 LK 阶段由 TF-A 写入 SRAM 头，建立者更像 TF-A（secure 组 CD 页，setup_init 分配的 2 页）而非 Linux——**两条流（0xa0 vcp 普通内存 / 0xa1 MMUP loader）尚未分清各自由谁建立**，之前文档里只盯 0xa0。
+- **待证（静态）**：(1) ATF 中处理 SMMU 命令的入口表（cmd 0/12/…）及本机 ATF 实际支持哪个 SIP id；(2) setup_init 的 2 页 CD 页被谁填 SID 0xa1→0xbd200000 的页表（LK op7 路径）；(3) iOS 当前对 MM SMMU 做过的 SMC（PM 投票）是否已触发 ATF init。均未做完，未写代码/镜像。
+
 #### 2026-11-23 日志 366（revert-hevc 镜像）：进 XNU 成功；MM SMMU 的 NS 组全零，ATF 实际写的是 secure 组
 
 - **镜像**：`x9/out/x9-revert-hevc-20261123/boot.img`（sha256 75cab4eb…8558）。进 XNU/SpringBoard，相机 app 可开；日志 `~/366.txt` 已备份 `.local/x9/logs/366.txt`。因此 11-22 合并镜像不进 XNU 的原因与 HEVC vcp_handoff（逐字段整树遍历）一致（revert 后恢复；仍是推断，未单独对照）。
