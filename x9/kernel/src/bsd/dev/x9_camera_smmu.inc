@@ -156,8 +156,10 @@ static int cam_smmu_storage(struct x9_camera_smmu *m)
         return CAM_FAIL(EFAULT);
     if(m->native && !x9_camera_smmu_policy_valid(&m->native_policy))return CAM_FAIL(ESTALE);
     oas=cam_s1_oas[m->idr5&7u];
+    if(m->native)cam_progress("st:s1-validate (camera_s1_lock)");
     e=x9_camera_s1_validate(m->map);
     if(e)return e;
+    if(m->native)cam_progress("st:pages");
     for(unsigned i=0;i<3;i++) {
         uint64_t pa=0;
         e=cam_s1_phys(pages[i]->va,oas,&pa);
@@ -186,6 +188,7 @@ static int cam_smmu_storage(struct x9_camera_smmu *m)
         for(unsigned j=0;j<m->map->pages;j++)
             if(pa==m->map->raw_pa[j])return CAM_FAIL(EFAULT);
     }
+    if(m->native)cam_progress("st:ste-compare");
     ste=(const volatile uint64_t *)m->ste.va;
     for(unsigned sid=0;sid<(1u<<m->ste_shift);sid++) {
         for(unsigned w=0;w<CAM_SMMU_STE_WORDS;w++) {

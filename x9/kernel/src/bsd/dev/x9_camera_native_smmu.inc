@@ -57,7 +57,10 @@ static void cam_native_read(struct x9_camera_smmu *m,struct cam_native_snapshot 
 static int cam_native_match(struct x9_camera_smmu *m,const struct cam_native_snapshot *s)
 {
     struct cam_native_snapshot now;
+    const char *outer=cam_progress_step;
+    cam_progress_step="match:mm-power-validate (mm_power_lock)";cam_progress_t0=mach_absolute_time();
     int e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);
+    cam_progress_step=outer;
     if(e)return e;
     if(!m->native_wp)return CAM_FAIL(ENXIO);
     cam_native_read(m,&now);
@@ -149,6 +152,7 @@ static int cam_native_full_table(struct x9_camera_smmu *m,unsigned shift,bool by
 {
     vm_offset_t va=0;uint64_t pa=0;unsigned bytes=64u<<shift;
     if(shift<8 || shift>16 || m->exported)return CAM_FAIL(EINVAL);
+    cam_progress(bytes!=m->ste_bytes?"ft:alloc-contig":"ft:fill");
     if(bytes!=m->ste_bytes) {
         if(kmem_alloc_contig(kernel_map,&va,bytes,PAGE_MASK,0,0,
             KMA_DATA|KMA_ZERO,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS)return CAM_FAIL(ENOMEM);
@@ -170,6 +174,7 @@ static int cam_native_full_table(struct x9_camera_smmu *m,unsigned shift,bool by
             if(m->idr1&(1u<<27))ste[sid*8+1]=1ull<<44;
         }
     }
+    cam_progress("ft:storage");
     return cam_smmu_storage(m);
 }
 static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t bytes,
@@ -240,6 +245,8 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
             "(MTK arm_smmu_init_initial_stes)\n",m->native_gbpa);
     cam_progress("smmu:full-table");
     e=cam_native_full_table(m,sidbits,true);
+    printf("X9 CAMERA SMMU FULL TABLE: errno=%d\n",e);
+    if(!e)cam_progress("smmu:entry-match");
     if(!e)e=cam_native_match(m,&entry);
     lck_mtx_unlock(&camera_smmu_lock);
     if(e){(void)x9_camera_smmu_discard(&m);return e;}
@@ -256,6 +263,7 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
      * allocation and export, so a bare errno cannot identify which SMMU
      * register or invalidation failed. No extra MMIO reads on failure. */
     const char *step="entry-match";
+    cam_progress("smmu:entry-match2");
     e=cam_native_match(m,&entry);
     if(!e)m->native_setup_issued=true; /* BEFORE first wrapper/normal store */
 #define CAM_NATIVE_STEP(name, expr) do { if(!e) { step=(name); cam_progress("smmu:" name); e=(expr); } } while(0)

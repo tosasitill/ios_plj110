@@ -586,7 +586,9 @@ static int cam_sv_pending_wait(uint64_t deadline)
 static int cam_sv_post(unsigned slot,uint32_t next)
 {
     unsigned reg=slot==CAM_SV_FIELDS?cam_sv.db_reg:cam_sv.field[slot];
-    int e=cam_sv_environment();if(e)return e;
+    /* Power/clock only before each writel, as Android (no per-field
+     * sv/out/rx/mac/phy guard sweep: ~100 ms each, 29 s total in log 383). */
+    int e=cam_sv_power_guard();if(!e)e=cam_sv_request_authority();if(e)return cam_sv_fault(e);
     /* Credits are NOT ordinary configuration dirty bits. No DB load,
      * field restore or address rearm may cancel/replay an issued credit. */
     if(cam_sv.credit_issued) {

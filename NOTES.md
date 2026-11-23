@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 383 + 镜像 x9-cam-fulltable-probe-20261123
+
+- **383**：PROGRESS/STALL 定位成功。start 由用户态 ioctl（HAKIOS_CAMERA_SENSOR）在 10.9s 发起，期间一直占着相机锁：sensor CAL 用 8s（3456B EEPROM 预读 3s，250 次写 4.4s），source-prepare 用 29s（CAMSV 字段逐个写入），48.9s 时 NATIVE CONFIG errno=0。随后 prepare 各步很快走完，`SMMU ENTRY: idr0=80f363f idr1=dd39d08 idr5=1000471 cr0=0 gbpa=0 bases=0`（冷态、空闲、sidbits=8），prepare-replacement 用 7ms。**卡在 `smmu:full-table`**（49.426s 起一直 STALL）。静态看，full_table 在 sidbits=8 时不分配内存（16K==ste_bytes），只有 bzero、256 次循环、cam_smmu_storage（加锁 camera_s1_lock 后 validate）和随后的 cam_native_match（加锁 mm_power_lock），都没有无界循环，因此怀疑是锁阻塞。
+- **本镜像**：
+  - full_table/storage/s1_validate/match 内部的细分 PROGRESS：`ft:fill / ft:storage / st:s1-validate (camera_s1_lock) / s1:check-private / st:pages / st:ste-compare / match:mm-power-validate (mm_power_lock) / smmu:entry-match`，以及 `SMMU FULL TABLE: errno`。
+  - cam_sv_post 每次写字段前只做 power guard 和 request authority，不再做完整的 environment 扫描（Android 直接 writel），预计 source-prepare 从 29s 降到几秒。
+- `x9/out/x9-cam-fulltable-probe-20261123/boot.img` sha256 `7cd7fdb13ce35b77f801c1dd2c7c170a1513b7ae72925c7efed207d0ae091127`，warning 2991。
+
 #### 2026-11-23 日志 382 + 镜像 x9-cam-progress-watchdog-20261123
 
 - **382**：卡在开机 logo，进不了桌面。CAMSV CONFIG `errno=0`（49.2s 时 QOS 完成，50.2s 时 CONFIG 完成），`NATIVE CONFIG stage=9 completed=1fe errno=0 step=configured`，outmux-open 第一次通过。之后再无任何 X9 CAMERA 输出（`NATIVE PREPARE` 一定会打印，但没有出现），CPU cluster0 从 54s 起一直 100%，内核仍在运行（显示、蜂窝心跳正常），没有 panic。可见 start() 卡在 configure 末尾的 engine.prepare（cam_native_capture_prepare：sensor/standby/rate-guard/controller/SMMU start），很可能在 SMMU 0x30800000 的首次 MMIO、CMDQ 或 GIC bind 中自旋，并占住锁拖住了开机。静态审计没找到无界循环（扫描了所有 ≥1000 次且无 deadline 的 poll，都有界）。

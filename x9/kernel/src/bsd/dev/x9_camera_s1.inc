@@ -231,6 +231,7 @@ int x9_camera_s1_validate(struct x9_camera_s1 *m)
 {
     int e;
     lck_mtx_lock(&camera_s1_lock);
+    if(cam_progress_step)cam_progress("s1:check-private");
     e=cam_s1_check_private(m);
     if(e && m && m->magic==CAM_S1_MAGIC && !m->last_errno)m->last_errno=e;
     lck_mtx_unlock(&camera_s1_lock);return e;
