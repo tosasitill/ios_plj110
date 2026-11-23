@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 SID 重映射（静态）：ATF 里没有重映射，SID 直接当 STE 下标
+
+- **观察**：`0x47c9c` 对 SID 表每个字节 sid：先检查 `sid>>[cfg+60]==0`（超范围报错），再 `STE = [cfg+168] + sid*64` 直接写入（`0x47f70`），随后用 `0x4775c` 发 CFGI_STE。中间没有任何查表/AID 转换。SID 表的编号即硬件 StreamID，与 Linux DT `iommus = <&mm_smmu N>` 同一编号空间。**上条的可能性 (a)「ATF 与 DT 编号空间不同」排除。**
+- **SMC 命令集（0x33aac 复核）**：只实现 0 INIT(0x33c54)、1 IRQ(0x34174)、2 TF(0x34c94，取故障记录)、3 PM_GET(0x343c0)、4 PM_PUT(0x34530)、5 DUMP_SID(0x33aa0，**空桩，直接返回 0**)、0xc WPCFG(0x34acc)。**没有 AID_SID_MAP**（Linux 头文件里有的命令 6 这份 ATF 不实现，落入 `unknown cmd` 返回 2）。0x47bd4 是写 S_CR0 并等 ACK（开关 secure SMMU），不是 SID 相关。
+- **Linux 侧**：vcp_io5(`vcp-iommu-sec`, vcp-support=7)挂 `mm_smmu_hfrp_protected`（SID 161，`mtk,iommu-dma-range = <0x1 0x0 0x0 0x40000000>`），其余 vcp_io 挂 SID 160。老平台(mt6879 等 mtk_iommu.c)有 `0x106000000 LK_RESV 32MB PROTECTED`，与本机 loader 的 IOVA 0x1_06c00000 落点一致，说明 protected 窗口是 LK 保留区，由 ATF 的页表承载。Linux 的 SMMUv3 驱动对该 SID 只用 dma-range 圈定可分配范围，没有为它在 Linux 里建映射的迹象（只读了 range 解析，未读完 STE 配置部分）。
+- **366 日志实测**：NS 组 CR0/STRTAB/CMDQ/EVTQ 全 0，SID 80/90/a0/a1 的 NS STE「unresolved」（STRTAB=0，无表可查）。x9 当前给 MMUP 的是 PA 直写（`DIAG4 gpr1=5fc00001 gpr3=5fc8d001` = PA 0x15fc00000/+0x8d000 | 1），不是 ATF 的 IOVA 0x106c37001；DIAG5 的 `bus=a1` 是 `busdbg+0` 的读值，**未证实是 StreamID**，不要当 SID 证据。
+- **结论/状态**：ATF 内无 SID 重映射 → SID 0xa0/0xa1 在 ATF 里确实没有 secure STE；它们要么走 NS 组（Linux/pKVM 建 STE），要么 SMMU 对其旁路。iOS 当前 NS 组全 0（SMMU 未启用，按 GBPA=0 为旁路，**但 secure 组状态没读到，无法确认 MMUP 事务的安全属性**）。尚无证据说明 PA 直写必然失败，errno=60 的原因仍应回到 stage=4 的判据本身。
+- **下一步（静态）**：(1) 查 stage=4 / errno=60 的判定代码（x9_mm_power.c）到底在等什么（init/end=0/4、smc=0/0/0/0、msg=1a0b5）；(2) 对照 Android 的 vcp_helper/mmup 启动顺序里 MMUP 起来之前 SRAM 头和 gpr 的内容；不出镜像。
+
 #### 2026-11-23 0x470d4 引用链（静态）：loader 映射挂在 MM 域1 的表上，该表只被 SID {0x8d,0xc7,0xb7,0xad} 的 STE 使用
 
 - **0x470d4(smmu,dom)**：返回 `[0x128548 + smmu*0x30 + dom*0x18]`（该域根表指针），smmu≤2、dom≤1。仅 4 个使用者：map **0x26954**、unmap **0x55f28**、IOVA→PA 查表 **0x473d8**、遍历 **0x13404**。
