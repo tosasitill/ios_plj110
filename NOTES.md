@@ -160,6 +160,11 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 镜像 x9-mmup-readypin-20261123（用户批准，未上机）
+
+- `x9/out/x9-mmup-readypin-20261123/boot.img` 15151104 B，sha256 `7af3a5982317d54b75819cd8f89a6d08057102e2a69903fdb41de28912909246`，boot-arg `x9_mmup_smmu_init=1`，无 warning。= 369 镜像 + READY pin 7/msg 0x38。
+- **判据**：`X9 MM VCP BOOT` 应过 stage 4（mmup=80/<img_size>），再看 stage 6（VCP core0 READY，vcp=80/..）；成功则无 BOOT 失败行，之后看 MM_2 投票（stage-4 STA）和 `X9 CAMERA MM` 的 errno/blockers。
+
 #### 2026-11-23 日志 369（x9-mmup-smmuinit-wpcfg-20261123）：**突破——WPCFG 后 INIT 成功，MMUP 主固件跑起来并发出 READY**；x9 READY pin 位错（bit0→应为 bit7）
 
 - **实测**：PM_GET ret=0 (21µs)；NS GBPA.UPDATE 4µs 清零（SMMU 核心正常，secure 字从 NS 读全 0）；**WPCFG ret=0 (7µs)**；**INIT ret=0 (347µs)**（368 无 WPCFG 时 3.55s 超时返回 2）。**根因：iOS 缺 Android 的 `smmu_sec_wpcfg`（SMC cmd 12）；没有它 INIT 的 secure 握手超时，secure STE 不建，MMUP stage0 经 SMMU 取主镜像得到垃圾。**
