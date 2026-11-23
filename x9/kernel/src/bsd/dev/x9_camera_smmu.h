@@ -96,19 +96,6 @@ struct x9_camera_smmu_host {
     int (*enter)(void *,uint64_t,unsigned,const struct x9_camera_smmu_export *);
     int (*guard)(void *,uint64_t,unsigned,const struct x9_camera_smmu_export *);
     void (*leave)(void *,uint64_t,unsigned);
-    /* Optional shared singleton integration. Called only inside the acquired
-     * host guard. Validates each FOREIGN STE against the owner's current
-     * ledger, not the camera's attach-time snapshot. It must also cover all
-     * intervening producer/consumer history: only at a NEW operation boundary
-     * may the camera adopt a completed, empty shared queue. NULL preserves
-     * the original immutable foreign-STE/sole-producer policy. Never permits
-     * a rebase while this camera has a pending batch or a latched fault. */
-    int (*stream_guard)(void *,uint64_t,uint32_t,const uint64_t[8]);
-    /* Paired optional result notification, before leave under the SAME
-     * acquisition. Lets the shared ledger retain/quarantine a camera fault
-     * that was not a register/authority mismatch (e.g. operation deadline).
-     * stream_guard and complete must both be present, or both be NULL. */
-    void (*complete)(void *,uint64_t,unsigned,int);
 };
 /* Once-only attach accepts ONLY zero-invalid or canonical ABORT STE80.
  * It snapshots/preserves every other STE in SID0..255, including

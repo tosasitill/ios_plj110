@@ -151,9 +151,6 @@ static const char *boot_impl(uintptr_t dtb, const void *embedded, size_t embedde
 	copy(adt_pa, (uintptr_t)data + p->adt_off, p->adt_size);
  if(fdt_gpu_patch_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size))
   return "GPU ADT handoff placeholder invalid";
- /* Nonfatal feature qualification; never enables a controller or resets VCP. */
- if(fdt_vcp_patch_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size)<0)
-  plog_str("X9 VCP FDT: invalid/missing ADT placeholder, transport unavailable\n");
  if(fdt_scp_patch_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size)<0)
   plog_str("X9 SCP FDT: missing/invalid ADT placeholder; sensors remain pending\n");
  /* Audio topology: ONE bounded collection (two FDT passes, watchdog

@@ -186,30 +186,10 @@ static int cam_shared_guard(struct x9_camera_smmu *m)
     e=cam_shared_table_guard();if(e)return e;
     for(unsigned sid=0;sid<CAM_SMMU_STES;sid++) {
         const volatile uint64_t *p=(const volatile uint64_t *)cam_shared.ste+sid*8;
-        if(sid!=CAM_SMMU_SID && cam_shared.host.stream_guard) {
-            uint64_t words[8];
-            for(unsigned w=0;w<8;w++)words[w]=p[w];
-            e=cam_shared.host.stream_guard(cam_shared.host.context,
-                cam_shared.host.lease,sid,words);if(e)return e;
-            continue;
-        }
         const uint64_t *expected=sid==CAM_SMMU_SID?cam_shared.expected:cam_shared.prior[sid];
         for(unsigned w=0;w<8;w++)if(p[w]!=expected[w])return ESTALE;
     }
     return cam_shared_lease(m);
-}
-static int cam_shared_operation_queue(struct x9_camera_smmu *m)
-{
-    /* Exclusive host enter has verified the singleton's entire intervening
-     * history. Never turn arbitrary idle readbacks into an ownership grant. */
-    if(!cam_shared.host.stream_guard)return 0;
-    if(cam_shared.pending || cam_shared.error)return ESTALE;
-    int e=cam_shared_lease(m);if(e)return e;
-    uint32_t prod=cam_smmu_rr(m,0x98),cons=cam_smmu_rr(m,0x9c);
-    if(prod!=cons || (prod&~((2u<<cam_shared.shift)-1u)))return ESTALE;
-    cam_shared.prod=cam_shared.cons=cam_shared.wait_cons=prod;
-    cam_shared.batch_count=0;
-    return 0;
 }
 static int cam_shared_batch_check(void)
 {
@@ -403,7 +383,6 @@ int x9_camera_smmu_attach(struct x9_camera_smmu *m,const struct x9_camera_smmu_h
     bool entered=false;
     int e;
     if(!host || !host->context || !host->lease || !host->enter || !host->guard || !host->leave)return EINVAL;
-    if(!!host->stream_guard!=!!host->complete)return EINVAL;
     lck_mtx_lock(&camera_smmu_lock);
     e=cam_smmu_identity(m);
     if(!e && (!m->exported || m->native || m->shared_attempted || cam_shared.owner || m->commands ||
@@ -437,10 +416,7 @@ int x9_camera_smmu_attach(struct x9_camera_smmu *m,const struct x9_camera_smmu_h
         }
         cam_shared_log(e);
     }
-    if(entered) {
-        if(host->complete)host->complete(host->context,host->lease,X9_CAM_SMMU_INSTALL,e);
-        host->leave(host->context,host->lease,X9_CAM_SMMU_INSTALL);
-    }
+    if(entered)host->leave(host->context,host->lease,X9_CAM_SMMU_INSTALL);
     lck_mtx_unlock(&camera_smmu_lock);return e;
 }
 static int cam_smmu_shared_check_locked(struct x9_camera_smmu *m)
@@ -452,14 +428,10 @@ static int cam_smmu_shared_check_locked(struct x9_camera_smmu *m)
     cam_shared.operation=X9_CAM_SMMU_CHECK;
     e=cam_shared.host.enter(cam_shared.host.context,cam_shared.host.lease,
         X9_CAM_SMMU_CHECK,&m->view);entered=!e;
-    if(!e)e=cam_shared_operation_queue(m);
     if(!e)e=cam_shared_guard(m);
     if(e)cam_shared_fault(e);
-    if(entered) {
-        if(cam_shared.host.complete)cam_shared.host.complete(cam_shared.host.context,
-            cam_shared.host.lease,X9_CAM_SMMU_CHECK,e);
-        cam_shared.host.leave(cam_shared.host.context,cam_shared.host.lease,X9_CAM_SMMU_CHECK);
-    }
+    if(entered)cam_shared.host.leave(cam_shared.host.context,cam_shared.host.lease,
+        X9_CAM_SMMU_CHECK);
     return e;
 }
 int x9_camera_smmu_attached_check(struct x9_camera_smmu *m)
@@ -485,8 +457,7 @@ int x9_camera_smmu_detach(struct x9_camera_smmu *m)
     }
     if(!e) {
         nanoseconds_to_absolutetime(100000000,&span);cam_shared.deadline=mach_absolute_time()+span;
-        e=cam_shared_operation_queue(m);
-        if(!e)e=cam_shared_guard(m);
+        e=cam_shared_guard(m);
         /* CPU ownership is necessary, never a substitute for the independent
          * host RETIRE proof of full stopped RAW/AXI/IRQ/worker history. */
         lck_mtx_lock(&camera_s1_lock);
@@ -507,11 +478,8 @@ int x9_camera_smmu_detach(struct x9_camera_smmu *m)
         if(entered && e==ETIMEDOUT)cam_shared_retire_timeout(m);
         cam_shared_fault(e);cam_smmu_latch(m,e);
     }
-    if(entered) {
-        if(cam_shared.host.complete)cam_shared.host.complete(cam_shared.host.context,
-            cam_shared.host.lease,X9_CAM_SMMU_RETIRE,e);
-        cam_shared.host.leave(cam_shared.host.context,cam_shared.host.lease,X9_CAM_SMMU_RETIRE);
-    }
+    if(entered)cam_shared.host.leave(cam_shared.host.context,cam_shared.host.lease,
+        X9_CAM_SMMU_RETIRE);
     if(m && m==cam_shared.owner)cam_shared_log(e);
     lck_mtx_unlock(&camera_smmu_lock);return e;
 }

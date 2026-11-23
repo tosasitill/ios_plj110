@@ -360,11 +360,6 @@ class Builder:
         if self.cfg.get('camera_vendor_root'):
             camera += ['--vendor-root', str(Path(self.cfg['camera_vendor_root']).expanduser())]
         self.run_or_exit(camera, ROOT, label='camera/build.py')
-        # Signed own-code bridge. Embedding is not installation/readiness:
-        # PID1 installation is opt-in and exec routing requires real native caps.
-        self.run_or_exit([sys.executable, '-I', str(X9 / 'hevc/build.py'),
-                          '--developer-dir', self.cfg['developer_dir'],
-                          '--out', str(self.out / 'hevc'), '--embed'], ROOT, label='hevc/build.py')
         # Complete signed input HAL is embedded for a PID1 native HAL union view.
         # Not a DYLD_INSERT_LIBRARIES bridge (no conflict with torch/camera).
         self.run_or_exit([sys.executable, '-I', str(X9 / 'audio/build-microphone.py'),

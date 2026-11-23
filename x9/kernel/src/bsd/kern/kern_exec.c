@@ -395,7 +395,6 @@ static int x9_camera_exec_env(struct image_params *, int);
 #include "x9_appsync_exec.inc"
 static int x9_appsync_exec_env(struct image_params *, int);
 static int x9_ui_exec_env(struct image_params *, int);
-static void x9_hevc_exec_env(struct image_params *);
 #endif
 
 /*
@@ -1788,9 +1787,6 @@ grade:
 	    load_result.ip_platform,
 	    load_result.lr_sdk);
 
-#if defined(ARM64_BOARD_CONFIG_SWEET)
-	if (load_result.unixproc && load_result.dynlinker) x9_hevc_exec_env(imgp);
-#endif
 	error = exec_add_apple_strings(imgp, &load_result); /* copies out main thread port */
 
 	if (error) {
@@ -6994,7 +6990,6 @@ sweet_x9_prepare_wallpaper_collections(proc_t p,user_addr_t scratch,user_addr_t 
 #include "x9_torch_install.inc"
 #include "x9_motion_install.inc"
 #include "x9_camera_install.inc"
-#include "x9_hevc_install.inc"
 #include "x9_appsync_env.inc"
 #include "x9_ui_install.inc"
 #include "x9_microphone_install.inc"
@@ -8960,8 +8955,6 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 if(motion_error)printf("X9 MOTION: bridge unavailable errno=%d; continuing boot\n",motion_error);
 	 int camera_error=x9_camera_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(camera_error)printf("X9 CAMERA: bridge unavailable errno=%d; continuing boot\n",camera_error);
-	 int hevc_error=x9_hevc_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
-	 if(hevc_error)printf("X9 HEVC: bridge unavailable errno=%d; continuing stock route\n",hevc_error);
 	 int mic_error=x9_microphone_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(mic_error)printf("X9 MIC HAL: unavailable errno=%d; continuing boot without synthetic input\n",mic_error);
 	 int haptic_error=x9_haptic_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
