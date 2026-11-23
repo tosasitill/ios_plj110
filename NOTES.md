@@ -160,6 +160,16 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 0x470d4 引用链（静态）：loader 映射挂在 MM 域1 的表上，该表只被 SID {0x8d,0xc7,0xb7,0xad} 的 STE 使用
+
+- **0x470d4(smmu,dom)**：返回 `[0x128548 + smmu*0x30 + dom*0x18]`（该域根表指针），smmu≤2、dom≤1。仅 4 个使用者：map **0x26954**、unmap **0x55f28**、IOVA→PA 查表 **0x473d8**、遍历 **0x13404**。
+- **根表谁建**：**0x21f5c(smmu,dom,39,40,cfg)**（唯一调用点 `0x3496c`，setup_init 循环里每个 SMMU×2 域各调一次）：经 `[0x127ff8]` 的分配器取 0x80 字节根表（16 项）+ 0x10000 字节二级池，把 16 个表描述符(0x3)填入根表，指针写进 `0x128548` 表，同时返回给 setup_init 存 `cfg+208+idx*8`。**所以映射根表就是 INIT 里 secure STE 用的那张表**：0x47c9c 写 STE 时把 `[cfg+208+idx*8]` 填进 STE 的 stage-2 TTB 字段（`x9=x10&0xffffffffffff0`，属性 `0xe200c0000000|…`）。
+- **域表语义（观察）**：`0x2ec4c` 的 8 项域表条目为 {id|smmu<<32, mode, size, IOVA基址}；loader 条目 = id1、**smmu0(MM)**、mode1、0xe00000、0x1_06c00000。mode<2 只映射到 `dom=mode`，mode=2 两域都映射。故 loader 的 IOVA→PA 块（2 MiB 描述符，属性 0xe01 / 域0 为 0xe41）写进 **MM 域1 的表**。其余条目 IOVA 基址同在 0x1_0000_0000..0x1_4000_0000，正好是 DT `mm_smmu_hfrp_protected` 的 `mtk,iommu-dma-range`，即该窗口由 ATF 管理、Linux 只保留不分配。
+- **谁用域1的表**：MM kind0 SID 表域1 = {0x8d,0xc7,0xb7,0xad}（域0={0x8e,0x94}）。其中 0xc7/0xb7=DT 的 gce_d/gce_m；0x8d/0x8e/0x94/0xad 在 Linux DT 里没有对应 `iommus`。**没有任何一处把 SID 0xa0/0xa1 与这些表关联。**
+- **未能解释**：MMUP 的取指到底用哪个 SID。DT 说 0xa1，但 ATF 的 secure 表里没有它；Linux 里也没有 0x8d/0x8e/0x94/0xad 的 vcp 用法（`vcp/rv_v2` 源码无 sid 引用）。可能性：(a) ATF 的 SID 编号与 DT 不是同一编号空间（需查 SMMU 的 SID 重映射/AID 映射）；(b) kind↔SMMU 对应推断错；(c) MMUP 取 loader 不走 SMMU。
+- **对 INIT 假设的影响**：若 (a) 成立（MMUP 实际 SID 落在 0x8d..0xad），则缺 INIT 仍可能是原因——不能仅凭 DT SID 数值排除。上条把它判为“推翻”偏强，改为“未证实也未排除”。
+- **下一步（静态）**：查 ATF 里 AID_SID_MAP/DUMP_SID(0x33aa0) 以及 0x22648/0x226e0 对 SID 的翻译（可能含 SID 重映射），并在 366 日志里查 VCP/MMUP 的 SMMU 事件（若有 EVTQ/TF 记录会给出真实 SID）。
+
 #### 2026-11-23 SID 列表核对：0xa1 不在 ATF secure STE 列表里，「缺 SMMU_SECURE_INIT」假设被推翻
 
 - **观察**：`0x34714(kind,ptr)`（由 0x34360 在启动时调用）登记两张按域分行的 SID 表：kind0→`0x8b7c8`，kind1→`0x8b7a4`（每域一行、10 字节、0 结尾；0x47c9c 只处理 2 个域）。kind0：域0={0x8e,0x94}，域1={0x8d,0xc7,0xb7,0xad}；kind1：域0={0x12}，域1={0x08}。每 SMMU 平台表（`0x89c20`，步长 0x38）项0=MM_SMMU(base 0x30800000)，项1=APU_SMMU(0x4c000000)，项2=SOC 未启用。0xc7=199/0xb7=183 在 Android DT 里是 `mm_smmu_gce_d/gce_m`，故 kind0 为 MM（kind↔SMMU 的对应没有逐行追到赋值处，按此推断）。
