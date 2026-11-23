@@ -389,20 +389,20 @@ static int cam_native_capture_prepare(void *context,uint64_t epoch,
     struct x9_camera_smmu *smmu=NULL;
     struct x9_camera_smmu *old_smmu;
     struct x9_camera_smmu_export view={0};
-    const char *step="sensor";
+    const char *step="sensor";cam_progress("prepare:""sensor");
     uint64_t token=0;
     int e;
     if(c!=&cam_native_capture || !s)return CAM_FAIL(EINVAL);
     e=cam_native_capture_sensor(epoch,s);
     if(e)goto out;
-    step="standby";
+    step="standby";cam_progress("prepare:""standby");
     e=session.capture || session.stream?EBUSY:cam_native_source_standby_locked(epoch);
     if(e)goto out;
-    step="raw-layout";
+    step="raw-layout";cam_progress("prepare:""raw-layout");
     e=cam_pipeline_plan(s->sensor,&plan);
     if(e)goto out;
     token=cam_mm.receive.power_token;
-    step="source-ready";
+    step="source-ready";cam_progress("prepare:""source-ready");
     if(!token || !cam_mm.active || !cam_irq.prepared || cam_irq.epoch!=epoch ||
        cam_irq.close_attempted || !cam_native_source.rate_valid ||
        cam_native_source.status.sensor_epoch!=epoch ||
@@ -410,10 +410,10 @@ static int cam_native_capture_prepare(void *context,uint64_t epoch,
         e=CAM_FAIL(ENXIO);
         goto out;
     }
-    step="rate-guard";
+    step="rate-guard";cam_progress("prepare:""rate-guard");
     e=cam_native_source_rate_guard_locked(epoch);
     if(e)goto out;
-    step="reserve";
+    step="reserve";cam_progress("prepare:""reserve");
     lck_mtx_lock(&camera_native_capture_lock);
     e=c->error?c->error:c->prepare_attempted?CAM_FAIL(EALREADY):0;
     old_smmu=c->smmu; /* pinned retired namespace, never freed/reset as live */
@@ -426,13 +426,13 @@ static int cam_native_capture_prepare(void *context,uint64_t epoch,
     }
     lck_mtx_unlock(&camera_native_capture_lock);
     if(e)goto out;
-    step="controller";
+    step="controller";cam_progress("prepare:""controller");
     e=cam_native_capture_thread_start_locked();
     if(e) {
         e=cam_native_capture_fault(c,e);
         goto out;
     }
-    step=old_smmu?"smmu-reopen":"smmu-start";
+    step=old_smmu?"smmu-reopen":"smmu-start";cam_progress("prepare:smmu-start");
     e=old_smmu?cam_native_reopen_locked(epoch,old_smmu,token,CAM_NATIVE_IOVA,
         plan.bytes,&smmu,&view):x9_camera_native_smmu_start(token,CAM_NATIVE_IOVA,
         plan.bytes,&smmu,&view);
@@ -443,7 +443,7 @@ static int cam_native_capture_prepare(void *context,uint64_t epoch,
     if(!e && (!smmu || !view.map.backing || !view.map.raw ||
        view.map.iova!=CAM_NATIVE_IOVA || view.map.bytes!=plan.bytes ||
        view.map.mapped_bytes!=c->reservation_bytes || view.asid!=CAM_SMMU_ASID)) {
-        step="smmu-export";
+        step="smmu-export";cam_progress("prepare:""smmu-export");
         e=CAM_FAIL(EFAULT);
     }
     if(e && !c->error)c->error=e;
@@ -625,7 +625,7 @@ static int cam_native_capture_capture(void *context,uint64_t epoch,
     struct cam_native_capture_context *c=context;
     struct x9_camera_camsv_request r={0};
     struct x9_camera_camsv_dma dma={0};
-    const char *step="admission";
+    const char *step="admission";cam_progress("arm:""admission");
     int e;
     if(c!=&cam_native_capture || !s || s->sensor<X9_CAMERA_BACK ||
        s->sensor>X9_CAMERA_SENSOR_COUNT || s!=&sensors[s->sensor-1] ||
@@ -638,15 +638,15 @@ static int cam_native_capture_capture(void *context,uint64_t epoch,
     if(!e) {c->on_attempted=true;c->generation=generation;}
     lck_mtx_unlock(&camera_native_capture_lock);
     if(e)goto report;
-    step="sensor-session";
+    step="sensor-session";cam_progress("arm:""sensor-session");
     e=cam_native_capture_sensor(epoch,s);
     if(!e && (!session.capture || session.stream || session.generation!=generation))e=CAM_FAIL(ESTALE);
     if(e)goto fault;
-    step="initial-controls";
+    step="initial-controls";cam_progress("arm:""initial-controls");
     e=cam_native_ae_seed_locked(epoch,config);
     if(!e)e=cam_native_ae_snapshot_locked(epoch,&r.frame);
     if(e)goto fault;
-    step="raw-request";
+    step="raw-request";cam_progress("arm:""raw-request");
     lck_mtx_lock(&camera_native_capture_lock);
     if(c->capture_serial==UINT64_MAX)e=CAM_FAIL(EOVERFLOW);
     if(!e) {
@@ -667,13 +667,13 @@ static int cam_native_capture_capture(void *context,uint64_t epoch,
     }
     lck_mtx_unlock(&camera_native_capture_lock);
     if(e)goto fault;
-    step="dma-check";
+    step="dma-check";cam_progress("arm:""dma-check");
     e=cam_native_capture_dma_check(c,dma.lease,&r);
     if(e)goto fault;
-    step="cam-irq-begin";
+    step="cam-irq-begin";cam_progress("arm:""cam-irq-begin");
     e=cam_irq_begin_locked(epoch,&r,&dma);
     if(e)goto fault;
-    step="repeat-enable";
+    step="repeat-enable";cam_progress("arm:""repeat-enable");
     e=cam_repeat_enable_locked(epoch); /* actual first credit; sensor still OFF */
     if(e)goto fault;
     lck_mtx_lock(&camera_native_capture_lock);

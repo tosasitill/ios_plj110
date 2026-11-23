@@ -166,6 +166,41 @@ static const struct x9_camera_sensor *sensor(void) { return &sensors[st.sensor-1
  * journal even when configure failed before core attempted capture(on). */
 static int cam_native_sensor_retirement_guard_locked(uint64_t epoch);
 static void cam_native_capture_stop_locked(uint64_t epoch);
+/* Log 382: start() hung after NATIVE CONFIG configured with no further
+ * camera output while the boot stalled at the logo. Every capture-arm
+ * step prints PROGRESS, and a separate watchdog thread prints STALL with
+ * the last step from another CPU if one step lasts longer than 2 s. */
+static const char *volatile cam_progress_step;
+static volatile uint64_t cam_progress_t0;
+static bool cam_watchdog_started;
+static void cam_progress(const char *step)
+{
+    cam_progress_t0=mach_absolute_time();cam_progress_step=step;
+    printf("X9 CAMERA PROGRESS: %s\n",step);
+}
+static void __attribute__((noreturn)) cam_watchdog(void *arg,wait_result_t result)
+{
+    const char *last=NULL;unsigned reports=0;
+    (void)arg;(void)result;
+    for(;;) {
+        assert_wait_timeout((event_t)&cam_watchdog_started,THREAD_UNINT,2000,NSEC_PER_MSEC);
+        thread_block(THREAD_CONTINUE_NULL);
+        const char *step=cam_progress_step;uint64_t ns;
+        if(!step){last=NULL;continue;}
+        absolutetime_to_nanoseconds(mach_absolute_time()-cam_progress_t0,&ns);
+        if(step!=last){last=step;reports=0;}
+        if(ns>=2000000000ull && reports<30) {
+            reports++;
+            printf("X9 CAMERA STALL: step=%s age_ms=%llu (#%u)\n",step,ns/1000000ull,reports);
+        }
+    }
+}
+static void cam_watchdog_start(void)
+{
+    thread_t t;
+    if(cam_watchdog_started)return;
+    if(kernel_thread_start(cam_watchdog,NULL,&t)==KERN_SUCCESS){thread_deallocate(t);cam_watchdog_started=true;}
+}
 #include "x9_camera_pipeline.inc"
 #include "x9_camera_s1.inc"
 #include "x9_camera_smmu.inc"
@@ -334,6 +369,8 @@ static int start(uint32_t which, uint32_t mode)
      * across power/I2C/capture callbacks. */
     cam_fail_reset();
     lck_mtx_unlock(&camera_lock);
+    cam_watchdog_start();
+    cam_progress("start:sensor-power");
     e=hw.power(s,1);
     if(!e) {
         step="sensor-id";
@@ -341,19 +378,20 @@ static int start(uint32_t which, uint32_t mode)
         if(!e && id!=s->chip_id)e=CAM_FAIL(ENODEV);
     }
     if(!e) {
-        step="configure";
+        step="configure";cam_progress("start:configure");
         e=hw.configure(s,&config);
     }
     if(!e) {
-        step="capture-arm";
+        step="capture-arm";cam_progress("start:capture-arm");
         session.capture=true;
         e=hw.capture(s,1,session.generation);
     }
     if(!e) {
-        step="sensor-stream-on";
+        step="sensor-stream-on";cam_progress("start:stream-on");
         session.stream=true;
         e=write8(s,0x0100,1);
     }
+    cam_progress_step=NULL;
     lck_mtx_lock(&camera_lock);
     if(e) {
         st.flags|=X9_CAMERA_FAULT;st.last_errno=e;

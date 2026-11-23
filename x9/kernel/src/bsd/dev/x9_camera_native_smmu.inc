@@ -186,8 +186,11 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     if(el!=4)return CAM_FAIL(ENOTSUP); /* normal EL1 host, not a guessed EL2 handoff */
     /* This boot's qualified controller/master policy, BEFORE MMIO or
      * exporting any storage. No generated/live.dts fallback is a grant. */
+    cam_progress("smmu:policy");
     e=cam_smmu_policy_read(&policy);if(e)return e;
+    cam_progress("smmu:power-validate");
     e=x9_mm_power_validate(token,X9_MM_POWER_CAMERA);if(e)return e;
+    cam_progress("smmu:io-map");
     lck_mtx_lock(&camera_smmu_lock);
     if(!cam_native_mmio)cam_native_mmio=ml_io_map(0x30800000,0x20000);
     if(!cam_native_wp_mmio)cam_native_wp_mmio=ml_io_map(0x309e0000,0x1000);
@@ -195,7 +198,12 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     lck_mtx_unlock(&camera_smmu_lock);
     if(!mmio || !cam_native_wp_mmio)return CAM_FAIL(ENOMEM);
     probe.mmio=mmio;probe.native_wp=cam_native_wp_mmio;probe.native_power=token;
-    cam_native_read(&probe,&entry);cam_native_read(&probe,&again);
+    cam_progress("smmu:first-mmio-read 0x30800000/0x309e0000");
+    cam_native_read(&probe,&entry);
+    printf("X9 CAMERA SMMU ENTRY: idr0=%x idr1=%x idr5=%x cr0=%x ack=%x gbpa=%x cfg=%x ge=%x/%x bases=%llx/%llx/%llx\n",
+        entry.word[CAM_N_IDR0],entry.word[CAM_N_IDR1],entry.word[CAM_N_IDR5],entry.word[CAM_N_CR0],
+        entry.word[CAM_N_ACK],entry.word[CAM_N_GBPA],entry.word[CAM_N_CFG],entry.word[CAM_N_GE],
+        entry.word[CAM_N_GEN],entry.base[0],entry.base[1],entry.base[2]);cam_native_read(&probe,&again);
     if(memcmp(&entry,&again,sizeof(entry)))return CAM_FAIL(EBUSY);
     unsigned sidbits=entry.word[CAM_N_IDR1]&63u;
     if(!cam_smmu_capable(entry.word[CAM_N_IDR0],entry.word[CAM_N_IDR1],
@@ -216,6 +224,7 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
         cam_native_read(&probe,&entry);
         if(entry.word[CAM_N_GE]^entry.word[CAM_N_GEN])return CAM_FAIL(EIO);
     }
+    cam_progress("smmu:prepare-replacement");
     e=cam_smmu_prepare_replacement(entry.word[CAM_N_IDR0],entry.word[CAM_N_IDR1],
         entry.word[CAM_N_IDR5],iova,bytes,previous,&m);if(e)return e;
     lck_mtx_lock(&camera_smmu_lock);
@@ -229,10 +238,12 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     if(m->native_gbpa&(1u<<20))
         printf("X9 CAMERA SMMU GBPA INHERITED: gbpa=%x ABORT set; non-camera STEs still bypass "
             "(MTK arm_smmu_init_initial_stes)\n",m->native_gbpa);
+    cam_progress("smmu:full-table");
     e=cam_native_full_table(m,sidbits,true);
     if(!e)e=cam_native_match(m,&entry);
     lck_mtx_unlock(&camera_smmu_lock);
     if(e){(void)x9_camera_smmu_discard(&m);return e;}
+    cam_progress("smmu:export");
     e=x9_camera_smmu_export(m,view);
     /* Addresses permanently escaped even when export's cache work fails. */
     if(m->exported)*out=m;
@@ -247,7 +258,7 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     const char *step="entry-match";
     e=cam_native_match(m,&entry);
     if(!e)m->native_setup_issued=true; /* BEFORE first wrapper/normal store */
-#define CAM_NATIVE_STEP(name, expr) do { if(!e) { step=(name); e=(expr); } } while(0)
+#define CAM_NATIVE_STEP(name, expr) do { if(!e) { step=(name); cam_progress("smmu:" name); e=(expr); } } while(0)
     CAM_NATIVE_STEP("wrapper",cam_native_wp_init(m,&entry));
     /* Android arm_smmu_device_reset starts by synchronizing CR0=0.
      * Admission above requires a cold, unowned bank; do not reset a live

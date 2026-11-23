@@ -108,7 +108,9 @@ static int cam_native_sensor_configure(const struct x9_camera_sensor *s,
     e=cam_sensor_session_configure_locked(cam_native_sensor.epoch,r);
     if(!e) {
         cam_native_sensor.configured=true;
+        cam_progress("configure:source-prepare");
         e=cam_native_source_prepare_locked(cam_native_sensor.epoch,&cam_native_sensor.source);
+        if(!e)cam_progress("configure:engine-prepare");
         if(!e)e=cam_native_sensor.engine.prepare(cam_native_sensor.engine.context,
             cam_native_sensor.epoch,s);
         if(!e)cam_native_sensor.prepared=true;

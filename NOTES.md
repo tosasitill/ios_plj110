@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 382 + 镜像 x9-cam-progress-watchdog-20261123
+
+- **382**：卡在开机 logo，进不了桌面。CAMSV CONFIG `errno=0`（49.2s 时 QOS 完成，50.2s 时 CONFIG 完成），`NATIVE CONFIG stage=9 completed=1fe errno=0 step=configured`，outmux-open 第一次通过。之后再无任何 X9 CAMERA 输出（`NATIVE PREPARE` 一定会打印，但没有出现），CPU cluster0 从 54s 起一直 100%，内核仍在运行（显示、蜂窝心跳正常），没有 panic。可见 start() 卡在 configure 末尾的 engine.prepare（cam_native_capture_prepare：sensor/standby/rate-guard/controller/SMMU start），很可能在 SMMU 0x30800000 的首次 MMIO、CMDQ 或 GIC bind 中自旋，并占住锁拖住了开机。静态审计没找到无界循环（扫描了所有 ≥1000 次且无 deadline 的 poll，都有界）。
+- **本镜像（诊断与现有修复合在同一个镜像里）**：
+  - 新增 `X9 CAMERA PROGRESS: <step>`，覆盖 start 的 4 步、configure:source/engine-prepare、prepare 的 8 步、arm 的 7 步，以及 SMMU start 的 policy/io-map/first-mmio-read/replacement/full-table/export 和全部 CAM_NATIVE_STEP。
+  - 新增 `X9 CAMERA SMMU ENTRY: idr0.. cr0.. gbpa.. bases`，即 SMMU 冷态寄存器。
+  - 新增 watchdog 内核线程：同一步超过 2s 时，每 2s 打印一次 `X9 CAMERA STALL: step=... age_ms=...`（每步最多 30 次），从其他 CPU 报告卡住的位置。
+- `x9/out/x9-cam-progress-watchdog-20261123/boot.img` sha256 `b6dd29a1d0fff63ec1e4f5454e45550f4b8519d22d0b7605770c9da2b5a814ea`，warning 2990（+3，declaration-after-statement）。
+
 #### 2026-11-23 日志 381 + 镜像 x9-cam-sv-db-android-20261123
 
 - **381**：cam_sv_open 往下走了。INHERITED：SV 0x240/244/248/24c=0x?05f3700（STG 默认值），0x250=2，0x1020=2，0x2010=2。`CAMSV QOS ... configured=1 errno=0`。但字段写入从 31.7s 一直持续到 62.5s：每个 field 先跑 environment，再跑 2 次 pending_observe，每次都要 environment（sv guard 约 40ms，加上 out/rx/mac/phy，一次约 100ms）。新失败点：`CAMSV CONFIG ... errno=60`，FAIL TRACE `cam_sv_pending_wait:577`：DB toggle 时要求内 bank 的 DB 字等于 pending_next，target_wait 还要求所有寄存器 inner==outer。内 bank 要到 SOF 才加载，必然超时。Android `mtk_cam_sv_toggle_db` 只写外 bank 的 0→1，不做任何等待。
