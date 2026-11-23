@@ -162,10 +162,10 @@ static uint64_t vcp_smc(uint32_t op, uint32_t val)
  * byte main image from IOVA 0x1_06c39000 before running. */
 #define MM_SMMU_SIP_CONTROL 0xc2000514u
 #define MM_SMMU_SECURE_INIT_ARG 0x800u
-static uint64_t mm_smmu_secure_init_smc(void)
+static uint64_t mm_smmu_smc(uint32_t arg)
 {
     register uint64_t x0 __asm__("x0") = MM_SMMU_SIP_CONTROL;
-    register uint64_t x1 __asm__("x1") = MM_SMMU_SECURE_INIT_ARG;
+    register uint64_t x1 __asm__("x1") = arg;
     register uint64_t x2 __asm__("x2") = 0;
     register uint64_t x3 __asm__("x3") = 0;
     register uint64_t x4 __asm__("x4") = 0;
@@ -178,6 +178,27 @@ static uint64_t mm_smmu_secure_init_smc(void)
         : : "memory", "cc", "x8", "x9", "x10", "x11",
             "x12", "x13", "x14", "x15", "x16", "x17");
     return x0;
+}
+/* NS-readable HWCCF/MM_2 voter state that ATF's PM_GET (voter55 bit3) moves. */
+static void mm_smmu_hwv_snap(const char *tag)
+{
+    printf("X9 MM VCP SMMU HWV %s: en=%x glob=%x sta=%x done=%x set/clr=%x/%x int=%x fsm=%x all=%x ack=%x infra=%x\n",
+        tag, mm_read(hwv, MM_POWER_EN), mm_read(hwv, MM_POWER_GLOBAL),
+        mm_read(hwv, MM_POWER_STA), mm_read(hwv, MM_POWER_DONE),
+        mm_read(hwv, MM_POWER_SET), mm_read(hwv, MM_POWER_CLR),
+        mm_read(hwv, MM_POWER_INT_STATUS), mm_read(hwv, MM_POWER_FSM),
+        mm_read(hwv, MM_POWER_ALL_STA), mm_read(power_ack, MM_POWER_ACK),
+        mm_read(hwv, 0x12900));
+}
+static uint64_t mm_smmu_smc_timed(const char *name, uint32_t arg)
+{
+    uint64_t t0 = mach_absolute_time(), t1, ns = 0, r;
+    r = mm_smmu_smc(arg);
+    t1 = mach_absolute_time();
+    absolutetime_to_nanoseconds(t1 - t0, &ns);
+    printf("X9 MM VCP SMMU SMC %s: arg=%x ret=%llx elapsed_us=%llu\n",
+        name, arg, r, ns / 1000ull);
+    return r;
 }
 static int vcp_smc_ok(uint32_t op, uint32_t val, uint64_t *raw)
 {
@@ -509,10 +530,19 @@ static int vcp_boot_ensure(void)
     init_c1 = mm_read(vcp_cfg_core1, VCP_CORE_STATUS_OFF);
     vcp_snap_core1(&snap_pre);
     {
+        /* Opt-in diagnostic (x9_mmup_smmu_init=1): PM_GET alone first, then
+         * INIT, with NS-visible HWCCF voter snapshots around each ATF call.
+         * No PM_PUT: a successful PM_GET reference is kept so MM stays up. */
         uint32_t want_smmu_init = 0;
         if (PE_parse_boot_argn("x9_mmup_smmu_init", &want_smmu_init, sizeof(want_smmu_init)) && want_smmu_init) {
-            uint64_t ir = mm_smmu_secure_init_smc();
-            printf("X9 MM VCP SMMU INIT: smc=%llx (0xc2000514 x1=0x800; a0==0xc2000514 means not handled)\n", ir);
+            uint64_t rg, ri;
+            mm_smmu_hwv_snap("pre");
+            rg = mm_smmu_smc_timed("PM_GET", 0x803u);
+            mm_smmu_hwv_snap("after-get");
+            ri = mm_smmu_smc_timed("INIT", MM_SMMU_SECURE_INIT_ARG);
+            mm_smmu_hwv_snap("after-init");
+            printf("X9 MM VCP SMMU INIT: get=%llx init=%llx (0=ok, 2=fail, c2000514=not handled; ref %s)\n",
+                rg, ri, rg == 0 ? "held" : "not taken");
         }
     }
     e = vcp_smc_ok(VCP_OP_RESET_SET, 1, &smc_s0);

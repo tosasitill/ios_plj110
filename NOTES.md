@@ -160,6 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 批量诊断镜像 x9-mmup-smmuinit-diag-20261123（用户批准，未上机）
+
+- 命令：`build.py all --boot-config x9/build/boot-device.json --boot-arg x9_mmup_smmu_init=1 --name x9-mmup-smmuinit-diag-20261123`，exit 0，x9_mm_power.c 无 warning；`x9/out/x9-mmup-smmuinit-diag-20261123/boot.img` 15147008 B，sha256 `e3f6265c5ea8de599694eea1b8048f76fe2824afe7f561f94ec01cce26246c92`。
+- 内容（仅 opt-in 路径，MMUP 释放前）：`HWV pre` → SMC PM_GET(x1=0x803)+耗时 → `HWV after-get` → SMC INIT(0x800)+耗时 → `HWV after-init` → 汇总行。HWV 行含 en/glob/sta/done/set/clr/int/fsm/all/ack/infra(0x12900)。不发 WPCFG（ATF 未确认 SMMU 上电时写其寄存器有挂总线风险）、不发 PM_PUT（成功的引用保留，MM 不掉电）。
+- **判据**：`X9 MM VCP SMMU SMC PM_GET: ret=`：非 0 且 elapsed 约 12ms+ = 投票轮询超时（A，循环依赖）；非 0 且很快 = 其他前置失败；0 = PM_GET 成功，则 INIT 的失败在 B/C（S_CR0 关闭等待 / S_IDR0），此时看 INIT 耗时区分（B 的轮询约 0x10000000 次/1ms 级很久，C 立即返回）。HWV：after-get 的 sta/en/glob 若相对 pre 变化（如 sta=8 卡住、en 置位）说明 ATF 的 voter 确实在动。回滚镜像不变。
+
 #### 2026-11-23 日志 367（验证镜像 x9-mmup-smmuinit-verify-20261123）：INIT 能进 ATF 处理函数，但返回 2（失败），MMUP 仍同样死法
 
 - **实测**：`X9 MM VCP SMMU INIT: smc=2`。**不是 0xc2000514**——ATF 的 `0x33aac` 确实被调用并返回状态码 2。此前「EL1 调不通 / a0 原样返回」的担心排除（log350 那次 PM_GET 的原样返回仍未解，但 INIT 路径可达）。返回 2 = INIT 失败，secure STE 没建。
