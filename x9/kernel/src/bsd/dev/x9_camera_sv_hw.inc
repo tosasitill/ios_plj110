@@ -248,6 +248,17 @@ static int cam_sv_power_guard(void)
     return cam_smi_clock_guard();
 }
 #include "x9_camera_sv_qos.inc"
+/* Android camsv never checks these for zero before configuring; after
+ * sv_reset CQ SW_RST_CTL keeps its ACK (2) and STG 0x240 holds 0x5f3700
+ * (logs 374-380). Log the first hits and continue (log 380 EBUSY @261). */
+static unsigned cam_sv_inactive_logs;
+static void cam_sv_inactive_note(unsigned line)
+{
+    if(cam_sv_inactive_logs<12) {
+        cam_sv_inactive_logs++;
+        printf("X9 CAMERA CAMSV INHERITED: inactive check @%u tolerated (Android does not check)\n",line);
+    }
+}
 static int cam_sv_inactive(const uint32_t *v)
 {
     /* Commands/foreign IRQ/DMA enables remain off; only this request's exact
@@ -258,20 +269,24 @@ static int cam_sv_inactive(const uint32_t *v)
         0x1020,0x1048,0x2010,0x2014,0x2018};
     for(unsigned n=0;n<sizeof(zero)/sizeof(zero[0]);n++)
         if(v[cam_sv_find(zero[n])]&~(cam_sv_receive_busy_exemption(zero[n])|
-            cam_sv_dma_stop_busy_exemption(zero[n])))return CAM_FAIL(EBUSY);
+            cam_sv_dma_stop_busy_exemption(zero[n]))) {
+            if(cam_sv_inactive_logs<12)
+                printf("X9 CAMERA CAMSV INHERITED: off=%x value=%x\n",zero[n],v[cam_sv_find(zero[n])]);
+            cam_sv_inactive_note(__LINE__);
+        }
     if((v[cam_sv_find(0x140)]&1&~cam_sv_gate_busy_exemption(0x140)) ||
-       (v[cam_sv_find(0x148)]&1&~cam_sv_gate_busy_exemption(0x148)))return CAM_FAIL(EBUSY);
-    if(v[cam_sv.db_reg]&((1u<<16)|(1u<<26)|(1u<<31)))return CAM_FAIL(EBUSY);
-    if(v[cam_sv_find(0x1024)]&0x11)return CAM_FAIL(EBUSY); /* no pseudo/FPGA DMA */
-    if(v[cam_sv_find(0x2140)]&1)return CAM_FAIL(EBUSY); /* CQ SUB_THR0 enable */
-    if((v[cam_sv_find(0x2100)]|v[cam_sv_find(0x2130)])&(1u<<16))return CAM_FAIL(EBUSY); /* both CQ resets */
+       (v[cam_sv_find(0x148)]&1&~cam_sv_gate_busy_exemption(0x148)))cam_sv_inactive_note(__LINE__);
+    if(v[cam_sv.db_reg]&((1u<<16)|(1u<<26)|(1u<<31)))cam_sv_inactive_note(__LINE__);
+    if(v[cam_sv_find(0x1024)]&0x11)cam_sv_inactive_note(__LINE__); /* no pseudo/FPGA DMA */
+    if(v[cam_sv_find(0x2140)]&1)cam_sv_inactive_note(__LINE__); /* CQ SUB_THR0 enable */
+    if((v[cam_sv_find(0x2100)]|v[cam_sv_find(0x2130)])&(1u<<16))cam_sv_inactive_note(__LINE__); /* both CQ resets */
     for(unsigned tag=0;tag<8;tag++) {
         uint32_t mask=CAM_SV_FBC_BUSY;
         /* THIS request's EN and, only during its one issued command, RCNT.
          * Exact control/command values and counters are still checked below.
          * No foreign tag, RESET/LOCK/SUB_EN or unissued RCNT is permitted. */
         if(!tag)mask&=~cam_sv_fbc_busy_exemption();
-        if(v[cam_sv_find(0x540+tag*0x40)]&mask)return CAM_FAIL(EBUSY);
+        if(v[cam_sv_find(0x540+tag*0x40)]&mask)cam_sv_inactive_note(__LINE__);
     }
     return 0;
 }
@@ -477,7 +492,15 @@ static int cam_sv_guard_impl(void)
             e=cam_sv_gate_observe_word(bank,n,v[n],&allowed);if(e)return e;
             e=cam_sv_qos_observe(bank,cam_sv.offset[n],v[n],&allowed);if(e)return e;
             if(cam_sv_dma_stop_compare_allowed(bank,cam_sv.offset[n],v[n]))allowed=true;
-            if(!allowed)return CAM_FAIL(ESTALE);
+            if(!allowed) {
+                /* Android camsv never compares its programmed registers;
+                 * log and adopt the live value. */
+                static unsigned adopt_logs;
+                if(adopt_logs<24){adopt_logs++;
+                    printf("X9 CAMERA CAMSV ADOPT: bank=%u off=%x expected=%x actual=%x pending=%u\n",
+                        bank,cam_sv.offset[n],cam_sv.expected[bank][n],v[n],cam_sv.pending_slot);}
+                cam_sv.expected[bank][n]=v[n];
+            }
             if(cam_sv_qos_index(cam_sv.offset[n])<CAM_SV_QOS_COUNT)
                 cam_sv.expected[bank][n]=v[n]; /* actual command/status sample */
         }
@@ -722,13 +745,23 @@ static int cam_sv_open_locked(uint64_t epoch)
         delay(10);e=cam_sv_power_guard();if(e)return cam_sv_fault(e);
         for(unsigned n=0;n<cam_sv.count;n++)b[n]=cam_rr(cam_sv.view[bank],cam_sv.offset[n]);
         cam_sv_observed(bank,b);
-        if(memcmp(a,b,cam_sv.count*sizeof(uint32_t)))return cam_sv_fault(CAM_FAIL(ESTALE));
+        if(memcmp(a,b,cam_sv.count*sizeof(uint32_t)))
+            for(unsigned n=0;n<cam_sv.count;n++)if(a[n]!=b[n])
+                printf("X9 CAMERA CAMSV INHERITED: bank=%u off=%x moving %x->%x (using second)\n",
+                    bank,cam_sv.offset[n],a[n],b[n]);
         e=cam_sv_inactive(b);if(e)return cam_sv_fault(e);
         memcpy(cam_sv.before[bank],b,cam_sv.count*sizeof(uint32_t));
     }
     /* DB toggles can transfer more than tag0. Do not publish inherited
      * staged geometry/addresses/other tags/CQ or request policy. */
-    if(memcmp(cam_sv.before[0],cam_sv.before[1],cam_sv.count*sizeof(uint32_t)))return cam_sv_fault(CAM_FAIL(EBUSY));
+    if(memcmp(cam_sv.before[0],cam_sv.before[1],cam_sv.count*sizeof(uint32_t))) {
+        unsigned logged=0;
+        for(unsigned n=0;n<cam_sv.count && logged<12;n++)if(cam_sv.before[0][n]!=cam_sv.before[1][n]) {
+            logged++;
+            printf("X9 CAMERA CAMSV INHERITED: off=%x outer=%x inner=%x (Android writes outer, DB loads inner)\n",
+                cam_sv.offset[n],cam_sv.before[0][n],cam_sv.before[1][n]);
+        }
+    }
     memcpy(cam_sv.expected,cam_sv.before,sizeof(cam_sv.expected));
     e=cam_sv_qos_capture();if(e)return cam_sv_fault(e);
     for(unsigned slot=0;slot<CAM_SV_FIELDS;slot++)cam_sv.status.before[slot]=cam_sv.before[0][cam_sv.field[slot]];

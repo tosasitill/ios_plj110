@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 380 + 镜像 x9-cam-sv-inherit-20261123
+
+- **380**：OUTMUX 配置完成。`OUTMUX ADOPT: bank=1 reg=8 off=2c expected=1 actual=0`（内 bank CAM_CFG_RDY 随配置变为 0，正常）。`OUTMUX ADOPT: cfg_done pending after 1s ... settle after stream-on`（未出流，没有 VSYNC，按 Android 延后确认）。新失败点：`outmux-open errno=16`，FAIL TRACE `cam_sv_inactive:261`，即 cam_sv_open 要求约 20 个 SV 寄存器为 0，但 reset 后 0x2010=2（ack 保留）、0x240=0x5f3700（继承值）。
+- **改动**（Android camsv 配置前不检查）：
+  - `cam_sv_inactive` 的 7 处 EBUSY 改为 `X9 CAMERA CAMSV INHERITED: off value` / `inactive check @line tolerated`。
+  - `cam_sv_open` 两次采样不同（ESTALE）、outer/inner 不同（EBUSY）改为 INHERITED 日志。
+  - `cam_sv_guard_impl` 精确比较失败改为 `CAMSV ADOPT` 并采用实际值。
+- `x9/out/x9-cam-sv-inherit-20261123/boot.img` sha256 `5e2dc1a68da7920d432b61b3cf6567ffadb019d1ca1a6a33e94f01dfddeaf4d2`，warning 2987。
+
 #### 2026-11-23 日志 379 + 镜像 x9-cam-outmux-adopt-20261123
 
 - **379**：MMQoS 通过：`READBACK ADOPT off=10b0 wrote=fffffff read=3ffffff`（mask 只有 26 位有效），`MMQOS TAKE ... current=43/104 errno=0`。另有 `SMI MMINFRA ADOPT 81->84`（MMPC 调频）和 `cam_smi_a0_write wrote=9 read=909`。source-rate、phy-ctle 通过（completed=fe）。OUTMUX：`ADOPT DEVICE_IRQ_SEL_0 0->3ff`、`ADMIT`、`INHERITED nonidle=1 filt=2 ctrl3=20200`、`LOCAL RESET`。新失败点：`outmux-open errno=70`，FAIL TRACE `cam_out_guard_impl:168`，即两个 bank 的寄存器逐字与 expected 精确比较，不等就 ESTALE，且日志没有打印是哪个字。
