@@ -160,6 +160,16 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 ATF 静态三问结论（atf-full.dis + 原 ATF 二进制，未出镜像/代码）
+
+- **基址**：ATF 文件偏移 = 反汇编地址，运行时基址 0x88800000（SMC 描述符里的指针 = 0x88800000+偏移）。SiP SMC 表是 109 个 32 字节描述符（`0x781e0..0x78f80`，+0=handler，+8=FID 对，+24=索引变量指针），由 0x32500 在启动时填索引；分发器 0x2f45c→0x32494/0x33720 按索引调用。
+- **(1) SMMU SMC 入口（观察）**：FID 0x82/0xC2000514 → handler **0x33aac**（FID 0x831 → 0x21a50；0x52c VCP_CONTROL → 0x54578）。0x33aac：type=(x1>>8)&7（须<3，MM=0），cmd_id=x1&0xff：0 INIT→0x33c54、1 IRQ_SETUP→0x34174、2 TF_HANDLE→0x34c94、3 PM_GET→0x343c0、4 PM_PUT→0x34530、5 DUMP_SID→0x33aa0、12 WPCFG→0x34acc；6(AID_SID_MAP)/7–11 → 日志 unsupported，返回 2。sec 位(bit11)被忽略。**没有任何 cmd 负责建映射。** 外层 `mtk_smc_handler` 对 NS 调用有闸门：FID bit15:14==0 且 `[0x8a5e8]` bit0==0 时打印 `Forbidden SMC call (0x%x)` 并返回 -1；该字由启动参数块经 0x21ca8 设置（镜像初值 1=放行），另有 `[0x131000+736]` = DT `/pkvm status==okay`。FID bit15:14==2 走 hyp 转发分支。**iOS 当前是否被 Forbidden 未知**（log350 观察到 a0 原样返回，既不是 -1 也不是 handler 返回值，与此闸门不吻合，原因未解）。
+- **(2) loader 映射（观察，已解）**：VCP loader 准备函数 0x56758（VCP_CONTROL op3 且参数==1 时调用，参数来自 LK 写入的全局：`[0x126e38]`=LK 缓冲 PA，`[0x126e48]`=大小）把前段拷入 SRAM，再调 **0x2ec4c(PA,size,..,domain=1)**：查 8 项域表（`0x89xxx`，每项 id/mode/size/**固定 IOVA 基址**）。域 1 = size 0xe00000、**IOVA 基址 0x1_06c00000**（正好等于 me_vcp_reserved 的 0xe00000），随后 0x26954 在 ATF 自己的页表（0x470d4 取表）里写 2 MiB 块描述符 IOVA→PA。MMUP header 的 0x1_06c37000 / 0x1_06c39000 就是该基址+0x37000/+0x39000。**坐实：header 值是 IOVA，不是物理地址**（11-20 的更正成立；被我丢弃的 fdt_ram.c VCP_LOADER 补丁的前提错误，丢弃正确）。这些页表在 ATF 内存，是否被 SMMU 用取决于 SID 161 的 secure STE。
+- **STE 谁建（观察）**：`INIT(0x33c54)` 分配 STRTAB/CMDQ/EVTQ，写 S_STRTAB/S_CMDQ/S_EVTQ（+0x8080/88/90/a0 …），调 0x46498(使能 S_CR0) 和 **0x47c9c**——后者按静态 SID 列表（0x127108/0x11bae0，每域最多 10 个 SID）逐域建 STE 并指向 0x470d4 的页表。即：**secure STE（含 SID 0xa1→loader 页表）只在 SMMU_SECURE_INIT(type=MM) 执行后才存在**。NS 组全零与此一致（INIT 从未执行或 NS 组本就不用）。
+- **(3) iOS 现状**：x9 日志显示 `smc=0/0/0/0`，没有证据 INIT 被执行过；旧 PM_GET 路径已弃用。MMUP 取指 IOVA 0x1_06c37000 若 secure SMMU 未 INIT，则无翻译。**这是目前最强的单一假设（推断，未实机证实）：iOS 缺少 Android 在 SMMU 探测时发出的 `SMMU_SECURE_INIT(0xC2000514, x1=0x800)`。**
+- **未解/风险**：(a) Forbidden 闸门是否拦 iOS 的 EL1 直调；(b) INIT 内部会 PM_GET(MM)，需 MM 电源就绪（目前 NS 读寄存器成功说明可达）；(c) 0xC2000514 在 log350 无响应的原因；(d) INIT 之后 SID 0xa1 的 STE 是否确实涵盖（需读 0x47c9c 用的 SID 列表字节 0x127108/0x11bae0）。(d) 可继续纯静态；(a)(c) 需看一次日志。
+- **建议下一步**：先静态读 SID 列表确认 0xa1(161) 在 MM 域内；再决定是否出一个只含 `SMMU_SECURE_INIT` 调用+返回值日志的镜像（需用户同意，遵循先静态后镜像）。
+
 #### 2026-11-23 续：Android 侧 SMMU 初始化顺序（静态，修正上条「NS 侧 path-b 大概率无效」过强）
 
 - **Android 源码顺序（观察）**：`arm-smmu-v3.c:3373-3390 / 4265-4287`：`smmu_hw_init`（内部 `smmu_sec_wpcfg` → SMC `MTK_IOMMU_SECURE_CONTROL=0xC2000514` cmd=WPCFG(12)）→ `arm_smmu_device_reset`（**Linux 自己编程 NS 组**：strtab/cmdq/CR0）→ `smmu_hw_sec_init`（SMC cmd=INIT(0)，`SMMU_SEC_EN`，MM_SMMU 带此标志）。cmd 格式 `cmd_id | smmu_type<<8 | sec<<11`，MM_SMMU=0；PM_GET=0x803。
