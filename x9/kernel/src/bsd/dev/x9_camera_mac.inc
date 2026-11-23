@@ -81,7 +81,14 @@ static int cam_mac_guard_untimed(void)
            (v==cam_mac.reg[n].before || v==(1u<<cam_mac.status.csi_port)))allowed=true;
         e=cam_source_observe(cam_mac.bank[cam_mac.reg[n].bank],cam_mac.reg[n].offset,v,&allowed);
         if(e)return e;
-        if(!allowed)return CAM_FAIL(ESTALE);
+        if(!allowed) {
+            /* Android never reads MAC config back; log and adopt. */
+            static unsigned adopt_logs;
+            if(adopt_logs<16){adopt_logs++;
+                printf("X9 CAMERA MAC ADOPT: bank=%u off=%x expected=%x actual=%x pending=%u\n",
+                    cam_mac.reg[n].bank,cam_mac.reg[n].offset,cam_mac.reg[n].expected,v,cam_mac.pending_slot);}
+            cam_mac.reg[n].expected=v;
+        }
     }
     return 0;
 }

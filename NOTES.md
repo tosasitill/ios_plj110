@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 379 + 镜像 x9-cam-outmux-adopt-20261123
+
+- **379**：MMQoS 通过：`READBACK ADOPT off=10b0 wrote=fffffff read=3ffffff`（mask 只有 26 位有效），`MMQOS TAKE ... current=43/104 errno=0`。另有 `SMI MMINFRA ADOPT 81->84`（MMPC 调频）和 `cam_smi_a0_write wrote=9 read=909`。source-rate、phy-ctle 通过（completed=fe）。OUTMUX：`ADOPT DEVICE_IRQ_SEL_0 0->3ff`、`ADMIT`、`INHERITED nonidle=1 filt=2 ctrl3=20200`、`LOCAL RESET`。新失败点：`outmux-open errno=70`，FAIL TRACE `cam_out_guard_impl:168`，即两个 bank 的寄存器逐字与 expected 精确比较，不等就 ESTALE，且日志没有打印是哪个字。
+- **改动**（Android 对这些配置只写不读）：
+  - `cam_out_guard_impl` 遇到不一致时打印 `X9 CAMERA OUTMUX ADOPT: bank reg off expected actual pending_slot commit`（最多 24 条），并以实际值为新的期望值。
+  - 预先处理同类问题：`cam_mac_guard` 改为 `MAC ADOPT`，`cam_phy_guard` 改为 `PHY ADOPT`，`cam_rx_session_guard` 的 changed 改为 `RX ADOPT` 并 rebase（各最多 16 条）。
+- `x9/out/x9-cam-outmux-adopt-20261123/boot.img` sha256 `4778aa38dd7a2c8447ecdde0142b2eafcefc68a72dcf68b8ae9137d74546f9d4`，warning 2987。
+
 #### 2026-11-23 日志 378 + 镜像 x9-cam-mmqos-android-20261123
 
 - **378**：`SOURCE MUX: raw=89 sel=9`，`CAM PROCESSING CLOCK: parent=a RC=2 counts=8192/8192 Hz=416000000`。新失败点：`MMQOS TAKE ... units/current=43/104:0/0 OSTD=9 errno=5`，FAIL TRACE `cam_native_bw_write:79`，即 MMPC 写入后回读不等于写入值就返回 EIO。Android `mmqos-mtk.c write_register/start_write_bw/stop_write_bw` 只写不读。

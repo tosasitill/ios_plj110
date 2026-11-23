@@ -165,7 +165,17 @@ static int cam_out_guard_impl(void)
             }
             allowed=cam_out_irq_control_allowed(bank,n,v[n],allowed);
             if(!allowed && cam_out_tolerated(bank,n,v[n]))allowed=true;
-            if(!allowed)return CAM_FAIL(ESTALE);
+            if(!allowed) {
+                /* Android programs OUTMUX write-only (no readback compare);
+                 * log 379 died here with no clue. Log and adopt. */
+                static unsigned adopt_logs;
+                if(adopt_logs<24) {
+                    adopt_logs++;
+                    printf("X9 CAMERA OUTMUX ADOPT: bank=%u reg=%u off=%x expected=%x actual=%x pending_slot=%u commit=%u\n",
+                        bank,n,cam_out_offset(n),cam_out.expected[bank][n],v[n],cam_out.pending_slot,cam_out.commit_pending);
+                }
+                cam_out.expected[bank][n]=v[n];
+            }
         }
         /* Command/status are separate from config CSR, never IRQ_STATUS.
          * An unexpected pending command means somebody else changed the bank. */

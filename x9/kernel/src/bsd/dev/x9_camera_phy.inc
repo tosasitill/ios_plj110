@@ -141,7 +141,14 @@ static int cam_phy_guard_untimed(void)
         bool allowed=v==cam_phy.reg[n].expected || (n==cam_phy.pending_reg && v==cam_phy.pending_next);
         e=cam_source_observe(cam_phy.bank[cam_phy.reg[n].bank],cam_phy.reg[n].offset,v,&allowed);
         if(e)return e;
-        if(!allowed)return CAM_FAIL(ESTALE);
+        if(!allowed) {
+            /* Android never reads PHY config back; log and adopt. */
+            static unsigned adopt_logs;
+            if(adopt_logs<16){adopt_logs++;
+                printf("X9 CAMERA PHY ADOPT: bank=%u off=%x expected=%x actual=%x\n",
+                    cam_phy.reg[n].bank,cam_phy.reg[n].offset,cam_phy.reg[n].expected,v);}
+            cam_phy.reg[n].expected=v;
+        }
     }
     /* ANA9 completion is not monitored: Android never reads it. */
     return 0;

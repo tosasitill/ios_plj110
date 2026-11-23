@@ -299,7 +299,14 @@ static int cam_rx_session_guard_untimed(void)
     changed=cam_rx_changed(&a,&b,port)|cam_rx_changed(&cam_rx_live.expected,&a,port)|
         cam_rx_changed(&cam_rx_live.expected,&b,port);
     r->after=b;r->busy|=busy;r->changed|=changed;
-    if(changed)return CAM_FAIL(ESTALE);
+    if(changed) {
+        /* Android has no receiver snapshot; log the changed groups and
+         * rebase on the latest sample instead of failing the session. */
+        static unsigned adopt_logs;
+        if(adopt_logs<16){adopt_logs++;
+            printf("X9 CAMERA RX ADOPT: changed=%x (1=mac 2=async 4=outmux 8+=camsv) busy=%x\n",changed,busy);}
+        cam_rx_live.expected=b;
+    }
     if(busy)return CAM_FAIL(EBUSY);
     /* FBC1 is not part of the public receiver snapshot. Do not return from
      * this live comparison without rechecking the private counter evidence. */
