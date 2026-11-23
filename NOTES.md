@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 381 + 镜像 x9-cam-sv-db-android-20261123
+
+- **381**：cam_sv_open 往下走了。INHERITED：SV 0x240/244/248/24c=0x?05f3700（STG 默认值），0x250=2，0x1020=2，0x2010=2。`CAMSV QOS ... configured=1 errno=0`。但字段写入从 31.7s 一直持续到 62.5s：每个 field 先跑 environment，再跑 2 次 pending_observe，每次都要 environment（sv guard 约 40ms，加上 out/rx/mac/phy，一次约 100ms）。新失败点：`CAMSV CONFIG ... errno=60`，FAIL TRACE `cam_sv_pending_wait:577`：DB toggle 时要求内 bank 的 DB 字等于 pending_next，target_wait 还要求所有寄存器 inner==outer。内 bank 要到 SOF 才加载，必然超时。Android `mtk_cam_sv_toggle_db` 只写外 bank 的 0→1，不做任何等待。
+- **改动**：
+  - pending_observe 只确认外 bank 的值，取样前只做 power guard（完整 environment 已在 cam_sv_post 中执行）。
+  - DB 提交后不再 target_wait，改为采用内 bank 当前值并打印 `X9 CAMERA CAMSV DB ADOPT: N inner words not yet loaded`。
+  - cam_sv_target_observe 遇到 inner≠outer 时返回 0 并打印。
+- `x9/out/x9-cam-sv-db-android-20261123/boot.img` sha256 `d175dfc5ba84813a4b80a2ef9861e2b0100a056ef1fd6ddead180a538169c6b7`，warning 2987。
+
 #### 2026-11-23 日志 380 + 镜像 x9-cam-sv-inherit-20261123
 
 - **380**：OUTMUX 配置完成。`OUTMUX ADOPT: bank=1 reg=8 off=2c expected=1 actual=0`（内 bank CAM_CFG_RDY 随配置变为 0，正常）。`OUTMUX ADOPT: cfg_done pending after 1s ... settle after stream-on`（未出流，没有 VSYNC，按 Android 延后确认）。新失败点：`outmux-open errno=16`，FAIL TRACE `cam_sv_inactive:261`，即 cam_sv_open 要求约 20 个 SV 寄存器为 0，但 reset 后 0x2010=2（ack 保留）、0x240=0x5f3700（继承值）。

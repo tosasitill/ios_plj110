@@ -556,14 +556,13 @@ static int cam_sv_pending_observe(void)
     if(cam_sv.pending_slot>CAM_SV_FIELDS)return 0;
     reg=cam_sv.pending_slot==CAM_SV_FIELDS?cam_sv.db_reg:cam_sv.field[cam_sv.pending_slot];
     for(unsigned sample=0;sample<2;sample++) {
-        e=cam_sv_environment();if(e)return e;
+        /* Power/clock only: the full environment (sv/out/rx/mac/phy guards,
+         * ~100 ms) already ran in cam_sv_post (log 381: 30 s of field writes). */
+        e=cam_sv_power_guard();if(e)return e;
         if(cam_rr(cam_sv.view[0],cam_sv.offset[reg])!=cam_sv.pending_next)
             return cam_sv.pending_seen?cam_sv_fault(CAM_FAIL(ESTALE)):EAGAIN;
-        /* DB policy is a phase boundary, not just an outer shadow word.
-         * Do not issue UP while a late inner DOWN could still arrive. */
-        if(cam_sv.pending_slot==CAM_SV_FIELDS &&
-           cam_rr(cam_sv.view[1],cam_sv.offset[reg])!=cam_sv.pending_next)
-            return cam_sv.expected[1][reg]==cam_sv.pending_next?cam_sv_fault(CAM_FAIL(ESTALE)):EAGAIN;
+        /* Android mtk_cam_sv_toggle_db writes DB_EN 0 then 1 on the outer
+         * bank only and never waits for the inner bank (loads at SOF). */
         if(!sample)delay(1);
     }
     cam_sv.expected[0][reg]=cam_sv.pending_next;
@@ -625,7 +624,13 @@ static int cam_sv_target_observe(void)
         for(unsigned n=0;n<cam_sv.count;n++) {
             unsigned o=cam_sv.offset[n];
             if(o==0x140 || o==0x148 || o==0x14c)continue;
-            if(cam_sv.expected[0][n]!=cam_sv.expected[1][n])return EAGAIN;
+            /* Inner loads at SOF; Android never compares it (log 381). */
+            if(cam_sv.expected[0][n]!=cam_sv.expected[1][n]) {
+                static unsigned logs;
+                if(logs<4){logs++;printf("X9 CAMERA CAMSV DB ADOPT: off=%x outer=%x inner=%x (inner loads at SOF)\n",
+                    o,cam_sv.expected[0][n],cam_sv.expected[1][n]);}
+                return 0;
+            }
         }
         if(!sample)delay(1);
     }
@@ -677,7 +682,18 @@ static int cam_sv_commit(void)
         if(!cam_sv.db_issued)return cam_sv_fault(CAM_FAIL(ESTALE));
         e=cam_sv_pending_wait(deadline);if(e)return e;
     }
-    e=cam_sv_target_wait(deadline);if(e)return e;
+    /* Android never waits for inner == outer after toggle_db; the inner
+     * bank loads at the next SOF (sensor still off here, log 381). */
+    {
+        unsigned diff=0;
+        for(unsigned n=0;n<cam_sv.count;n++) {
+            uint32_t in=cam_rr(cam_sv.view[1],cam_sv.offset[n]);
+            if(in!=cam_sv.expected[0][n])diff++;
+            cam_sv.expected[1][n]=in;
+        }
+        if(diff)printf("X9 CAMERA CAMSV DB ADOPT: %u inner words not yet loaded after toggle_db (load at SOF, Android no wait)\n",diff);
+    }
+    (void)cam_sv_target_wait;
     cam_sv.completed=cam_sv.command;cam_sv.commit_pending=cam_sv.db_issued=false;
     cam_sv.db_phase=CAM_SV_DB_IDLE;return cam_sv_guard();
 }
