@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 INIT 前置条件复核（静态）：EL1 可达性、GCE 影响
+
+- **EL1 可达性（观察）**：mtk_smc_handler(`0x2f45c`) 对 NS 调用先看 FID bits[15:14]（0xC2000514 与 VCP 的 0xC200052C 同为 0），闸门 `0x2296c` = `~[0x8a5e8]&1`、`0x22954` 均不看具体 FID；VCP FID 已在 iOS 上正常返回（smc=0、rstn 变化），故两者过闸结果相同。0xC2000514 在 FID 决策树（`0x31a78/0x31aac`）内，经索引变量 `[0x79000+178]`（描述符 +24 指向 0x888790b2）进入 `0x33aac`。**静态上没有 FID 级别的 EL1 拦截。**
+- **与 log350 的矛盾（未解）**：log350 / 旧 `cam_smmu_power_call`（commit 2eac6811，`"+r"(x0)` 约束正确）对 PM_GET(x1=0x803) 实测 a0 返回 0xc2000514，即 x0 原样。静态上处理函数返回的是状态码 0/1/2/3/5（`0x343c0` 返回 0、1、2；0x33aac 返回 w21），经 `0x2f558: str x8,[x19]` 写回，不会等于 FID。**没找到任何会让 x0 保持原值的路径。**要么 0x803 那次 ATF 走了我没解码的路径，要么 SMC 没进 ATF 处理函数。这是唯一的静态硬缺口，要看设备上 INIT(x1=0x800) 的真实返回才能确认。
+- **GCE 影响（观察）**：`x9/kernel/src` 里没有 GCE/cmdq 使用（grep 空）；INIT 为 SID {0xc7,0xb7,…} 建的 secure STE 只影响 secure 事务的 GCE 通路，x9 不用，视为无影响。
+- **Android 留存日志**：`~/x9-android-dmesg.txt` 无 SMMU/MMUP 早期初始化行，无法旁证 INIT 返回值或 MMUP SID。
+- **结论**：证据链除「INIT 在 iOS 上的真实返回」外已静态闭合；该点已有 opt-in 打印（`x9_mmup_smmu_init=1`），需上机一次。
+
 #### 2026-11-23 编译检查（仅 kernel 步骤，无 boot.img）
 
 - 命令：`build.py kernel --boot-config x9/build/boot-device.json --name x9-compilecheck-smmuinit-20261123`，exit 0；104/104 overlay 对象编译、链接并 strip 成功，`x9_mm_power.c` 无新增 warning/error。产物 `x9/out/x9-compilecheck-smmuinit-20261123/kernel.development.sweet`（sha256 `008f51c06c47…f34d`），**目录里没有 boot.img**，未打包、未上机。
