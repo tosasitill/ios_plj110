@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 384 + 镜像 x9-cam-smmu-mmio-probe-20261123
+
+- **384**：source-prepare 从 29s 降到 19.7s（19.6→39.3s），CAMSV CONFIG errno=0。full_table 全部子步骤正常，`SMMU FULL TABLE: errno=0`，2ms 内完成。**卡在 `smmu:entry-match`**，且 STALL 显示的是外层步骤名（不是 `match:mm-power-validate`），说明 x9_mm_power_validate 已经返回，卡在 cam_native_read 的 SMMU MMIO 读上。同样的读 9ms 前（first-mmio-read、ENTRY）成功过，因此推断是读的时候总线挂死（CPU 一直 100%）。
+- **Android 对照**：mt6993_data_mm 的 flags 没有 SMMU_CLK_AO_EN，有 SMMU_DELAY_HW_INIT；DT 是 `mtk,power-awake`。MM_SMMU 的 pm_ops 由 mtk-smi-dbg 注册为 `mtk_smi_mminfra_get_if_in_use`，即 SMI_COMMON 的 runtime PM（mminfra 必须上电）。也就是说，Android 只在 SMI common rpm 有效时访问 MM SMMU 寄存器。
+- **本镜像**：只做探测，不改行为。
+  - cam_native_read 每次读之前发布 region/offset，STALL 行会带 `mmio=smmu30800000+off / wp309e0000+off / smmu64+off reads=N`。
+  - 打印两份 ioremap 的 VA（`SMMU MAP`）。
+- `x9/out/x9-cam-smmu-mmio-probe-20261123/boot.img` sha256 `24b314d12c7f9eca16bdd620ee03877dddb786682dc18eb63ba7d9ecb90e2256`。
+
 #### 2026-11-23 日志 383 + 镜像 x9-cam-fulltable-probe-20261123
 
 - **383**：PROGRESS/STALL 定位成功。start 由用户态 ioctl（HAKIOS_CAMERA_SENSOR）在 10.9s 发起，期间一直占着相机锁：sensor CAL 用 8s（3456B EEPROM 预读 3s，250 次写 4.4s），source-prepare 用 29s（CAMSV 字段逐个写入），48.9s 时 NATIVE CONFIG errno=0。随后 prepare 各步很快走完，`SMMU ENTRY: idr0=80f363f idr1=dd39d08 idr5=1000471 cr0=0 gbpa=0 bases=0`（冷态、空闲、sidbits=8），prepare-replacement 用 7ms。**卡在 `smmu:full-table`**（49.426s 起一直 STALL）。静态看，full_table 在 sidbits=8 时不分配内存（16K==ste_bytes），只有 bzero、256 次循环、cam_smmu_storage（加锁 camera_s1_lock 后 validate）和随后的 cam_native_match（加锁 mm_power_lock），都没有无界循环，因此怀疑是锁阻塞。

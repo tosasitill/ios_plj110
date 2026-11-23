@@ -49,9 +49,13 @@ static int cam_native_wp_guard(struct x9_camera_smmu *m)
 static void cam_native_read(struct x9_camera_smmu *m,struct cam_native_snapshot *s)
 {
     bzero(s,sizeof(*s));
-    for(unsigned i=0;i<CAM_N_WORDS;i++)s->word[i]=cam_smmu_rr(m,cam_native_off[i]);
-    for(unsigned i=0;i<4;i++)s->wp[i]=*(volatile uint32_t *)(m->native_wp+cam_native_wp_off[i]);
-    for(unsigned i=0;i<3;i++)s->base[i]=cam_smmu_rr64(m,cam_native_base_off[i]);
+    cam_mmio_region=1;
+    for(unsigned i=0;i<CAM_N_WORDS;i++){cam_mmio_off=cam_native_off[i];s->word[i]=cam_smmu_rr(m,cam_native_off[i]);cam_mmio_reads++;}
+    cam_mmio_region=2;
+    for(unsigned i=0;i<4;i++){cam_mmio_off=cam_native_wp_off[i];s->wp[i]=*(volatile uint32_t *)(m->native_wp+cam_native_wp_off[i]);cam_mmio_reads++;}
+    cam_mmio_region=3;
+    for(unsigned i=0;i<3;i++){cam_mmio_off=cam_native_base_off[i];s->base[i]=cam_smmu_rr64(m,cam_native_base_off[i]);cam_mmio_reads++;}
+    cam_mmio_region=0;
     __asm__ volatile("dsb sy":::"memory");
 }
 static int cam_native_match(struct x9_camera_smmu *m,const struct cam_native_snapshot *s)
@@ -203,6 +207,7 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     lck_mtx_unlock(&camera_smmu_lock);
     if(!mmio || !cam_native_wp_mmio)return CAM_FAIL(ENOMEM);
     probe.mmio=mmio;probe.native_wp=cam_native_wp_mmio;probe.native_power=token;
+    printf("X9 CAMERA SMMU MAP: shared=%lx wp=%lx\n",(unsigned long)mmio,(unsigned long)cam_native_wp_mmio);
     cam_progress("smmu:first-mmio-read 0x30800000/0x309e0000");
     cam_native_read(&probe,&entry);
     printf("X9 CAMERA SMMU ENTRY: idr0=%x idr1=%x idr5=%x cr0=%x ack=%x gbpa=%x cfg=%x ge=%x/%x bases=%llx/%llx/%llx\n",
@@ -246,6 +251,8 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     cam_progress("smmu:full-table");
     e=cam_native_full_table(m,sidbits,true);
     printf("X9 CAMERA SMMU FULL TABLE: errno=%d\n",e);
+    if(!e)printf("X9 CAMERA SMMU MAP: m->mmio=%lx m->wp=%lx (prepare_replacement maps its own)\n",
+        (unsigned long)m->mmio,(unsigned long)m->native_wp);
     if(!e)cam_progress("smmu:entry-match");
     if(!e)e=cam_native_match(m,&entry);
     lck_mtx_unlock(&camera_smmu_lock);

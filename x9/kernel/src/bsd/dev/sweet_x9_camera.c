@@ -173,6 +173,9 @@ static void cam_native_capture_stop_locked(uint64_t epoch);
 static const char *volatile cam_progress_step;
 static volatile uint64_t cam_progress_t0;
 static bool cam_watchdog_started;
+/* Log 384: hang inside cam_native_match's SMMU register read. The current
+ * MMIO region/offset is published before each read so STALL can name it. */
+static volatile unsigned cam_mmio_region,cam_mmio_off,cam_mmio_reads;
 static void cam_progress(const char *step)
 {
     cam_progress_t0=mach_absolute_time();cam_progress_step=step;
@@ -191,7 +194,9 @@ static void __attribute__((noreturn)) cam_watchdog(void *arg,wait_result_t resul
         if(step!=last){last=step;reports=0;}
         if(ns>=2000000000ull && reports<30) {
             reports++;
-            printf("X9 CAMERA STALL: step=%s age_ms=%llu (#%u)\n",step,ns/1000000ull,reports);
+            printf("X9 CAMERA STALL: step=%s age_ms=%llu (#%u) mmio=%s+%x reads=%u\n",step,ns/1000000ull,reports,
+                cam_mmio_region==1?"smmu30800000":cam_mmio_region==2?"wp309e0000":cam_mmio_region==3?"smmu64":"-",
+                cam_mmio_off,cam_mmio_reads);
         }
     }
 }
