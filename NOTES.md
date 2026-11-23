@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 370（x9-mmup-readypin-20261123）：**MMUP+VCP 启动成功**（stage=6 errno=0），MM_2 投票成功；camera 卡在 CAM rate take（EBUSY）
+
+- **实测**：PM_GET/WPCFG/INIT 均 0（INIT 318µs）；`X9 MM VCP BOOT: stage=6 ... end=0/f pc=8692/0 mmup=80/80000 vcp=180/80000 errno=0`（两个 READY 都是 bit7，msg=0x80000）；`X9 MM POWER GET: ... stage=6 owned=1 held=1 ... errno=0`。**相机 MMUP/VCP/errno=60 这一阻塞已解决。**
+- 新阻塞：`X9 CAMERA MM: flags=13 stage/slot=3/5 errno=16 blockers=1fc cfg=4/3/9`。slot 0–5（含 slot5=MRAW，flags=b=SEEN|OWNED|ACTIVE）全部完成，POWER 标志已置；EBUSY 来自 MRAW 之后的 `cam_native_rate_take()`（x9_camera_native_rate.inc），返回前没打印 `CAM RATE TAKE`。
+- **该函数的 EBUSY 来源（静态）**：① `cam_native_rate_foreign_guard`：RC(0x31d00000) `0x10000+xpu*0x10`（xpu 1..12）任一低 4 位非 0；② 基线检查：`entry_cfg&15`（CAM mux cfg）或 RC `0x100d0/0x10000/0x10234/0x10264` 低 4 位非 0。日志 cfg[0]=4 → **② 的第一项必然成立**（① 是否也成立未知）。代码策略是「只从空闲基线起投，不接管 Android/vcp/cpc 用户」。
+- **解释（推断）**：以前从没走到这一步（所有旧日志都没有 CAM RATE TAKE）。现在 VCP/MMUP 固件真的在跑（MMUP 日志有 `mmqos_vmmrc_init`、`vote dpc vdisp level5`），VMMRC 里很可能已有 VCP 的投票，CAM mux 被抬到 4，于是这条「空闲基线」前提不再成立。Android 侧的 mmdvfs v5 主要逻辑在 VCP 固件里，参考树只有 debug/memory 文件。
+- **下一步**：先出一个只读诊断（打印 RC 0x100d0/0x10000..0x100c0/0x10234/0x10264 和 CAM mux cfg，以及每个 guard 的结果），确认是 VCP 投票还是别的；再决定 rate take 的策略（接受已有更高的 VCP 投票作为借用 / 改走 VCP mmdvfs IPI）。改策略前需要你同意。
+
 #### 2026-11-23 镜像 x9-mmup-readypin-20261123（用户批准，未上机）
 
 - `x9/out/x9-mmup-readypin-20261123/boot.img` 15151104 B，sha256 `7af3a5982317d54b75819cd8f89a6d08057102e2a69903fdb41de28912909246`，boot-arg `x9_mmup_smmu_init=1`，无 warning。= 369 镜像 + READY pin 7/msg 0x38。
