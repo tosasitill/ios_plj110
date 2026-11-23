@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 367（验证镜像 x9-mmup-smmuinit-verify-20261123）：INIT 能进 ATF 处理函数，但返回 2（失败），MMUP 仍同样死法
+
+- **实测**：`X9 MM VCP SMMU INIT: smc=2`。**不是 0xc2000514**——ATF 的 `0x33aac` 确实被调用并返回状态码 2。此前「EL1 调不通 / a0 原样返回」的担心排除（log350 那次 PM_GET 的原样返回仍未解，但 INIT 路径可达）。返回 2 = INIT 失败，secure STE 没建。
+- **BOOT 结果与 366 完全一致**：`stage=4 errno=60`，SNAP 1ms pc=0x3a8、end lr=0x14e4，TBUF 0x19c→0x4a14 后随机值，HDR `1a0b5 6c37001 2000 6c39001 48c00`，PROG nest=0x3bfa4，NS SMMU 全 0。
+- **静态定位返回 2 的位置（0x33c54，观察）**：状态 2 只在 `0x33e28`（INIT 内部失败路径统一出口）或 PM_GET `0x34528` 产生。三个候选：(A) INIT 内的 PM_GET(MM)（`0x343c0→0x28d48`）失败——引用计数为 0 时 `0x28d48` 经 `0x21424(1,0x37,0,3)`→`0x37f4` 对 hwccf voter55 bit3 发 AP 投票并轮询（内部超时返回 −4096/−4097/−8192），失败即 PM_GET=2；(B) `0x46048` 对 S_CR0(+0x8020) 写 0 并等 S_CR0ACK(+0x8024) 清零超时；(C) 读 S_IDR0(+0x8004) bit31 为 0（`0x33d2c`）。**观察不足以区分**，ATF 的 UART 打印看不到。
+- **A 的因果（推断）**：ATF 的投票和 x9 自己的 MM_2 投票是同一个 voter55/bit3；x9 之前 stage=4 超时的现象是「STA 卡住等 VIP(MMUP) ACK」。如果 ATF 的 PM_GET 同样等 VIP 应答，则存在**循环依赖**：INIT 需要 MM 投票成功 → 需要 MMUP 应答 → MMUP 需要 INIT 建的 STE 才能取到镜像。Android 里这个顺序为何能成立尚不清楚（可能 SMMU probe 时 MM 已被其他 XPU 持有，ATF 引用计数求和非 0 就不再投票：`0x34444 cbz w8`）。
+- **下一步（需你批准，会再出一个镜像）**：在 opt-in 块里批量加诊断——① INIT 前后各 dump hwv 的 STA/EN/GLOBAL/DONE/INT_STATUS/ACK/0x12900（ATF 的投票会动这些 NS 可读寄存器，直接区分 A 与 B/C）；② 先单独发 PM_GET(x1=0x803) 记录返回（若也是 2 则 A 成立）；③ PM_GET 成功时再发 INIT，并保留引用不 PUT（避免 MM 掉电）；④ 失败后再发 PM_PUT(0x804) 记录；⑤ 可选先发 WPCFG(0x80c) 记录返回。合并成一个镜像（符合「一次编译带全部诊断」）。
+
 #### 2026-11-23 验证镜像 x9-mmup-smmuinit-verify-20261123（用户批准）
 
 - 命令：`build.py all --boot-config x9/build/boot-device.json --boot-arg x9_mmup_smmu_init=1 --name x9-mmup-smmuinit-verify-20261123`，exit 0；`x9/out/x9-mmup-smmuinit-verify-20261123/boot.img` 15147008 B，sha256 `e8ba6aec810a7e19c68b163fad1f729d8da46ef948c1b71e437518f0478306f5`。未上机，`not hardware-verified`。
