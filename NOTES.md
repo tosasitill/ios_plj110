@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 369（x9-mmup-smmuinit-wpcfg-20261123）：**突破——WPCFG 后 INIT 成功，MMUP 主固件跑起来并发出 READY**；x9 READY pin 位错（bit0→应为 bit7）
+
+- **实测**：PM_GET ret=0 (21µs)；NS GBPA.UPDATE 4µs 清零（SMMU 核心正常，secure 字从 NS 读全 0）；**WPCFG ret=0 (7µs)**；**INIT ret=0 (347µs)**（368 无 WPCFG 时 3.55s 超时返回 2）。**根因：iOS 缺 Android 的 `smmu_sec_wpcfg`（SMC cmd 12）；没有它 INIT 的 secure 握手超时，secure STE 不建，MMUP stage0 经 SMMU 取主镜像得到垃圾。**
+- MMUP 状态彻底变化：PROG nest=1/0 fpga=1 mask=ffffffff mpu10=4fc00000..4fc8d000 mpu11=4fc8d000..4fe0e000；TBUF 是主镜像里的正常地址（0x17658/0x163ba/0x3564…）；MMUP LOG 打出固件日志（`vcp is cold boot`、mmqos_vmmrc_init done、VENC CVFS opp 表、hwccf_mask_unmask…；另有 `[VDISP] E:table_locked_init: timeout(11)` 待查）。
+- 仍 stage=4 errno=60，但 `mmup=80/0`、DIAG3 `mbox4=0/80/0/80`：MMUP 置的是 clr_irq_reg **bit7**，x9 轮询 bit0。
+- **静态核对（证明）**：rv_v2 `mbox_setup_pin_table()` 先排同一 mbox 的 send pin 再排 recv pin（is64d=1，pin_index 累加 DIV_ROUND_UP(size,2)）。mmup mbox1(0x31bc0000) send 0x1e(6)/0x14(2)/0x15(3)/0x17(2) → recv 0x1a READY_1 = **pin 7，msg 字节偏移 0x38**；vcp mbox2(0x31ba0000) send 0x16(6)/0x02(2)/0x03(3)/0x20(2) → recv 0x05 READY_0 也是 **pin 7 / 0x38**。脚本复算 MMUP 结果与实测 0x80 吻合。旧注释「first recv entry → pin 0」漏算 send pin。
+- **修正（已提交，仅编译检查 `build.py kernel` exit 0，无 warning，未出镜像）**：`VCP_MBOX_READY_BIT=1u<<7`、`VCP_MBOX_READY_MSG_OFF=0x38`。SMMU PM_GET→WPCFG→INIT 仍由 `x9_mmup_smmu_init=1` 控制（boot-device.json 未加；验证通过后应改为默认开启）。
+
 #### 2026-11-23 诊断镜像 x9-mmup-smmuinit-wpcfg-20261123（用户批准，未上机）
 
 - `x9/out/x9-mmup-smmuinit-wpcfg-20261123/boot.img` 15151104 B，sha256 `0a0b816524bf56891789238d3956330318bd018f56ce9bf25371d9f2eec701fd`，boot-arg `x9_mmup_smmu_init=1`，无 warning。

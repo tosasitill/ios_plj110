@@ -63,16 +63,18 @@ LCK_MTX_DECLARE(mm_power_lock, &mm_power_group);
 #define VCP_CORE_STATUS_OFF 0x70u
 #define VCP_CORE_MON_PC_OFF 0x80u
 #define VCP_CORE_RSTN_CLR_OFF 0x00u
-/* READY pin layout derived from live.dts recv-table + mbox_setup_pin_table()
- * (rv_v2 vcp_helper.c:2781 / mmup.c:268, is64d=1): vcp chan 0x05
- * (IPI_IN_VCP_READY_0) is the first recv entry of vcp mbox2 (0x31ba0000),
- * mmup chan 0x1a (IPI_IN_VCP_READY_1) the first of mmup mbox1 (0x31bc0000),
- * so both get pin_index 0 / offset 0. No mbox%d_recv in DT, so status is read
- * from clr_irq_reg (+0x10c) bit0 and cleared by writing the same bit
- * (mtk-mbox.c mtk_mbox_read_recv_irq / mtk_mbox_clr_irq); msg at base+0x00. */
-#define VCP_MBOX_READY_MSG_OFF 0x00u
+/* READY pin layout from live.dts send/recv tables + mbox_setup_pin_table()
+ * (rv_v2 vcp_helper.c:2781 / mmup.c:268, is64d=1). Send pins of the same
+ * mbox are laid out BEFORE recv pins: vcp mbox2 (0x31ba0000) sends
+ * 0x16(6),0x02(2),0x03(3),0x20(2) -> recv 0x05 IPI_IN_VCP_READY_0 gets
+ * pin 7, slot offset 14 (byte 0x38); mmup mbox1 (0x31bc0000) sends
+ * 0x1e(6),0x14(2),0x15(3),0x17(2) -> recv 0x1a IPI_IN_VCP_READY_1 also
+ * pin 7 / byte 0x38. Confirmed on device: log 369 clr_irq_reg=0x80 after
+ * MMUP started (the old pin-0 assumption ignored the send pins). Status is
+ * clr_irq_reg (+0x10c), cleared by writing the same bit. */
+#define VCP_MBOX_READY_MSG_OFF 0x38u
 #define VCP_MBOX_CLR_OFF 0x10cu
-#define VCP_MBOX_READY_BIT (1u << 0)
+#define VCP_MBOX_READY_BIT (1u << 7)
 #define VCP_READY_TIMEOUT_MS 3000u
 #define VCP_MEM_TOTAL_SIZE 0x20e000u
 #define VCP_MEM_ALLOC_BYTES ((VCP_MEM_TOTAL_SIZE + PAGE_MASK) & ~(vm_size_t)PAGE_MASK)
