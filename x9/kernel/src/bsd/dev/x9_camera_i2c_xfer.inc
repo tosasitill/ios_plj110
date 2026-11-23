@@ -9,10 +9,10 @@ static int cam_bus_other_idle(struct cam_probe_bus *b)
 {
     for(unsigned channel=1;channel<b->banks;channel++) {
         vm_offset_t c=b->base+channel*0x10000;
-        if(cam_rr(c,CAM_I2C_START)&1)return EBUSY; /* other host actually running */
+        if(cam_rr(c,CAM_I2C_START)&1)return CAM_FAIL(EBUSY); /* other host actually running */
     }
     for(unsigned channel=0;channel<b->dma_banks;channel++)
-        if(cam_rr(b->dma,channel*0x10000+0x08)&1)return EBUSY;
+        if(cam_rr(b->dma,channel*0x10000+0x08)&1)return CAM_FAIL(EBUSY);
     return 0;
 }
 static int cam_bus_request_fault(struct cam_probe_bus *b,int e,uint32_t status,uint32_t start)
@@ -33,8 +33,8 @@ static int cam_bus_terminal_check(struct cam_probe_bus *b,uint32_t status)
     int e=cam_bus_controls(b,false);if(e)return e;
     e=cam_bus_other_idle(b);if(e)return e;
     uint32_t start=cam_rr(b->base,CAM_I2C_START);
-    if(start&~(1u<<14))return EBUSY; /* no START, resume or extra-leg configuration */
-    if(cam_rr(b->base,CAM_I2C_STAT)!=status)return ESTALE;
+    if(start&~(1u<<14))return CAM_FAIL(EBUSY); /* no START, resume or extra-leg configuration */
+    if(cam_rr(b->base,CAM_I2C_STAT)!=status)return CAM_FAIL(ESTALE);
     return 0;
 }
 /* AP FIFO transfers. FIFO_DATA is byte-accessed upstream even with a
@@ -48,8 +48,8 @@ static int cam_bus_transfer_n(struct cam_probe_bus *b,uint8_t slave,
 {
     if(!tx || !count || (rx?count>4:count>CAM_I2C_FIFO_BYTES) ||
        rx_count>CAM_I2C_FIFO_BYTES ||
-       (!!rx != !!rx_count))return EINVAL;
-    if(!b->owned || cam_bus_unretired(b))return EBUSY;
+       (!!rx != !!rx_count))return CAM_FAIL(EINVAL);
+    if(!b->owned || cam_bus_unretired(b))return CAM_FAIL(EBUSY);
     int e=cam_bus_clock(b);if(!e)e=cam_bus_idle(b);
     if(!e)e=cam_bus_controls(b,false);if(e)return e;
     uint32_t control=(b->saved[1]&~((1u<<1)|(1u<<2)|(1u<<4)|(1u<<8)|(1u<<9)))|
@@ -69,8 +69,8 @@ static int cam_bus_transfer_n(struct cam_probe_bus *b,uint8_t slave,
     for(unsigned i=0;i<count;i++)*(volatile uint8_t *)(b->base+CAM_I2C_DATA)=tx[i];
     __asm__ volatile("dsb sy" ::: "memory");
     e=cam_bus_controls(b,false);if(!e)e=cam_bus_other_idle(b);
-    if(!e && ((cam_rr(b->base,CAM_I2C_START)&1) || cam_rr(b->base,CAM_I2C_STAT)))e=EBUSY;
-    if(!e && (cam_rr(b->base,CAM_I2C_FIFO)&31)!=count)e=EIO;
+    if(!e && ((cam_rr(b->base,CAM_I2C_START)&1) || cam_rr(b->base,CAM_I2C_STAT)))e=CAM_FAIL(EBUSY);
+    if(!e && (cam_rr(b->base,CAM_I2C_FIFO)&31)!=count)e=CAM_FAIL(EIO);
     if(e)return cam_bus_request_fault(b,e,UINT32_MAX,UINT32_MAX);
     /* Match i2c-mt65xx.c I2C_POLLING_TIMEOUT=50ms and its final STAT
      * sample. A thread may be descheduled between START and the first
@@ -109,7 +109,7 @@ static int cam_bus_transfer_n(struct cam_probe_bus *b,uint8_t slave,
     if(start&~(1u<<14))return cam_bus_request_fault(b,EBUSY,status,start);
     e=cam_bus_terminal_check(b,status);
     if(e)return cam_bus_request_fault(b,e,status,start);
-    int result=(status&6)?ENXIO:0; /* a qualified NACK is not an ACK */
+    int result=(status&6)?CAM_FAIL(ENXIO):0; /* a qualified NACK is not an ACK */
     uint32_t pending=cam_rr(b->base,CAM_I2C_FIFO)&31;
     if((!result && pending!=rx_count) || (result && pending>count))
         return cam_bus_request_fault(b,EIO,status,start);
@@ -119,7 +119,7 @@ static int cam_bus_transfer_n(struct cam_probe_bus *b,uint8_t slave,
     e=cam_bus_terminal_check(b,status);
     if(!e) {
         pending=cam_rr(b->base,CAM_I2C_FIFO)&31;
-        if((!result && pending) || (result && pending>count))e=EIO;
+        if((!result && pending) || (result && pending>count))e=CAM_FAIL(EIO);
     }
     if(e)return cam_bus_request_fault(b,e,status,start);
     if(!b->failed_status)b->last_status=status;
@@ -130,7 +130,7 @@ static int cam_bus_transfer_n(struct cam_probe_bus *b,uint8_t slave,
     if(e)return cam_bus_request_fault(b,e,status,UINT32_MAX);
     cam_rw(b->base,CAM_I2C_FIFO_CLR,1);
     e=cam_bus_terminal_check(b,0);
-    if(!e && (cam_rr(b->base,CAM_I2C_FIFO)&31))e=EIO;
+    if(!e && (cam_rr(b->base,CAM_I2C_FIFO)&31))e=CAM_FAIL(EIO);
     if(e)return cam_bus_request_fault(b,e,status,UINT32_MAX);
     cam_rw(b->base,CAM_I2C_START,0);
     e=cam_bus_controls(b,false);if(!e)e=cam_bus_idle(b);

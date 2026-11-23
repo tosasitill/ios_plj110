@@ -54,7 +54,7 @@ static int cam_out_irq_control_guard(void)
 {
     if(cam_out_irq.poison)return cam_out_irq.poison;
     if(!cam_out_irq.captured)return 0;
-    if(cam_out_irq.status.sensor_epoch!=cam_out.epoch)return ESTALE;
+    if(cam_out_irq.status.sensor_epoch!=cam_out.epoch)return CAM_FAIL(ESTALE);
     return 0;
 }
 static bool cam_out_irq_control_allowed(unsigned bank,unsigned reg,uint32_t v,bool prior)
@@ -94,10 +94,10 @@ static int cam_out_irq_mode_observe(void)
         seen[b]=cam_rr(cam_out.out[b],0x20);
         if(!cam_out_irq_control_allowed(b,CAM_OUT_IRQ_CTRL,seen[b],
            seen[b]==cam_out.expected[b][CAM_OUT_IRQ_CTRL]))return cam_out_irq_poison(ESTALE);
-        if(seen[b]!=first[b])return EAGAIN;
+        if(seen[b]!=first[b])return CAM_FAIL(EAGAIN);
     }
     /* Prior does not retire a possibly posted policy write. */
-    if(seen[pending]!=cam_out_irq.mode_next[pending])return EAGAIN;
+    if(seen[pending]!=cam_out_irq.mode_next[pending])return CAM_FAIL(EAGAIN);
     for(unsigned b=0;b<2;b++) {
         if(seen[b]!=cam_out.before[b][CAM_OUT_IRQ_CTRL])cam_out_irq.mode_owned|=1u<<b;
         cam_out.expected[b][CAM_OUT_IRQ_CTRL]=seen[b];
@@ -110,7 +110,7 @@ static int cam_out_irq_mode_write(unsigned bank,uint32_t bit)
 {
     uint32_t next;
     int e=cam_out_guard();if(e)return e;
-    if(cam_out_irq.mode_bank<2 || cam_out_irq.ack_pending || cam_out.commit_pending)return EBUSY;
+    if(cam_out_irq.mode_bank<2 || cam_out_irq.ack_pending || cam_out.commit_pending)return CAM_FAIL(EBUSY);
     next=(cam_out.expected[bank][CAM_OUT_IRQ_CTRL]&~1u)|(bit&1);
     if(next==cam_out.expected[bank][CAM_OUT_IRQ_CTRL])return 0;
     /* Journal both possible policy effects BEFORE the ordinary CSR write.
@@ -125,7 +125,7 @@ static int cam_out_irq_require_wclr(void)
 {
     int e=cam_out_guard();if(e)return e;
     if(!cam_out_irq.captured || !cam_out_irq.mode_ready || cam_out_irq.raw_disabled ||
-       cam_out_irq.mode_bank<2)return EBUSY;
+       cam_out_irq.mode_bank<2)return CAM_FAIL(EBUSY);
     for(unsigned b=0;b<2;b++) {
         uint32_t control=cam_rr(cam_out.out[b],0x20);
         bool allowed=false;
@@ -164,12 +164,12 @@ static int cam_out_irq_ack_observe(void)
 {
     uint32_t raw;
     int e;
-    if(!cam_out_irq.ack_pending)return EINVAL;
+    if(!cam_out_irq.ack_pending)return CAM_FAIL(EINVAL);
     for(unsigned s=0;s<2;s++) {
         e=cam_out_irq_sample(&raw);if(e)return e;
         if(raw) {
             if(cam_out_irq.ack_clear_seen)return cam_out_irq_poison(ESTALE);
-            return EAGAIN; /* still posted; NEVER write W1C again */
+            return CAM_FAIL(EAGAIN); /* still posted; NEVER write W1C again */
         }
         cam_out_irq.ack_clear_seen=true;
         if(!s)delay(1);
@@ -180,7 +180,7 @@ static int cam_out_irq_ack_begin(unsigned kind)
 {
     uint32_t raw;
     int e;
-    if(cam_out_irq.ack_pending)return EBUSY;
+    if(cam_out_irq.ack_pending)return CAM_FAIL(EBUSY);
     e=cam_out_irq_sample(&raw);if(e)return e;
     if(raw!=CAM_OUT_IRQ_DONE)return cam_out_irq_poison(ESTALE);
     cam_out_irq.ack_pending=kind;cam_out_irq.ack_clear_seen=false; /* BEFORE W1C */
@@ -205,7 +205,7 @@ static int cam_out_irq_wait(int (*step)(void))
 static int cam_out_irq_history_finish(void)
 {
     int e;
-    if(cam_out_irq.ack_pending!=CAM_OUT_IRQ_HISTORY)return EINVAL;
+    if(cam_out_irq.ack_pending!=CAM_OUT_IRQ_HISTORY)return CAM_FAIL(EINVAL);
     e=cam_out_irq_ack_observe();if(e)return e;
     cam_out_irq.ack_pending=0;cam_out_irq.ack_clear_seen=false;
     return cam_out_irq_clear_baseline();
@@ -240,7 +240,7 @@ static int cam_out_irq_open_locked(void)
 static int cam_out_irq_precommit(void)
 {
     int e;
-    if(cam_out_irq.ack_pending || cam_out_irq.mode_bank<2 || cam_out.commit_pending)return EBUSY;
+    if(cam_out_irq.ack_pending || cam_out_irq.mode_bank<2 || cam_out.commit_pending)return CAM_FAIL(EBUSY);
     e=cam_out_irq_clear_baseline();if(e)return cam_out_irq_error(e);
     if(cam_out_irq_sequence==UINT64_MAX)return cam_out_irq_poison(EOVERFLOW);
     cam_out_irq.status.command=++cam_out_irq_sequence;
@@ -253,7 +253,7 @@ static int cam_out_irq_finish_commit(void)
     uint32_t raw,inner[CAM_OUT_REGS];
     int e;
     if(!cam_out.commit_pending || !cam_out_irq.status.command ||
-       cam_out_irq.status.command==cam_out_irq.status.completed)return EINVAL;
+       cam_out_irq.status.command==cam_out_irq.status.completed)return CAM_FAIL(EINVAL);
     if(cam_out_irq.ack_pending && cam_out_irq.ack_pending!=CAM_OUT_IRQ_COMMAND)
         return cam_out_irq_poison(ESTALE);
     if(!cam_out_irq.ack_pending) {

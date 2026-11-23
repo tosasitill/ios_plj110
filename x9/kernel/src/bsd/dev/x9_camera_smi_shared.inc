@@ -55,30 +55,30 @@ static int cam_smi_shared_voter_guard(void)
 {
     int e;
     if(!cam_smi_shared.captured)return 0;
-    if(!cam_smi.held || cam_smi_shared.epoch!=cam_smi.epoch)return ESTALE;
+    if(!cam_smi.held || cam_smi_shared.epoch!=cam_smi.epoch)return CAM_FAIL(ESTALE);
     e=cam_smi_parent_guard();if(e)return e;
     for(unsigned g=0;g<CAM_SMI_SHARED_GROUPS;g++) {
         unsigned cg=cam_smi_shared_cg[g];uint32_t mask=cam_smi_shared_mask[g];
-        if(cam_rr(cam_mm.receive.hwv,0x11800+cg*4)&mask)return EBUSY;
+        if(cam_rr(cam_mm.receive.hwv,0x11800+cg*4)&mask)return CAM_FAIL(EBUSY);
         for(unsigned n=0;n<CAM_SMI_SHARED_XPUS;n++) {
             uint32_t expected=cam_smi_shared.votes[g][n];
             if(!n && g<2 && (cam_smi.seen&(1u<<g)))
                 expected=cam_smi.gate[g].ap_expected&mask;
-            if((cam_smi_shared_vote(n,cg*12+8)&mask)!=expected)return ESTALE;
+            if((cam_smi_shared_vote(n,cg*12+8)&mask)!=expected)return CAM_FAIL(ESTALE);
         }
         if(g>=2 && (cam_rr(cam_mm.receive.hwv,0x12200+cg*4)&mask)!=cam_smi_shared.global[g])
-            return ESTALE;
+            return CAM_FAIL(ESTALE);
     }
     /* LARB44's sibling RAW_C domain: no speculative physical-CG access
      * when PM_ACK is off, and no domain enable to inspect it. */
     if((cam_rr(cam_mm.receive.hwv,0x20708)&(1u<<11))!=cam_smi_shared.rawc_ap ||
         (cam_rr(cam_mm.receive.hwv,0x11318)&(1u<<11))!=cam_smi_shared.rawc_global ||
-        (cam_rr(cam_mm.receive.hwv,0x12900)&(1u<<11))!=cam_smi_shared.rawc_ack)return ESTALE;
-    if(cam_rr(cam_mm.receive.hwv,0x1131c)&(1u<<11))return EBUSY;
+        (cam_rr(cam_mm.receive.hwv,0x12900)&(1u<<11))!=cam_smi_shared.rawc_ack)return CAM_FAIL(ESTALE);
+    if(cam_rr(cam_mm.receive.hwv,0x1131c)&(1u<<11))return CAM_FAIL(EBUSY);
     for(unsigned n=1;n<CAM_SMI_SHARED_XPUS;n++)
         if((cam_smi_shared_vote(n,0x708)&(1u<<11))!=cam_smi.status.shared.rawc_votes[n])
-            return ESTALE;
-    if((cam_rr(cam_mm.cam_cg,0)&1)!=cam_smi_shared.gate[1])return ESTALE;
+            return CAM_FAIL(ESTALE);
+    if((cam_rr(cam_mm.cam_cg,0)&1)!=cam_smi_shared.gate[1])return CAM_FAIL(ESTALE);
     return 0;
 }
 static int cam_smi_shared_capture_locked(void)
@@ -86,18 +86,18 @@ static int cam_smi_shared_capture_locked(void)
     static vm_offset_t xpu;
     uint32_t votes[CAM_SMI_SHARED_GROUPS][CAM_SMI_SHARED_XPUS];
     struct x9_camera_smi_shared_status *s=&cam_smi.status.shared;int e;
-    if(cam_smi_shared.captured)return EALREADY;
+    if(cam_smi_shared.captured)return CAM_FAIL(EALREADY);
     e=cam_smi_parent_guard();if(e)return e;
     /* Separate from the existing AP-only 22000-byte power mapping. */
     if(!xpu)xpu=ml_io_map(0x31c30000,0x45000);
-    if(!xpu)return ENOMEM;
+    if(!xpu)return CAM_FAIL(ENOMEM);
     memset(&cam_smi_shared,0,sizeof(cam_smi_shared));cam_smi_shared.xpu=xpu;
     cam_smi_shared.epoch=cam_smi.epoch;s->flags=X9_CAM_SMI_SHARED_ATTEMPTED;
     for(unsigned sample=0;sample<2;sample++) {
         e=cam_smi_parent_guard();if(e)return cam_smi_shared_fault(e);
         for(unsigned g=0;g<CAM_SMI_SHARED_GROUPS;g++) {
             unsigned cg=cam_smi_shared_cg[g];uint32_t mask=cam_smi_shared_mask[g];
-            if(cam_rr(cam_mm.receive.hwv,0x11800+cg*4)&mask)return cam_smi_shared_fault(EBUSY);
+            if(cam_rr(cam_mm.receive.hwv,0x11800+cg*4)&mask)return cam_smi_shared_fault(CAM_FAIL(EBUSY));
             for(unsigned n=0;n<CAM_SMI_SHARED_XPUS;n++)
                 votes[g][n]=cam_smi_shared_vote(n,cg*12+8)&mask;
         }
@@ -114,13 +114,13 @@ static int cam_smi_shared_capture_locked(void)
             for(unsigned n=0;n<CAM_SMI_SHARED_XPUS;n++)
                 s->rawc_votes[n]=cam_smi_shared_vote(n,0x708)&(1u<<11);
             cam_smi_shared.captured=true;
-        } else if(memcmp(votes,cam_smi_shared.votes,sizeof(votes)))return cam_smi_shared_fault(ESTALE);
+        } else if(memcmp(votes,cam_smi_shared.votes,sizeof(votes)))return cam_smi_shared_fault(CAM_FAIL(ESTALE));
         e=cam_smi_shared_voter_guard();if(e)return cam_smi_shared_fault(e);
         for(unsigned g=0;g<2;g++)
             if((cam_rr(cam_mm.receive.hwv,0x12200+cam_smi_shared_cg[g]*4)&cam_smi_shared_mask[g])!=cam_smi_shared.global[g])
-                return cam_smi_shared_fault(ESTALE);
+                return cam_smi_shared_fault(CAM_FAIL(ESTALE));
         if((cam_rr(cam_smi.gate[0].cg,0)&(1u<<15))!=cam_smi_shared.gate[0] ||
-            (cam_rr(cam_smi.gate[1].cg,0)&4)!=cam_smi_shared.gate[2])return cam_smi_shared_fault(ESTALE);
+            (cam_rr(cam_smi.gate[1].cg,0)&4)!=cam_smi_shared.gate[2])return cam_smi_shared_fault(CAM_FAIL(ESTALE));
         delay(10);
     }
     memcpy(s->votes,cam_smi_shared.votes,sizeof(s->votes));
@@ -155,14 +155,14 @@ static int cam_smi_shared_control_guard(bool qualify_pending)
     for(unsigned word=0;word<CAM_SMI_SHARED_WORDS;word++)if(cam_smi_shared.sampled&(1u<<word)) {
         uint32_t value=cam_rr(cam_smi_shared_base(word),cam_smi_shared_offsets[word]);
         cam_smi.status.shared.after[word]=value;
-        if(value!=cam_smi_shared.expected[word])return ESTALE;
+        if(value!=cam_smi_shared.expected[word])return CAM_FAIL(ESTALE);
     }
-    return cam_smi_shared.pending&&!qualify_pending?EBUSY:0;
+    return cam_smi_shared.pending&&!qualify_pending?CAM_FAIL(EBUSY):0;
 }
 static int cam_smi_shared_write(unsigned word,uint32_t value)
 {
     uint32_t old;int e;
-    if(word>=CAM_SMI_SHARED_WORDS || value!=cam_smi_shared_targets[word])return EINVAL;
+    if(word>=CAM_SMI_SHARED_WORDS || value!=cam_smi_shared_targets[word])return CAM_FAIL(EINVAL);
     e=cam_rx_session_guard();if(e)return e;
     e=cam_smi_larb_idle();if(e)return e;
     e=cam_smi_shared_control_guard(false);if(e)return e;
@@ -182,11 +182,11 @@ static int cam_smi_shared_open_locked(void)
 {
     static vm_offset_t common;
     uint32_t a[CAM_SMI_SHARED_WORDS],b[CAM_SMI_SHARED_WORDS];int e;
-    if(!cam_smi_shared.captured || cam_smi_shared.held)return ESTALE;
+    if(!cam_smi_shared.captured || cam_smi_shared.held)return CAM_FAIL(ESTALE);
     e=cam_smi_shared_voter_guard();if(e)return cam_smi_shared_fault(e);
     e=cam_smi_clock_only_guard();if(e)return cam_smi_shared_fault(e);
     if(!common)common=ml_io_map(0x3c808000,0x1000);
-    if(!common)return cam_smi_shared_fault(ENOMEM);
+    if(!common)return cam_smi_shared_fault(CAM_FAIL(ENOMEM));
     cam_smi_shared.common=common;
     for(unsigned sample=0;sample<2;sample++) {
         e=cam_rx_session_guard();if(e)return cam_smi_shared_fault(e);
@@ -194,7 +194,7 @@ static int cam_smi_shared_open_locked(void)
         for(unsigned word=0;word<CAM_SMI_SHARED_WORDS;word++)
             b[word]=cam_rr(cam_smi_shared_base(word),cam_smi_shared_offsets[word]);
         if(!sample)memcpy(a,b,sizeof(a));
-        else if(memcmp(a,b,sizeof(a)))return cam_smi_shared_fault(ESTALE);
+        else if(memcmp(a,b,sizeof(a)))return cam_smi_shared_fault(CAM_FAIL(ESTALE));
         delay(10);
     }
     memcpy(cam_smi_shared.before,a,sizeof(a));memcpy(cam_smi_shared.expected,a,sizeof(a));
@@ -215,9 +215,9 @@ static int cam_smi_shared_retirement_guard(uint64_t epoch)
 {
     int e;
     if(!cam_smi_shared.captured)return 0;
-    if(epoch!=cam_smi_shared.epoch)return ESTALE;
+    if(epoch!=cam_smi_shared.epoch)return CAM_FAIL(ESTALE);
     if(!cam_smi_shared.pending)return cam_smi_shared_control_guard(false);
-    if(cam_smi_shared.restoring)return EBUSY;
+    if(cam_smi_shared.restoring)return CAM_FAIL(EBUSY);
     for(unsigned sample=0;sample<2;sample++) {
         e=cam_smi_shared_control_guard(true);if(e)return e;
         delay(10);
@@ -229,7 +229,7 @@ static int cam_smi_shared_close_locked(void)
 {
     struct x9_camera_smi_shared_status *s=&cam_smi.status.shared;int e;
     if(!cam_smi_shared.captured)return 0;
-    if(cam_smi_shared.close_attempted)return ESTALE;
+    if(cam_smi_shared.close_attempted)return CAM_FAIL(ESTALE);
     cam_smi_shared.close_attempted=true;
     e=cam_smi_shared_retirement_guard(cam_smi.epoch);
     if(!e && cam_smi_shared.held)e=cam_rx_session_guard();

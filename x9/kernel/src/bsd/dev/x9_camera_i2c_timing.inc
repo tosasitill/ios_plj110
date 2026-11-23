@@ -24,13 +24,13 @@ static int cam_bus_timing_profile(uint64_t hz, uint32_t timing, uint32_t low,
 {
     *rate=0;
     if((timing&~0x073fu) || (low&~0x01ffu) || (ext&~0xff01u) ||
-       (divreg&~0x1f1fu) || hs || sda || io!=3 || mis || !(ext&1))return ENOTSUP;
+       (divreg&~0x1f1fu) || hs || sda || io!=3 || mis || !(ext&1))return CAM_FAIL(ENOTSUP);
     unsigned div=(divreg&31)+1;
-    if(((divreg>>8)&31)+1!=div)return ENOTSUP;
+    if(((divreg>>8)&31)+1!=div)return CAM_FAIL(ENOTSUP);
     unsigned high=(((timing>>8)&7)+1)*((timing&63)+1);
     unsigned l=(((low>>6)&7)+1)*((low&63)+1);
     unsigned total=high+l;
-    if(high<2 || l<2)return ENOTSUP;
+    if(high<2 || l<2)return CAM_FAIL(ENOTSUP);
     /* Charge one count against the full period, matching the upstream
      * LS solver's +1 slack. Charge one against EACH phase for conservative
      * tHIGH>=4us / tLOW>=4.7us. Do not round a >100kHz bound down to 100k. */
@@ -38,7 +38,7 @@ static int cam_bus_timing_profile(uint64_t hz, uint32_t timing, uint32_t low,
     if(hz>period*100000 || hz-1<(uint64_t)div*total*20000 ||
        (uint64_t)div*(high-1)*1000000<hz*4 ||
        (uint64_t)div*(l-1)*10000000<hz*47 ||
-       (uint64_t)div*(ext>>8)*1000000<hz*5)return ENOTSUP;
+       (uint64_t)div*(ext>>8)*1000000<hz*5)return CAM_FAIL(ENOTSUP);
     *rate=(uint32_t)((hz+period-1)/period);
     return 0;
 }
@@ -77,7 +77,7 @@ static int cam_bus_timing_borrow(struct cam_probe_bus *b)
     unsigned l=(((low>>6)&7)+1)*((low&63)+1);
     uint64_t period=(uint64_t)div*(high+l);
     uint32_t rate=period?(uint32_t)((hz+period-1)/period):0;
-    if(!e && ((hs&0x83) || (io&3)!=3 || high<2 || l<2 || !rate || rate>b->max_hz))e=ENOTSUP;
+    if(!e && ((hs&0x83) || (io&3)!=3 || high<2 || l<2 || !rate || rate>b->max_hz))e=CAM_FAIL(ENOTSUP);
     if(!e)b->timing_hz=rate;
     printf("X9 CAMERA AP TIMING BORROW: gate=%x source_hz=%llu timing=%x low=%x hs=%x div=%x io=%x hz=%u max=%u errno=%d\n",
         b->gate_bit,hz,timing,low,hs,divreg,io,rate,b->max_hz,e);
@@ -119,7 +119,7 @@ static int cam_bus_init_timing(struct cam_probe_bus *b)
             }
         }
     }
-    if(!found)return ENOTSUP;
+    if(!found)return CAM_FAIL(ENOTSUP);
     e=cam_bus_controls(b,false);if(!e)e=cam_bus_idle(b);if(e)return e;
     /* Journal was captured/owned before writes. Do not softreset, change
      * MCU interrupt routing, APDMA or shared shadow mode to get admission. */

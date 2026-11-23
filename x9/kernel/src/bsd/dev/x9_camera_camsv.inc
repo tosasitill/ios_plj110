@@ -23,10 +23,10 @@ static int cam_irq_completed_frame_guard(const struct x9_camera_camsv_slot *,
 int x9_camera_camsv_arm(struct x9_camera_camsv_slot *slot,
     const struct x9_camera_camsv_request *request,const struct x9_camera_camsv_dma *dma)
 {
-    if(!slot || !request || !dma)return EINVAL;
+    if(!slot || !request || !dma)return CAM_FAIL(EINVAL);
     const struct x9_camera_camsv_request r=*request;
     const struct x9_camera_camsv_dma d=*dma;
-    if(!x9_camera_sensor_valid(r.frame.sensor))return EINVAL;
+    if(!x9_camera_sensor_valid(r.frame.sensor))return CAM_FAIL(EINVAL);
     const struct x9_camera_sensor *s=&sensors[r.frame.sensor-1];
     int e=cam_completed_layout(s,&r.frame);
     if(!e)e=cam_completed_controls(s,&r.frame);
@@ -36,21 +36,21 @@ int x9_camera_camsv_arm(struct x9_camera_camsv_slot *slot,
         !r.frame.generation || !r.frame.capture_id || !r.iova || (r.iova&0x3fffull) ||
         r.iova>=0x400000000ull || r.frame.bytes>0x400000000ull-r.iova ||
         d.version!=X9_CAMERA_CAMSV_VERSION || d.reserved || !d.context ||
-        !d.lease || !d.check || !d.backing))e=EINVAL;
+        !d.lease || !d.check || !d.backing))e=CAM_FAIL(EINVAL);
     if(e)return e; /* no callback/hardware/raw access on malformed inputs */
     lck_mtx_lock(&camera_camsv_lock);
     if(slot->state==X9_CAMSV_RETAINED)e=slot->last_errno?slot->last_errno:EIO;
-    else if(slot->state!=X9_CAMSV_EMPTY && slot->state!=X9_CAMSV_RETIRED)e=EBUSY;
+    else if(slot->state!=X9_CAMSV_EMPTY && slot->state!=X9_CAMSV_RETIRED)e=CAM_FAIL(EBUSY);
     else if(slot->state==X9_CAMSV_RETIRED) {
         const struct x9_camera_camsv_request *old=&slot->request;
         if(d.backing!=slot->dma.backing || d.context!=slot->dma.context ||
-            d.check!=slot->dma.check)e=EINVAL;
-        else if(r.frame.generation<old->frame.generation)e=ESTALE;
+            d.check!=slot->dma.check)e=CAM_FAIL(EINVAL);
+        else if(r.frame.generation<old->frame.generation)e=CAM_FAIL(ESTALE);
         else if(r.frame.generation==old->frame.generation) {
             /* Hardware sequence can wrap through zero. Require an unambiguous
              * forward delta; never widen it to the 64-bit source capture_id. */
             uint32_t delta=r.inner_sequence-old->inner_sequence;
-            if(r.frame.capture_id<=old->frame.capture_id || !delta || delta>=0x80000000u)e=ESTALE;
+            if(r.frame.capture_id<=old->frame.capture_id || !delta || delta>=0x80000000u)e=CAM_FAIL(ESTALE);
         }
     }
     if(!e) {
@@ -69,15 +69,15 @@ int x9_camera_camsv_arm(struct x9_camera_camsv_slot *slot,
 static int cam_camsv_finish(struct x9_camera_camsv_slot *slot,
     const struct x9_camera_camsv_irq *snapshot,bool native_worker)
 {
-    if(!slot || !snapshot)return EINVAL;
+    if(!slot || !snapshot)return CAM_FAIL(EINVAL);
     const struct x9_camera_camsv_irq irq=*snapshot;
     bool drop=false;
     lck_mtx_lock(&camera_camsv_lock);int e=0;
     if(slot->state==X9_CAMSV_RETAINED)e=slot->last_errno?slot->last_errno:EIO;
-    else if(slot->state!=X9_CAMSV_ARMED)e=ESTALE;
-    else if(irq.version!=X9_CAMERA_CAMSV_VERSION || irq.reserved || irq.reserved1)e=EINVAL;
+    else if(slot->state!=X9_CAMSV_ARMED)e=CAM_FAIL(ESTALE);
+    else if(irq.version!=X9_CAMERA_CAMSV_VERSION || irq.reserved || irq.reserved1)e=CAM_FAIL(EINVAL);
     else if(irq.generation!=slot->request.frame.generation ||
-        irq.capture_id!=slot->request.frame.capture_id)e=ESTALE;
+        irq.capture_id!=slot->request.frame.capture_id)e=CAM_FAIL(ESTALE);
     if(e)goto out;
 
     /* Standalone finish rejects invalidated sessions before any lease/cache
@@ -89,7 +89,7 @@ static int cam_camsv_finish(struct x9_camera_camsv_slot *slot,
         st.generation==irq.generation && st.sensor==slot->request.frame.sensor;
     drop=native_worker && cam_core_retiring_locked(irq.generation,slot->request.frame.sensor);
     lck_mtx_unlock(&camera_lock);
-    if(!current && !drop){e=ESTALE;goto out;}
+    if(!current && !drop){e=CAM_FAIL(ESTALE);goto out;}
 
     /* Treat any central error or any CQ status other than setting-done as
      * uncertain. This includes known code/VB/DMA/OTF errors and unknown bits.

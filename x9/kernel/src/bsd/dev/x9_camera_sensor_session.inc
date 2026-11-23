@@ -48,10 +48,10 @@ static int cam_sensor_ap_local_guard(struct cam_sensor_ap *ap)
     uint8_t enable=0;
     int e;
     if(ap->bus!=&j->sensor || !cam_sensor_live.epoch || cam_sensor_live.close_attempted)
-        return ESTALE;
-    if(ap->slave!=(cam_sensor_slave(cam_sensor_live.probe.sensor)))return EINVAL;
+        return CAM_FAIL(ESTALE);
+    if(ap->slave!=(cam_sensor_slave(cam_sensor_live.probe.sensor)))return CAM_FAIL(EINVAL);
     e=cam_wl_guard(j,false,&enable);
-    if(!e && (enable&j->board.wl_mask)!=j->board.wl_mask)e=EBUSY;
+    if(!e && (enable&j->board.wl_mask)!=j->board.wl_mask)e=CAM_FAIL(EBUSY);
     if(!e)e=cam_clock_check(j,false,true);
     if(!e)e=cam_pins_guard(j,false);
     return e;
@@ -79,7 +79,7 @@ static int cam_sensor_ap_read(void *context, uint16_t reg, uint8_t *v)
     uint8_t byte=0;
     int e=cam_sensor_ap_guard(ap);
     if(!e && sensors[cam_sensor_live.probe.sensor-1].table_word &&
-       (!cam_journal.page_known || cam_journal.page_pending || cam_journal.sensor_page!=0x4000))e=ESTALE;
+       (!cam_journal.page_known || cam_journal.page_pending || cam_journal.sensor_page!=0x4000))e=CAM_FAIL(ESTALE);
     if(!e)e=cam_bus_transfer(ap->bus,ap->slave,tx,2,&byte);
     if(!e)*v=byte;
     return e;
@@ -91,10 +91,10 @@ static int cam_sensor_ap_write(void *context, uint16_t reg, uint8_t v)
     bool fab=ap->slave==0x10 && ((reg==0x0a02 && v==0x7f) || (reg==0x0a00 && v<=1));
     bool mirror=reg==0x0101 && v==sensors[cam_sensor_live.probe.sensor-1].mirror;
     int e;
-    if(cam_sensor_forbidden(reg) && !mirror && !fab)return EPERM;
+    if(cam_sensor_forbidden(reg) && !mirror && !fab)return CAM_FAIL(EPERM);
     e=cam_sensor_ap_guard(ap);
     if(!e && sensors[cam_sensor_live.probe.sensor-1].table_word &&
-       (!cam_journal.page_known || cam_journal.page_pending || cam_journal.sensor_page!=0x4000))e=ESTALE;
+       (!cam_journal.page_known || cam_journal.page_pending || cam_journal.sensor_page!=0x4000))e=CAM_FAIL(ESTALE);
     if(!e)e=cam_bus_transfer(ap->bus,ap->slave,tx,3,NULL);
     return e;
 }
@@ -104,7 +104,7 @@ static int cam_sensor_ap_read_word(void *context,uint16_t reg,uint16_t *v)
     const uint8_t tx[2]={(uint8_t)(reg>>8),(uint8_t)reg};
     int e=cam_sensor_ap_guard(ap);
     if(!e && (cam_sensor_live.probe.sensor!=X9_CAMERA_ULTRAWIDE ||
-       !cam_journal.page_known || cam_journal.page_pending || cam_journal.sensor_page!=0x4000))e=ESTALE;
+       !cam_journal.page_known || cam_journal.page_pending || cam_journal.sensor_page!=0x4000))e=CAM_FAIL(ESTALE);
     if(!e)e=cam_bus_transfer_n(ap->bus,ap->slave,tx,2,bytes,2);
     if(!e)*v=(uint16_t)((uint16_t)bytes[0]<<8)|bytes[1];
     return e;
@@ -114,14 +114,14 @@ static int cam_sensor_ap_write_word(void *context,uint16_t reg,uint16_t v)
     struct cam_sensor_ap *ap=context;struct cam_probe_journal *j=&cam_journal;
     uint8_t tx[4]={(uint8_t)(reg>>8),(uint8_t)reg,(uint8_t)(v>>8),(uint8_t)v};
     if(cam_sensor_live.probe.sensor!=X9_CAMERA_ULTRAWIDE ||
-       cam_sensor_live.phase!=CAM_SENSOR_CONFIGURING || j->page_pending)return EPERM;
-    if(reg==0xfcfc) {if(!cam_uw_page(v))return EPERM;}
+       cam_sensor_live.phase!=CAM_SENSOR_CONFIGURING || j->page_pending)return CAM_FAIL(EPERM);
+    if(reg==0xfcfc) {if(!cam_uw_page(v))return CAM_FAIL(EPERM);}
     else {
-        if(!j->page_known)return ESTALE;
+        if(!j->page_known)return CAM_FAIL(ESTALE);
         if(j->sensor_page==0x4000 && (reg==0x100 || reg==0x101 || reg==0x103 ||
-           reg==0x104 || reg==0x16 || reg==0x17))return EPERM;
+           reg==0x104 || reg==0x16 || reg==0x17))return CAM_FAIL(EPERM);
         if(j->sensor_page==0x4000 && ((reg==0 && v!=0xe && v!=0x38e5) ||
-           ((reg==0x6014 || reg==0x6018) && v!=1)))return EPERM;
+           ((reg==0x6014 || reg==0x6018) && v!=1)))return CAM_FAIL(EPERM);
     }
     int e=cam_sensor_ap_guard(ap);if(e)return e;
     if(reg==0xfcfc)j->page_pending=true; /* before ambiguous transfer */
@@ -134,7 +134,7 @@ static int cam_sensor_ap_write_word(void *context,uint16_t reg,uint16_t v)
 #include "x9_camera_sensor_calibration.inc"
 static int cam_sensor_session_match(uint64_t epoch)
 {
-    if(!epoch || epoch!=cam_sensor_live.epoch)return ESTALE;
+    if(!epoch || epoch!=cam_sensor_live.epoch)return CAM_FAIL(ESTALE);
     if(cam_sensor_live.close_attempted)return cam_sensor_live.close_error?cam_sensor_live.close_error:ESTALE;
     return 0;
 }
@@ -146,12 +146,12 @@ static int cam_sensor_session_open_locked(uint32_t which,uint64_t *epoch,
     int e;
     *epoch=0;
     memset(r,0,sizeof(*r));r->version=1;r->sensor=which;
-    if(!x9_camera_sensor_valid(which))e=EINVAL;
-    else if(st.mode!=2 && st.mode!=3)e=EPERM;
-    else if(cam_sensor_live.epoch || cam_mm_live.epoch)e=EBUSY;
-    else if(session.capture || session.stream || session.latched)e=EBUSY;
-    else if(cam_probe_latched || cam_resources_latched)e=EIO;
-    else if(cam_sensor_live.serial==UINT64_MAX)e=EOVERFLOW;
+    if(!x9_camera_sensor_valid(which))e=CAM_FAIL(EINVAL);
+    else if(st.mode!=2 && st.mode!=3)e=CAM_FAIL(EPERM);
+    else if(cam_sensor_live.epoch || cam_mm_live.epoch)e=CAM_FAIL(EBUSY);
+    else if(session.capture || session.stream || session.latched)e=CAM_FAIL(EBUSY);
+    else if(cam_probe_latched || cam_resources_latched)e=CAM_FAIL(EIO);
+    else if(cam_sensor_live.serial==UINT64_MAX)e=CAM_FAIL(EOVERFLOW);
     else e=0;
     if(e) {
         r->last_errno=e;
@@ -179,9 +179,9 @@ static int cam_sensor_session_open_locked(uint32_t which,uint64_t *epoch,
     /* Persist only a matched, physically reset, standby sensor. Unexpected
      * stream/hold is not fixed with a guessed stream-off/group release. */
     if(!e)e=cam_sensor_ap_read(&ap,0x0100,&byte);
-    if(!e && byte)e=EBUSY;
+    if(!e && byte)e=CAM_FAIL(EBUSY);
     if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);
-    if(!e && byte)e=EBUSY;
+    if(!e && byte)e=CAM_FAIL(EBUSY);
     if(e)cam_sensor_session_fault(e);
     else cam_sensor_live.phase=CAM_SENSOR_STANDBY;
     cam_sensor_live.probe.i2c_status[0]=cam_journal.sensor.last_status;
@@ -239,7 +239,7 @@ static int cam_sensor_session_close_locked(uint64_t epoch,struct x9_camera_probe
     if(e)return e;
     /* An independent sensor caller cannot remove supplies below a capture
      * attempt. Core stop must clear capture only after actual HW drain. */
-    if(session.capture)return EBUSY;
+    if(session.capture)return CAM_FAIL(EBUSY);
     /* Normal lens release first, then restore the borrowed sensor-open
      * VCM mode, before close marking/reset/MM/supplier teardown. Both need
      * this still-powered AP bus and the independent capture retirement. */
@@ -306,14 +306,14 @@ static int cam_sensor_session_close_locked(uint64_t epoch,struct x9_camera_probe
 int x9_camera_sensor_session_open(uint32_t which,uint64_t *epoch,struct x9_camera_probe *r)
 {
     int e;
-    if(!epoch || !r)return EINVAL;
+    if(!epoch || !r)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_control_lock);
     if(session.power) {
         /* A standalone caller cannot compete with an adapter's power
          * attempt. Its future internal power callback uses _locked after
          * the core has intentionally journaled session.power=true. */
         *epoch=0;memset(r,0,sizeof(*r));r->version=1;r->sensor=which;
-        r->last_errno=EBUSY;e=EBUSY;
+        r->last_errno=EBUSY;e=CAM_FAIL(EBUSY);
     } else e=cam_sensor_session_open_locked(which,epoch,r);
     lck_mtx_unlock(&camera_control_lock);
     return e;
@@ -321,7 +321,7 @@ int x9_camera_sensor_session_open(uint32_t which,uint64_t *epoch,struct x9_camer
 int x9_camera_sensor_session_configure(uint64_t epoch,struct x9_camera_config *r)
 {
     int e;
-    if(!r)return EINVAL;
+    if(!r)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_control_lock);
     e=cam_sensor_session_configure_locked(epoch,r);
     lck_mtx_unlock(&camera_control_lock);
@@ -332,30 +332,30 @@ int x9_camera_sensor_session_prepare_receiver(uint64_t epoch,struct x9_camera_re
     struct cam_sensor_ap ap;
     uint8_t byte=0;
     int e;
-    if(!r)return EINVAL;
+    if(!r)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_control_lock);
     memset(r,0,sizeof(*r));r->version=1;r->sensor=cam_sensor_live.probe.sensor;
     e=cam_sensor_session_match(epoch);
     if(!e && cam_sensor_live.error)e=cam_sensor_live.error;
-    if(!e && cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED)e=EBUSY;
-    if(!e && (session.capture || session.stream))e=EBUSY;
-    if(!e && cam_rx_sensor_held_locked(epoch))e=EALREADY;
+    if(!e && cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED)e=CAM_FAIL(EBUSY);
+    if(!e && (session.capture || session.stream))e=CAM_FAIL(EBUSY);
+    if(!e && cam_rx_sensor_held_locked(epoch))e=CAM_FAIL(EALREADY);
     if(!e) {
         ap=(struct cam_sensor_ap){&cam_journal.sensor,
             cam_sensor_slave(cam_sensor_live.probe.sensor)};
         e=cam_sensor_ap_read(&ap,0x0100,&byte);
-        if(!e && byte)e=EBUSY;
+        if(!e && byte)e=CAM_FAIL(EBUSY);
         if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);
-        if(!e && byte)e=EBUSY;
+        if(!e && byte)e=CAM_FAIL(EBUSY);
         if(e)cam_sensor_session_fault(e);
         else e=cam_rx_sensor_prepare_locked(epoch,r);
         /* MM take can wait on several voters. Re-prove the powered sensor
          * and consumed receiver after those waits, not only at admission. */
         if(!e) {
             e=cam_sensor_ap_read(&ap,0x0100,&byte);
-            if(!e && byte)e=EBUSY;
+            if(!e && byte)e=CAM_FAIL(EBUSY);
             if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);
-            if(!e && byte)e=EBUSY;
+            if(!e && byte)e=CAM_FAIL(EBUSY);
             if(!e)e=cam_sensor_ap_guard(&ap);
             if(e)cam_sensor_session_fault(e);
         }
@@ -372,26 +372,26 @@ int x9_camera_sensor_session_read8(uint64_t epoch,uint16_t reg,uint8_t *v)
     bool permitted=reg==0x0016 || reg==0x0017 || reg==0x0100 || reg==0x0104;
     uint8_t byte=0;
     int e;
-    if(!v)return EINVAL;
+    if(!v)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_control_lock);
     e=cam_sensor_session_match(epoch);
     if(!e && cam_sensor_live.error)e=cam_sensor_live.error;
     if(!e && cam_sensor_live.phase!=CAM_SENSOR_STANDBY &&
-       cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED)e=EBUSY;
+       cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED)e=CAM_FAIL(EBUSY);
     if(!e && !permitted) {
         if(cam_sensor_live.phase==CAM_SENSOR_CONFIGURED)controls=&cam_sensor_live.config;
         else e=cam_sensor_config_preflight(cam_sensor_live.probe.sensor,&cfg);
         for(unsigned i=0;!e && i<X9_CAM_CFG_SAMPLES && controls->sample[i].reg;i++)
             if(controls->sample[i].reg==reg)permitted=true;
-        if(!e && !permitted)e=EPERM;
+        if(!e && !permitted)e=CAM_FAIL(EPERM);
     }
     if(!e) {
         ap=(struct cam_sensor_ap){&cam_journal.sensor,
             cam_sensor_slave(cam_sensor_live.probe.sensor)};
         e=cam_sensor_ap_read(&ap,reg,&byte);
-        if(!e && (reg==0x0100 || reg==0x0104) && byte)e=EBUSY;
+        if(!e && (reg==0x0100 || reg==0x0104) && byte)e=CAM_FAIL(EBUSY);
         if(!e && (reg==0x0016 || reg==0x0017) &&
-           byte!=(uint8_t)(cam_sensor_live.probe.chip_id>>(reg==0x0016?8:0)))e=ENODEV;
+           byte!=(uint8_t)(cam_sensor_live.probe.chip_id>>(reg==0x0016?8:0)))e=CAM_FAIL(ENODEV);
         if(!e)e=cam_sensor_ap_guard(&ap);
         if(e)cam_sensor_session_fault(e);
         else *v=byte;
@@ -402,7 +402,7 @@ int x9_camera_sensor_session_read8(uint64_t epoch,uint16_t reg,uint8_t *v)
 int x9_camera_sensor_session_close(uint64_t epoch,struct x9_camera_probe *r)
 {
     int e;
-    if(!r)return EINVAL;
+    if(!r)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_control_lock);
     e=cam_sensor_session_close_locked(epoch,r);
     lck_mtx_unlock(&camera_control_lock);
@@ -414,10 +414,10 @@ static int cam_sensor_probe(uint32_t which,struct x9_camera_probe *r)
 {
     uint64_t epoch=0;
     int e,off=0;
-    if(!x9_camera_sensor_valid(which))return EINVAL;
+    if(!x9_camera_sensor_valid(which))return CAM_FAIL(EINVAL);
     if(cam_probe_done&(1u<<which)) {
         memset(r,0,sizeof(*r));r->version=1;r->sensor=which;r->last_errno=EALREADY;
-        return EALREADY;
+        return CAM_FAIL(EALREADY);
     }
     e=cam_sensor_session_open_locked(which,&epoch,r);
     if(epoch)off=cam_sensor_session_close_locked(epoch,r);

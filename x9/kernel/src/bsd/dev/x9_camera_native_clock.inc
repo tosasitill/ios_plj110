@@ -13,9 +13,9 @@ static struct { uint64_t epoch; unsigned sensor; } cam_native_clock_request;
 
 static int cam_native_clock_request_locked(uint64_t epoch,unsigned sensor)
 {
-    if(!epoch || (!x9_camera_sensor_valid(sensor)))return EINVAL;
+    if(!epoch || (!x9_camera_sensor_valid(sensor)))return CAM_FAIL(EINVAL);
     if(cam_native_clock_request.epoch || cam_mm_live.epoch || cam_mm.native_clock.seen)
-        return EBUSY;
+        return CAM_FAIL(EBUSY);
     cam_native_clock_request.epoch=epoch;cam_native_clock_request.sensor=sensor;
     return 0;
 }
@@ -38,14 +38,14 @@ static int cam_native_clock_conflict(struct cam_mm_journal *j,unsigned off,
     printf("X9 CAMERA NATIVE CLOCK CONFLICT: sensor_epoch=%llu mm_epoch=%llu reg=%x "
         "expected=%x observed=%x owned/uncertain/update=%u/%u/%u (retain, no overwrite)\n",
         c->sensor_epoch,c->mm_epoch,off,expected,observed,c->owned,c->uncertain,c->update_pending);
-    return ESTALE;
+    return CAM_FAIL(ESTALE);
 }
 static int cam_native_clock_source_guard(struct cam_mm_journal *j)
 {
     struct cam_native_clock_receipt *c=&j->native_clock;
-    if(!c->pll || !sweet_x9_vcore_ufs_check(c->vcore))return ENXIO;
+    if(!c->pll || !sweet_x9_vcore_ufs_check(c->vcore))return CAM_FAIL(ENXIO);
     if((cam_rr(c->pll,0xc)&0x073fffff)!=c->pcw ||
-       (cam_rr(c->pll,0x34)&0x10)!=c->fenc)return ESTALE;
+       (cam_rr(c->pll,0x34)&0x10)!=c->fenc)return CAM_FAIL(ESTALE);
     return 0;
 }
 static int cam_native_clock_guard(struct cam_mm_journal *j,bool cleanup)
@@ -55,13 +55,13 @@ static int cam_native_clock_guard(struct cam_mm_journal *j,bool cleanup)
     uint32_t cfg;
     int e;
     if(!c->seen)return 0;
-    if(c->conflict)return ESTALE;
+    if(c->conflict)return CAM_FAIL(ESTALE);
     if(c->mm_epoch!=cam_mm_live.epoch || !c->sensor_epoch ||
-       cam_native_clock_request.epoch!=c->sensor_epoch)return ESTALE;
-    if(!j->receive.smmu_owned)return ENXIO;
+       cam_native_clock_request.epoch!=c->sensor_epoch)return CAM_FAIL(ESTALE);
+    if(!j->receive.smmu_owned)return CAM_FAIL(ENXIO);
     e=x9_mm_power_validate(j->receive.power_token,X9_MM_POWER_CAMERA);if(e)return e;
     e=cam_native_clock_source_guard(j);if(e)return e;
-    if(!cleanup && (c->uncertain || c->update_pending))return EIO;
+    if(!cleanup && (c->uncertain || c->update_pending))return CAM_FAIL(EIO);
     e=cam_wait_bits(j->top,0x330,d->effect_mask,0,10000);if(e)return e;
     cfg=cam_native_clock_byte(j);
     if(cfg!=c->expected && !(cleanup && c->uncertain && cfg==c->prior))
@@ -69,7 +69,7 @@ static int cam_native_clock_guard(struct cam_mm_journal *j,bool cleanup)
     /* An issued UPDATE is never replayed. Its original wait may only be
      * retired by the real idle check and exact target readback. */
     if(c->update_pending) {
-        if(cfg!=c->expected || c->uncertain)return EIO;
+        if(cfg!=c->expected || c->uncertain)return CAM_FAIL(EIO);
         c->update_pending=false;
     }
     return 0;
@@ -84,12 +84,12 @@ static int cam_native_clock_off_guard(struct cam_mm_journal *j,bool cleanup)
         if((cam_rr(j->receive.hwv,d->global)&d->mask) ||
            (cam_rr(j->receive.hwv,d->sta)&d->mask) ||
            (cam_rr(j->top,0x270)&d->effect_mask) ||
-           (cam_rr(j->top,0x330)&d->effect_mask))return EBUSY;
+           (cam_rr(j->top,0x330)&d->effect_mask))return CAM_FAIL(EBUSY);
         for(unsigned n=0;n<CAM_SV_SIBLING_XPUS;n++) {
             uint32_t vote=n?cam_rr(cam_sv_siblings.xpu,
                 cam_sv_sibling_xpu_base(n)-0x30000+0x608):
                 cam_rr(j->receive.hwv,0x20608);
-            if(vote&d->mask)return EBUSY;
+            if(vote&d->mask)return CAM_FAIL(EBUSY);
         }
         e=cam_native_clock_guard(j,cleanup);if(e)return e;
         __asm__ volatile("dsb sy":::"memory");
@@ -114,7 +114,7 @@ static int cam_native_clock_field_write(struct cam_mm_journal *j,unsigned parent
     observed=(observed>>d->shift)&0x7f;
     if(observed!=c->expected) {
         if(observed!=c->prior)return cam_native_clock_conflict(j,d->cfg,c->expected,observed);
-        return EIO;
+        return CAM_FAIL(EIO);
     }
     c->uncertain=false;return 0;
 }
@@ -142,15 +142,15 @@ static int cam_native_clock_take(struct cam_mm_journal *j,unsigned sensor)
     uint64_t hz,vco;
     int e;
     if(!cam_native_clock_request.epoch)return 0;
-    if(cam_native_clock_request.sensor!=sensor || c->seen)return ESTALE;
+    if(cam_native_clock_request.sensor!=sensor || c->seen)return CAM_FAIL(ESTALE);
     memset(c,0,sizeof(*c));
     if(!pll)pll=ml_io_map(0x10043100,0x100);
-    if(!pll)return ENOMEM;
+    if(!pll)return CAM_FAIL(ENOMEM);
     c->pll=pll;c->pcw=cam_rr(pll,0xc)&0x073fffff;c->fenc=cam_rr(pll,0x34)&0x10;
-    if(c->fenc!=0x10 || !sweet_x9_vcore_ufs_check(c->vcore))return ENXIO;
+    if(c->fenc!=0x10 || !sweet_x9_vcore_ufs_check(c->vcore))return CAM_FAIL(ENXIO);
     vco=(26000000ull*(c->pcw&0x3fffffu)+0x3fffu)>>14;
     hz=((vco+(1u<<((c->pcw>>24)&7))-1)/(1u<<((c->pcw>>24)&7)))/8;
-    if(hz<311688000ull || hz>312312000ull)return ERANGE;
+    if(hz<311688000ull || hz>312312000ull)return CAM_FAIL(ERANGE);
     c->sensor_epoch=cam_native_clock_request.epoch;c->mm_epoch=cam_mm_live.epoch;
     c->sensor=sensor;c->entry=c->expected=cam_native_clock_byte(j);c->seen=true;
     e=cam_native_clock_parent(j,9,false);
@@ -166,10 +166,10 @@ static int cam_native_clock_restore(struct cam_mm_journal *j)
     struct cam_native_clock_receipt *c=&j->native_clock;
     int e;
     if(!c->seen)return 0;
-    if(j->seen&(1u<<X9_CAM_MM_SENINF_MUX))return EBUSY;
+    if(j->seen&(1u<<X9_CAM_MM_SENINF_MUX))return CAM_FAIL(EBUSY);
     e=cam_native_clock_off_guard(j,true);if(e)return e;
     if(c->owned)e=cam_native_clock_parent(j,c->entry&15,true);
-    if(!e && cam_native_clock_byte(j)!=c->entry)e=ESTALE;
+    if(!e && cam_native_clock_byte(j)!=c->entry)e=CAM_FAIL(ESTALE);
     if(e)return e;
     j->cfg[2]=c->entry;c->owned=false;c->seen=false;c->restored=true;
     printf("X9 CAMERA NATIVE CLOCK RESTORE: sensor_epoch=%llu mm_epoch=%llu cfg=%x "

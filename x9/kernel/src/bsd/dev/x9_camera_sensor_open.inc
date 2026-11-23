@@ -31,8 +31,8 @@ static int cam_sensor_open_guard(uint64_t deadline)
         !cam_sensor_open.close_attempted) ||
        cam_sensor_live.close_attempted || session.capture ||
        (session.stream && !cam_sensor_open.close_attempted) ||
-       !cam_journal.afvdd.taken)return ESTALE;
-    if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+       !cam_journal.afvdd.taken)return CAM_FAIL(ESTALE);
+    if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
     /* Core retains stream=true until power(false) completes. It records an
      * attempted stream, not current source activity. Close access instead
      * needs the independent source/DMA/IRQ/translation retirement receipt. */
@@ -65,7 +65,7 @@ static int cam_sensor_open_mode(uint64_t deadline,uint8_t value,bool restore)
        (restore?(!cam_sensor_open.close_attempted || cam_sensor_open.restore_issued ||
                   !cam_sensor_open.active || value!=cam_sensor_open.prior):
                 (cam_sensor_open.close_attempted || cam_sensor_open.issued || value)))
-        return EPERM;
+        return CAM_FAIL(EPERM);
     e=cam_sensor_open_guard(deadline);
     if(e)return e;
     /* BEFORE the transfer can START. A failed command is never replayed,
@@ -86,7 +86,7 @@ static int cam_sensor_open_observe(uint64_t deadline,uint8_t target)
     for(unsigned sample=0;sample<2 && !e;sample++) {
         uint8_t value=0;
         e=cam_sensor_open_read(deadline,&value);
-        if(!e && value!=target)e=ESTALE;
+        if(!e && value!=target)e=CAM_FAIL(ESTALE);
     }
     return e;
 }
@@ -106,7 +106,7 @@ static int cam_sensor_open_id(uint64_t deadline,struct x9_camera_config *r)
         if(!e) {
             cam_sensor_open.id_bytes++;
             id=(id<<8)|byte;r->observed=byte;
-            if(byte!=r->expected)e=ENXIO;
+            if(byte!=r->expected)e=CAM_FAIL(ENXIO);
         }
         if(!e)e=cam_sensor_open_guard(deadline);
     }
@@ -123,7 +123,7 @@ static int cam_sensor_open_activate(uint64_t deadline,struct x9_camera_config *r
         cam_sensor_open.prior=before;r->observed=before;
         /* All three modes are used by the supplied AK7316 drivers. Refuse
          * an unknown mode rather than guessing its restoration semantics. */
-        if(before!=0 && before!=0x20 && before!=0x40)e=ENOTSUP;
+        if(before!=0 && before!=0x20 && before!=0x40)e=CAM_FAIL(ENOTSUP);
     }
     if(!e)e=cam_sensor_open_observe(deadline,before);
     if(!e)cam_sensor_open.captured=true;
@@ -142,7 +142,7 @@ static int cam_sensor_open_prepare(uint32_t which,struct x9_camera_config *r)
     int e=0;
     if(!cam_sensor_open_slave(which))return 0;
     if(cam_sensor_open.epoch!=cam_sensor_live.epoch || cam_sensor_open.sensor!=which ||
-       cam_sensor_open.attempted)return ESTALE;
+       cam_sensor_open.attempted)return CAM_FAIL(ESTALE);
     nanoseconds_to_absolutetime(1000000000ull,&span);deadline=mach_absolute_time()+span;
     cam_sensor_open.attempted=true;r->stage=X9_CAM_CFG_OPEN;
     /* hhmain: activate ->3ms->get_imgsensor_id; hhtele: ID->activate->3ms.
@@ -165,12 +165,12 @@ static int cam_sensor_open_restore(uint64_t epoch)
     uint64_t span,deadline;
     uint8_t close_mode=0;
     int e;
-    if(cam_sensor_open.epoch!=epoch)return ESTALE;
+    if(cam_sensor_open.epoch!=epoch)return CAM_FAIL(ESTALE);
     if(!cam_sensor_open.issued) {
         cam_sensor_open.restored=true;
         return 0; /* ID-only open or rejection before any VCM mutation. */
     }
-    if(cam_sensor_open.close_attempted)return ESTALE;
+    if(cam_sensor_open.close_attempted)return CAM_FAIL(ESTALE);
     cam_sensor_open.close_attempted=true;
     /* A later sensor-ID/table error must not hide a completely observed
      * activation. Its mode can still restore, without clearing that error.

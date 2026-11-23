@@ -112,9 +112,9 @@ static bool cam_repeat_stopped_identity(void)
  * modulo128 DROP record, not a rewind to a newly guessed baseline. */
 static int cam_repeat_empty_note(unsigned bank,uint32_t counter)
 {
-    if((counter^cam_repeat.after[bank])&~CAM_REPEAT_DROP)return ESTALE;
+    if((counter^cam_repeat.after[bank])&~CAM_REPEAT_DROP)return CAM_FAIL(ESTALE);
     unsigned delta=((counter>>25)-(cam_repeat.after[bank]>>25))&127u;
-    if(delta>=64)return ESTALE;
+    if(delta>=64)return CAM_FAIL(ESTALE);
     cam_repeat.drops+=delta;cam_repeat.after[bank]=counter;
     return 0;
 }
@@ -134,7 +134,7 @@ static int cam_repeat_note_locked(unsigned bank,uint32_t control,uint32_t counte
 {
     *handled=false;
     if(!cam_repeat.enabled)return 0;
-    if(bank>=2)return EINVAL;
+    if(bank>=2)return CAM_FAIL(EINVAL);
     if(cam_sv.credit_retired || (!cam_repeat_identity() && !cam_repeat_stopped_identity()))return 0;
     if(cam_repeat.error){*handled=true;return cam_repeat.error;}
     uint32_t expected=cam_irq_fbc.control[bank];
@@ -143,7 +143,7 @@ static int cam_repeat_note_locked(unsigned bank,uint32_t control,uint32_t counte
     if(cam_repeat.phase==CAM_REPEAT_LIVE && !completed)return 0;
     *handled=true;
     if(cam_repeat.phase==CAM_REPEAT_NONE || (cam_repeat.phase==CAM_REPEAT_LIVE && completed)) {
-        if(control!=expected || ((counter^cam_irq_fbc.target[bank])&~CAM_REPEAT_DROP))return ESTALE;
+        if(control!=expected || ((counter^cam_irq_fbc.target[bank])&~CAM_REPEAT_DROP))return CAM_FAIL(ESTALE);
         /* First completion's DROP may start before the CPU copy ends. Only
          * this actual accepted no-credit target permits that movement. */
         if(!cam_repeat.after[bank])cam_repeat.after[bank]=cam_irq_fbc.target[bank];
@@ -151,24 +151,24 @@ static int cam_repeat_note_locked(unsigned bank,uint32_t control,uint32_t counte
     }
     if(cam_repeat.phase==CAM_REPEAT_PARKED || cam_repeat.phase==CAM_REPEAT_PREPARING ||
        (cam_repeat.phase==CAM_REPEAT_READY || cam_repeat.phase==CAM_REPEAT_CANCELLED)) {
-        if(control!=expected)return ESTALE;
+        if(control!=expected)return CAM_FAIL(ESTALE);
         return cam_repeat_empty_note(bank,counter);
     }
-    if(cam_repeat.phase!=CAM_REPEAT_POSTED)return ESTALE;
+    if(cam_repeat.phase!=CAM_REPEAT_POSTED)return CAM_FAIL(ESTALE);
     uint32_t bit=1u<<bank;
     if(control==expected)cam_repeat.ack|=bit;
-    else if((cam_repeat.ack&bit) || control!=(expected|CAM_SV_FBC_RCNT))return ESTALE;
+    else if((cam_repeat.ack&bit) || control!=(expected|CAM_SV_FBC_RCNT))return CAM_FAIL(ESTALE);
     uint32_t old=cam_repeat.empty[bank],rcnt=(old+1)&255u;
     if((counter&255u)==(old&255u)) {
-        if(cam_repeat.seen&bit)return ESTALE;
+        if(cam_repeat.seen&bit)return CAM_FAIL(ESTALE);
         return cam_repeat_empty_note(bank,counter);
     }
-    if((counter&255u)!=rcnt || ((counter^old)&0x01f00000u))return ESTALE;
+    if((counter&255u)!=rcnt || ((counter^old)&0x01f00000u))return CAM_FAIL(ESTALE);
     unsigned wc=(counter>>8)&255u,old_wc=(old>>8)&255u,cnt=(counter>>16)&15u;
-    if((wc!=old_wc && wc!=((old_wc+1)&255u)) || cnt>1)return ESTALE;
+    if((wc!=old_wc && wc!=((old_wc+1)&255u)) || cnt>1)return CAM_FAIL(ESTALE);
     if(!(cam_repeat.seen&bit)) {
         unsigned delta=((counter>>25)-(cam_repeat.after[bank]>>25))&127u;
-        if(delta>=64)return ESTALE;
+        if(delta>=64)return CAM_FAIL(ESTALE);
         cam_repeat.drops+=delta;
         cam_repeat.accepted[bank]=(counter&~(0x000fffffu))|rcnt|(old_wc<<8)|0x10000u;
         /* Expected credit target is a computed criterion, not a fabricated
@@ -179,9 +179,9 @@ static int cam_repeat_note_locked(unsigned bank,uint32_t control,uint32_t counte
         cam_sv.credit_target[bank]=cam_repeat.accepted[bank];
         cam_repeat.seen|=bit;
     }
-    if((counter^cam_repeat.accepted[bank])&~(CAM_IRQ_FBC_WCNT|CAM_IRQ_FBC_CNT))return ESTALE;
-    if((cam_irq_fbc.seen[bank]&1u) && wc!=((old_wc+1)&255u))return ESTALE;
-    if((cam_irq_fbc.seen[bank]&2u) && cnt)return ESTALE;
+    if((counter^cam_repeat.accepted[bank])&~(CAM_IRQ_FBC_WCNT|CAM_IRQ_FBC_CNT))return CAM_FAIL(ESTALE);
+    if((cam_irq_fbc.seen[bank]&1u) && wc!=((old_wc+1)&255u))return CAM_FAIL(ESTALE);
+    if((cam_irq_fbc.seen[bank]&2u) && cnt)return CAM_FAIL(ESTALE);
     if(wc==((old_wc+1)&255u))cam_irq_fbc.seen[bank]|=1u;
     if(!cnt)cam_irq_fbc.seen[bank]|=2u;
     cam_repeat.after[bank]=counter;
@@ -272,10 +272,10 @@ static bool cam_repeat_idle_irq_locked(unsigned role,struct cam_irq_parked_fault
          * vendor event but cannot publish a new RCNT. No status is replayed.
          * DMA_DONE is NOT a drop: only one receipt for our prior completed
          * credit while no next credit has been issued may be consumed. */
-        if((sof && sof!=4) || (channel&~5u) || (!sof&&!channel))e=EIO;
+        if((sof && sof!=4) || (channel&~5u) || (!sof&&!channel))e=CAM_FAIL(EIO);
         if(!e && (channel&4u)) {
             if(!cam_repeat.prior_done || !cam_repeat.completed ||
-               cam_repeat.phase==CAM_REPEAT_POSTED)e=EIO;
+               cam_repeat.phase==CAM_REPEAT_POSTED)e=CAM_FAIL(EIO);
             else e=cam_repeat_channel_seen_locked(channel);
         }
         actual_sof=sof==4;
@@ -284,15 +284,15 @@ static bool cam_repeat_idle_irq_locked(unsigned role,struct cam_irq_parked_fault
         uint32_t done=cam_irq_rd(cam_irq.view[0],0x348);
         uint32_t cq=cam_irq_rd(cam_irq.view[0],0x201c);
         fault->err=err;fault->done=done;fault->cq=cq;fault->status_sampled=true;
-        if(err || done || (cq&~1u))e=EIO;
-    } else if(!e)e=EIO;
+        if(err || done || (cq&~1u))e=CAM_FAIL(EIO);
+    } else if(!e)e=CAM_FAIL(EIO);
     for(unsigned bank=0;bank<2 && !e;bank++) {
         uint32_t ctl=cam_irq_rd(cam_irq.view[bank],0x540);
         uint32_t count=cam_irq_rd(cam_irq.view[bank],0x544);
         fault->fbc_control[bank]=ctl;fault->fbc_counter[bank]=count;
         fault->fbc_sampled|=1u<<bank;
         bool handled=false;e=cam_repeat_note_locked(bank,ctl,count,&handled);
-        if(!e && !handled)e=ESTALE;
+        if(!e && !handled)e=CAM_FAIL(ESTALE);
     }
     if(!e && actual_sof && cam_repeat.phase==CAM_REPEAT_READY && cam_repeat.admission) {
         /* A genuine empty SOF history was just consumed. Publish exactly
@@ -357,7 +357,7 @@ static int cam_repeat_cpu_boundary_locked(uint64_t epoch)
        !cam_irq_fbc.bound || !cam_irq_fbc.done_seen || !cam_irq_fbc.count_accepted ||
        cam_irq_fbc.epoch!=epoch || cam_irq_fbc.source_phase!=CAM_STREAM_RUNNING ||
        cam_irq_fbc.source_issued!=CAM_STREAM_ON || cam_irq_fbc.source_ack!=CAM_STREAM_ON ||
-       cam_sv.credit_phase!=X9_CAM_SV_CREDIT_ACCEPTED || cam_sv.credit_retired))e=ESTALE;
+       cam_sv.credit_phase!=X9_CAM_SV_CREDIT_ACCEPTED || cam_sv.credit_retired))e=CAM_FAIL(ESTALE);
     cam_irq_spin_drop(old);if(e)return e;
     e=cam_irq_credit_retired_slot(); /* real RETIRED + S1 RAW_IDLE, not bus drain */
     if(!e)e=cam_sv_request_guard_locked(epoch,cam_irq.slot);
@@ -370,13 +370,13 @@ static int cam_repeat_cpu_boundary_locked(uint64_t epoch)
        cam_repeat.phase!=CAM_REPEAT_PARKED || cam_irq.accepting || cam_irq.busy || cam_irq.count ||
        !cam_irq_fbc.done_seen || !cam_irq_fbc.count_accepted ||
        cam_irq_fbc.source_phase!=CAM_STREAM_RUNNING || cam_irq_fbc.source_issued!=CAM_STREAM_ON ||
-       cam_irq_fbc.source_ack!=CAM_STREAM_ON))e=ESTALE;
+       cam_irq_fbc.source_ack!=CAM_STREAM_ON))e=CAM_FAIL(ESTALE);
     for(unsigned bank=0;bank<2 && !e;bank++) {
         e=cam_irq_power();if(e)break;
         uint32_t control=cam_irq_rd(cam_irq.view[bank],0x540);
         uint32_t counter=cam_irq_rd(cam_irq.view[bank],0x544);
         e=cam_irq_fbc_note_locked(bank,control,counter);
-        if(!e && !cam_repeat_done_target_locked(bank,counter))e=ESTALE;
+        if(!e && !cam_repeat_done_target_locked(bank,counter))e=CAM_FAIL(ESTALE);
     }
     cam_irq_spin_drop(old);return e;
 }
@@ -402,30 +402,30 @@ static int cam_repeat_post_guard(unsigned slot,uint32_t next,bool *handled)
        cam_sv.request.iova!=cam_irq.request.iova ||
        cam_sv.request.frame.generation!=cam_irq.request.frame.generation ||
        cam_sv.request.frame.sensor!=cam_irq.request.frame.sensor ||
-       cam_sv.request.frame.capture_id<=cam_irq.request.frame.capture_id))e=ESTALE;
+       cam_sv.request.frame.capture_id<=cam_irq.request.frame.capture_id))e=CAM_FAIL(ESTALE);
     for(unsigned bank=0;bank<2 && !e;bank++) {
         e=cam_irq_power();if(e)break;
         uint32_t ctl=cam_irq_rd(cam_irq.view[bank],0x540),count=cam_irq_rd(cam_irq.view[bank],0x544);
         e=cam_irq_fbc_note_locked(bank,ctl,count);
-        if(!e && !cam_repeat_done_target_locked(bank,count))e=ESTALE;
+        if(!e && !cam_repeat_done_target_locked(bank,count))e=CAM_FAIL(ESTALE);
     }
     cam_irq_spin_drop(old);if(e)return e;
     uint32_t delta=cam_sv.request.inner_sequence-cam_irq.request.inner_sequence;
-    if(!delta || delta>=0x80000000u)return ESTALE;
+    if(!delta || delta>=0x80000000u)return CAM_FAIL(ESTALE);
     if(slot==CAM_SV_FIELDS) {
-        if((next^cam_sv.expected[0][cam_sv.db_reg])&~CAM_SV_DB_EN)return EINVAL;
+        if((next^cam_sv.expected[0][cam_sv.db_reg])&~CAM_SV_DB_EN)return CAM_FAIL(EINVAL);
     } else if(slot>=CAM_SV_ADDR_LO && slot<=CAM_SV_FH) {
         uint32_t mask=cam_sv_fields[slot].mask;
         uint32_t want=(cam_sv.expected[0][cam_sv.field[slot]]&~mask)|(cam_sv.target[slot]&mask);
-        if(next!=want)return EINVAL;
+        if(next!=want)return CAM_FAIL(EINVAL);
     } else return EACCES;
     lck_mtx_lock(&camera_camsv_lock);
     e=!cam_irq.slot || cam_irq.slot!=cam_sv.request_slot || cam_irq.slot->state!=X9_CAMSV_ARMED ||
-        memcmp(&cam_irq.slot->request,&cam_sv.request,sizeof(cam_sv.request))?ESTALE:0;
+        memcmp(&cam_irq.slot->request,&cam_sv.request,sizeof(cam_sv.request))?CAM_FAIL(ESTALE):0;
     if(!e) {
         struct x9_camera_s1 *m=cam_irq.slot->dma.backing;
         lck_mtx_lock(&camera_s1_lock);e=cam_s1_check_private(m);
-        if(!e && (m->raw_errno || m->raw_state!=CAM_RAW_DEVICE || !cam_s1_dma_match(m,cam_irq.slot)))e=ESTALE;
+        if(!e && (m->raw_errno || m->raw_state!=CAM_RAW_DEVICE || !cam_s1_dma_match(m,cam_irq.slot)))e=CAM_FAIL(ESTALE);
         lck_mtx_unlock(&camera_s1_lock);
     }
     lck_mtx_unlock(&camera_camsv_lock);return e;
@@ -484,7 +484,7 @@ static int cam_repeat_stopped_irqs_locked(uint64_t epoch)
     if(!cam_repeat.enabled){cam_irq_spin_drop(old);return 0;}
     int e=cam_repeat.error?cam_repeat.error:cam_irq.error;
     if(!e && (!cam_repeat_stopped_identity() || cam_repeat.epoch!=epoch ||
-       cam_irq.accepting || cam_irq.count || cam_irq.busy || !cam_irq.owns))e=ESTALE;
+       cam_irq.accepting || cam_irq.count || cam_irq.busy || !cam_irq.owns))e=CAM_FAIL(ESTALE);
     if(!e)for(unsigned role=0;role<3;role++)cam_irq_wr(cam_irq_bank(role,0x100),cam_irq_bit(role));
     cam_irq_spin_drop(old);if(e)return e;
     uint64_t span;nanoseconds_to_absolutetime(10000000,&span);
@@ -500,10 +500,10 @@ static int cam_repeat_stopped_irqs_locked(uint64_t epoch)
         samples=!e&&!pending?samples+1:0;
         cam_irq_spin_drop(old);
         if(e || samples==2)break;
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
         delay(2);
     }
-    if(!e && samples!=2)e=ETIMEDOUT;
+    if(!e && samples!=2)e=CAM_FAIL(ETIMEDOUT);
     old=cam_irq_spin_take();cam_irq_mask_all();
     if(e)cam_repeat_fault_locked(e);cam_irq_spin_drop(old);
     if(!e)e=cam_irq_wait_rwp();if(!e)e=cam_irq_wait_idle();return e;
@@ -523,22 +523,22 @@ static int cam_irq_repeat_publish_locked(uint64_t epoch,const struct x9_camera_c
     void *context)
 {
     int e;
-    if(!r || !d)return EINVAL;
+    if(!r || !d)return CAM_FAIL(EINVAL);
     boolean_t old;
     e=cam_repeat_cpu_boundary_locked(epoch);
     lck_mtx_lock(&camera_lock);
     if(!e && (!(st.flags&X9_CAMERA_STREAMING) || (st.flags&X9_CAMERA_FAULT) ||
-        st.generation!=r->frame.generation || st.sensor!=r->frame.sensor))e=ESTALE;
+        st.generation!=r->frame.generation || st.sensor!=r->frame.sensor))e=CAM_FAIL(ESTALE);
     lck_mtx_unlock(&camera_lock);
     if(!e && (r->frame.generation!=cam_sv.request.frame.generation || r->iova!=cam_sv.request.iova ||
         r->frame.sensor!=cam_sv.request.frame.sensor || d->lease!=cam_sv.request_dma.lease ||
         d->context!=cam_sv.request_dma.context || d->check!=cam_sv.request_dma.check ||
-        d->backing!=cam_sv.request_dma.backing))e=ESTALE;
+        d->backing!=cam_sv.request_dma.backing))e=CAM_FAIL(ESTALE);
     if(!e) {
         lck_mtx_lock(&camera_camsv_lock);lck_mtx_lock(&camera_s1_lock);
         struct x9_camera_s1 *prior_map=cam_irq.slot->dma.backing;
         e=cam_irq.slot->state!=X9_CAMSV_RETIRED || prior_map->raw_state!=CAM_RAW_IDLE ||
-            !cam_s1_dma_match(prior_map,cam_irq.slot)?ESTALE:0;
+            !cam_s1_dma_match(prior_map,cam_irq.slot)?CAM_FAIL(ESTALE):0;
         if(!e) {
             old=cam_irq_spin_take();bzero(&cam_repeat_cancel,sizeof(cam_repeat_cancel));
             cam_repeat_cancel.epoch=epoch;cam_repeat_cancel.submitted=cam_repeat.submitted;
@@ -600,7 +600,7 @@ static int cam_irq_repeat_locked(uint64_t epoch,const struct x9_camera_camsv_req
 int x9_camera_native_repeat(uint64_t epoch,const struct x9_camera_camsv_request *r,
     const struct x9_camera_camsv_dma *d)
 {
-    if(!r || !d)return EINVAL;
+    if(!r || !d)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_irq_lock);
     int e=cam_irq_repeat_locked(epoch,r,d);
     lck_mtx_unlock(&camera_irq_lock);lck_mtx_unlock(&camera_control_lock);return e;

@@ -41,22 +41,22 @@ static int cam_shared_region(struct x9_camera_smmu *m,
     if(!r->va || !r->pa || r->reserved || (r->va&(CAM_S1_PAGE-1)) ||
        (r->pa&(CAM_S1_PAGE-1)) || !r->bytes || r->bytes>limit ||
        (r->bytes&(CAM_S1_PAGE-1)) || r->bytes>UINTPTR_MAX-r->va ||
-       r->pa>=(1ull<<m->map->oas) || r->bytes>(1ull<<m->map->oas)-r->pa)return EINVAL;
+       r->pa>=(1ull<<m->map->oas) || r->bytes>(1ull<<m->map->oas)-r->pa)return CAM_FAIL(EINVAL);
     /* Range-check private backing once, rather than rewalking every RAW
      * page for each page of a large inherited CMDQ. The VA->PA check below
      * still independently covers EVERY resident page of the whole region. */
-    if(cam_shared_private_overlap(m,r->pa,r->bytes))return ESTALE;
+    if(cam_shared_private_overlap(m,r->pa,r->bytes))return CAM_FAIL(ESTALE);
     for(unsigned off=0;off<r->bytes;off+=CAM_S1_PAGE) {
         uint64_t pa=0;
         int e=cam_s1_phys(r->va+off,m->map->oas,&pa);if(e)return e;
-        if(pa!=r->pa+off)return ESTALE;
+        if(pa!=r->pa+off)return CAM_FAIL(ESTALE);
     }
     return 0;
 }
 static int cam_shared_slice(const struct x9_camera_smmu_host_region *r,
     uint64_t pa,uint32_t bytes,vm_offset_t *out)
 {
-    if(pa<r->pa || pa-r->pa>=r->bytes || bytes>r->bytes-(pa-r->pa))return ERANGE;
+    if(pa<r->pa || pa-r->pa>=r->bytes || bytes>r->bytes-(pa-r->pa))return CAM_FAIL(ERANGE);
     *out=r->va+(vm_offset_t)(pa-r->pa);return 0;
 }
 static bool cam_shared_region_empty(const struct x9_camera_smmu_host_region *r)
@@ -96,63 +96,63 @@ static int cam_shared_table_capture(struct x9_camera_smmu *m,uint64_t base,
     uint32_t bytes,align;
     int e;
     if(!fmt) {
-        if(cfg!=8 || !cam_shared_region_empty(l))return ENOTSUP;
-        if(pa&(CAM_S1_PAGE-1))return ERANGE;
+        if(cfg!=8 || !cam_shared_region_empty(l))return CAM_FAIL(ENOTSUP);
+        if(pa&(CAM_S1_PAGE-1))return CAM_FAIL(ERANGE);
         return cam_shared_slice(s,pa,CAM_S1_PAGE,&cam_shared.ste);
     }
     if(fmt!=1 || ((m->idr0>>27)&3u)!=1 || split!=8 || bits<8 || bits>20 ||
-       bits>(m->idr1&63u) || (cfg&~((3u<<16)|(31u<<6)|63u)))return ENOTSUP;
+       bits>(m->idr1&63u) || (cfg&~((3u<<16)|(31u<<6)|63u)))return CAM_FAIL(ENOTSUP);
     e=cam_shared_region(m,l,2*CAM_S1_PAGE);if(e)return e;
-    if(cam_shared_region_alias(s,l) || cam_shared_region_alias(q,l))return EINVAL;
-    if(evt_pa<l->pa+l->bytes && l->pa<evt_pa+evt_bytes)return ESTALE;
+    if(cam_shared_region_alias(s,l) || cam_shared_region_alias(q,l))return CAM_FAIL(EINVAL);
+    if(evt_pa<l->pa+l->bytes && l->pa<evt_pa+evt_bytes)return CAM_FAIL(ESTALE);
     cam_shared.l1_entries=1u<<(bits-8);
     bytes=cam_shared.l1_entries*8;align=bytes<64?64:bytes;
-    if(cam_shared.l1_entries>X9_CAM_SMMU_HOST_L1_MAX || (pa&(align-1)))return ERANGE;
+    if(cam_shared.l1_entries>X9_CAM_SMMU_HOST_L1_MAX || (pa&(align-1)))return CAM_FAIL(ERANGE);
     e=cam_shared_slice(s,pa,bytes,&cam_shared.l1);if(e)return e;
     desc=*(volatile uint64_t *)cam_shared.l1;
     /* SID80 lies in the first leaf. A zero/partial leaf cannot be installed
      * by this engine; the native table owner must establish it separately. */
-    if(!desc)return ENXIO;
+    if(!desc)return CAM_FAIL(ENXIO);
     if((desc&CAM_SHARED_L1_SPAN)!=9 ||
-       (desc&~(CAM_SHARED_ST_ADDR|CAM_SHARED_L1_SPAN)))return ENOTSUP;
+       (desc&~(CAM_SHARED_ST_ADDR|CAM_SHARED_L1_SPAN)))return CAM_FAIL(ENOTSUP);
     target=desc&CAM_SHARED_ST_ADDR;
-    if(!target || (target&(CAM_S1_PAGE-1)))return ERANGE;
+    if(!target || (target&(CAM_S1_PAGE-1)))return CAM_FAIL(ERANGE);
     e=cam_shared_slice(l,target,CAM_S1_PAGE,&cam_shared.ste);if(e)return e;
     for(unsigned n=0;n<cam_shared.l1_entries;n++) {
-        if(mach_absolute_time()>=cam_shared.deadline)return ETIMEDOUT;
+        if(mach_absolute_time()>=cam_shared.deadline)return CAM_FAIL(ETIMEDOUT);
         desc=((const volatile uint64_t *)cam_shared.l1)[n];
         cam_shared.l1_prior[n]=desc;
         if(!desc)continue; /* exact zero-invalid, not a fabricated ABORT leaf */
         if((desc&CAM_SHARED_L1_SPAN)!=9 ||
-           (desc&~(CAM_SHARED_ST_ADDR|CAM_SHARED_L1_SPAN)))return ENOTSUP;
+           (desc&~(CAM_SHARED_ST_ADDR|CAM_SHARED_L1_SPAN)))return CAM_FAIL(ENOTSUP);
         pa=desc&CAM_SHARED_ST_ADDR;
         if(!pa || (pa&(CAM_S1_PAGE-1)) || pa>=(1ull<<m->map->oas) ||
-           CAM_S1_PAGE>(1ull<<m->map->oas)-pa)return ERANGE;
+           CAM_S1_PAGE>(1ull<<m->map->oas)-pa)return CAM_FAIL(ERANGE);
         if((pa<s->pa+s->bytes && s->pa<pa+CAM_S1_PAGE) ||
            (pa<q->pa+q->bytes && q->pa<pa+CAM_S1_PAGE) ||
            (pa<evt_pa+evt_bytes && evt_pa<pa+CAM_S1_PAGE) ||
-           cam_shared_private_overlap(m,pa,CAM_S1_PAGE))return ESTALE;
+           cam_shared_private_overlap(m,pa,CAM_S1_PAGE))return CAM_FAIL(ESTALE);
         /* Another SID range must not alias any part of our pinned leaf;
          * otherwise an STE80 write would also change an unrelated stream. */
-        if(n && pa<l->pa+l->bytes && l->pa<pa+CAM_S1_PAGE)return ESTALE;
-        if(!n && pa!=target)return ESTALE;
+        if(n && pa<l->pa+l->bytes && l->pa<pa+CAM_S1_PAGE)return CAM_FAIL(ESTALE);
+        if(!n && pa!=target)return CAM_FAIL(ESTALE);
     }
     __asm__ volatile("dsb sy":::"memory");return 0;
 }
 static int cam_shared_table_guard(void)
 {
     if(cam_shared.l1_entries) {
-        if(!cam_shared.l1 || cam_shared.l1_entries>X9_CAM_SMMU_HOST_L1_MAX)return ESTALE;
+        if(!cam_shared.l1 || cam_shared.l1_entries>X9_CAM_SMMU_HOST_L1_MAX)return CAM_FAIL(ESTALE);
         for(unsigned n=0;n<cam_shared.l1_entries;n++)
-            if(((const volatile uint64_t *)cam_shared.l1)[n]!=cam_shared.l1_prior[n])return ESTALE;
-    } else if(cam_shared.l1 || !cam_shared_region_empty(&cam_shared.host.strtab_l2))return ESTALE;
+            if(((const volatile uint64_t *)cam_shared.l1)[n]!=cam_shared.l1_prior[n])return CAM_FAIL(ESTALE);
+    } else if(cam_shared.l1 || !cam_shared_region_empty(&cam_shared.host.strtab_l2))return CAM_FAIL(ESTALE);
     __asm__ volatile("dsb sy":::"memory");return 0;
 }
 static int cam_shared_lease(struct x9_camera_smmu *m)
 {
     if(cam_shared.error)return cam_shared.error;
     if(!cam_shared.captured || cam_shared.owner!=m || !m->shared_attempted ||
-       !cam_shared.host.lease)return ESTALE;
+       !cam_shared.host.lease)return CAM_FAIL(ESTALE);
     return cam_shared.host.guard(cam_shared.host.context,cam_shared.host.lease,
         cam_shared.operation,&m->view);
 }
@@ -170,24 +170,24 @@ static int cam_shared_guard(struct x9_camera_smmu *m)
         e=cam_shared_region(m,&cam_shared.host.strtab_l2,2*CAM_S1_PAGE);if(e)return e;
     }
     for(unsigned n=0;n<sizeof(cam_shared_reg32)/sizeof(cam_shared_reg32[0]);n++)
-        if(cam_smmu_rr(m,cam_shared_reg32[n])!=cam_shared.regs32[n])return ESTALE;
+        if(cam_smmu_rr(m,cam_shared_reg32[n])!=cam_shared.regs32[n])return CAM_FAIL(ESTALE);
     for(unsigned n=0;n<sizeof(cam_shared_reg64)/sizeof(cam_shared_reg64[0]);n++)
-        if(cam_smmu_rr64(m,cam_shared_reg64[n])!=cam_shared.regs64[n])return ESTALE;
+        if(cam_smmu_rr64(m,cam_shared_reg64[n])!=cam_shared.regs64[n])return CAM_FAIL(ESTALE);
     cam_shared.observed_prod=cam_smmu_rr(m,0x98);
     cam_shared.observed_cons=cam_smmu_rr(m,0x9c);
     __asm__ volatile("dsb sy":::"memory");
-    if(cam_shared.observed_prod!=cam_shared.prod || (cam_shared.observed_cons&~mask))return ESTALE;
+    if(cam_shared.observed_prod!=cam_shared.prod || (cam_shared.observed_cons&~mask))return CAM_FAIL(ESTALE);
     if(cam_shared.pending) {
         uint32_t left=(cam_shared.prod-cam_shared.wait_cons)&mask;
         uint32_t moved=(cam_shared.observed_cons-cam_shared.wait_cons)&mask;
-        if(moved>left)return ESTALE;
+        if(moved>left)return CAM_FAIL(ESTALE);
         cam_shared.wait_cons=cam_shared.observed_cons;
-    } else if(cam_shared.observed_cons!=cam_shared.cons)return ESTALE;
+    } else if(cam_shared.observed_cons!=cam_shared.cons)return CAM_FAIL(ESTALE);
     e=cam_shared_table_guard();if(e)return e;
     for(unsigned sid=0;sid<CAM_SMMU_STES;sid++) {
         const volatile uint64_t *p=(const volatile uint64_t *)cam_shared.ste+sid*8;
         const uint64_t *expected=sid==CAM_SMMU_SID?cam_shared.expected:cam_shared.prior[sid];
-        for(unsigned w=0;w<8;w++)if(p[w]!=expected[w])return ESTALE;
+        for(unsigned w=0;w<8;w++)if(p[w]!=expected[w])return CAM_FAIL(ESTALE);
     }
     return cam_shared_lease(m);
 }
@@ -197,13 +197,13 @@ static int cam_shared_batch_check(void)
     if(!cam_shared.batch_count || cam_shared.batch_count>3 || cam_shared.batch_count>ring ||
        (cam_shared.batch_start&~mask) ||
        cam_shared.batch[cam_shared.batch_count-1].word[0]!=CAM_SMMU_CMD_SYNC ||
-       cam_shared.batch[cam_shared.batch_count-1].word[1])return ESTALE;
+       cam_shared.batch[cam_shared.batch_count-1].word[1])return CAM_FAIL(ESTALE);
     if(cam_shared.pending && (cam_shared.cons!=cam_shared.batch_start ||
-       cam_shared.prod!=((cam_shared.batch_start+cam_shared.batch_count)&mask)))return ESTALE;
+       cam_shared.prod!=((cam_shared.batch_start+cam_shared.batch_count)&mask)))return CAM_FAIL(ESTALE);
     for(unsigned n=0;n<cam_shared.batch_count;n++) {
         const volatile uint64_t *p=(const volatile uint64_t *)cam_shared.cmd+
             ((cam_shared.batch_start+n)&(ring-1))*2;
-        if(p[0]!=cam_shared.batch[n].word[0] || p[1]!=cam_shared.batch[n].word[1])return ESTALE;
+        if(p[0]!=cam_shared.batch[n].word[0] || p[1]!=cam_shared.batch[n].word[1])return CAM_FAIL(ESTALE);
     }
     __asm__ volatile("dsb sy":::"memory");return 0;
 }
@@ -226,25 +226,25 @@ static void cam_shared_retire_timeout(struct x9_camera_smmu *m)
     cam_shared.close_attempted=true;
     nanoseconds_to_absolutetime(10000000ull,&span);deadline=mach_absolute_time()+span;
     for(unsigned poll=0;poll<10000;poll++) {
-        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=deadline){e=CAM_FAIL(ETIMEDOUT);break;}
         e=cam_shared_batch_check();if(!e)e=cam_shared_guard(m);if(e)break;
         cam_shared.close_samples++;
-        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=deadline){e=CAM_FAIL(ETIMEDOUT);break;}
         if(cam_shared.observed_cons!=cam_shared.prod){delay(1);continue;}
         /* guard recorded this actual CONS as wait_cons. With zero remaining,
          * any later regression/foreign wrap fails the original forward window.
          * A second fresh full guard follows, not two cached target comparisons. */
         delay(1);
-        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=deadline){e=CAM_FAIL(ETIMEDOUT);break;}
         e=cam_shared_batch_check();if(!e)e=cam_shared_guard(m);if(e)break;
         cam_shared.close_samples++;
-        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
-        if(cam_shared.observed_cons!=cam_shared.prod){e=ESTALE;break;}
+        if(mach_absolute_time()>=deadline){e=CAM_FAIL(ETIMEDOUT);break;}
+        if(cam_shared.observed_cons!=cam_shared.prod){e=CAM_FAIL(ESTALE);break;}
         cam_shared.cons=cam_shared.prod;cam_shared.pending=false;
         cam_shared.timedout_retired=true;
         __asm__ volatile("dsb sy":::"memory");break;
     }
-    if(!e && !cam_shared.timedout_retired)e=ETIMEDOUT;
+    if(!e && !cam_shared.timedout_retired)e=CAM_FAIL(ETIMEDOUT);
     cam_shared.close_errno=(uint32_t)e;
     printf("X9 CAMERA SID80 CLOSE: operation=%u original=%d qualify=%u pending=%u retired=%u "
         "samples=%u batch=%x/%u actual=%x/%x target=%x "
@@ -258,8 +258,8 @@ static int cam_shared_submit(struct x9_camera_smmu *m,unsigned op)
     struct cam_smmu_cmd cmd[2]={0};
     uint32_t ring=1u<<cam_shared.shift,mask=2*ring-1,count;
     int e=cam_shared_guard(m);if(e)return e;
-    if(cam_shared.pending || cam_shared.prod!=cam_shared.cons)return EBUSY;
-    if(mach_absolute_time()>=cam_shared.deadline)return ETIMEDOUT;
+    if(cam_shared.pending || cam_shared.prod!=cam_shared.cons)return CAM_FAIL(EBUSY);
+    if(mach_absolute_time()>=cam_shared.deadline)return CAM_FAIL(ETIMEDOUT);
     cmd[0]=(struct cam_smmu_cmd){{CAM_SMMU_CFGI_STE|((uint64_t)CAM_SMMU_SID<<32),1}};
     count=1;
     if(op==1) {
@@ -271,14 +271,14 @@ static int cam_shared_submit(struct x9_camera_smmu *m,unsigned op)
     for(unsigned n=0;n<=count;n++) {
         vm_offset_t va=cam_shared.cmd+((cam_shared.prod+n)&(ring-1))*16;
         e=cam_shared_guard(m);if(e)return e;
-        if(mach_absolute_time()>=cam_shared.deadline)return ETIMEDOUT;
+        if(mach_absolute_time()>=cam_shared.deadline)return CAM_FAIL(ETIMEDOUT);
         cam_shared.batch[n]=n<count?cmd[n]:(struct cam_smmu_cmd){{CAM_SMMU_CMD_SYNC,0}};
         *(volatile uint64_t *)va=cam_shared.batch[n].word[0];
         *(volatile uint64_t *)(va+8)=cam_shared.batch[n].word[1];
         e=cam_cache_range(va,16,CAM_CACHE_CLEAN);if(e)return e;
     }
     e=cam_shared_batch_check();if(!e)e=cam_shared_guard(m);if(e)return e;
-    if(mach_absolute_time()>=cam_shared.deadline)return ETIMEDOUT;
+    if(mach_absolute_time()>=cam_shared.deadline)return CAM_FAIL(ETIMEDOUT);
     cam_shared.wait_cons=cam_shared.cons;
     cam_shared.prod=(cam_shared.prod+count+1)&mask;cam_shared.pending=true;
     /* issued/pending BEFORE the only actual CMDQ_PROD publication. */
@@ -286,26 +286,26 @@ static int cam_shared_submit(struct x9_camera_smmu *m,unsigned op)
     cam_smmu_rw(m,0x98,cam_shared.prod);
     cam_shared.samples=0;
     for(unsigned poll=0;poll<100000;poll++) {
-        if(mach_absolute_time()>=cam_shared.deadline)return ETIMEDOUT;
+        if(mach_absolute_time()>=cam_shared.deadline)return CAM_FAIL(ETIMEDOUT);
         e=cam_shared_batch_check();if(!e)e=cam_shared_guard(m);if(e)return e;
         cam_shared.samples=cam_shared.observed_cons==cam_shared.prod?cam_shared.samples+1:0;
         if(cam_shared.samples==2) {
             e=cam_shared_lease(m);if(e)return e;
-            if(mach_absolute_time()>=cam_shared.deadline)return ETIMEDOUT;
+            if(mach_absolute_time()>=cam_shared.deadline)return CAM_FAIL(ETIMEDOUT);
             e=cam_shared_batch_check();if(!e)e=cam_shared_guard(m);if(e)return e;
-            if(cam_shared.observed_cons!=cam_shared.prod)return ESTALE;
+            if(cam_shared.observed_cons!=cam_shared.prod)return CAM_FAIL(ESTALE);
             cam_shared.cons=cam_shared.prod;cam_shared.pending=false;return 0;
         }
         delay(1);
     }
-    return ETIMEDOUT;
+    return CAM_FAIL(ETIMEDOUT);
 }
 static int cam_shared_store(struct x9_camera_smmu *m,unsigned word,uint64_t value)
 {
     vm_offset_t va=cam_shared.ste+CAM_SMMU_SID*64+word*8;
     int e=cam_shared_guard(m);if(e)return e;
-    if(word>=8 || cam_shared.pending)return ESTALE;
-    if(mach_absolute_time()>=cam_shared.deadline)return ETIMEDOUT;
+    if(word>=8 || cam_shared.pending)return CAM_FAIL(ESTALE);
+    if(mach_absolute_time()>=cam_shared.deadline)return CAM_FAIL(ETIMEDOUT);
     /* Immutable expected journal records possible exposure before atomic64.
      * No uncertain store/cache failure is blindly rolled back or retried. */
     cam_shared.expected[word]=value;
@@ -320,7 +320,7 @@ static int cam_shared_capture(struct x9_camera_smmu *m)
     uint32_t cr0,cr1,cr2,gbpa,ge,gn,evt_prod,evt_cons,shift,evt_shift,mask;
     int e=cam_shared_region(m,s,2*CAM_S1_PAGE);
     if(!e)e=cam_shared_region(m,q,16u<<X9_CAM_SMMU_HOST_CMDQ_SHIFT);if(e)return e;
-    if(cam_shared_region_alias(s,q))return EINVAL;
+    if(cam_shared_region_alias(s,q))return CAM_FAIL(EINVAL);
     for(unsigned n=0;n<sizeof(cam_shared_reg32)/sizeof(cam_shared_reg32[0]);n++)
         cam_shared.regs32[n]=cam_smmu_rr(m,cam_shared_reg32[n]);
     for(unsigned n=0;n<sizeof(cam_shared_reg64)/sizeof(cam_shared_reg64[0]);n++)
@@ -340,30 +340,30 @@ static int cam_shared_capture(struct x9_camera_smmu *m)
        (evt_prod&~((2u<<evt_shift)-1u)) ||
        (strtab&~(CAM_SHARED_ST_ADDR|(1ull<<62))) ||
        (cmd&~(CAM_SHARED_Q_ADDR|31ull|(1ull<<62))) ||
-       (evt&~(CAM_SHARED_Q_ADDR|31ull|(1ull<<62))))return ENOTSUP;
+       (evt&~(CAM_SHARED_Q_ADDR|31ull|(1ull<<62))))return CAM_FAIL(ENOTSUP);
     evt_pa=evt&CAM_SHARED_Q_ADDR;evt_bytes=32ull<<evt_shift;
     if(!evt_pa || (evt_pa&(evt_bytes-1)) || evt_pa>=(1ull<<m->map->oas) ||
        evt_bytes>(1ull<<m->map->oas)-evt_pa ||
        (evt_pa<s->pa+s->bytes && s->pa<evt_pa+evt_bytes) ||
        (evt_pa<q->pa+q->bytes && q->pa<evt_pa+evt_bytes) ||
-       cam_shared_private_overlap(m,evt_pa,evt_bytes))return ESTALE;
+       cam_shared_private_overlap(m,evt_pa,evt_bytes))return CAM_FAIL(ESTALE);
     e=cam_shared_table_capture(m,strtab,cam_smmu_rr(m,0x88),evt_pa,evt_bytes);
     if(!e)e=cam_shared_slice(q,cmd&CAM_SHARED_Q_ADDR,16u<<shift,&cam_shared.cmd);
     if(e)return e;
     /* Architected bases aligned to their complete structures; no queue size
      * reduction, inherited producer reset or short-region prefix accepted. */
-    if((cmd&CAM_SHARED_Q_ADDR)&((16u<<shift)-1))return ERANGE;
+    if((cmd&CAM_SHARED_Q_ADDR)&((16u<<shift)-1))return CAM_FAIL(ERANGE);
     cam_shared.shift=shift;mask=(2u<<shift)-1;
     cam_shared.prod=cam_smmu_rr(m,0x98);cam_shared.cons=cam_smmu_rr(m,0x9c);
-    if(cam_shared.prod!=cam_shared.cons || (cam_shared.prod&~mask))return EBUSY;
+    if(cam_shared.prod!=cam_shared.cons || (cam_shared.prod&~mask))return CAM_FAIL(EBUSY);
     for(unsigned sid=0;sid<CAM_SMMU_STES;sid++) {
         const volatile uint64_t *p=(const volatile uint64_t *)cam_shared.ste+sid*8;
         for(unsigned w=0;w<8;w++)cam_shared.prior[sid][w]=p[w];
     }
     /* Existing live/bypass/translated STE80 cannot be taken over. All other
      * contexts remain exact raw prior, not converted to a private template. */
-    if(cam_shared.prior[CAM_SMMU_SID][0]>1)return EBUSY;
-    for(unsigned w=1;w<8;w++)if(cam_shared.prior[CAM_SMMU_SID][w])return EBUSY;
+    if(cam_shared.prior[CAM_SMMU_SID][0]>1)return CAM_FAIL(EBUSY);
+    for(unsigned w=1;w<8;w++)if(cam_shared.prior[CAM_SMMU_SID][w])return CAM_FAIL(EBUSY);
     memcpy(cam_shared.expected,cam_shared.prior[CAM_SMMU_SID],sizeof(cam_shared.expected));
     cam_shared.captured=true;cam_shared.phase=CAM_SHARED_CAPTURED;
     return cam_shared_guard(m);
@@ -382,11 +382,11 @@ int x9_camera_smmu_attach(struct x9_camera_smmu *m,const struct x9_camera_smmu_h
     uint64_t span;
     bool entered=false;
     int e;
-    if(!host || !host->context || !host->lease || !host->enter || !host->guard || !host->leave)return EINVAL;
+    if(!host || !host->context || !host->lease || !host->enter || !host->guard || !host->leave)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_smmu_lock);
     e=cam_smmu_identity(m);
     if(!e && (!m->exported || m->native || m->shared_attempted || cam_shared.owner || m->commands ||
-       m->pending || m->close_attempted))e=EBUSY;
+       m->pending || m->close_attempted))e=CAM_FAIL(EBUSY);
     if(!e)e=cam_smmu_storage(m);
     if(!e) {
         e=host->enter(host->context,host->lease,X9_CAM_SMMU_INSTALL,&m->view);
@@ -408,7 +408,7 @@ int x9_camera_smmu_attach(struct x9_camera_smmu *m,const struct x9_camera_smmu_h
         if(!e)e=cam_shared_submit(m,1);
         if(!e)e=cam_shared_submit(m,2);
         if(!e)e=cam_shared_guard(m);
-        if(!e && mach_absolute_time()>=cam_shared.deadline)e=ETIMEDOUT;
+        if(!e && mach_absolute_time()>=cam_shared.deadline)e=CAM_FAIL(ETIMEDOUT);
         if(!e)cam_shared.phase=CAM_SHARED_INSTALLED;
         else {
             if(e==ETIMEDOUT)cam_shared_retire_timeout(m);
@@ -449,7 +449,7 @@ int x9_camera_smmu_detach(struct x9_camera_smmu *m)
     int e;
     lck_mtx_lock(&camera_smmu_lock);e=cam_smmu_identity(m);
     if(!e && (cam_shared.owner!=m || cam_shared.phase!=CAM_SHARED_INSTALLED ||
-       cam_shared.pending || cam_shared.error))e=ESTALE;
+       cam_shared.pending || cam_shared.error))e=CAM_FAIL(ESTALE);
     if(!e) {
         cam_shared.operation=X9_CAM_SMMU_RETIRE;
         e=cam_shared.host.enter(cam_shared.host.context,cam_shared.host.lease,
@@ -462,7 +462,7 @@ int x9_camera_smmu_detach(struct x9_camera_smmu *m)
          * host RETIRE proof of full stopped RAW/AXI/IRQ/worker history. */
         lck_mtx_lock(&camera_s1_lock);
         if(!e && (m->map->raw_errno || (m->map->raw_state!=CAM_RAW_PRIVATE &&
-           m->map->raw_state!=CAM_RAW_IDLE)))e=EBUSY;
+           m->map->raw_state!=CAM_RAW_IDLE)))e=CAM_FAIL(EBUSY);
         lck_mtx_unlock(&camera_s1_lock);
         if(!e)e=cam_shared_store(m,0,cam_shared.expected[0]&~1ull);
         if(!e)e=cam_shared_submit(m,1);
@@ -471,7 +471,7 @@ int x9_camera_smmu_detach(struct x9_camera_smmu *m)
         if(!e)e=cam_shared_store(m,0,cam_shared.prior[CAM_SMMU_SID][0]);
         if(!e)e=cam_shared_submit(m,0);
         if(!e)e=cam_shared_guard(m);
-        if(!e && mach_absolute_time()>=cam_shared.deadline)e=ETIMEDOUT;
+        if(!e && mach_absolute_time()>=cam_shared.deadline)e=CAM_FAIL(ETIMEDOUT);
         if(!e)cam_shared.phase=CAM_SHARED_RETIRED;
     }
     if(e && m && m==cam_smmu_namespace && m->shared_attempted) {

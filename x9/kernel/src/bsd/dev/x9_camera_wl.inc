@@ -11,14 +11,14 @@ static int cam_wl_conflict(struct cam_probe_journal *j,uint8_t reg,
     j->wl_conflict=true;
     printf("X9 CAMERA WL CONFLICT: reg=%02x expected=%02x observed=%02x enabled=%02x uncertain=%02x (retained, no overwrite)\n",
         reg,expected,observed,j->wl_enabled,j->wl_enable_uncertain);
-    return EBUSY;
+    return CAM_FAIL(EBUSY);
 }
 static int cam_wl_enable_check(struct cam_probe_journal *j,uint8_t enable,bool cleanup)
 {
-    if(!j->wl_tracking)return ENXIO;
-    if(j->wl_conflict)return EBUSY;
+    if(!j->wl_tracking)return CAM_FAIL(ENXIO);
+    if(j->wl_conflict)return CAM_FAIL(EBUSY);
     uint8_t mask=j->board.wl_mask, uncertain=j->wl_enable_uncertain;
-    if(uncertain && !cleanup)return EIO;
+    if(uncertain && !cleanup)return CAM_FAIL(EIO);
     if(((enable^j->wl_enable_expected)&mask)==0)return 0;
     /* There is at most ONE attempted enable write. Only that bit's exact
      * prior value is admissible to cleanup; no other channel may change. */
@@ -29,8 +29,8 @@ static int cam_wl_enable_check(struct cam_probe_journal *j,uint8_t enable,bool c
 }
 static int cam_wl_guard(struct cam_probe_journal *j,bool cleanup,uint8_t *enable)
 {
-    if(!j->wl_tracking)return ENXIO;
-    if(j->wl_conflict)return EBUSY;
+    if(!j->wl_tracking)return CAM_FAIL(ENXIO);
+    if(j->wl_conflict)return CAM_FAIL(EBUSY);
     int e=cam_pins_guard(j,cleanup);if(e)return e;
     e=cam_wl_read(j,3,enable);if(e)return e;
     e=cam_wl_enable_check(j,*enable,cleanup);if(e)return e;
@@ -57,11 +57,11 @@ static int cam_wl_guard(struct cam_probe_journal *j,bool cleanup,uint8_t *enable
 }
 static int cam_wl_enable_change(struct cam_probe_journal *j,unsigned i,bool on)
 {
-    if(i>=j->board.wl_count)return EINVAL;
+    if(i>=j->board.wl_count)return CAM_FAIL(EINVAL);
     uint8_t bit=(uint8_t)(1u<<(j->board.wl_channel[i]-1)),enable=0;
-    if(j->wl_enable_uncertain && j->wl_enable_uncertain!=bit)return EBUSY;
-    if(on && (j->wl_enable_uncertain || (j->wl_enabled&bit)))return EIO;
-    if(!on && !(j->wl_enabled&bit))return EINVAL; /* cannot clear a borrowed bit */
+    if(j->wl_enable_uncertain && j->wl_enable_uncertain!=bit)return CAM_FAIL(EBUSY);
+    if(on && (j->wl_enable_uncertain || (j->wl_enabled&bit)))return CAM_FAIL(EIO);
+    if(!on && !(j->wl_enabled&bit))return CAM_FAIL(EINVAL); /* cannot clear a borrowed bit */
     int e=cam_wl_guard(j,!on,&enable);if(e)return e;
     if(on) {
         if(enable&bit)return cam_wl_conflict(j,3,0,bit);

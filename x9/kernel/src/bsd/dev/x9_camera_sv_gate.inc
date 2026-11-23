@@ -76,14 +76,14 @@ static int cam_sv_gate_admission_locked(uint64_t epoch)
     uint32_t sen=cam_sv_gate.before[CAM_SV_GATE_SEN],vf=cam_sv_gate.before[CAM_SV_GATE_VF];
     uint32_t path=cam_sv_gate.before[CAM_SV_GATE_PATH];
     if(!cam_sv.held || cam_sv.epoch!=epoch || !cam_sv_gate.captured || cam_sv_gate.epoch!=epoch ||
-       cam_sv_gate.phase!=X9_CAM_SV_GATE_IDLE || cam_sv_gate.issued)return ESTALE;
-    if(sen&((1u<<0)|(1u<<1)|(1u<<2)|(1u<<8)|(1u<<11)|(15u<<16)|(1u<<26)))return ENOTSUP;
-    if(vf&0x7773u)return ENOTSUP; /* EN, SINGLE, FR_CON, delay/mux controls */
-    if(path&0x80190u)return ENOTSUP; /* JPG, JPG_LINEND, TG DB disable, EXP_ESC */
+       cam_sv_gate.phase!=X9_CAM_SV_GATE_IDLE || cam_sv_gate.issued)return CAM_FAIL(ESTALE);
+    if(sen&((1u<<0)|(1u<<1)|(1u<<2)|(1u<<8)|(1u<<11)|(15u<<16)|(1u<<26)))return CAM_FAIL(ENOTSUP);
+    if(vf&0x7773u)return CAM_FAIL(ENOTSUP); /* EN, SINGLE, FR_CON, delay/mux controls */
+    if(path&0x80190u)return CAM_FAIL(ENOTSUP); /* JPG, JPG_LINEND, TG DB disable, EXP_ESC */
     for(unsigned i=0;i<X9_CAM_SV_GATE_FIELDS;i++) {
         unsigned n=cam_sv_find(cam_sv_gate_offsets[i]);
         if(n>=cam_sv.count || cam_sv.expected[0][n]!=cam_sv_gate.before[i] ||
-           cam_sv.expected[1][n]!=cam_sv_gate.before[i])return ESTALE;
+           cam_sv.expected[1][n]!=cam_sv_gate.before[i])return CAM_FAIL(ESTALE);
     }
     return 0;
 }
@@ -130,17 +130,17 @@ static int cam_sv_gate_note(unsigned bank,unsigned offset,uint32_t value,bool *a
        (cam_sv_gate.phase==X9_CAM_SV_GATE_RESTORING || cam_sv_gate.phase==X9_CAM_SV_GATE_RESTORED)) {
         if(bank>=2 || cam_sv_gate.epoch!=cam_sv.epoch || !cam_sv.credit_retired ||
            !cam_sv.close_attempted || (value!=cam_sv_gate.before[CAM_SV_GATE_SEN] &&
-            ((cam_sv_gate.restore_seen&(1u<<bank)) || value!=cam_sv_gate.restore_prior)))return ESTALE;
+            ((cam_sv_gate.restore_seen&(1u<<bank)) || value!=cam_sv_gate.restore_prior)))return CAM_FAIL(ESTALE);
         if(value==cam_sv_gate.before[CAM_SV_GATE_SEN])cam_sv_gate.restore_seen|=1u<<bank;
         *allowed=true;return 0;
     }
     if(step>=X9_CAM_SV_GATE_STEPS || !(cam_sv_gate.issued&(1u<<step)) ||
        cam_sv_gate_offsets[cam_sv_gate_step_fields[step]]!=offset)return 0;
     if(cam_sv_gate.epoch!=cam_sv.epoch || cam_sv.credit_phase!=X9_CAM_SV_CREDIT_ACCEPTED ||
-       (cam_sv_gate.phase!=X9_CAM_SV_GATE_PENDING && cam_sv_gate.phase!=X9_CAM_SV_GATE_STOPPING))return ESTALE;
+       (cam_sv_gate.phase!=X9_CAM_SV_GATE_PENDING && cam_sv_gate.phase!=X9_CAM_SV_GATE_STOPPING))return CAM_FAIL(ESTALE);
     bit=1u<<step;
     if(value!=cam_sv_gate.target[step] && ((cam_sv_gate.seen[bank]&bit) ||
-       value!=cam_sv_gate.prior[step]))return ESTALE;
+       value!=cam_sv_gate.prior[step]))return CAM_FAIL(ESTALE);
     if(value==cam_sv_gate.target[step])cam_sv_gate.seen[bank]|=bit;
     *allowed=true;return 0;
 }
@@ -167,13 +167,13 @@ static int cam_sv_gate_sample_word(unsigned bank,vm_offset_t view,unsigned offse
     if(cam_sv_gate.phase==X9_CAM_SV_GATE_IDLE)return 0;
     if(cam_sv_controls_restored())return 0;
     if(bank>=2 || view!=cam_sv.view[bank] || !cam_sv.held || !cam_sv.request_held ||
-       cam_sv.terminal || cam_sv_gate.epoch!=cam_sv.epoch)return cam_sv_fault(ESTALE);
+       cam_sv.terminal || cam_sv_gate.epoch!=cam_sv.epoch)return cam_sv_fault(CAM_FAIL(ESTALE));
     while(field<X9_CAM_SV_GATE_FIELDS && cam_sv_gate_offsets[field]!=offset)field++;
-    if(field==X9_CAM_SV_GATE_FIELDS)return cam_sv_fault(EINVAL);
-    reg=cam_sv_find(offset);if(reg>=cam_sv.count)return cam_sv_fault(ESTALE);
+    if(field==X9_CAM_SV_GATE_FIELDS)return cam_sv_fault(CAM_FAIL(EINVAL));
+    reg=cam_sv_find(offset);if(reg>=cam_sv.count)return cam_sv_fault(CAM_FAIL(ESTALE));
     cam_sv.status.gate_after[bank][field]=value;
     e=cam_sv_gate_note(bank,offset,value,&allowed);if(e)return cam_sv_fault(e);
-    if(!allowed && value!=cam_sv.expected[bank][reg])return cam_sv_fault(ESTALE);
+    if(!allowed && value!=cam_sv.expected[bank][reg])return cam_sv_fault(CAM_FAIL(ESTALE));
     return 0;
 }
 static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
@@ -183,9 +183,9 @@ static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
     int e;
     if(!cam_sv.held || cam_sv.epoch!=epoch || !cam_sv.request_ready || !cam_sv.fbc_ready ||
        cam_sv.credit_phase!=X9_CAM_SV_CREDIT_ACCEPTED ||
-       cam_sv.receive_phase!=X9_CAM_SV_RECEIVE_ARMED || cam_sv_gate.pending<X9_CAM_SV_GATE_STEPS)return ESTALE;
+       cam_sv.receive_phase!=X9_CAM_SV_RECEIVE_ARMED || cam_sv_gate.pending<X9_CAM_SV_GATE_STEPS)return CAM_FAIL(ESTALE);
     if(off) {
-        if(cam_sv_gate.phase!=X9_CAM_SV_GATE_ARMED)return ESTALE;
+        if(cam_sv_gate.phase!=X9_CAM_SV_GATE_ARMED)return CAM_FAIL(ESTALE);
     } else {
         uint32_t sen,vf,path;
         e=cam_sv_gate_admission_locked(epoch);if(e)return e;
@@ -210,11 +210,11 @@ static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
         unsigned reg=cam_sv_find(offset);
         uint32_t bit=1u<<step,next=cam_sv_gate.target[step];
         bool complete=false;
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
         e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
         e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
         if(cam_sv_gate.issued&bit || cam_sv.expected[0][reg]!=cam_sv_gate.prior[step] ||
-           cam_sv.expected[1][reg]!=cam_sv_gate.prior[step]){e=ESTALE;break;}
+           cam_sv.expected[1][reg]!=cam_sv_gate.prior[step]){e=CAM_FAIL(ESTALE);break;}
         cam_sv_gate.pending=step;cam_sv_gate.samples=0;
         if(next!=cam_sv_gate.prior[step]) {
             cam_sv_gate.issued|=bit;cam_sv_status();
@@ -222,27 +222,27 @@ static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
         }
         for(unsigned poll=0;poll<10000;poll++) {
             bool match=true;
-            if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+            if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
             e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
             e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
             for(unsigned bank=0;bank<2;bank++) {
                 if(cam_sv.status.gate_after[bank][field]!=next)match=false;
                 else cam_sv_gate.seen[bank]|=bit; /* also records actual no-op observation */
             }
-            if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+            if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
             cam_sv_gate.samples=match?cam_sv_gate.samples+1:0;
             if(cam_sv_gate.samples==2){complete=true;break;}
             delay(1);
         }
         if(e)break;
-        if(!complete){e=ETIMEDOUT;break;}
+        if(!complete){e=CAM_FAIL(ETIMEDOUT);break;}
         cam_sv_gate.pending=X9_CAM_SV_GATE_STEPS;
     }
     if(!e) {
         cam_sv_gate.phase=off?X9_CAM_SV_GATE_STOPPED:X9_CAM_SV_GATE_ARMED;
         e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);
         if(!e)e=cam_irq_control_guard_locked(epoch,off && session.stream);
-        if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
+        if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
     }
     if(e){cam_sv.terminal=true;cam_sv_fault(e);}
     cam_sv_status();
@@ -284,7 +284,7 @@ static int cam_sv_gate_restore_locked(uint64_t epoch)
        cam_sv.pending_slot<=CAM_SV_FIELDS || cam_sv.commit_pending ||
        !cam_sv.credit_restore_issued || cam_sv.credit_restore_seen!=3 ||
        sen>=cam_sv.count || vf>=cam_sv.count || path>=cam_sv.count || (target&CAM_SV_GATE_CMOS)) {
-        e=ESTALE;goto out;
+        e=CAM_FAIL(ESTALE);goto out;
     }
     e=cam_sv_environment();if(!e)e=cam_irq_credit_retired_guard(epoch);if(e)goto out;
     cam_sv_gate.restore_prior=cam_sv.expected[0][sen];
@@ -295,10 +295,10 @@ static int cam_sv_gate_restore_locked(uint64_t epoch)
            cam_sv.expected[bank][vf]!=cam_sv_gate.before[CAM_SV_GATE_VF] ||
            cam_sv.expected[bank][path]!=cam_sv_gate.before[CAM_SV_GATE_PATH] ||
            cam_sv.expected[bank][cam_sv.field[CAM_SV_FBC]]!=
-                cam_sv.before[bank][cam_sv.field[CAM_SV_FBC]]) {e=ESTALE;goto out;}
+                cam_sv.before[bank][cam_sv.field[CAM_SV_FBC]]) {e=CAM_FAIL(ESTALE);goto out;}
     }
     e=cam_sv_environment();if(!e)e=cam_irq_credit_retired_guard(epoch);if(e)goto out;
-    if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+    if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
     cam_sv_gate.phase=X9_CAM_SV_GATE_RESTORING;
     if(cam_sv_gate.restore_prior!=target) {
         cam_sv_gate.restore_issued=true;cam_sv_status(); /* BEFORE sole store */
@@ -306,20 +306,20 @@ static int cam_sv_gate_restore_locked(uint64_t epoch)
     }
     for(unsigned poll=0;poll<10000;poll++) {
         bool match=true;
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
         e=cam_sv_environment();if(!e)e=cam_irq_credit_retired_guard(epoch);if(e)goto out;
         for(unsigned bank=0;bank<2;bank++) {
             if(cam_sv.status.gate_after[bank][CAM_SV_GATE_SEN]!=target)match=false;
             else cam_sv_gate.restore_seen|=1u<<bank; /* actual no-op also recorded */
         }
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
         cam_sv_gate.restore_samples=match?cam_sv_gate.restore_samples+1:0;
         if(cam_sv_gate.restore_samples==2)break;
         delay(1);
     }
-    if(cam_sv_gate.restore_samples!=2 || cam_sv_gate.restore_seen!=3){e=ETIMEDOUT;goto out;}
+    if(cam_sv_gate.restore_samples!=2 || cam_sv_gate.restore_seen!=3){e=CAM_FAIL(ETIMEDOUT);goto out;}
     e=cam_sv_environment();if(!e)e=cam_irq_credit_retired_guard(epoch);
-    if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
+    if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
     if(!e)cam_sv_gate.phase=X9_CAM_SV_GATE_RESTORED;
 out:
     if(e){cam_sv.terminal=true;cam_sv_fault(e);}

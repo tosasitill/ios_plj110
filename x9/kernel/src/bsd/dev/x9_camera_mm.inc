@@ -87,7 +87,7 @@ static int cam_mm_poll_error(unsigned slot,const char *op,const char *step,
     printf("X9 CAMERA MM VOTER: slot=%u op=%s step=%s errno=%d "
         "timeout_off=%x timeout_raw=%x mask=%x target=%x\n",
         slot,op,step,ETIMEDOUT,timeout.offset,timeout.value,mask,target);
-    return ETIMEDOUT;
+    return CAM_FAIL(ETIMEDOUT);
 }
 
 static int cam_mm_poll(struct cam_mm_journal *j,unsigned slot,const char *op,
@@ -137,19 +137,19 @@ static int cam_mm_idle(struct cam_mm_journal *j,unsigned n,bool on)
     const char *op=on?"set":"clr";
     int e;
     /* receive_take proved AO/infra0; retain its MM_2 reference until done. */
-    if(!j->receive.smmu_owned)return ENXIO;
+    if(!j->receive.smmu_owned)return CAM_FAIL(ENXIO);
     /* Check the parent BEFORE the MMUP dummy read. This also reaches the
      * shared power authority's validate through cam_mm_vote_idle. A cached
      * successful GET never permits an MMUP read below a lost infra ACK. */
     if((cam_rr(j->receive.hwv,0x12900)&CAM_RES_MM_INFRA)!=CAM_RES_MM_INFRA ||
-       (cam_rr(j->receive.hwv,0x1131c)&CAM_RES_MM_INFRA))return ENXIO;
+       (cam_rr(j->receive.hwv,0x1131c)&CAM_RES_MM_INFRA))return CAM_FAIL(ENXIO);
     e=cam_mm_vote_idle(&j->receive);if(e)return e;
     e=cam_mm_poll_state(j,n,op,"pre-sta",d->sta,d->mask,0);if(e)return e;
     if(d->kind!=CAM_MM_BACKUP && (on || d->kind==CAM_MM_DOMAIN)) {
         e=cam_mm_poll_state(j,n,op,"fsm-idle",CAM_RES_FSM,0xfffe,0);
         if(e)return e;
     }
-    return cam_mm_fsm_stuck(&j->receive)?EBUSY:0;
+    return cam_mm_fsm_stuck(&j->receive)?CAM_FAIL(EBUSY):0;
 }
 static int cam_mm_cfg_check(struct cam_mm_journal *j,unsigned n)
 {
@@ -161,7 +161,11 @@ static int cam_mm_cfg_check(struct cam_mm_journal *j,unsigned n)
      * No PDN, PLL or shared AL table changes.
      * Configuration must remain stable, valid, with CKSTA idle. FENC is
      * checked after vote (and CAM only after its parent-domain AL vote). */
-    if(cfg!=j->cfg[k] || (cfg&((1u<<d->width)-1))>=d->parents)return ESTALE;
+    /* k==0/1 are the CAM AL and CAMTM muxes (mmdvfs mux-cam pos0 /
+     * mux-camtm pos1), driven by the VMMRC from all XPU votes incl. the
+     * running VCP; Android never checks them. Only validity, then track. */
+    if((k>1 && cfg!=j->cfg[k]) || (cfg&((1u<<d->width)-1))>=d->parents)return CAM_FAIL(ESTALE);
+    if(k<=1)j->cfg[k]=cfg;
     return cam_wait_bits(j->top,0x330,d->effect_mask,0,10000);
 }
 static int cam_mm_effect_on(struct cam_mm_journal *j,unsigned n)
@@ -180,15 +184,15 @@ static int cam_mm_guard(struct cam_mm_journal *j,bool complete)
     e=cam_sv_sibling_guard(j);if(e)return e;
     e=cam_native_clock_guard(j,!complete);if(e)return e;
     e=cam_native_rate_guard(j,!complete);if(e)return e;
-    if(complete && (!j->active || j->completed!=((1u<<X9_CAM_MM_SLOTS)-1)))return ENXIO;
-    if(!j->receive.smmu_owned)return j->seen?ENXIO:0;
+    if(complete && (!j->active || j->completed!=((1u<<X9_CAM_MM_SLOTS)-1)))return CAM_FAIL(ENXIO);
+    if(!j->receive.smmu_owned)return j->seen?CAM_FAIL(ENXIO):0;
     if((cam_rr(j->receive.hwv,0x12900)&CAM_RES_MM_INFRA)!=CAM_RES_MM_INFRA ||
-       (cam_rr(j->receive.hwv,0x1131c)&CAM_RES_MM_INFRA))return ENXIO;
+       (cam_rr(j->receive.hwv,0x1131c)&CAM_RES_MM_INFRA))return CAM_FAIL(ENXIO);
     e=cam_mm_vote_idle(&j->receive);if(e)return e;
     if(j->receive.active || j->receive.csi_borrowed) {
         if(!(cam_rr(j->receive.hwv,CAM_RES_CSI_EN)&CAM_RES_CSI_BIT) ||
            !(cam_rr(j->receive.hwv,CAM_RES_CSI_GLOBAL)&CAM_RES_CSI_BIT) ||
-           !(cam_rr(j->receive.hwv,CAM_RES_CSI_ACK)&CAM_RES_CSI_BIT))return ESTALE;
+           !(cam_rr(j->receive.hwv,CAM_RES_CSI_ACK)&CAM_RES_CSI_BIT))return CAM_FAIL(ESTALE);
     }
     for(unsigned n=0;n<X9_CAM_MM_SLOTS;n++)if(j->seen&(1u<<n)) {
         const struct cam_mm_desc *d=&j->desc[n];
@@ -197,14 +201,14 @@ static int cam_mm_guard(struct cam_mm_journal *j,bool complete)
         e=cam_mm_cfg_check(j,n);if(e)return e;
         cam_mm_snapshot(j,n,live);
         if((live[0]&j->borrowed[n])!=j->borrowed[n] ||
-           (live[1]&j->borrowed[n])!=j->borrowed[n])return ESTALE;
+           (live[1]&j->borrowed[n])!=j->borrowed[n])return CAM_FAIL(ESTALE);
         if(j->completed&(1u<<n)) {
             if(d->kind!=CAM_MM_AL &&
-               ((live[0]&d->mask)!=d->mask || (live[1]&d->mask)!=d->mask))return ESTALE;
+               ((live[0]&d->mask)!=d->mask || (live[1]&d->mask)!=d->mask))return CAM_FAIL(ESTALE);
             e=cam_mm_effect_on(j,n);if(e)return e;
         }
     }
-    if(cam_mm_fsm_stuck(&j->receive))return EBUSY;
+    if(cam_mm_fsm_stuck(&j->receive))return CAM_FAIL(EBUSY);
     return cam_sv_sibling_guard(j);
 }
 static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera_mm_status *r)
@@ -216,7 +220,7 @@ static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera
     cam_mm_snapshot(j,n,s->before);
     e=cam_mm_idle(j,n,true);if(e)return e;
     cam_mm_snapshot(j,n,before);
-    if(((before[0]^s->before[0])&d->mask) || ((before[1]^s->before[1])&d->mask))return EBUSY;
+    if(((before[0]^s->before[0])&d->mask) || ((before[1]^s->before[1])&d->mask))return CAM_FAIL(EBUSY);
     e=cam_mm_cfg_check(j,n);if(e)return e;
     if(d->kind==CAM_MM_AL) {
         /* clk-mux.c mtk_mux_generic_hwv_al_ops has NO enable/disable.
@@ -226,7 +230,7 @@ static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera
         s->flags|=X9_CAM_MM_SLOT_BORROWED;
     } else {
         uint32_t ap=before[0]&d->mask;
-        if((ap&~before[1])!=0)return EBUSY;
+        if((ap&~before[1])!=0)return CAM_FAIL(EBUSY);
         /* Preserve arbitrary partial inherited AP masks (e.g. VMM10).
          * A borrowed vote without its real effect is NOT ready. */
         j->borrowed[n]=ap;
@@ -234,16 +238,16 @@ static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera
         if(d->kind==CAM_MM_GATE) {
             j->gate_before[n]=before[2]&d->mask;
             /* Never repair an existing owner's gated-but-voted clock. */
-            if((before[2]&before[1]&d->mask)!=0)return EBUSY;
+            if((before[2]&before[1]&d->mask)!=0)return CAM_FAIL(EBUSY);
             /* Unvoted-but-ungated is an unknown direct owner. A later
              * last HWV CLR would gate it and destroy that owner's state. */
-            if((~before[2]&~before[1]&d->mask)!=0)return EBUSY;
+            if((~before[2]&~before[1]&d->mask)!=0)return CAM_FAIL(EBUSY);
         } else if(n<X9_CAM_MM_VMM) {
             /* MM_2/display hold AO/infra0 via parent-domain autolink; their own
              * MTCMOS0 bits may be zero while PM_ACK (0x12900) is already one. */
-            if(!(before[2]&d->effect_mask))return ENXIO;
+            if(!(before[2]&d->effect_mask))return CAM_FAIL(ENXIO);
         } else if(d->kind==CAM_MM_DOMAIN) {
-            if(!!(before[1]&d->mask)!=!!(before[2]&d->effect_mask))return EBUSY;
+            if(!!(before[1]&d->mask)!=!!(before[2]&d->effect_mask))return CAM_FAIL(EBUSY);
         }
         uint32_t add=d->mask&~ap;
         if(add) {
@@ -255,11 +259,11 @@ static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera
             if(!e)e=cam_mm_poll_state(j,n,"set","final-sta",d->sta,d->mask,0);
             if(e)return e;
         }
-        if(cam_mm_fsm_stuck(&j->receive))return EBUSY;
+        if(cam_mm_fsm_stuck(&j->receive))return CAM_FAIL(EBUSY);
         if(d->kind==CAM_MM_GATE) {
             vm_offset_t cg=cam_mm_effect_base(j,n);
             uint32_t gated=cam_rr(cg,0)&d->mask;
-            if(gated&~j->gate_before[n])return ESTALE;
+            if(gated&~j->gate_before[n])return CAM_FAIL(ESTALE);
             if(gated) {
                 e=cam_sv_sibling_guard(j);if(e)return e;
                 j->gate_changed[n]=gated;
@@ -286,7 +290,7 @@ static int cam_mm_vmm_can_drop(struct cam_mm_journal *j,uint32_t drop)
            !(cam_rr(j->receive.hwv,0x12904)&2))return 0;
         delay(1);
     }
-    return ETIMEDOUT;
+    return CAM_FAIL(ETIMEDOUT);
 }
 static int cam_mm_slot_restore(struct cam_mm_journal *j,unsigned n,struct x9_camera_mm_status *r)
 {
@@ -300,7 +304,7 @@ static int cam_mm_slot_restore(struct cam_mm_journal *j,unsigned n,struct x9_cam
         /* Not our AP vote. Its effect may go away only with our domains. */
         if((j->completed&(1u<<n)) && (e=cam_mm_effect_on(j,n)))return e;
     } else {
-        if((cam_rr(b,d->set+8)&j->borrowed[n])!=j->borrowed[n])return ESTALE;
+        if((cam_rr(b,d->set+8)&j->borrowed[n])!=j->borrowed[n])return CAM_FAIL(ESTALE);
         uint32_t drop=j->owned[n];
         if(drop) {
             if(n==X9_CAM_MM_VMM && (e=cam_mm_vmm_can_drop(j,drop)))return e;
@@ -324,7 +328,7 @@ static int cam_mm_slot_restore(struct cam_mm_journal *j,unsigned n,struct x9_cam
                  * CG_CLR recorded. Original gated bits still require a
                  * last-owner check in that case: do not drop dependencies
                  * under a new aggregate owner just because gate_changed=0. */
-                if(!e && (j->gate_before[n]&global))e=ESTALE;
+                if(!e && (j->gate_before[n]&global))e=CAM_FAIL(ESTALE);
             } else if(d->kind==CAM_MM_DOMAIN && n>=X9_CAM_MM_VMM && !global)
                 e=cam_wait_bits(b,d->effect,d->effect_mask,0,10000);
             if(e)return e;
@@ -376,7 +380,7 @@ static int cam_mm_take(struct cam_mm_journal *j,unsigned sensor,struct x9_camera
                         struct x9_camera_resources *receive)
 {
     if(j->active || j->seen || j->native_clock.seen || j->receive.active || j->receive.smmu_owned ||
-       j->receive.csi_owned || j->receive.csi_borrowed)return EBUSY;
+       j->receive.csi_owned || j->receive.csi_borrowed)return CAM_FAIL(EBUSY);
     j->completed=0;
     r->stage=X9_CAM_MM_STAGE_RECEIVE;
     int e=cam_receive_power_take(&j->receive,receive);if(e)return e;
@@ -384,11 +388,11 @@ static int cam_mm_take(struct cam_mm_journal *j,unsigned sensor,struct x9_camera
     if(!j->top)j->top=ml_io_map(0x10040000,0x1000);
     if(!j->cam_cg)j->cam_cg=ml_io_map(0x3a010000,0x1000);
     if(!j->sv_cg)j->sv_cg=ml_io_map(0x3a680000,0x1000);
-    if(!j->top || !j->cam_cg || !j->sv_cg)return ENOMEM;
+    if(!j->top || !j->cam_cg || !j->sv_cg)return CAM_FAIL(ENOMEM);
     memcpy(j->desc,cam_mm_descs,sizeof(j->desc));
     {
         unsigned port=cam_sensor_port(sensor);
-        if(port>3)return ENOTSUP;
+        if(port>3)return CAM_FAIL(ENOTSUP);
         struct cam_mm_desc *d=&j->desc[X9_CAM_MM_SENINF_MUX];
         d->mask=1u<<(17+port);d->effect_mask=1u<<(14-port);
         d->cfg=port==3?0x60:0x50;d->shift=port==3?0:8*(port+1);
@@ -396,7 +400,7 @@ static int cam_mm_take(struct cam_mm_journal *j,unsigned sensor,struct x9_camera
     for(unsigned k=0;k<3;k++) {
         const struct cam_mm_desc *d=&j->desc[X9_CAM_MM_CAM_MUX+k];
         j->cfg[k]=r->cfg[k]=(cam_rr(j->top,d->cfg)>>d->shift)&0x7f;
-        if((j->cfg[k]&((1u<<d->width)-1))>=d->parents)return ENOTSUP;
+        if((j->cfg[k]&((1u<<d->width)-1))>=d->parents)return CAM_FAIL(ENOTSUP);
     }
     /* Receive PM/CSI is held. Before any MM-journal domain, CAMTG/TOP/A
      * or register-clock vote: foreign
@@ -427,7 +431,7 @@ static int cam_mm_take(struct cam_mm_journal *j,unsigned sensor,struct x9_camera
         cam_mm_snapshot(j,n,r->sample[n].active);
         if(d->kind!=CAM_MM_AL &&
            ((r->sample[n].active[0]&d->mask)!=d->mask ||
-            (r->sample[n].active[1]&d->mask)!=d->mask))return ESTALE;
+            (r->sample[n].active[1]&d->mask)!=d->mask))return CAM_FAIL(ESTALE);
     }
     r->flags|=X9_CAM_MM_CLOCKS;r->blockers&=~X9_CAM_MM_NEED_CLOCKS;
     j->active=true;return 0;
@@ -465,11 +469,11 @@ static int cam_mm_session_open(unsigned sensor,uint64_t *epoch,struct x9_camera_
 {
     int e;
     *epoch=0;cam_mm_status_init(sensor,r);
-    if(!x9_camera_sensor_valid(sensor))e=EINVAL;
-    else if(st.mode!=2 && st.mode!=3)e=EPERM;
-    else if(cam_mm_live.epoch || cam_mm.active || cam_mm.seen || session.capture)e=EBUSY;
-    else if(cam_resources_latched || cam_probe_latched)e=EIO;
-    else if(cam_mm_live.serial==UINT64_MAX)e=EOVERFLOW;
+    if(!x9_camera_sensor_valid(sensor))e=CAM_FAIL(EINVAL);
+    else if(st.mode!=2 && st.mode!=3)e=CAM_FAIL(EPERM);
+    else if(cam_mm_live.epoch || cam_mm.active || cam_mm.seen || session.capture)e=CAM_FAIL(EBUSY);
+    else if(cam_resources_latched || cam_probe_latched)e=CAM_FAIL(EIO);
+    else if(cam_mm_live.serial==UINT64_MAX)e=CAM_FAIL(EOVERFLOW);
     else e=0;
     if(e){r->last_errno=e;return e;}
     cam_mm_live.epoch=++cam_mm_live.serial;*epoch=cam_mm_live.epoch;
@@ -487,7 +491,7 @@ static int cam_mm_session_open(unsigned sensor,uint64_t *epoch,struct x9_camera_
 static int cam_mm_session_check(uint64_t epoch)
 {
     int e;
-    if(!epoch || epoch!=cam_mm_live.epoch || cam_mm_live.close_attempted)return ESTALE;
+    if(!epoch || epoch!=cam_mm_live.epoch || cam_mm_live.close_attempted)return CAM_FAIL(ESTALE);
     if(cam_mm_live.error)return cam_mm_live.error;
     e=cam_mm_guard(&cam_mm,true);
     return e?cam_mm_session_fault(e):0;
@@ -496,11 +500,11 @@ static int cam_mm_session_close(uint64_t epoch,struct x9_camera_mm_status *r)
 {
     unsigned stage,slot;
     int off,prior;
-    if(!epoch || epoch!=cam_mm_live.epoch || cam_mm_live.close_attempted)return ESTALE;
-    if(session.capture)return EBUSY;
+    if(!epoch || epoch!=cam_mm_live.epoch || cam_mm_live.close_attempted)return CAM_FAIL(ESTALE);
+    if(session.capture)return CAM_FAIL(EBUSY);
     off=cam_native_sensor_retirement_guard_locked(0);
     if(off)return off;
-    if(cam_smi_clocks_held())return EBUSY;
+    if(cam_smi_clocks_held())return CAM_FAIL(EBUSY);
     cam_mm_live.close_attempted=true;
     prior=cam_mm_live.error;
     stage=cam_mm_live.status.stage;slot=cam_mm_live.status.slot;
@@ -524,7 +528,7 @@ static int cam_mm_session_close(uint64_t epoch,struct x9_camera_mm_status *r)
 static int cam_mm_session_retain(uint64_t epoch,int e)
 {
     int prior=cam_mm_live.error;
-    if(!epoch || epoch!=cam_mm_live.epoch || cam_mm_live.close_attempted)return ESTALE;
+    if(!epoch || epoch!=cam_mm_live.epoch || cam_mm_live.close_attempted)return CAM_FAIL(ESTALE);
     cam_mm_live.close_attempted=true;cam_mm_live.close_error=e;
     cam_mm_live.status.restore_errno=e;
     if(!prior)cam_mm_live.status.stage=X9_CAM_MM_STAGE_RESTORE;
@@ -554,7 +558,7 @@ static int cam_mm_probe(unsigned sensor,struct x9_camera_mm_status *r)
     int e,off=0;
     if(cam_sensor_session_active || cam_mm_live.epoch) {
         memset(r,0,sizeof(*r));r->version=1;r->sensor=sensor;r->last_errno=EBUSY;
-        return EBUSY;
+        return CAM_FAIL(EBUSY);
     }
     cam_mm_status_init(sensor,r);
     if(cam_mm_attempted || cam_resources_latched || cam_probe_latched) {

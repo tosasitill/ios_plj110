@@ -36,9 +36,9 @@ static bool cam_sensor_forbidden(uint16_t reg)
 }
 static int cam_sensor_validate_table(const uint16_t *p, uint32_t n)
 {
-    if(!n || n%2 || n>4096)return ENOTSUP;
+    if(!n || n%2 || n>4096)return CAM_FAIL(ENOTSUP);
     for(uint32_t i=0;i<n;i+=2)
-        if(cam_sensor_forbidden(p[i]) || p[i+1]>255)return EINVAL;
+        if(cam_sensor_forbidden(p[i]) || p[i+1]>255)return CAM_FAIL(EINVAL);
     return 0;
 }
 /* Vendor wr_ob_type: 1=36db, 2=30db, 0=not selected since open/control.
@@ -59,8 +59,8 @@ static int cam_tele_ob_preflight(void)
         const uint16_t *p=cam_tele_ob_table(i+1);
         int e=cam_sensor_validate_table(p,counts[i]);
         if(e)return e;
-        if(counts[i]!=16)return EINVAL;
-        for(unsigned j=0;j<8;j++)if(p[j*2]!=regs[j])return EINVAL;
+        if(counts[i]!=16)return CAM_FAIL(EINVAL);
+        for(unsigned j=0;j<8;j++)if(p[j*2]!=regs[j])return CAM_FAIL(EINVAL);
     }
     return 0;
 }
@@ -116,7 +116,7 @@ static int cam_sensor_config_preflight(uint32_t which, struct x9_camera_config *
         if(e || value!=s->expected) {
             r->reg=s->reg;r->expected=s->expected;
             /* This is a source-table mismatch, not a hardware observation. */
-            return EINVAL;
+            return CAM_FAIL(EINVAL);
         }
     }
     if(which==X9_CAMERA_FRONT) {
@@ -126,7 +126,7 @@ static int cam_sensor_config_preflight(uint32_t which, struct x9_camera_config *
         for(unsigned i=0;i<2;i++) {
             uint32_t value=UINT32_MAX;
             if(!cam_sensor_table_value(t,patch[i],&value)) {
-                r->reg=patch[i];return EINVAL;
+                r->reg=patch[i];return CAM_FAIL(EINVAL);
             }
         }
     }
@@ -134,20 +134,20 @@ static int cam_sensor_config_preflight(uint32_t which, struct x9_camera_config *
 }
 static int cam_sensor_io_read(struct cam_sensor_io *io, uint16_t reg, uint8_t *v)
 {
-    if(mach_absolute_time()>=io->deadline)return ETIMEDOUT;
+    if(mach_absolute_time()>=io->deadline)return CAM_FAIL(ETIMEDOUT);
     int e=io->read(io->context,reg,v);
-    if(!e && mach_absolute_time()>=io->deadline)e=ETIMEDOUT;
+    if(!e && mach_absolute_time()>=io->deadline)e=CAM_FAIL(ETIMEDOUT);
     return e;
 }
 static int cam_sensor_config_write(struct cam_sensor_io *io, uint16_t reg, uint8_t v,
                                     struct x9_camera_config *r, bool cleanup)
 {
     r->reg=reg;r->expected=v;r->observed=UINT32_MAX;
-    if(!cleanup && mach_absolute_time()>=io->deadline)return ETIMEDOUT;
+    if(!cleanup && mach_absolute_time()>=io->deadline)return CAM_FAIL(ETIMEDOUT);
     r->attempted++; /* BEFORE possibly ambiguous I2C write, not a pre-budget rejection */
     int e=io->write(io->context,reg,v);
     if(!e)r->written++; /* An ACK still counts if the total budget expired meanwhile. */
-    if(!e && !cleanup && mach_absolute_time()>=io->deadline)e=ETIMEDOUT;
+    if(!e && !cleanup && mach_absolute_time()>=io->deadline)e=CAM_FAIL(ETIMEDOUT);
     return e;
 }
 static int cam_sensor_front_fab(struct cam_sensor_io *io, struct x9_camera_config *r)
@@ -187,7 +187,7 @@ static int cam_sensor_front_fab(struct cam_sensor_io *io, struct x9_camera_confi
         r->expected=expected;r->observed=observed;return e;
     }
     if(off)return off;
-    if(mach_absolute_time()>=io->deadline)return ETIMEDOUT;
+    if(mach_absolute_time()>=io->deadline)return CAM_FAIL(ETIMEDOUT);
     r->flags|=X9_CAM_CFG_FAB_READ;
     if(b4)r->flags|=X9_CAM_CFG_FAB_B4;
     return 0;
@@ -219,7 +219,7 @@ static int cam_sensor_configure(struct cam_sensor_io *io, uint32_t which,
     for(unsigned i=0;i<2;i++) {
         r->reg=idle[i];r->expected=0;r->observed=UINT32_MAX;
         int e=cam_sensor_io_read(io,idle[i],&v);if(e)return e;
-        r->observed=v;if(v)return EBUSY;
+        r->observed=v;if(v)return CAM_FAIL(EBUSY);
     }
     r->flags|=X9_CAM_CFG_STANDBY;
     int e=which==X9_CAMERA_FRONT?cam_sensor_front_fab(io,r):0;if(e)return e;
@@ -230,7 +230,7 @@ static int cam_sensor_configure(struct cam_sensor_io *io, uint32_t which,
         if(!e){r->table_index=1;e=cam_sensor_config_write(io,0x5765,0x33,r,false);}
         if(!e) {
             uint32_t n=0;while(n<X9_CAM_CFG_SAMPLES && r->sample[n].reg)n++;
-            if(n+2>X9_CAM_CFG_SAMPLES)return EOVERFLOW;
+            if(n+2>X9_CAM_CFG_SAMPLES)return CAM_FAIL(EOVERFLOW);
             cam_sensor_sample(r,&n,0x574b,1);cam_sensor_sample(r,&n,0x5765,0x33);
         }
     }
@@ -247,7 +247,7 @@ static int cam_sensor_configure(struct cam_sensor_io *io, uint32_t which,
         r->table_index=i;r->reg=s->reg;r->expected=s->expected;r->observed=UINT32_MAX;
         e=cam_sensor_io_read(io,(uint16_t)s->reg,&v);if(e)return e;
         r->observed=s->observed=v;r->read_count++;
-        if(v!=s->expected)return EIO;
+        if(v!=s->expected)return CAM_FAIL(EIO);
     }
     r->flags|=X9_CAM_CFG_VERIFIED;return 0;
 }

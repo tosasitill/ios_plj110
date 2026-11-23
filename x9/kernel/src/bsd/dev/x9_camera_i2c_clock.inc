@@ -16,7 +16,7 @@ static int cam_bus_parent_conflict(struct cam_probe_bus *b,unsigned off,
     b->parent_conflict=true;
     printf("X9 CAMERA AP CLOCK CONFLICT: shift=%u reg=%x expected=%08x observed=%08x owned=%u (retained, no overwrite)\n",
         b->clock_shift,off,expected,observed,b->parent_owned);
-    return EBUSY;
+    return CAM_FAIL(EBUSY);
 }
 static int cam_bus_source_check(struct cam_probe_bus *b,uint32_t cfg)
 {
@@ -24,7 +24,7 @@ static int cam_bus_source_check(struct cam_probe_bus *b,uint32_t cfg)
      * inferred from I2C FENC. CAMTG holds UNIVPLL until parent cleanup. */
     uint32_t source=cfg&3;
     vm_offset_t pll=source==2?b->mainpll:b->univpll;
-    if(source && !(cam_rr(pll,0x34)&(1u<<4)))return ENOTSUP;
+    if(source && !(cam_rr(pll,0x34)&(1u<<4)))return CAM_FAIL(ENOTSUP);
     uint32_t con1=source?cam_rr(pll,0x0c):0;
     if(b->clock_saved && (b->clock_source!=source || b->clock_con1!=con1))
         return cam_bus_parent_conflict(b,source?0x0c:0x110,
@@ -34,14 +34,14 @@ static int cam_bus_source_check(struct cam_probe_bus *b,uint32_t cfg)
 }
 static int cam_bus_clock(struct cam_probe_bus *b)
 {
-    if(b->parent_conflict)return EBUSY;
+    if(b->parent_conflict)return CAM_FAIL(EBUSY);
     int e=cam_wait_bits(b->top,0x338,1u<<(b->clock_bit-2),0,1000);
     if(e)return e;
     uint32_t cfg=cam_bus_parent_byte(b);
     if(b->parent_seen && cfg!=b->parent_expected)
         return cam_bus_parent_conflict(b,0x110,b->parent_expected,cfg);
-    if(cfg&0x80)return ENOTSUP;
-    if(!(cam_rr(b->top,0x278)&(1u<<b->clock_bit)))return ENOTSUP;
+    if(cfg&0x80)return CAM_FAIL(ENOTSUP);
+    if(!(cam_rr(b->top,0x278)&(1u<<b->clock_bit)))return CAM_FAIL(ENOTSUP);
     if(b->parent_owned) {
         uint32_t siblings=b->group_gate_mask&~b->gate_bit;
         uint32_t gates=cam_rr(b->gate,0xe00)&siblings;
@@ -51,7 +51,7 @@ static int cam_bus_clock(struct cam_probe_bus *b)
 }
 static int cam_bus_parent_take(struct cam_probe_bus *b)
 {
-    if(b->parent_seen || b->parent_owned || b->parent_conflict)return EALREADY;
+    if(b->parent_seen || b->parent_owned || b->parent_conflict)return CAM_FAIL(EALREADY);
     int e=cam_wait_bits(b->top,0x338,1u<<(b->clock_bit-2),0,1000);
     if(e)return e;
     uint32_t cfg=cam_bus_parent_byte(b),bit=1u<<b->clock_bit;
@@ -61,14 +61,14 @@ static int cam_bus_parent_take(struct cam_probe_bus *b)
     delay(10);
     if(cam_bus_parent_byte(b)!=cfg || (cam_rr(b->top,0x278)&bit)!=fenc ||
        (cam_rr(b->gate,0xe00)&b->group_gate_mask)!=gates ||
-       (cam_rr(b->top,0x338)&(1u<<(b->clock_bit-2))))return EBUSY;
+       (cam_rr(b->top,0x338)&(1u<<(b->clock_bit-2))))return CAM_FAIL(EBUSY);
     e=cam_bus_source_check(b,cfg);if(e)return e;
     if(fenc) {
-        if(cfg&0x80)return EBUSY; /* unknown forced-on source */
+        if(cfg&0x80)return CAM_FAIL(EBUSY); /* unknown forced-on source */
     } else {
         /* Do not wake a shared parent with an ungated child of unknown
          * ownership. DISABLED alone is insufficient, including our child. */
-        if(!(cfg&0x80) || gates!=b->group_gate_mask)return EBUSY;
+        if(!(cfg&0x80) || gates!=b->group_gate_mask)return CAM_FAIL(EBUSY);
     }
     b->parent_entry=b->parent_expected=cfg;b->parent_seen=true;
     if(!fenc) {
@@ -86,7 +86,7 @@ static int cam_bus_parent_restore(struct cam_probe_bus *b)
 {
     if(!b->parent_owned)return 0; /* borrowed clock is never disabled */
     if(b->parent_conflict || b->owned || b->gate_owned || b->wedged ||
-       b->conflict || b->fifo_owned || b->request_owned)return EBUSY;
+       b->conflict || b->fifo_owned || b->request_owned)return CAM_FAIL(EBUSY);
     int e=cam_wait_bits(b->top,0x338,1u<<(b->clock_bit-2),0,1000);
     if(e)return e;
     uint32_t cfg=cam_bus_parent_byte(b);
@@ -100,13 +100,13 @@ static int cam_bus_parent_restore(struct cam_probe_bus *b)
     e=cam_bus_source_check(b,cfg);if(e)return e;
     /* Recheck after source validation, before the only possible SET. */
     if(cam_bus_parent_byte(b)!=cfg ||
-       (cam_rr(b->gate,0xe00)&b->group_gate_mask)!=gates)return EBUSY;
+       (cam_rr(b->gate,0xe00)&b->group_gate_mask)!=gates)return CAM_FAIL(EBUSY);
     if(cfg!=b->parent_entry)
         cam_rw(b->top,0x114,1u<<(b->clock_shift+7));
     e=cam_wait_bits(b->top,0x278,1u<<b->clock_bit,0,1000);
     if(!e)e=cam_wait_bits(b->top,0x338,1u<<(b->clock_bit-2),0,1000);
-    if(!e && cam_bus_parent_byte(b)!=b->parent_entry)e=EBUSY;
-    if(!e && (cam_rr(b->gate,0xe00)&b->group_gate_mask)!=gates)e=EBUSY;
+    if(!e && cam_bus_parent_byte(b)!=b->parent_entry)e=CAM_FAIL(EBUSY);
+    if(!e && (cam_rr(b->gate,0xe00)&b->group_gate_mask)!=gates)e=CAM_FAIL(EBUSY);
     if(!e)b->parent_owned=false; /* retain on timeout; never SET twice */
     return e;
 }

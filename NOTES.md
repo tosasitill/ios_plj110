@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 镜像 x9-camrate-failtrace-20261123（按 Android 改 CAM rate + 全栈失败追踪，未上机）
+
+- `x9/out/x9-camrate-failtrace-20261123/boot.img` 15306752 B，sha256 `0ed65250ae4cebc4db4d12e1fdd186e6de7bc73338da79e3213708bfaa298a3e`，boot-arg `x9_mmup_smmu_init=1`；warning 数与改动前基线相同（2987）。（中间版 x9-camrate-android-20261123 未交付。）
+- **CAM rate 按 Android `mmdvfs_mt6993_dfs_vote_by_xpu`**（drivers/soc/mediatek/mmdvfs/mmdvfs-mt6993.c）：寄存器与 Android 一致（user-cam = XPU0 pos0：CLR 0x110c / SET 0x1110 / UPDATE 0x1114，读 0x10000 / 0x10234 / 0x10264）。去掉「冷基线 + 无外来 XPU」门禁（foreign_guard、entry_cfg/RC 非零 EBUSY）；完成判据改为 Android 的 `(targ && vote<=curr && vote<=targ) || 全零`，预算约 1 s；restore 改为 Android 的 set_rate(0)（投 0 级），不再要求 cfg 回到 entry。CAM AL / CAMTM mux（mmdvfs mux-cam / mux-camtm，由 VMMRC 汇总各 XPU）在 `cam_mm_cfg_check` 里只查有效性并跟踪当前值。native_source 处理时钟改为实测 ID14 ≥ 416 MHz（RC 取各 XPU 最大值），去掉 parent==10。新增 `X9 CAMERA CAM RATE ENTRY` 行（cfg/pre/xpu0/targ/curr/rc_level/xpu9-12）。
+- **全栈失败追踪**：sweet_x9_camera.c + 59 个 x9_camera*.inc 中 1502 处字面 errno 返回或赋值改为 `CAM_FAIL(E…)`（记录 __func__/__LINE__/errno/次数，无锁环形 48 项，行为不变）；start 失败时打印最近 16 条 `X9 CAMERA FAIL TRACE <step> #k: fn:line errno hits`。以后任一步被拒都能直接定位到具体检查。
+- **后续流程静态检查**：receiver-open（MM slot 0–10 + rate）→ smi-clocks-open → camsv-cold-reset → mac-open → phy-open → phy-timing → source-rate → phy-ctle → outmux-open → capture。VCP 运行后可能受影响的：VMMRC mux（已改）、vcore 电压（检查是「≥」，VCP 抬压不影响）、MMQoS（AP 表要求全零；VCP 用自己的表，预计不受影响）、SMI/HWV 精确门禁（无法静态预判，靠 FAIL TRACE 定位）。
+
 #### 2026-11-23 日志 370（x9-mmup-readypin-20261123）：**MMUP+VCP 启动成功**（stage=6 errno=0），MM_2 投票成功；camera 卡在 CAM rate take（EBUSY）
 
 - **实测**：PM_GET/WPCFG/INIT 均 0（INIT 318µs）；`X9 MM VCP BOOT: stage=6 ... end=0/f pc=8692/0 mmup=80/80000 vcp=180/80000 errno=0`（两个 READY 都是 bit7，msg=0x80000）；`X9 MM POWER GET: ... stage=6 owned=1 held=1 ... errno=0`。**相机 MMUP/VCP/errno=60 这一阻塞已解决。**

@@ -10,16 +10,16 @@ static int cam_uw_table_check(const uint16_t *p,uint32_t n,bool pre)
         0x7002,0x408,0x6014,1,0xfcfc,0x2002,0x1e92,0x8000,
         0x1e84,0x282b,0x1e86,0x320,0xfcfc,0x4000,0x7002,8};
     uint16_t page=0;
-    if(!p || !n || n%2 || n>8192)return ENOTSUP;
-    if(pre && (n!=sizeof(reset)/sizeof(reset[0]) || memcmp(p,reset,sizeof(reset))))return EINVAL;
+    if(!p || !n || n%2 || n>8192)return CAM_FAIL(ENOTSUP);
+    if(pre && (n!=sizeof(reset)/sizeof(reset[0]) || memcmp(p,reset,sizeof(reset))))return CAM_FAIL(EINVAL);
     for(uint32_t i=0;i<n;i+=2) {
         uint16_t reg=p[i],v=p[i+1];
-        if(reg==0xfcfc) {if(!cam_uw_page(v))return EINVAL;page=v;continue;}
-        if(!page)return EINVAL;
+        if(reg==0xfcfc) {if(!cam_uw_page(v))return CAM_FAIL(EINVAL);page=v;continue;}
+        if(!page)return CAM_FAIL(EINVAL);
         /* 4001:0100 is internal RAM, NOT the live stream control. */
         if(page==0x4000 && (reg==0x0100 || reg==0x0101 || reg==0x0103 ||
-           reg==0x0104 || reg==0x0016 || reg==0x0017))return EPERM;
-        if(page==0x4000 && (reg==0 || reg==0x6014 || reg==0x6018) && !pre)return EPERM;
+           reg==0x0104 || reg==0x0016 || reg==0x0017))return CAM_FAIL(EPERM);
+        if(page==0x4000 && (reg==0 || reg==0x6014 || reg==0x6018) && !pre)return CAM_FAIL(EPERM);
     }
     return page==0x4000?0:EINVAL;
 }
@@ -50,7 +50,7 @@ static int cam_uw_preflight(struct x9_camera_config *r)
         uint32_t v=UINT32_MAX;uint16_t reg=controls[i];
         if(reg!=0x0100 && reg!=0x0104 && reg!=0x0101 && reg!=0x0204) {
             int e=cam_uw_table_value(x9_hhuwide_preview,X9_HHUWIDE_PREVIEW_COUNT,reg,&v);
-            if(e || v!=controls[i+1]) {r->reg=reg;r->expected=controls[i+1];return EINVAL;}
+            if(e || v!=controls[i+1]) {r->reg=reg;r->expected=controls[i+1];return CAM_FAIL(EINVAL);}
         }
         r->sample[i/2]=(struct x9_camera_config_sample){reg,controls[i+1],UINT32_MAX};
     }
@@ -61,11 +61,11 @@ static int cam_uw_preflight(struct x9_camera_config *r)
 static int cam_uw_write(struct cam_sensor_io *io,uint16_t reg,uint16_t v,struct x9_camera_config *r)
 {
     r->reg=reg;r->expected=v;r->observed=UINT32_MAX;
-    if(mach_absolute_time()>=io->deadline)return ETIMEDOUT;
+    if(mach_absolute_time()>=io->deadline)return CAM_FAIL(ETIMEDOUT);
     r->attempted++;
     int e=io->write_word(io->context,reg,v);
     if(!e)r->written++;
-    if(!e && mach_absolute_time()>=io->deadline)e=ETIMEDOUT;
+    if(!e && mach_absolute_time()>=io->deadline)e=CAM_FAIL(ETIMEDOUT);
     return e;
 }
 static int cam_uw_load(struct cam_sensor_io *io,const uint16_t *p,uint32_t n,struct x9_camera_config *r)
@@ -76,15 +76,15 @@ static int cam_uw_load(struct cam_sensor_io *io,const uint16_t *p,uint32_t n,str
 static int cam_uw_configure(struct cam_sensor_io *io,struct x9_camera_config *r)
 {
     uint16_t module=0;uint8_t byte=0;
-    if(!io->read_word || !io->write_word)return ENOTSUP;
+    if(!io->read_word || !io->write_word)return CAM_FAIL(ENOTSUP);
     r->stage=X9_CAM_CFG_IDLE;
-    int e=io->read(io->context,0x0100,&byte);if(!e && byte)e=EBUSY;
-    if(!e)e=io->read(io->context,0x0104,&byte);if(!e && byte)e=EBUSY;
+    int e=io->read(io->context,0x0100,&byte);if(!e && byte)e=CAM_FAIL(EBUSY);
+    if(!e)e=io->read(io->context,0x0104,&byte);if(!e && byte)e=CAM_FAIL(EBUSY);
     if(e)return e;
     r->flags|=X9_CAM_CFG_STANDBY;
     e=cam_uw_write(io,0xfcfc,0x4000,r);
     if(!e)e=io->read_word(io->context,0x0010,&module);
-    if(!e && mach_absolute_time()>=io->deadline)e=ETIMEDOUT;
+    if(!e && mach_absolute_time()>=io->deadline)e=CAM_FAIL(ETIMEDOUT);
     if(e)return e;
     bool short_module=(module|0xff)==0x7ff;
     const uint16_t *pre=short_module?x9_hhuwide_pre_short:x9_hhuwide_pre_long;
@@ -99,7 +99,7 @@ static int cam_uw_configure(struct cam_sensor_io *io,struct x9_camera_config *r)
     if(!e)e=cam_uw_write(io,0x0204,32,r); /* explicit unity, not an assumed reset value */
     if(!e) {
         r->stage=X9_CAM_CFG_MIRROR;r->reg=0x0101;r->expected=0;r->observed=UINT32_MAX;
-        if(mach_absolute_time()>=io->deadline)e=ETIMEDOUT;
+        if(mach_absolute_time()>=io->deadline)e=CAM_FAIL(ETIMEDOUT);
         else {r->attempted++;e=io->write(io->context,0x0101,0);if(!e)r->written++;}
     }
     if(e)return e;
@@ -107,15 +107,15 @@ static int cam_uw_configure(struct cam_sensor_io *io,struct x9_camera_config *r)
     for(unsigned i=0;i<X9_CAM_CFG_SAMPLES && r->sample[i].reg;i++) {
         struct x9_camera_config_sample *s=&r->sample[i];uint16_t v=0;
         r->table_index=i;r->reg=s->reg;r->expected=s->expected;r->observed=UINT32_MAX;
-        if(mach_absolute_time()>=io->deadline)return ETIMEDOUT;
+        if(mach_absolute_time()>=io->deadline)return CAM_FAIL(ETIMEDOUT);
         /* Byte controls must not demand an unqualified adjacent register. */
         if(s->reg==0x0100 || s->reg==0x0101 || s->reg==0x0104) {
             uint8_t b=0;e=io->read(io->context,(uint16_t)s->reg,&b);v=b;
         } else e=io->read_word(io->context,(uint16_t)s->reg,&v);
         if(e)return e;
-        if(mach_absolute_time()>=io->deadline)return ETIMEDOUT;
+        if(mach_absolute_time()>=io->deadline)return CAM_FAIL(ETIMEDOUT);
         r->observed=s->observed=v;r->read_count++;
-        if(v!=s->expected)return EIO;
+        if(v!=s->expected)return CAM_FAIL(EIO);
     }
     r->flags|=X9_CAM_CFG_VERIFIED;return 0;
 }

@@ -13,7 +13,7 @@ static int cam_cache_range(vm_offset_t va,uint32_t bytes,unsigned operation)
     vm_offset_t line,end;
     if(!va || !bytes || bytes>CAM_S1_PAGE || operation>CAM_CACHE_CPU ||
         va>~(vm_offset_t)0-bytes ||
-        bytes>CAM_S1_PAGE-(va&(CAM_S1_PAGE-1)))return EINVAL;
+        bytes>CAM_S1_PAGE-(va&(CAM_S1_PAGE-1)))return CAM_FAIL(EINVAL);
     /* DminLine belongs to the CPU executing the cache instructions, not
      * to the camera allocation or its mutex. Migration to a CPU with a
      * smaller line could otherwise skip dirty/stale lines. Pin ONLY this
@@ -22,11 +22,11 @@ static int cam_cache_range(vm_offset_t va,uint32_t bytes,unsigned operation)
     disable_preemption();
     __asm__ volatile("mrs %0, ctr_el0":"=r"(ctr));
     line=(vm_offset_t)4<<((ctr>>16)&15u);
-    if(line>CAM_S1_PAGE){enable_preemption();return ENOTSUP;}
+    if(line>CAM_S1_PAGE){enable_preemption();return CAM_FAIL(ENOTSUP);}
     /* Invalidate ONLY complete lines owned by this allocation. Partial-line
      * IVAC/CIVAC must not discard an adjacent CPU writer's dirty bytes. */
     if(operation!=CAM_CACHE_CLEAN && ((va|bytes)&(line-1))) {
-        enable_preemption();return EINVAL;
+        enable_preemption();return CAM_FAIL(EINVAL);
     }
     end=va+bytes;
     __asm__ volatile("dsb sy":::"memory");

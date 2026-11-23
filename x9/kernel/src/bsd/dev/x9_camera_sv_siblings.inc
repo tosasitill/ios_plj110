@@ -44,14 +44,14 @@ static int cam_sv_sibling_sample(struct cam_mm_journal *j,bool physical)
     int e;
     /* No cam_mm_guard recursion. Prove the actual shared power/infra path
      * before the RO foreign EN window and, separately, before MRAW CG. */
-    if(!j->receive.smmu_owned)return ENXIO;
+    if(!j->receive.smmu_owned)return CAM_FAIL(ENXIO);
     e=x9_mm_power_validate(j->receive.power_token,X9_MM_POWER_CAMERA);if(e)return e;
     if((cam_rr(j->receive.hwv,0x12900)&CAM_RES_MM_INFRA)!=CAM_RES_MM_INFRA ||
-        (cam_rr(j->receive.hwv,0x1131c)&CAM_RES_MM_INFRA))return ENXIO;
+        (cam_rr(j->receive.hwv,0x1131c)&CAM_RES_MM_INFRA))return CAM_FAIL(ENXIO);
     e=cam_mm_vote_idle(&j->receive);if(e)return e;
     for(unsigned sample=0;sample<2;sample++) {
         cam_sv_siblings.sta=cam_rr(j->receive.hwv,0x11888)&CAM_SV_SIBLING_MASK;
-        if(cam_sv_siblings.sta)return EBUSY;
+        if(cam_sv_siblings.sta)return CAM_FAIL(EBUSY);
         cam_sv_siblings.global_after=cam_rr(j->receive.hwv,0x12288)&CAM_SV_SIBLING_MASK;
         for(unsigned n=0;n<CAM_SV_SIBLING_XPUS;n++)
             cam_sv_siblings.after[n]=cam_sv_sibling_vote(j,n);
@@ -60,9 +60,9 @@ static int cam_sv_sibling_sample(struct cam_mm_journal *j,bool physical)
             cam_sv_siblings.global_before=cam_sv_siblings.global_after;
         }
         if(cam_sv_siblings.reads!=UINT32_MAX)cam_sv_siblings.reads++;
-        if(cam_sv_siblings.global_after)return EBUSY;
+        if(cam_sv_siblings.global_after)return CAM_FAIL(EBUSY);
         for(unsigned n=0;n<CAM_SV_SIBLING_XPUS;n++)
-            if(cam_sv_siblings.after[n])return EBUSY;
+            if(cam_sv_siblings.after[n])return CAM_FAIL(EBUSY);
         if(physical) {
             /* An ambiguous MRAW SET may have exposed CG even without a
              * completed slot. Require its actual AP/global/ACK target;
@@ -71,17 +71,17 @@ static int cam_sv_sibling_sample(struct cam_mm_journal *j,bool physical)
             if((cam_rr(j->receive.hwv,0x1131c)&bit) ||
                 !(cam_rr(j->receive.hwv,0x20708)&bit) ||
                 !(cam_rr(j->receive.hwv,0x11318)&bit) ||
-                !(cam_rr(j->receive.hwv,0x12900)&bit))return ENXIO;
+                !(cam_rr(j->receive.hwv,0x12900)&bit))return CAM_FAIL(ENXIO);
             cam_sv_siblings.gate=cam_rr(j->sv_cg,0)&CAM_SV_SIBLING_MASK;
             cam_sv_siblings.gate_sampled=true;
-            if(cam_sv_siblings.gate!=CAM_SV_SIBLING_MASK)return EBUSY;
+            if(cam_sv_siblings.gate!=CAM_SV_SIBLING_MASK)return CAM_FAIL(EBUSY);
         }
         __asm__ volatile("dsb sy":::"memory");
         /* Bracket the hardware reads by the real token/infra authority.
          * No late adoption or extra waiting for a foreign voter to go away. */
         e=x9_mm_power_validate(j->receive.power_token,X9_MM_POWER_CAMERA);if(e)return e;
         if((cam_rr(j->receive.hwv,0x12900)&CAM_RES_MM_INFRA)!=CAM_RES_MM_INFRA ||
-            (cam_rr(j->receive.hwv,0x1131c)&CAM_RES_MM_INFRA))return ENXIO;
+            (cam_rr(j->receive.hwv,0x1131c)&CAM_RES_MM_INFRA))return CAM_FAIL(ENXIO);
         if(!sample)delay(1);
     }
     if(cam_sv_siblings.checks!=UINT32_MAX)cam_sv_siblings.checks++;
@@ -91,13 +91,13 @@ static int cam_sv_sibling_begin(struct cam_mm_journal *j)
 {
     static vm_offset_t xpu;
     int e;
-    if(cam_sv_siblings.captured)return EBUSY;
+    if(cam_sv_siblings.captured)return CAM_FAIL(EBUSY);
     memset(&cam_sv_siblings,0,sizeof(cam_sv_siblings));
     cam_sv_siblings.epoch=cam_mm_live.epoch;cam_sv_siblings.attempted=true;
     /* DT MM_HWV size74900. Existing power map ends22000, insufficient
      * for XPU1..9; this separate Device window reads only their EN words. */
     if(!xpu)xpu=ml_io_map(0x31c30000,0x45000);
-    if(!xpu)return cam_sv_sibling_fault(ENOMEM);
+    if(!xpu)return cam_sv_sibling_fault(CAM_FAIL(ENOMEM));
     cam_sv_siblings.xpu=xpu;
     e=cam_sv_sibling_sample(j,false);if(e)return cam_sv_sibling_fault(e);
     cam_sv_siblings.captured=true;return 0;
@@ -112,7 +112,7 @@ static int cam_sv_sibling_guard(struct cam_mm_journal *j)
     if(!cam_sv_siblings.captured)return 0;
     if(cam_sv_siblings.error)return cam_sv_siblings.error;
     if(j!=&cam_mm || !cam_mm_live.epoch || cam_sv_siblings.epoch!=cam_mm_live.epoch)
-        return cam_sv_sibling_fault(ESTALE);
+        return cam_sv_sibling_fault(CAM_FAIL(ESTALE));
     /* completed persists in reverse close; still-SEEN is essential. An
      * issued/borrowed MRAW reference also needs target qualification on
      * partial take, not a blind unwind just because completed is clear. */

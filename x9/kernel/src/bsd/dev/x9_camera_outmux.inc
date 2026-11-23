@@ -81,14 +81,14 @@ static int cam_out_top_guard(bool admission)
 {
     uint32_t cg;
     int e=cam_mm_guard(&cam_mm,true);if(e)return e;
-    if(cam_rr(cam_out.top,4)&1)return EBUSY; /* selected TOP reset only */
+    if(cam_rr(cam_out.top,4)&1)return CAM_FAIL(EBUSY); /* selected TOP reset only */
     /* Preserve VM routing; never move a bank away from another VM. This
      * observed AP route is NOT a normal-memory/SMMU authorization grant. */
     if(!(cam_rr(cam_out.top,0xc0)&1) || (cam_rr(cam_out.top,0xc4)&1) ||
        (cam_rr(cam_out.top,0xc8)&1) || (cam_rr(cam_out.top,0xcc)&1))return EACCES;
     cg=cam_rr(cam_out.top,0xc)&1;
-    if(admission)return cg?EBUSY:0; /* no borrowed/direct-owner CG repair */
-    if(!cam_out.cg_uncertain && cg!=(cam_out.cg_owned?1u:0u))return ESTALE;
+    if(admission)return cg?CAM_FAIL(EBUSY):0; /* no borrowed/direct-owner CG repair */
+    if(!cam_out.cg_uncertain && cg!=(cam_out.cg_owned?1u:0u))return CAM_FAIL(ESTALE);
     return 0;
 }
 static int cam_out_environment(void)
@@ -103,10 +103,10 @@ static int cam_out_environment(void)
     /* OUTMUX is checked completely below, including all seven unused tags;
      * never suppress MAC/async/AFIFO/CAMSV changes under a route commit. */
     memset(live.out,0,sizeof(live.out));memset(base.out,0,sizeof(base.out));
-    if(cam_rx_changed(&base,&live,port))return ESTALE;
+    if(cam_rx_changed(&base,&live,port))return CAM_FAIL(ESTALE);
     return cam_rx_busy(&live,port,cam_sv_fbc_busy_exemption(),
         cam_sv_receive_busy_exemption(0x040),cam_sv_gate_busy_exemption(0x140),
-        cam_sv_gate_busy_exemption(0x148),cam_source_busy_exemption(m->mac,0x40),0)?EBUSY:0;
+        cam_sv_gate_busy_exemption(0x148),cam_source_busy_exemption(m->mac,0x40),0)?CAM_FAIL(EBUSY):0;
 }
 static int cam_out_read_bank(unsigned bank,uint32_t v[CAM_OUT_REGS])
 {
@@ -126,7 +126,7 @@ static int cam_out_guard_impl(void)
     uint32_t v[CAM_OUT_REGS];
     int e;
     if(!cam_out.held)return 0;
-    if(cam_out.epoch!=cam_rx_live.sensor_epoch || cam_rx_live.epoch!=cam_mm_live.epoch)return ESTALE;
+    if(cam_out.epoch!=cam_rx_live.sensor_epoch || cam_rx_live.epoch!=cam_mm_live.epoch)return CAM_FAIL(ESTALE);
     e=cam_source_commit_guard();if(e)return e;
     e=cam_sv_guard();if(e)return e;
     e=cam_out_irq_control_guard();if(e)return e;
@@ -143,16 +143,16 @@ static int cam_out_guard_impl(void)
                 else if(v[n]==cam_out.expected[0][n])allowed=true;
             }
             allowed=cam_out_irq_control_allowed(bank,n,v[n],allowed);
-            if(!allowed)return ESTALE;
+            if(!allowed)return CAM_FAIL(ESTALE);
         }
         /* Command/status are separate from config CSR, never IRQ_STATUS.
          * An unexpected pending command means somebody else changed the bank. */
         if((cam_rr(cam_out.out[bank],0x1c)&~1u) ||
-           (cam_rr(cam_out.out[bank],0x38)&~1u))return EIO;
+           (cam_rr(cam_out.out[bank],0x38)&~1u))return CAM_FAIL(EIO);
         if(cam_out_irq_inner_target_required() &&
-           ((cam_rr(cam_out.out[bank],0x1c)|cam_rr(cam_out.out[bank],0x38))&1))return ESTALE;
+           ((cam_rr(cam_out.out[bank],0x1c)|cam_rr(cam_out.out[bank],0x38))&1))return CAM_FAIL(ESTALE);
         if(!cam_out.commit_pending &&
-           ((cam_rr(cam_out.out[bank],0x1c)|cam_rr(cam_out.out[bank],0x38))&1))return EBUSY;
+           ((cam_rr(cam_out.out[bank],0x1c)|cam_rr(cam_out.out[bank],0x38))&1))return CAM_FAIL(EBUSY);
     }
     return 0;
 }
@@ -187,7 +187,7 @@ static int cam_out_target_observe(uint32_t inner[CAM_OUT_REGS])
             }
             if(bank)memcpy(inner,v,sizeof(v));
         }
-        if(!match)return EAGAIN;
+        if(!match)return CAM_FAIL(EAGAIN);
         if(!sample)delay(1);
     }
     return 0;
@@ -198,13 +198,13 @@ static int cam_out_write(unsigned slot,uint32_t value)
     const struct cam_out_field *f=&cam_out_fields[slot];
     uint32_t next,seen;
     int e=cam_out_guard();if(e)return e;
-    if(cam_out.pending_slot<CAM_OUT_WRITES || cam_out.commit_pending)return EBUSY;
+    if(cam_out.pending_slot<CAM_OUT_WRITES || cam_out.commit_pending)return CAM_FAIL(EBUSY);
     next=(cam_out.expected[0][f->reg]&~f->mask)|(value&f->mask);
     if(next==cam_out.expected[0][f->reg])return 0;
     cam_out.pending_slot=slot;cam_out.pending_next=next;cam_out.dirty|=1u<<slot;
     cam_rw(cam_out.out[0],cam_out_offset(f->reg),next);
     seen=cam_rr(cam_out.out[0],cam_out_offset(f->reg));
-    if(seen!=next)return EIO; /* journal already includes ambiguous MMIO */
+    if(seen!=next)return CAM_FAIL(EIO); /* journal already includes ambiguous MMIO */
     cam_out.expected[0][f->reg]=next;cam_out.pending_slot=CAM_OUT_WRITES;
     cam_out_publish_expected();
     return cam_out_guard();
@@ -213,21 +213,21 @@ static int cam_out_commit(void)
 {
     uint64_t span,deadline;
     int e=cam_out_guard();if(e)return e;
-    if(cam_out.pending_slot<CAM_OUT_WRITES || cam_out.commit_pending)return EBUSY;
+    if(cam_out.pending_slot<CAM_OUT_WRITES || cam_out.commit_pending)return CAM_FAIL(EBUSY);
     e=cam_out_irq_precommit();if(e)return e;
     nanoseconds_to_absolutetime(10000000,&span);deadline=mach_absolute_time()+span;
     cam_out.commit_pending=true; /* BEFORE the possibly posted trigger */
     cam_rw(cam_out.out[0],0x1c,1);
     for(unsigned poll=0;poll<10000;poll++) {
-        if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+        if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
         e=cam_out_guard();if(e)return e;
         e=cam_out_irq_finish_commit();
-        if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+        if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
         if(!e)return cam_out_guard();
         if(e!=EAGAIN)return e;
         delay(1);
     }
-    return ETIMEDOUT; /* never reset/cancel/retrigger/force inner CSR */
+    return CAM_FAIL(ETIMEDOUT); /* never reset/cancel/retrigger/force inner CSR */
 }
 static int cam_out_cg_retirement_guard(void)
 {
@@ -239,11 +239,11 @@ static int cam_out_cg_retirement_guard(void)
      * prior/off readback is NOT a cancellation or retirement proof. */
     nanoseconds_to_absolutetime(10000000,&span);deadline=mach_absolute_time()+span;
     for(unsigned poll=0;poll<10000;poll++) {
-        if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+        if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
         e=cam_out_guard();if(e)return e;
         if(cam_rr(cam_out.top,0xc)&1) {
             delay(1);e=cam_out_guard();if(e)return e;
-            if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+            if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
             if(cam_rr(cam_out.top,0xc)&1) {
                 cam_out.cg_uncertain=false;
                 return cam_out_guard();
@@ -252,7 +252,7 @@ static int cam_out_cg_retirement_guard(void)
         }
         delay(1);
     }
-    return ETIMEDOUT; /* observe only, never replay SET or remove its parent */
+    return CAM_FAIL(ETIMEDOUT); /* observe only, never replay SET or remove its parent */
 }
 static int cam_out_open_locked(uint64_t epoch,struct x9_camera_outmux_status *r)
 {
@@ -261,13 +261,13 @@ static int cam_out_open_locked(uint64_t epoch,struct x9_camera_outmux_status *r)
     const struct cam_rx_maps *m;
     int e;
     memset(r,0,sizeof(*r));r->sensor_epoch=epoch;r->sensor=cam_sensor_live.probe.sensor;
-    if(cam_out.held)return EALREADY;
-    if(!cam_rx_sensor_held_locked(epoch) || cam_rx_live.close_attempted || cam_rx_live.error)return ESTALE;
+    if(cam_out.held)return CAM_FAIL(EALREADY);
+    if(!cam_rx_sensor_held_locked(epoch) || cam_rx_live.close_attempted || cam_rx_live.error)return CAM_FAIL(ESTALE);
     e=cam_pipeline_plan(r->sensor,&plan);if(e)return e;
     e=cam_rx_session_guard();if(e)return cam_rx_session_fault(e);
     e=cam_mac_guard();if(e)return cam_rx_session_fault(e);
     if(!cam_out.top)cam_out.top=ml_io_map(0x3a400000,0x1000);
-    if(!cam_out.top)return ENOMEM;
+    if(!cam_out.top)return CAM_FAIL(ENOMEM);
     m=&cam_rx_maps[(r->sensor-1)];
     cam_out.out[0]=m->out[0];cam_out.out[1]=m->out[1];
     e=cam_out_top_guard(true);if(e)return e;
@@ -278,20 +278,20 @@ static int cam_out_open_locked(uint64_t epoch,struct x9_camera_outmux_status *r)
         delay(10);
         e=cam_out_top_guard(true);if(e)return e;
         for(unsigned n=0;n<CAM_OUT_REGS;n++)again[n]=cam_rr(cam_out.out[bank],cam_out_offset(n));
-        if(memcmp(again,cam_out.before[bank],sizeof(again)))return ESTALE;
-        if(cam_rr(cam_out.out[bank],0x1c) || cam_rr(cam_out.out[bank],0x38))return EBUSY;
+        if(memcmp(again,cam_out.before[bank],sizeof(again)))return CAM_FAIL(ESTALE);
+        if(cam_rr(cam_out.out[bank],0x1c) || cam_rr(cam_out.out[bank],0x38))return CAM_FAIL(EBUSY);
     }
     /* A commit transfers more than tag0. Reject any inherited staged
      * difference rather than accidentally publishing another owner's tags. */
-    if(memcmp(cam_out.before[0],cam_out.before[1],sizeof(cam_out.before[0])))return EBUSY;
+    if(memcmp(cam_out.before[0],cam_out.before[1],sizeof(cam_out.before[0])))return CAM_FAIL(EBUSY);
     if((cam_out.before[0][0]&0x3f0103) || (cam_out.before[0][1]&3) ||
        (cam_out.before[0][7]&((1u<<12)|(1u<<28)|(1u<<29))) ||
        cam_out.before[0][8] || cam_out.before[0][9] || cam_out.before[0][10] ||
        cam_out.before[0][11] || (cam_out.before[0][12]&0x80) ||
-       (cam_out.before[0][13]&0x71311) || cam_out.before[0][15])return EBUSY;
+       (cam_out.before[0][13]&0x71311) || cam_out.before[0][15])return CAM_FAIL(EBUSY);
     for(unsigned tag=0;tag<8;tag++) {
         unsigned n=CAM_OUT_FIXED+tag*5;
-        if((cam_out.before[0][n]&0x31) || cam_out.before[0][n+2] || cam_out.before[0][n+3])return EBUSY;
+        if((cam_out.before[0][n]&0x31) || cam_out.before[0][n+2] || cam_out.before[0][n+3])return CAM_FAIL(EBUSY);
     }
     memcpy(cam_out.expected,cam_out.before,sizeof(cam_out.expected));
     cam_out.status=*r;cam_out.status.image_vc=plan.vc;
@@ -312,12 +312,12 @@ static int cam_out_open_locked(uint64_t epoch,struct x9_camera_outmux_status *r)
     if(!e)e=cam_out_top_guard(true);
     if(!e) {
         cg=cam_rr(cam_out.top,0xc);
-        if(cg&1)e=EBUSY;
+        if(cg&1)e=CAM_FAIL(EBUSY);
         else {
             cam_out.cg_owned=cam_out.cg_uncertain=true; /* BEFORE SET */
             cam_rw(cam_out.top,0xc,cg|1);
-            if(!(cam_rr(cam_out.top,0xc)&1))e=EIO;
-            else if((cam_rr(cam_out.top,0xc)^cg)&~1u)e=ESTALE;
+            if(!(cam_rr(cam_out.top,0xc)&1))e=CAM_FAIL(EIO);
+            else if((cam_rr(cam_out.top,0xc)^cg)&~1u)e=CAM_FAIL(ESTALE);
             else {cam_out.cg_uncertain=false;e=cam_out_guard();}
         }
     }
@@ -334,7 +334,7 @@ static int cam_out_close_locked(uint64_t epoch)
     uint32_t cg;
     int e;
     if(!cam_out.held)return 0;
-    if(cam_out.epoch!=epoch || cam_out.close_attempted)return ESTALE;
+    if(cam_out.epoch!=epoch || cam_out.close_attempted)return CAM_FAIL(ESTALE);
     cam_out.close_attempted=true;
     /* A late target AND the bound fresh event may qualify the sole close.
      * Never cancel/replay a trigger, accept prior as retirement, or retry a
@@ -348,7 +348,7 @@ static int cam_out_close_locked(uint64_t epoch)
          * observation, never by repeating the original failed write. */
         cam_out.expected[0][reg]=cam_rr(cam_out.out[0],cam_out_offset(reg));
         if(cam_out.expected[0][reg]!=cam_out.pending_next &&
-           cam_out.expected[0][reg]!=cam_out.before[0][reg])e=ESTALE;
+           cam_out.expected[0][reg]!=cam_out.before[0][reg])e=CAM_FAIL(ESTALE);
         else {cam_out.pending_slot=CAM_OUT_WRITES;cam_out_publish_expected();}
     }
     for(unsigned i=CAM_OUT_WRITES;i && !e;i--) {
@@ -361,12 +361,12 @@ static int cam_out_close_locked(uint64_t epoch)
     if(!e)e=cam_out_guard();
     if(!e) {
         cg=cam_rr(cam_out.top,0xc);
-        if(!cam_out.cg_owned && (cg&1))e=ESTALE;
+        if(!cam_out.cg_owned && (cg&1))e=CAM_FAIL(ESTALE);
         else {
             cam_out.cg_uncertain=true; /* ambiguous CLR retains the CG journal */
             if(cam_out.cg_owned && (cg&1))cam_rw(cam_out.top,0xc,cg&~1u);
-            if(cam_rr(cam_out.top,0xc)&1)e=EIO;
-            else if((cam_rr(cam_out.top,0xc)^cg)&~1u)e=ESTALE;
+            if(cam_rr(cam_out.top,0xc)&1)e=CAM_FAIL(EIO);
+            else if((cam_rr(cam_out.top,0xc)^cg)&~1u)e=CAM_FAIL(ESTALE);
         }
         if(!e) {
             cam_out_irq_release();
@@ -391,22 +391,22 @@ int x9_camera_sensor_session_configure_outmux(uint64_t epoch,struct x9_camera_ou
     struct cam_sensor_ap ap;
     uint8_t byte=0;
     int e;
-    if(!r)return EINVAL;
+    if(!r)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_control_lock);
     memset(r,0,sizeof(*r));r->sensor_epoch=epoch;
     e=cam_sensor_session_match(epoch);
     if(!e && cam_sensor_live.error)e=cam_sensor_live.error;
-    if(!e && (cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED || session.capture || session.stream))e=EBUSY;
-    if(!e && cam_out.held)e=EALREADY;
-    if(!e && !cam_rx_sensor_held_locked(epoch))e=ENXIO;
+    if(!e && (cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED || session.capture || session.stream))e=CAM_FAIL(EBUSY);
+    if(!e && cam_out.held)e=CAM_FAIL(EALREADY);
+    if(!e && !cam_rx_sensor_held_locked(epoch))e=CAM_FAIL(ENXIO);
     if(!e) {
         ap=(struct cam_sensor_ap){&cam_journal.sensor,cam_sensor_slave(cam_sensor_live.probe.sensor)};
-        e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e && byte)e=EBUSY;
-        if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=EBUSY;
+        e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e && byte)e=CAM_FAIL(EBUSY);
+        if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=CAM_FAIL(EBUSY);
         if(e)cam_sensor_session_fault(e);
         if(!e)e=cam_out_open_locked(epoch,r);
-        if(!e)e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e && byte)e=EBUSY;
-        if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=EBUSY;
+        if(!e)e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e && byte)e=CAM_FAIL(EBUSY);
+        if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=CAM_FAIL(EBUSY);
         if(!e)e=cam_sensor_ap_guard(&ap);
         if(e && cam_out.held){cam_out_fault(e);cam_rx_session_fault(e);cam_sensor_session_fault(e);}
         else if(e && cam_rx_live.error)cam_sensor_session_fault(e);

@@ -15,14 +15,14 @@ static int cam_irq_credit_retired_slot(void)
         memcmp(&slot->request,&cam_sv.request,sizeof(slot->request)) ||
         slot->dma.version!=cam_sv.request_dma.version || slot->dma.reserved ||
         slot->dma.context!=cam_sv.request_dma.context || slot->dma.lease!=cam_sv.request_dma.lease ||
-        slot->dma.backing!=cam_sv.request_dma.backing || slot->dma.check!=cam_sv.request_dma.check?ESTALE:0;
+        slot->dma.backing!=cam_sv.request_dma.backing || slot->dma.check!=cam_sv.request_dma.check?CAM_FAIL(ESTALE):0;
     if(!e) {
         m=slot->dma.backing;
         lck_mtx_lock(&camera_s1_lock);
         e=cam_s1_check_private(m);
         if(!e && m->raw_errno)e=m->raw_errno;
         if(!e && (!m->published || (m->raw_state!=CAM_RAW_IDLE &&
-            (m->raw_state!=CAM_RAW_CANCELLED || slot->state!=X9_CAMSV_CANCELLED)) || !cam_s1_dma_match(m,slot)))e=ESTALE;
+            (m->raw_state!=CAM_RAW_CANCELLED || slot->state!=X9_CAMSV_CANCELLED)) || !cam_s1_dma_match(m,slot)))e=CAM_FAIL(ESTALE);
         lck_mtx_unlock(&camera_s1_lock);
     }
     lck_mtx_unlock(&camera_camsv_lock);return e;
@@ -53,7 +53,7 @@ static int cam_irq_credit_retired_guard(uint64_t epoch)
        !cam_smi.held || !cam_smi_a0.held || cam_smi.epoch!=epoch || cam_smi_a0.epoch!=epoch ||
        cam_smi.close_attempted || cam_smi_a0.close_attempted || cam_smi.error ||
        cam_smi.status.a0.last_errno ||
-       memcmp(&cam_dma_stop.request,&cam_sv.request,sizeof(cam_sv.request)))return ESTALE;
+       memcmp(&cam_dma_stop.request,&cam_sv.request,sizeof(cam_sv.request)))return CAM_FAIL(ESTALE);
     e=cam_sv_request_authority();if(!e)e=cam_irq_mapping();if(!e)e=cam_irq_power();
     if(!e)e=cam_irq_wait_rwp();if(!e)e=cam_irq_controller();if(!e)e=cam_irq_idle();
     if(!e)e=cam_irq_credit_retired_slot();if(e)return e;
@@ -69,7 +69,7 @@ static int cam_irq_credit_retired_guard(uint64_t epoch)
        cam_irq_fbc.source_seen!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||
        cam_irq_fbc.source_sampled!=7 || cam_irq_fbc.source_control ||
        cam_irq_fbc.source_frame_count!=0xff ||
-       memcmp(&cam_irq_fbc.request,&cam_sv.request,sizeof(cam_sv.request))))e=ESTALE;
+       memcmp(&cam_irq_fbc.request,&cam_sv.request,sizeof(cam_sv.request))))e=CAM_FAIL(ESTALE);
     if(!e)e=cam_irq_power();if(!e)e=cam_irq_controller();
     if(!e)e=cam_irq_idle();if(!e)e=cam_irq_partial_config();
     for(unsigned bank=0;bank<2 && !e;bank++) {
@@ -78,7 +78,7 @@ static int cam_irq_credit_retired_guard(uint64_t epoch)
         control=cam_irq_rd(cam_irq.view[bank],0x540);counter=cam_irq_rd(cam_irq.view[bank],0x544);
         e=cam_irq_fbc_note_locked(bank,control,counter);
         if(!e && (!cam_repeat_done_target_locked(bank,counter) ||
-           (cam_sv.credit_retired && counter!=cam_sv.credit_spent_count[bank])))e=ESTALE;
+           (cam_sv.credit_retired && counter!=cam_sv.credit_spent_count[bank])))e=CAM_FAIL(ESTALE);
     }
     cam_irq_spin_drop(old);if(e)return e;
     /* Real restored stop/DCM and outstanding monitors, not cached zeros. */
@@ -89,10 +89,10 @@ static int cam_irq_credit_retired_guard(uint64_t epoch)
         if(!e)e=cam_sv_dma_stop_observe(bank,cam_sv.view[bank],0x1020,
             cam_rr(cam_sv.view[bank],0x1020),&allowed);if(e)return e;
         if(cam_dma_stop.dcm_actual[bank]!=cam_dma_stop.dcm_prior[bank] ||
-           cam_dma_stop.actual[bank]!=cam_dma_stop.prior[bank])return ESTALE;
+           cam_dma_stop.actual[bank]!=cam_dma_stop.prior[bank])return CAM_FAIL(ESTALE);
     }
     e=cam_smi_clock_guard();if(!e)e=cam_sv_dma_stop_port_sample_locked();if(e)return e;
-    if(cam_dma_stop.ostd[0] || cam_dma_stop.ostd[1])return EBUSY;
+    if(cam_dma_stop.ostd[0] || cam_dma_stop.ostd[1])return CAM_FAIL(EBUSY);
     return cam_sv_request_authority();
 }
 static int cam_sv_credit_retire_locked(uint64_t epoch)
@@ -109,21 +109,21 @@ static int cam_sv_credit_retire_locked(uint64_t epoch)
         cam_sensor_slave(cam_sv.request.frame.sensor)};
     for(unsigned sample=0;sample<2;sample++) {
         e=cam_irq_credit_retired_guard(epoch);if(e)goto out;
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
         /* Actual fresh sensor OFF/hold0/FF, with existing AP/FIFO guards.
          * A sensor already isolated/closing cannot manufacture this receipt.
          * Native capture-stop must run here BEFORE sensor power teardown. */
         e=cam_sensor_ap_read(&ap,0x0100,&control);
-        if(!e && control)e=ESTALE;
-        if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
+        if(!e && control)e=CAM_FAIL(ESTALE);
+        if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
         if(!e)e=cam_sensor_ap_read(&ap,0x0104,&hold);
-        if(!e && hold)e=ESTALE;
-        if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
+        if(!e && hold)e=CAM_FAIL(ESTALE);
+        if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
         if(!e)e=cam_sensor_ap_read(&ap,0x0005,&count);
-        if(!e && count!=0xff)e=ESTALE;
+        if(!e && count!=0xff)e=CAM_FAIL(ESTALE);
         if(!e)e=cam_sv_environment();
         if(!e)e=cam_irq_credit_retired_guard(epoch);
-        if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
+        if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
         if(e)goto out;
         cam_sv.credit_retire_samples++;
     }
@@ -136,9 +136,9 @@ static int cam_sv_credit_retire_locked(uint64_t epoch)
         uint32_t control_word=cam_irq_rd(cam_irq.view[bank],0x540);
         uint32_t counter=cam_irq_rd(cam_irq.view[bank],0x544);
         e=cam_irq_fbc_note_locked(bank,control_word,counter);
-        if(!e && !cam_repeat_done_target_locked(bank,counter))e=ESTALE;
+        if(!e && !cam_repeat_done_target_locked(bank,counter))e=CAM_FAIL(ESTALE);
     }
-    if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
+    if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
     if(!e) {
         memcpy(cam_sv.credit_spent_count,cam_irq_fbc.after,sizeof(cam_sv.credit_spent_count));
         cam_sv.credit_retired=true; /* keep credit_issued/ACCEPTED history */

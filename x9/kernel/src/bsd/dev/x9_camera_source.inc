@@ -59,14 +59,14 @@ static int cam_source_observe(vm_offset_t view,unsigned offset,uint32_t v,bool *
             unsigned p=cam_source.pending;
             v&=f->full;
             if(cam_source.error)return cam_source.error;
-            if(cam_source.epoch!=cam_rx_live.sensor_epoch)return cam_source_fault(ESTALE);
+            if(cam_source.epoch!=cam_rx_live.sensor_epoch)return cam_source_fault(CAM_FAIL(ESTALE));
             if(p<2*cam_source.count && (cam_source.issued&(1u<<p)) &&
                cam_source.step[p].field==i) {
                 struct cam_source_step *s=&cam_source.step[p];
                 if(cam_source.phase!=CAM_SOURCE_STARTING && cam_source.phase!=CAM_SOURCE_STOPPING)
-                    return cam_source_fault(ESTALE);
+                    return cam_source_fault(CAM_FAIL(ESTALE));
                 if(v!=s->target[bank] && ((s->seen&(1u<<bank)) || v!=s->prior[bank]))
-                    return cam_source_fault(ESTALE);
+                    return cam_source_fault(CAM_FAIL(ESTALE));
                 if(v==s->target[bank]) {
                     s->seen|=1u<<bank;cam_source_accept(f,bank,v);
                 }
@@ -118,7 +118,7 @@ static int cam_source_commit_guard(void)
     if(!cam_source.captured || p>=2*cam_source.count ||
        cam_source.field[cam_source.step[p].field].kind!=CAM_SOURCE_OUT)return 0;
     if(cam_source.error)return cam_source.error;
-    if(cam_source.epoch!=cam_irq.epoch)return cam_source_fault(ESTALE);
+    if(cam_source.epoch!=cam_irq.epoch)return cam_source_fault(CAM_FAIL(ESTALE));
     e=cam_sv_request_authority();
     if(!e)e=cam_irq_control_guard_locked(cam_source.epoch,session.stream);
     return e?cam_source_fault(e):0;
@@ -126,27 +126,27 @@ static int cam_source_commit_guard(void)
 static int cam_source_add(unsigned kind,unsigned bank,unsigned offset,uint32_t mask,uint32_t value)
 {
     struct cam_source_field f={.kind=kind,.offset=offset,.mask=mask,.banks=1};
-    if(cam_source.count>=CAM_SOURCE_FIELDS || !value || (value&~mask))return EINVAL;
+    if(cam_source.count>=CAM_SOURCE_FIELDS || !value || (value&~mask))return CAM_FAIL(EINVAL);
     if(kind==CAM_SOURCE_MAC) {
         for(f.reg=0;f.reg<cam_mac.count;f.reg++)
             if(cam_mac.reg[f.reg].bank==bank && cam_mac.reg[f.reg].offset==offset)break;
-        if(f.reg==cam_mac.count)return EINVAL;
+        if(f.reg==cam_mac.count)return CAM_FAIL(EINVAL);
         f.view[0]=cam_mac.bank[bank];f.full=cam_mac.reg[f.reg].mask;
     } else if(kind==CAM_SOURCE_PHY) {
-        f.reg=cam_phy_find(bank,offset);if(f.reg==CAM_PHY_NO_REG)return EINVAL;
+        f.reg=cam_phy_find(bank,offset);if(f.reg==CAM_PHY_NO_REG)return CAM_FAIL(EINVAL);
         f.view[0]=cam_phy.bank[bank];f.full=cam_phy.reg[f.reg].mask;
     } else {
-        if(offset!=0x20 || mask!=(1u<<12))return EINVAL;
+        if(offset!=0x20 || mask!=(1u<<12))return CAM_FAIL(EINVAL);
         f.reg=7;f.banks=2;f.full=UINT32_MAX;
         f.view[0]=cam_out.out[0];f.view[1]=cam_out.out[1];
     }
-    if(mask&~f.full)return EINVAL;
+    if(mask&~f.full)return CAM_FAIL(EINVAL);
     for(unsigned b=0;b<f.banks;b++) {
         f.before[b]=cam_source_expected(&f,b);
-        if(f.before[b]&mask)return EBUSY; /* no inherited enable repair */
+        if(f.before[b]&mask)return CAM_FAIL(EBUSY); /* no inherited enable repair */
         f.on[b]=f.before[b]|value;
     }
-    if(f.banks==2 && f.before[0]!=f.before[1])return ESTALE;
+    if(f.banks==2 && f.before[0]!=f.before[1])return CAM_FAIL(ESTALE);
     cam_source.field[cam_source.count++]=f;return 0;
 }
 /* Admission precedes S1 arm. Flags are prerequisites, never grants. The
@@ -161,7 +161,7 @@ static int cam_source_admission_locked(uint64_t epoch)
     uint8_t byte;
     int e;
     if(cam_sensor_live.epoch!=epoch || cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED ||
-       cam_sensor_live.close_attempted || session.stream)return ESTALE;
+       cam_sensor_live.close_attempted || session.stream)return CAM_FAIL(ESTALE);
     if(!cam_mac.held || cam_mac.epoch!=epoch || cam_mac.close_attempted || cam_mac.error ||
        !(cam_mac.status.flags&X9_CAM_MAC_CONFIGURED) || cam_mac.pending_slot<CAM_MAC_WRITES ||
        cam_mac.cg_uncertain || !cam_phy.held || cam_phy.epoch!=epoch || cam_phy.close_attempted ||
@@ -173,16 +173,16 @@ static int cam_source_admission_locked(uint64_t epoch)
        cam_out_irq.ack_pending || !cam_smi.held || cam_smi.epoch!=epoch || cam_smi.close_attempted ||
        cam_smi.error || !(cam_smi.status.flags&X9_CAM_SMI_CLOCKS_CONFIGURED) ||
        !(cam_smi.status.a0.flags&X9_CAM_SMI_A0_CONFIGURED) ||
-       !(cam_smi.status.shared.flags&X9_CAM_SMI_SHARED_CONFIGURED))return ESTALE;
-    if(!x9_camera_sensor_valid(sensor))return EINVAL;
+       !(cam_smi.status.shared.flags&X9_CAM_SMI_SHARED_CONFIGURED))return CAM_FAIL(ESTALE);
+    if(!x9_camera_sensor_valid(sensor))return CAM_FAIL(EINVAL);
     e=cam_sv_environment();if(e)return e;
     for(unsigned sample=0;sample<2;sample++) {
-        e=cam_sensor_ap_read(&ap,0x0100,&byte);if(e)return e;if(byte)return EBUSY;
-        e=cam_sensor_ap_read(&ap,0x0104,&byte);if(e)return e;if(byte)return EBUSY;
+        e=cam_sensor_ap_read(&ap,0x0100,&byte);if(e)return e;if(byte)return CAM_FAIL(EBUSY);
+        e=cam_sensor_ap_read(&ap,0x0104,&byte);if(e)return e;if(byte)return CAM_FAIL(EBUSY);
     }
     e=cam_sensor_ap_guard(&ap);if(e)return e;
     if(cam_source.captured) {
-        if(cam_source.epoch!=epoch || cam_source.phase!=CAM_SOURCE_IDLE || cam_source.issued)return EBUSY;
+        if(cam_source.epoch!=epoch || cam_source.phase!=CAM_SOURCE_IDLE || cam_source.issued)return CAM_FAIL(EBUSY);
         return cam_source.error; /* no snapshot rebase after first admission */
     }
     cam_source.epoch=epoch;cam_source.count=0;
@@ -190,7 +190,7 @@ static int cam_source_admission_locked(uint64_t epoch)
     if(!e)e=cam_source_add(CAM_SOURCE_MAC,CAM_MAC_A,0,0xf,sensors[sensor-1].cphy?7:0xf);
     if(!sensors[sensor-1].cphy) {
         unsigned lane=cam_phy_find(CAM_PHY_D,4);
-        if(lane==CAM_PHY_NO_REG || cam_phy.reg[lane].expected!=0x80403102u)e=ESTALE;
+        if(lane==CAM_PHY_NO_REG || cam_phy.reg[lane].expected!=0x80403102u)e=CAM_FAIL(ESTALE);
         if(!e)e=cam_source_add(CAM_SOURCE_PHY,CAM_PHY_D,0,0xf03,0xf01);
         if(!e)e=cam_source_add(CAM_SOURCE_PHY,CAM_PHY_A,0x100,0x101,0x101);
         if(!e)e=cam_source_add(CAM_SOURCE_PHY,CAM_PHY_B,0x100,0x101,0x101);
@@ -229,16 +229,16 @@ static int cam_source_wait_locked(uint64_t epoch,uint64_t end,bool outer_only)
     for(unsigned poll=0;poll<10000;poll++) {
         bool match=true;
         int e;
-        if(mach_absolute_time()>=end)return ETIMEDOUT;
+        if(mach_absolute_time()>=end)return CAM_FAIL(ETIMEDOUT);
         e=cam_source_guard_locked(epoch);if(e)return e;
         for(unsigned b=0;b<(outer_only?1:f->banks);b++)
             if(cam_source_expected(f,b)!=s->target[b] || !(s->seen&(1u<<b)))match=false;
-        if(mach_absolute_time()>=end)return ETIMEDOUT;
+        if(mach_absolute_time()>=end)return CAM_FAIL(ETIMEDOUT);
         cam_source.samples=match?cam_source.samples+1:0;
         if(cam_source.samples==2)return 0;
         delay(1);
     }
-    return ETIMEDOUT;
+    return CAM_FAIL(ETIMEDOUT);
 }
 static int cam_source_transition_locked(uint64_t epoch,bool off)
 {
@@ -246,7 +246,7 @@ static int cam_source_transition_locked(uint64_t epoch,bool off)
     unsigned first=off?cam_source.count:0,last=off?2*cam_source.count:cam_source.count;
     int e;
     if(!cam_source.captured || cam_source.epoch!=epoch || cam_source.pending<CAM_SOURCE_STEPS ||
-       cam_source.phase!=(off?CAM_SOURCE_ARMED:CAM_SOURCE_IDLE))return ESTALE;
+       cam_source.phase!=(off?CAM_SOURCE_ARMED:CAM_SOURCE_IDLE))return CAM_FAIL(ESTALE);
     e=cam_source_guard_locked(epoch);if(e)return e;
     nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
     cam_source.phase=off?CAM_SOURCE_STOPPING:CAM_SOURCE_STARTING;
@@ -254,19 +254,19 @@ static int cam_source_transition_locked(uint64_t epoch,bool off)
         struct cam_source_step *s=&cam_source.step[p];
         const struct cam_source_field *f=&cam_source.field[s->field];
         uint32_t raw,next;
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
         e=cam_source_guard_locked(epoch);if(e)break;
-        if(cam_source.issued&(1u<<p)){e=ESTALE;break;}
-        for(unsigned b=0;b<f->banks;b++)if(cam_source_expected(f,b)!=s->prior[b])e=ESTALE;
+        if(cam_source.issued&(1u<<p)){e=CAM_FAIL(ESTALE);break;}
+        for(unsigned b=0;b<f->banks;b++)if(cam_source_expected(f,b)!=s->prior[b])e=CAM_FAIL(ESTALE);
         if(e)break;
         raw=cam_rr(f->view[0],f->offset);
-        if((raw&f->full)!=s->prior[0]){e=ESTALE;break;}
+        if((raw&f->full)!=s->prior[0]){e=CAM_FAIL(ESTALE);break;}
         /* AFIFO CTRL0 has command bits7/15/23, not RO completion flags.
          * Never echo those commands; actual FLUSH_FLAG lives at +104. */
-        if(f->kind==CAM_SOURCE_PHY && f->offset==0x100 && (raw&0x00808080u)){e=EBUSY;break;}
+        if(f->kind==CAM_SOURCE_PHY && f->offset==0x100 && (raw&0x00808080u)){e=CAM_FAIL(EBUSY);break;}
         next=(raw&~f->mask)|(s->target[0]&f->mask);
         e=cam_source_guard_locked(epoch);if(e)break;
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
         cam_source.pending=p;cam_source.issued|=1u<<p; /* BEFORE unique ordinary RW store */
         if(f->kind==CAM_SOURCE_OUT) {
             cam_out.consumed=false;cam_out.status.flags&=~X9_CAM_OUT_CONSUMED;
@@ -283,7 +283,7 @@ static int cam_source_transition_locked(uint64_t epoch,bool off)
     }
     if(!e) {
         e=cam_source_guard_locked(epoch);
-        if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
+        if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
     }
     if(e)cam_source_fault(e);
     else cam_source.phase=off?CAM_SOURCE_STOPPED:CAM_SOURCE_ARMED;
@@ -297,7 +297,7 @@ static int cam_source_transition_locked(uint64_t epoch,bool off)
 static int cam_source_quiesce_locked(uint64_t epoch)
 {
     if(!cam_source.captured)return 0;
-    if(cam_source.epoch!=epoch)return ESTALE;
+    if(cam_source.epoch!=epoch)return CAM_FAIL(ESTALE);
     if(cam_source.error)return cam_source.error;
     if(session.stream) {
         int e=cam_stream_close_guard_locked(epoch);if(e)return e;
@@ -309,6 +309,6 @@ static int cam_source_quiesce_locked(uint64_t epoch)
      * canceled by a reverse write. A streamed request additionally
      * needs the private actual OFF/owned DONE/worker/GIC stop receipt;
      * session.stream or a sensor OFF bit alone never grants this branch. */
-    if(cam_source.phase!=CAM_SOURCE_ARMED)return ESTALE;
+    if(cam_source.phase!=CAM_SOURCE_ARMED)return CAM_FAIL(ESTALE);
     return cam_source_transition_locked(epoch,true);
 }

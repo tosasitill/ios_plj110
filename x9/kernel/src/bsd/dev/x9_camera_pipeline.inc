@@ -12,9 +12,9 @@
 _Static_assert(sizeof(struct x9_camera_pipeline)==128,"camera pipeline ABI");
 static int cam_pipeline_plan(uint32_t which, struct x9_camera_pipeline *p)
 {
-    if(!x9_camera_sensor_valid(which))return EINVAL;
+    if(!x9_camera_sensor_valid(which))return CAM_FAIL(EINVAL);
     const struct x9_camera_sensor *s=&sensors[which-1];
-    if(!s->width || s->width%4 || !s->height || s->width>65535 || s->height>65535)return EINVAL;
+    if(!s->width || s->width%4 || !s->height || s->width>65535 || s->height>65535)return CAM_FAIL(EINVAL);
     uint32_t stride=(s->width/4*5+63)&~63u;
     uint64_t bytes=(uint64_t)stride*s->height;
     if(stride>65535 || bytes>X9_CAMERA_MAX_BYTES)return EMSGSIZE;

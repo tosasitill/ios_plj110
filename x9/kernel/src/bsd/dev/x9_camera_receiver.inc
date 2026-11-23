@@ -191,7 +191,7 @@ static int cam_rx_inspect(void *arg)
     /* Map only three documented banks per view, not the holes in the DT. */
     if(!m->sv[0])m->sv[0]=ml_io_map(r->sv_base,0x3000);
     if(!m->sv[1])m->sv[1]=ml_io_map(r->sv_base+0x8000,0x3000);
-    if(!m->mac || !m->async || !m->out[0] || !m->out[1] || !m->sv[0] || !m->sv[1])return ENOMEM;
+    if(!m->mac || !m->async || !m->out[0] || !m->out[1] || !m->sv[0] || !m->sv[1])return CAM_FAIL(ENOMEM);
     r->stage=X9_CAM_RX_STAGE_SAMPLE;
     e=cam_rx_sample(m,&r->before);if(e)return e;
     delay(10);
@@ -200,9 +200,9 @@ static int cam_rx_inspect(void *arg)
     r->stage=X9_CAM_RX_STAGE_CHECK;
     r->busy=cam_rx_busy(&r->before,port,0,0,0,0,0,0)|cam_rx_busy(&r->after,port,0,0,0,0,0,0);
     r->changed=cam_rx_changed(&r->before,&r->after,port);
-    if(r->changed)return ESTALE;
+    if(r->changed)return CAM_FAIL(ESTALE);
     r->flags|=X9_CAM_RX_STABLE;
-    if(r->busy)return EBUSY;
+    if(r->busy)return CAM_FAIL(EBUSY);
     r->flags|=X9_CAM_RX_DISABLED;
     return 0;
 }
@@ -231,7 +231,7 @@ static int cam_rx_session_open(unsigned sensor,uint64_t sensor_epoch,struct x9_c
     uint64_t epoch=0;
     int e;
     cam_rx_status_init(sensor,r);
-    if(cam_rx_live.epoch){r->last_errno=EBUSY;return EBUSY;}
+    if(cam_rx_live.epoch){r->last_errno=EBUSY;return CAM_FAIL(EBUSY);}
     e=cam_mm_session_open(sensor,&epoch,&r->mm);
     if(!epoch){r->last_errno=e;return e;}
     cam_rx_live.epoch=epoch;cam_rx_live.sensor_epoch=sensor_epoch;
@@ -260,7 +260,7 @@ static int cam_rx_session_guard(void)
     unsigned port=cam_sensor_port(r->sensor);
     uint32_t busy,changed,fbc0_mask,dma0_mask,cmos_mask,vf_mask,phy_mask,dl_mask;
     int e;
-    if(!cam_rx_live.epoch || cam_rx_live.epoch!=cam_mm_live.epoch)return ESTALE;
+    if(!cam_rx_live.epoch || cam_rx_live.epoch!=cam_mm_live.epoch)return CAM_FAIL(ESTALE);
     if(!(r->flags&X9_CAM_RX_SNAPSHOT))return cam_rx_live.error?cam_rx_live.error:ENXIO;
     /* CAMSV may have confirmed a live-through inner DB effect. Publish
      * only its actual accepted values before the receiver comparison. */
@@ -278,8 +278,8 @@ static int cam_rx_session_guard(void)
     changed=cam_rx_changed(&a,&b,port)|cam_rx_changed(&cam_rx_live.expected,&a,port)|
         cam_rx_changed(&cam_rx_live.expected,&b,port);
     r->after=b;r->busy|=busy;r->changed|=changed;
-    if(changed)return ESTALE;
-    if(busy)return EBUSY;
+    if(changed)return CAM_FAIL(ESTALE);
+    if(busy)return CAM_FAIL(EBUSY);
     /* FBC1 is not part of the public receiver snapshot. Do not return from
      * this live comparison without rechecking the private counter evidence. */
     return cam_sv_guard();
@@ -287,8 +287,8 @@ static int cam_rx_session_guard(void)
 static int cam_rx_session_close(struct x9_camera_receiver *r)
 {
     int off,prior=cam_rx_live.error;
-    if(!cam_rx_live.epoch || cam_rx_live.close_attempted)return ESTALE;
-    if(session.capture)return EBUSY;
+    if(!cam_rx_live.epoch || cam_rx_live.close_attempted)return CAM_FAIL(ESTALE);
+    if(session.capture)return CAM_FAIL(EBUSY);
     cam_rx_live.close_attempted=true;
     /* An incomplete MM take cannot safely sample receiver registers. It
      * has not issued any receiver writes; unwind only its consumed slots.
@@ -335,7 +335,7 @@ static bool cam_rx_sensor_mm2_take_failed_locked(uint64_t epoch)
 static int cam_rx_sensor_prepare_locked(uint64_t epoch,struct x9_camera_receiver *r)
 {
     int e;
-    if(!epoch || epoch!=cam_sensor_live.epoch)return ESTALE;
+    if(!epoch || epoch!=cam_sensor_live.epoch)return CAM_FAIL(ESTALE);
     e=cam_rx_session_open(cam_sensor_live.probe.sensor,epoch,r);
     if(e) {
         bool held=cam_rx_sensor_held_locked(epoch);
@@ -354,7 +354,7 @@ static int cam_rx_sensor_guard_locked(uint64_t epoch)
 {
     int e;
     if(!cam_rx_live.epoch)return 0;
-    if(!cam_rx_sensor_held_locked(epoch) || cam_rx_live.close_attempted)return ESTALE;
+    if(!cam_rx_sensor_held_locked(epoch) || cam_rx_live.close_attempted)return CAM_FAIL(ESTALE);
     e=cam_mm_session_check(cam_rx_live.epoch);
     if(!e)e=cam_irq_guard_locked(epoch);
     if(!e)e=cam_rx_session_guard();
@@ -367,7 +367,7 @@ static int cam_rx_sensor_close_locked(uint64_t epoch)
 {
     struct x9_camera_receiver r;
     int off;
-    if(!cam_rx_sensor_held_locked(epoch))return ESTALE;
+    if(!cam_rx_sensor_held_locked(epoch))return CAM_FAIL(ESTALE);
     off=cam_native_sensor_retirement_guard_locked(epoch);
     if(off)return off;
     off=cam_rx_session_close(&r);
@@ -387,7 +387,7 @@ static int cam_rx_probe(unsigned sensor,struct x9_camera_receiver *r)
     int e,off=0;
     if(cam_sensor_session_active || cam_mm_live.epoch || cam_rx_live.epoch) {
         memset(r,0,sizeof(*r));r->version=1;r->sensor=sensor;r->last_errno=EBUSY;
-        return EBUSY;
+        return CAM_FAIL(EBUSY);
     }
     cam_rx_status_init(sensor,r);
     if(cam_rx_attempted || cam_mm_attempted || cam_resources_latched || cam_probe_latched) {

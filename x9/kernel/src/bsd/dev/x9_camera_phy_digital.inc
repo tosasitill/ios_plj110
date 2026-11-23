@@ -12,8 +12,8 @@ static int cam_phy_deskew_reset(void)
     unsigned n=cam_phy_find(CAM_PHY_D,0x50);
     int e;
     if(n==CAM_PHY_NO_REG || cam_phy.status.deskew_reset_pending ||
-       cam_phy.status.deskew_reset_released)return EALREADY;
-    if(cam_phy_read(n)&(CAM_DSK_RESET|CAM_DSK_ENABLE|CAM_DSK_LP11_IDLE))return EBUSY;
+       cam_phy.status.deskew_reset_released)return CAM_FAIL(EALREADY);
+    if(cam_phy_read(n)&(CAM_DSK_RESET|CAM_DSK_ENABLE|CAM_DSK_LP11_IDLE))return CAM_FAIL(EBUSY);
     e=cam_phy_dependencies();if(e)return e;
     /* Dedicated inactive deskew FSM reset, NOT a way to cancel pending
      * calibration/meter/DMA requests. Mark before assertion. A failed
@@ -27,7 +27,7 @@ static int cam_phy_deskew_reset(void)
     if(!e)e=cam_phy_write(CAM_PHY_D,0x50,CAM_DSK_RESET,0);
     if(!e)e=cam_phy_pause(2);
     if(e)return e;
-    if(cam_phy_read(n)&CAM_DSK_RESET)return EIO;
+    if(cam_phy_read(n)&CAM_DSK_RESET)return CAM_FAIL(EIO);
     cam_phy.status.deskew_reset_pending=0;cam_phy.status.deskew_reset_released=1;
     return 0;
 }
@@ -73,11 +73,11 @@ static int cam_phy_digital_stop(void)
     struct cam_phy_reg *r;
     uint32_t mask;
     int e;
-    if(cam_phy.status.deskew_reset_pending)return EBUSY;
-    if(n==CAM_PHY_NO_REG)return EINVAL;
+    if(cam_phy.status.deskew_reset_pending)return CAM_FAIL(EBUSY);
+    if(n==CAM_PHY_NO_REG)return CAM_FAIL(EINVAL);
     r=&cam_phy.reg[n];mask=r->owned&(CAM_DSK_ENABLE|CAM_DSK_LP11_IDLE);
     if(!mask)return 0;
-    if(r->before&(CAM_DSK_ENABLE|CAM_DSK_LP11_IDLE|CAM_DSK_RESET))return EBUSY;
+    if(r->before&(CAM_DSK_ENABLE|CAM_DSK_LP11_IDLE|CAM_DSK_RESET))return CAM_FAIL(EBUSY);
     /* No PHY lane or DELAY_EN/PERIODIC/APPLY was enabled. Stop only the
      * generic deskew configuration before other digital controls change.
      * Neither a late IRQ poll nor a reset is used as a drain assertion. */

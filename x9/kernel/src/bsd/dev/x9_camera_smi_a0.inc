@@ -62,12 +62,12 @@ static int cam_smi_a0_guard(void)
     uint32_t larb[CAM_SMI_A0_WORDS],common[CAM_SMI_A0_COMMON_WORDS];int e;
     if(!cam_smi_a0.held)return 0;
     if(!cam_smi.held || cam_smi_a0.epoch!=cam_smi.epoch || cam_smi.completed!=3)
-        return ESTALE;
+        return CAM_FAIL(ESTALE);
     e=cam_smi_clock_only_guard();if(e)return e;
     cam_smi_a0_sample(larb,common);
     if(memcmp(larb,cam_smi_a0.expected,sizeof(larb)) ||
-        memcmp(common,cam_smi_a0.common_expected,sizeof(common)))return ESTALE;
-    return cam_smi_a0.pending?EBUSY:0;
+        memcmp(common,cam_smi_a0.common_expected,sizeof(common)))return CAM_FAIL(ESTALE);
+    return cam_smi_a0.pending?CAM_FAIL(EBUSY):0;
 }
 static int cam_smi_a0_idle(void)
 {
@@ -76,10 +76,10 @@ static int cam_smi_a0_idle(void)
         e=cam_smi_clock_only_guard();if(e)return e;
         /* SLP_CON protection EN/RDY, plus ordinary per-port outstanding
          * monitors. No protection handshake, reset, IRQ/R-C or clear. */
-        if(cam_rr(cam_smi.larb[0],0xc)&0x10001)return EBUSY;
+        if(cam_rr(cam_smi.larb[0],0xc)&0x10001)return CAM_FAIL(EBUSY);
         cam_smi.status.a0.outstanding[0]=cam_rr(cam_smi.larb[0],0x280);
         cam_smi.status.a0.outstanding[1]=cam_rr(cam_smi.larb[0],0x780);
-        if(cam_smi.status.a0.outstanding[0] || cam_smi.status.a0.outstanding[1])return EBUSY;
+        if(cam_smi.status.a0.outstanding[0] || cam_smi.status.a0.outstanding[1])return CAM_FAIL(EBUSY);
         delay(10);
     }
     /* Necessary inactive-port conditions only. No producer was enabled by
@@ -89,7 +89,7 @@ static int cam_smi_a0_idle(void)
 static int cam_smi_a0_write(unsigned word,uint32_t mask,uint32_t value)
 {
     uint32_t old,next;int e;bool native;
-    if(!cam_smi_a0.held || cam_smi_a0.pending)return EBUSY;
+    if(!cam_smi_a0.held || cam_smi_a0.pending)return CAM_FAIL(EBUSY);
     /* Fixed allowlist. Even a future internal caller cannot smuggle a
      * legacy MMU/bank/path, another port or a shared misc write through. */
     native=cam_native_clock_request.epoch==cam_smi.epoch &&
@@ -97,7 +97,7 @@ static int cam_smi_a0_write(unsigned word,uint32_t mask,uint32_t value)
     if(!((word==CAM_SMI_A0_ULTRA && mask==1 && (value==1 || (native && value==0))) ||
         (word==CAM_SMI_A0_NONSEC && mask==8 && (value==8 || (native && value==0))) ||
         (word==CAM_SMI_A0_OSTD && mask==UINT32_MAX &&
-         (value==1 || (native && value>0 && value<=64)))))return EINVAL;
+         (value==1 || (native && value>0 && value<=64)))))return CAM_FAIL(EINVAL);
     e=cam_rx_session_guard();if(e)return e;
     e=cam_smi_a0_idle();if(e)return e;
     e=cam_smi_a0_guard();if(e)return e;
@@ -117,14 +117,14 @@ static int cam_smi_a0_pending_retire(void)
 {
     uint32_t larb[CAM_SMI_A0_WORDS],common[CAM_SMI_A0_COMMON_WORDS];int e;
     if(!cam_smi_a0.pending)return 0;
-    if(cam_smi_a0.restoring)return EBUSY; /* failed sole close: never replay */
+    if(cam_smi_a0.restoring)return CAM_FAIL(EBUSY); /* failed sole close: never replay */
     for(unsigned sample=0;sample<2;sample++) {
         e=cam_smi_clock_only_guard();if(e)return e;
         cam_smi_a0_sample(larb,common);
         /* Require the posted TARGET, preserving every other consumed
          * control. A prior value alone is NOT request retirement. */
         if(memcmp(larb,cam_smi_a0.expected,sizeof(larb)) ||
-            memcmp(common,cam_smi_a0.common_expected,sizeof(common)))return EBUSY;
+            memcmp(common,cam_smi_a0.common_expected,sizeof(common)))return CAM_FAIL(EBUSY);
         delay(10);
     }
     cam_smi_a0.pending=false;cam_smi_a0_status();return cam_smi_a0_guard();
@@ -134,7 +134,7 @@ static int cam_smi_a0_close_locked(void)
     static const unsigned order[3]={CAM_SMI_A0_NONSEC,CAM_SMI_A0_ULTRA,CAM_SMI_A0_OSTD};
     struct x9_camera_smi_a0_status *s=&cam_smi.status.a0;int e;
     if(!cam_smi_a0.held)return 0;
-    if(cam_smi_a0.epoch!=cam_smi.epoch || cam_smi_a0.close_attempted)return ESTALE;
+    if(cam_smi_a0.epoch!=cam_smi.epoch || cam_smi_a0.close_attempted)return CAM_FAIL(ESTALE);
     cam_smi_a0.close_attempted=true;
     e=cam_smi_a0_pending_retire();if(!e)e=cam_rx_session_guard();
     if(!e)e=cam_smi_a0_idle();
@@ -167,11 +167,11 @@ static int cam_smi_a0_open_locked(void)
     static vm_offset_t common;
     uint32_t a[CAM_SMI_A0_WORDS],b[CAM_SMI_A0_WORDS];
     uint32_t c[CAM_SMI_A0_COMMON_WORDS],d[CAM_SMI_A0_COMMON_WORDS];int e;
-    if(cam_smi_a0.held)return EALREADY;
-    if(!cam_smi.held || cam_smi.completed!=3 || cam_smi.pending)return ENXIO;
+    if(cam_smi_a0.held)return CAM_FAIL(EALREADY);
+    if(!cam_smi.held || cam_smi.completed!=3 || cam_smi.pending)return CAM_FAIL(ENXIO);
     e=cam_rx_session_guard();if(e)return e;
     if(!common)common=ml_io_map(0x3c808000,0x1000); /* COMM33, A0's supplier */
-    if(!common)return ENOMEM;
+    if(!common)return CAM_FAIL(ENOMEM);
     memset(&cam_smi_a0,0,sizeof(cam_smi_a0));cam_smi_a0.common=common;
     cam_smi.status.a0.flags=X9_CAM_SMI_A0_ATTEMPTED;cam_smi.status.a0.stage=1;
     e=cam_smi_a0_idle();if(e)return cam_smi_a0_fault(e);
@@ -180,7 +180,7 @@ static int cam_smi_a0_open_locked(void)
     e=cam_rx_session_guard();if(e)return cam_smi_a0_fault(e);
     e=cam_smi_a0_idle();if(e)return cam_smi_a0_fault(e);
     cam_smi_a0_sample(b,d);
-    if(memcmp(a,b,sizeof(a)) || memcmp(c,d,sizeof(c)))return cam_smi_a0_fault(ESTALE);
+    if(memcmp(a,b,sizeof(a)) || memcmp(c,d,sizeof(c)))return cam_smi_a0_fault(CAM_FAIL(ESTALE));
     memcpy(cam_smi_a0.expected,a,sizeof(a));memcpy(cam_smi_a0.common_expected,c,sizeof(c));
     memcpy(cam_smi.status.a0.larb_before,a,sizeof(a));
     memcpy(cam_smi.status.a0.common_before,c,sizeof(c));
@@ -191,7 +191,7 @@ static int cam_smi_a0_open_locked(void)
      * A0 never acquires whole-common authority or repairs that profile. */
     if(a[CAM_SMI_A0_CMD]!=0x370456 || a[CAM_SMI_A0_FLAG]!=1 ||
         c[0]!=0xa || c[10]!=0x4146 || c[11]!=1)return cam_smi_a0_fault(EOPNOTSUPP);
-    if((a[CAM_SMI_A0_FORCE]|a[CAM_SMI_A0_PRE])&1)return cam_smi_a0_fault(EBUSY);
+    if((a[CAM_SMI_A0_FORCE]|a[CAM_SMI_A0_PRE])&1)return cam_smi_a0_fault(CAM_FAIL(EBUSY));
     cam_smi.status.a0.flags|=X9_CAM_SMI_A0_SHARED_PROFILE_MATCHED;
     cam_smi.status.a0.stage=3;e=cam_smi_a0_write(CAM_SMI_A0_OSTD,UINT32_MAX,1);
     if(!e) {cam_smi.status.a0.stage=4;e=cam_smi_a0_write(CAM_SMI_A0_ULTRA,1,1);}

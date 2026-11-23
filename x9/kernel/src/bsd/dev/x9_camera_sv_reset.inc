@@ -40,33 +40,33 @@ static int cam_sv_cold_reset_guard(uint64_t epoch)
        !cam_smi.held || cam_smi.epoch!=epoch || cam_smi.completed!=3 ||
        cam_smi.close_attempted || cam_smi.error || cam_sv.held ||
        cam_sv.request_held || (cam_sv.credit_issued && !cam_sv.credit_retired) ||
-       cam_mac.held || cam_phy.held || cam_out.held)return ESTALE;
+       cam_mac.held || cam_phy.held || cam_out.held)return CAM_FAIL(ESTALE);
     e=cam_native_source_standby_locked(epoch);if(e)return e;
     e=cam_irq_cold_reset_guard_locked(epoch,m);if(e)return e;
     e=cam_rx_sample(m,&current);if(e)return e;
     cam_sv_reset.after=current;
-    if(cam_rx_busy(&current,cam_sensor_port(cam_sv_reset.sensor),0,0,0,0,0,0))return EBUSY;
+    if(cam_rx_busy(&current,cam_sensor_port(cam_sv_reset.sensor),0,0,0,0,0,0))return CAM_FAIL(EBUSY);
     /* Only CAMSV0 is reset. Never adopt a changed CSI/MAC/OUTMUX/async
      * input as a side effect of resetting this downstream engine. */
     non_sv=current;memcpy(non_sv.sv,cam_sv_reset.before.sv,sizeof(non_sv.sv));
     if(cam_rx_changed(&cam_sv_reset.before,&non_sv,cam_sensor_port(cam_sv_reset.sensor)))
-        return ESTALE;
+        return CAM_FAIL(ESTALE);
     for(unsigned b=0;b<2;b++) {
         e=cam_mm_guard(&cam_mm,true);if(e)return e;
         e=cam_smi_clock_guard();if(e)return e;
         /* No IRQ/R-C status reads. Source enables, DMA/STG stops and
          * CQ thread0 remain inactive. CQ stop is the sole live command. */
         for(unsigned n=0;n<sizeof(off)/sizeof(off[0]);n++)
-            if(cam_rr(m->sv[b],off[n]))return EBUSY;
+            if(cam_rr(m->sv[b],off[n]))return CAM_FAIL(EBUSY);
     }
     for(unsigned n=0;n<sizeof(ports)/sizeof(ports[0]);n++) {
         vm_offset_t larb=cam_smi.larb[ports[n].larb];
         unsigned port=ports[n].port;
         e=cam_smi_clock_guard();if(e)return e;
-        if(!larb)return ENXIO;
+        if(!larb)return CAM_FAIL(ENXIO);
         cam_sv_reset.outstanding[n][0]=cam_rr(larb,0x280+4*port);
         cam_sv_reset.outstanding[n][1]=cam_rr(larb,0x780+4*port);
-        if(cam_sv_reset.outstanding[n][0] || cam_sv_reset.outstanding[n][1])return EBUSY;
+        if(cam_sv_reset.outstanding[n][0] || cam_sv_reset.outstanding[n][1])return CAM_FAIL(EBUSY);
     }
     return cam_irq_cold_reset_guard_locked(epoch,m);
 }
@@ -77,21 +77,21 @@ static int cam_sv_cold_reset_locked(uint64_t epoch)
     int e;
     if(cam_sv_reset.attempted && cam_sv_reset.epoch==epoch)
         return cam_sv_reset.error?cam_sv_reset.error:EALREADY;
-    if(cam_sv_reset.attempted && !cam_sv_reset.complete)return ESTALE;
+    if(cam_sv_reset.attempted && !cam_sv_reset.complete)return CAM_FAIL(ESTALE);
     memset(&cam_sv_reset,0,sizeof(cam_sv_reset));
     cam_sv_reset.attempted=true;cam_sv_reset.epoch=epoch;
     cam_sv_reset.sensor=cam_sensor_live.probe.sensor;
-    if(!x9_camera_sensor_valid(cam_sv_reset.sensor)){e=EINVAL;goto out;}
+    if(!x9_camera_sensor_valid(cam_sv_reset.sensor)){e=CAM_FAIL(EINVAL);goto out;}
     m=&cam_rx_maps[cam_sv_reset.sensor-1];
     e=cam_rx_session_guard();if(e)goto out;
     e=cam_rx_sample(m,&cam_sv_reset.before);if(e)goto out;
     e=cam_sv_cold_reset_guard(epoch);if(e)goto out;
     for(unsigned b=0;b<2;b++) {
         cam_sv_reset.cq_before[b]=cam_rr(m->sv[b],0x2010);
-        if(cam_sv_reset.cq_before[b]){e=EBUSY;goto out;}
+        if(cam_sv_reset.cq_before[b]){e=CAM_FAIL(EBUSY);goto out;}
     }
     cam_sv_reset.top_before=cam_rr(cam_mm.sv_cg,0xa4);
-    if(cam_sv_reset.top_before){e=EBUSY;goto out;}
+    if(cam_sv_reset.top_before){e=CAM_FAIL(EBUSY);goto out;}
     nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
     /* Keep the upstream zero writes even with a zero prior. These are
      * command edges, not ordinary geometry fields or DB transactions.
@@ -102,11 +102,11 @@ static int cam_sv_cold_reset_locked(uint64_t epoch)
         cam_rw(m->sv[0],0x2010,step);
     }
     for(unsigned poll=0;poll<100000;poll++) {
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
         e=cam_sv_cold_reset_guard(epoch);if(e)goto out;
         cam_sv_reset.cq_actual[0]=cam_rr(m->sv[0],0x2010);
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
-        if(cam_sv_reset.cq_actual[0]&~3u){e=ESTALE;goto out;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
+        if(cam_sv_reset.cq_actual[0]&~3u){e=CAM_FAIL(ESTALE);goto out;}
         cam_sv_reset.cq_samples=(cam_sv_reset.cq_actual[0]&2)?
             cam_sv_reset.cq_samples+1:0;
         if(cam_sv_reset.cq_samples==2) {
@@ -114,12 +114,12 @@ static int cam_sv_cold_reset_locked(uint64_t epoch)
         }
         delay(1);
     }
-    if(cam_sv_reset.cq_samples!=2){e=ETIMEDOUT;goto out;}
+    if(cam_sv_reset.cq_samples!=2){e=CAM_FAIL(ETIMEDOUT);goto out;}
     e=cam_sv_cold_reset_guard(epoch);if(e)goto out;
     cam_sv_reset.issued|=1u<<2;cam_rw(m->sv[0],0x2010,0);
     e=cam_sv_cold_reset_guard(epoch);if(e)goto out;
     cam_sv_reset.top_actual=cam_rr(cam_mm.sv_cg,0xa4);
-    if(cam_sv_reset.top_actual){e=ESTALE;goto out;}
+    if(cam_sv_reset.top_actual){e=CAM_FAIL(ESTALE);goto out;}
     /* Keep the upstream pulse contiguous. In particular, do not perform
      * sensor I2C or read a CAMSV engine while its reset is asserted. */
     for(unsigned step=0;step<3;step++) {
@@ -136,15 +136,15 @@ static int cam_sv_cold_reset_locked(uint64_t epoch)
         cam_sv_reset.post[sample]=cam_sv_reset.after;
         for(unsigned b=0;b<2;b++) {
             cam_sv_reset.cq_actual[b]=cam_rr(m->sv[b],0x2010);
-            if(cam_sv_reset.cq_actual[b]){e=ESTALE;goto out;}
+            if(cam_sv_reset.cq_actual[b]){e=CAM_FAIL(ESTALE);goto out;}
         }
         cam_sv_reset.top_actual=cam_rr(cam_mm.sv_cg,0xa4);
-        if(cam_sv_reset.top_actual){e=ESTALE;goto out;}
+        if(cam_sv_reset.top_actual){e=CAM_FAIL(ESTALE);goto out;}
         /* First sample is after the pulse; stability is required between
          * the two post samples, not against a pre-reset default. */
         if(sample && memcmp(cam_sv_reset.post[0].sv,cam_sv_reset.post[1].sv,
             sizeof(cam_sv_reset.post[0].sv))) {
-            e=ESTALE;goto out;
+            e=CAM_FAIL(ESTALE);goto out;
         }
         cam_sv_reset.post_samples++;
         if(!sample)delay(10);

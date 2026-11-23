@@ -19,13 +19,13 @@ static int cam_pin_conflict(struct cam_probe_pin *p,unsigned field,
     printf("X9 CAMERA PIN CONFLICT: pin=%u field=%u expected=%x observed=%x "
         "dirty=%x uncertain=%x taken=%u (retained, no overwrite)\n",
         p->pin,field,expected,observed,p->dirty,p->uncertain,p->taken);
-    return EBUSY;
+    return CAM_FAIL(EBUSY);
 }
 static int cam_pin_check(struct cam_probe_journal *j,struct cam_probe_pin *p,bool cleanup)
 {
-    if(!p->valid)return EINVAL;
-    if(p->conflict)return EBUSY;
-    if(!cleanup && p->uncertain)return EIO;
+    if(!p->valid)return CAM_FAIL(EINVAL);
+    if(p->conflict)return CAM_FAIL(EBUSY);
+    if(!cleanup && p->uncertain)return CAM_FAIL(EIO);
     for(unsigned i=0;i<CAM_PIN_FIELDS;i++) {
         uint32_t v=cam_pin_value(j,p,i);
         if(v!=p->expected[i] && !(cleanup && (p->uncertain&(1u<<i)) && v==p->prior[i]))
@@ -46,7 +46,7 @@ static void cam_pin_snapshot(struct cam_probe_journal *j,struct cam_probe_pin *p
 static int cam_pin_write(struct cam_probe_journal *j,struct cam_probe_pin *p,
                           unsigned field,uint32_t value,bool cleanup)
 {
-    if(field>=CAM_PIN_FIELDS || value>(field==CAM_PIN_MODE?15u:1u) || !p->taken)return EINVAL;
+    if(field>=CAM_PIN_FIELDS || value>(field==CAM_PIN_MODE?15u:1u) || !p->taken)return CAM_FAIL(EINVAL);
     int e=cam_pin_check(j,p,cleanup);if(e)return e;
     uint32_t bit=1u<<field,before=cam_pin_value(j,p,field);
     if(before!=p->expected[field] && !(cleanup && (p->uncertain&bit) && before==p->prior[field]))
@@ -61,7 +61,7 @@ static int cam_pin_write(struct cam_probe_journal *j,struct cam_probe_pin *p,
     uint32_t observed=cam_pin_value(j,p,field);
     if(e || observed!=value) {
         if(observed!=before && observed!=value)return cam_pin_conflict(p,field,value,observed);
-        return EIO;
+        return CAM_FAIL(EIO);
     }
     p->uncertain&=~bit; /* confirmed values have no prior fallback */
     return cam_pin_check(j,p,cleanup);
@@ -72,14 +72,14 @@ static int cam_drive_conflict(struct cam_probe_journal *j,uint32_t expected,uint
     printf("X9 CAMERA DRIVE CONFLICT: pin=%u expected=%x observed=%x dirty=%x "
         "uncertain=%u (retained, no overwrite)\n",j->board.mclk,expected,observed,
         j->drive.dirty,j->drive.uncertain);
-    return EBUSY;
+    return CAM_FAIL(EBUSY);
 }
 static int cam_drive_check(struct cam_probe_journal *j,bool cleanup)
 {
     struct cam_probe_drive *p=&j->drive;
-    if(!p->valid)return EINVAL;
-    if(p->conflict)return EBUSY;
-    if(!cleanup && p->uncertain)return EIO;
+    if(!p->valid)return CAM_FAIL(EINVAL);
+    if(p->conflict)return CAM_FAIL(EBUSY);
+    if(!cleanup && p->uncertain)return CAM_FAIL(EIO);
     uint32_t v=(cam_rr(j->board.drive_base,0)>>j->board.drive_shift)&7;
     if(v!=p->expected && !(cleanup && p->uncertain && v==p->prior))
         return cam_drive_conflict(j,p->expected,v);
@@ -102,7 +102,7 @@ static int cam_drive_alias(struct cam_probe_journal *j,uint32_t bits,bool set,bo
     if(!bits)return 0;
     struct cam_probe_drive *p=&j->drive;
     int e=cam_pins_guard(j,cleanup);if(e)return e;
-    if(cam_pin_mode(j->gpio,j->board.mclk))return EBUSY; /* never retune live MCLK */
+    if(cam_pin_mode(j->gpio,j->board.mclk))return CAM_FAIL(EBUSY); /* never retune live MCLK */
     uint32_t before=(cam_rr(j->board.drive_base,0)>>j->board.drive_shift)&7;
     if(before!=p->expected && !(cleanup && p->uncertain && before==p->prior))
         return cam_drive_conflict(j,p->expected,before);
@@ -112,21 +112,21 @@ static int cam_drive_alias(struct cam_probe_journal *j,uint32_t bits,bool set,bo
     uint32_t observed=(cam_rr(j->board.drive_base,0)>>j->board.drive_shift)&7;
     if(observed!=p->expected) {
         if(observed!=before)return cam_drive_conflict(j,p->expected,observed);
-        return EIO;
+        return CAM_FAIL(EIO);
     }
     p->uncertain=false;
     return cam_pins_guard(j,cleanup);
 }
 static int cam_drive_write(struct cam_probe_journal *j,uint32_t value,bool cleanup)
 {
-    if(value>7)return EINVAL;
+    if(value>7)return CAM_FAIL(EINVAL);
     int e=cam_pins_guard(j,cleanup);if(e)return e;
     e=cam_drive_check(j,cleanup);if(e)return e;
     j->drive.taken=true;
     uint32_t before=(cam_rr(j->board.drive_base,0)>>j->board.drive_shift)&7;
     if(before!=j->drive.expected && !(cleanup && j->drive.uncertain && before==j->drive.prior))
         return cam_drive_conflict(j,j->drive.expected,before);
-    if(cam_pin_mode(j->gpio,j->board.mclk))return EBUSY;
+    if(cam_pin_mode(j->gpio,j->board.mclk))return CAM_FAIL(EBUSY);
     e=cam_drive_alias(j,value&~before,true,cleanup);if(e)return e;
     /* SET is confirmed before computing the CLR delta; an ambiguous SET
      * stops here, never silently proceeds to the second mutation. */
@@ -177,7 +177,7 @@ static int cam_sensor_pads(struct cam_probe_journal *j)
     static vm_offset_t b4,b5;
     if(!b5)b5=ml_io_map(0x120e0000,0x1000);
     if(!b4)b4=ml_io_map(0x12060000,0x1000);
-    if(!b4 || !b5)return ENOMEM;
+    if(!b4 || !b5)return CAM_FAIL(ENOMEM);
     const struct cam_pad ref[2]={{162,13,15},{163,15,21}};
     for(unsigned i=0;i<2;i++)cam_pad_log("ref-i2c12",b4,&ref[i],0x70,0xa0,0xb0,0xd0,0xe0);
     struct cam_pad pads[2];
@@ -195,7 +195,7 @@ static int cam_sensor_pads(struct cam_probe_journal *j)
         __asm__ volatile("dsb sy" ::: "memory");
         cam_pad_log("android",b5,p,0x50,0x80,0x90,0xb0,0xc0);
         if(!((cam_rr(b5,0x50)>>p->bit)&1) || !((cam_rr(b5,0x90)>>p->bit)&1) ||
-           ((cam_rr(b5,0x80)>>p->bit)&1) || ((cam_rr(b5,0xb0)>>p->rsel_shift)&7)!=7)return EIO;
+           ((cam_rr(b5,0x80)>>p->bit)&1) || ((cam_rr(b5,0xb0)>>p->rsel_shift)&7)!=7)return CAM_FAIL(EIO);
     }
     return 0;
 }
@@ -204,7 +204,7 @@ static int cam_routes_take(struct cam_probe_journal *j)
     for(unsigned i=0;i<4;i++) {
         struct cam_probe_pin *p=&j->route[i];
         int e=cam_pins_guard(j,false);if(!e)e=cam_pin_check(j,p,false);if(e)return e;
-        if(!p->ap_mode || (p->mode!=p->ap_mode && (p->mode || p->dir)))return EBUSY;
+        if(!p->ap_mode || (p->mode!=p->ap_mode && (p->mode || p->dir)))return CAM_FAIL(EBUSY);
         p->taken=true; /* includes a borrowed AP function: guard, never restore */
         e=cam_pin_write(j,p,CAM_PIN_MODE,p->ap_mode,false);if(e)return e;
     }

@@ -172,8 +172,8 @@ static unsigned cam_sv_find(unsigned offset)
 }
 static int cam_sv_add(unsigned offset)
 {
-    if(offset>=0x3000 || (offset&3) || cam_sv.count==CAM_SV_MAX_REGS)return EOVERFLOW;
-    if(cam_sv_find(offset)!=CAM_SV_MAX_REGS)return EEXIST;
+    if(offset>=0x3000 || (offset&3) || cam_sv.count==CAM_SV_MAX_REGS)return CAM_FAIL(EOVERFLOW);
+    if(cam_sv_find(offset)!=CAM_SV_MAX_REGS)return CAM_FAIL(EEXIST);
     cam_sv.offset[cam_sv.count++]=offset;return 0;
 }
 static void cam_sv_status(void)
@@ -243,7 +243,7 @@ static int cam_sv_fault(int e)
 static int cam_sv_power_guard(void)
 {
     int e;
-    if(cam_sv.epoch!=cam_rx_live.sensor_epoch || cam_rx_live.epoch!=cam_mm_live.epoch)return ESTALE;
+    if(cam_sv.epoch!=cam_rx_live.sensor_epoch || cam_rx_live.epoch!=cam_mm_live.epoch)return CAM_FAIL(ESTALE);
     e=cam_mm_guard(&cam_mm,true);if(e)return e;
     return cam_smi_clock_guard();
 }
@@ -258,20 +258,20 @@ static int cam_sv_inactive(const uint32_t *v)
         0x1020,0x1048,0x2010,0x2014,0x2018};
     for(unsigned n=0;n<sizeof(zero)/sizeof(zero[0]);n++)
         if(v[cam_sv_find(zero[n])]&~(cam_sv_receive_busy_exemption(zero[n])|
-            cam_sv_dma_stop_busy_exemption(zero[n])))return EBUSY;
+            cam_sv_dma_stop_busy_exemption(zero[n])))return CAM_FAIL(EBUSY);
     if((v[cam_sv_find(0x140)]&1&~cam_sv_gate_busy_exemption(0x140)) ||
-       (v[cam_sv_find(0x148)]&1&~cam_sv_gate_busy_exemption(0x148)))return EBUSY;
-    if(v[cam_sv.db_reg]&((1u<<16)|(1u<<26)|(1u<<31)))return EBUSY;
-    if(v[cam_sv_find(0x1024)]&0x11)return EBUSY; /* no pseudo/FPGA DMA */
-    if(v[cam_sv_find(0x2140)]&1)return EBUSY; /* CQ SUB_THR0 enable */
-    if((v[cam_sv_find(0x2100)]|v[cam_sv_find(0x2130)])&(1u<<16))return EBUSY; /* both CQ resets */
+       (v[cam_sv_find(0x148)]&1&~cam_sv_gate_busy_exemption(0x148)))return CAM_FAIL(EBUSY);
+    if(v[cam_sv.db_reg]&((1u<<16)|(1u<<26)|(1u<<31)))return CAM_FAIL(EBUSY);
+    if(v[cam_sv_find(0x1024)]&0x11)return CAM_FAIL(EBUSY); /* no pseudo/FPGA DMA */
+    if(v[cam_sv_find(0x2140)]&1)return CAM_FAIL(EBUSY); /* CQ SUB_THR0 enable */
+    if((v[cam_sv_find(0x2100)]|v[cam_sv_find(0x2130)])&(1u<<16))return CAM_FAIL(EBUSY); /* both CQ resets */
     for(unsigned tag=0;tag<8;tag++) {
         uint32_t mask=CAM_SV_FBC_BUSY;
         /* THIS request's EN and, only during its one issued command, RCNT.
          * Exact control/command values and counters are still checked below.
          * No foreign tag, RESET/LOCK/SUB_EN or unissued RCNT is permitted. */
         if(!tag)mask&=~cam_sv_fbc_busy_exemption();
-        if(v[cam_sv_find(0x540+tag*0x40)]&mask)return EBUSY;
+        if(v[cam_sv_find(0x540+tag*0x40)]&mask)return CAM_FAIL(EBUSY);
     }
     return 0;
 }
@@ -354,12 +354,12 @@ static int cam_sv_receive_sample_word(unsigned bank,vm_offset_t view,uint32_t va
     if(cam_sv_controls_restored())return 0; /* exact raw comparison; no live exception */
     if(bank>=2 || view!=cam_sv.view[bank] || !cam_sv.held || !cam_sv.request_held ||
        cam_sv.terminal || cam_sv.credit_phase!=X9_CAM_SV_CREDIT_ACCEPTED)
-        return cam_sv_fault(ESTALE);
+        return cam_sv_fault(CAM_FAIL(ESTALE));
     off=(cam_sv.receive_off_issued&bit)!=0;
     next=off?0:cam_sv_receive_fields[i].target;prior=off?cam_sv_receive_fields[i].target:0;
     seen=off?&cam_sv.receive_off_seen[bank]:&cam_sv.receive_seen[bank];
     cam_sv.status.receive_after[bank][i]=value;
-    if(value!=next && ((*seen&bit) || value!=prior))return cam_sv_fault(ESTALE);
+    if(value!=next && ((*seen&bit) || value!=prior))return cam_sv_fault(CAM_FAIL(ESTALE));
     if(value==next)*seen|=bit;
     return 0;
 }
@@ -371,11 +371,11 @@ static int cam_sv_receive_observe_word(unsigned bank,unsigned reg,uint32_t value
         if(cam_sv.offset[reg]!=cam_sv_receive_fields[i].offset || !(cam_sv.receive_issued&bit))continue;
         if(cam_sv.credit_phase!=X9_CAM_SV_CREDIT_ACCEPTED ||
            cam_sv.receive_phase<X9_CAM_SV_RECEIVE_PENDING ||
-           cam_sv.receive_phase>X9_CAM_SV_RECEIVE_QUIESCENT)return ESTALE;
+           cam_sv.receive_phase>X9_CAM_SV_RECEIVE_QUIESCENT)return CAM_FAIL(ESTALE);
         off=(cam_sv.receive_off_issued&bit)!=0;
         next=off?0:cam_sv_receive_fields[i].target;prior=off?cam_sv_receive_fields[i].target:0;
         seen=off?&cam_sv.receive_off_seen[bank]:&cam_sv.receive_seen[bank];
-        if(value!=next && ((*seen&bit) || value!=prior))return ESTALE;
+        if(value!=next && ((*seen&bit) || value!=prior))return CAM_FAIL(ESTALE);
         *allowed=true;
         if(value==next){*seen|=bit;cam_sv.expected[bank][reg]=value;}
     }
@@ -403,14 +403,14 @@ static int cam_sv_fbc_counters_guard(void)
         value=cam_rr(cam_sv.view[bank],0x544);
         cam_sv.status.fbc_after[bank]=value;
         if(cam_sv.credit_phase==X9_CAM_SV_CREDIT_EMPTY) {
-            if(value!=cam_sv.fbc_before[bank])return ESTALE;
+            if(value!=cam_sv.fbc_before[bank])return CAM_FAIL(ESTALE);
         } else if(cam_sv.credit_phase==X9_CAM_SV_CREDIT_PENDING ||
                   cam_sv.credit_phase==X9_CAM_SV_CREDIT_ACCEPTED) {
             bool target=value==cam_sv.credit_target[bank];
             if(!target && (cam_sv.credit_phase!=X9_CAM_SV_CREDIT_PENDING ||
-               (cam_sv.credit_seen&(1u<<bank)) || value!=cam_sv.fbc_before[bank]))return ESTALE;
+               (cam_sv.credit_seen&(1u<<bank)) || value!=cam_sv.fbc_before[bank]))return CAM_FAIL(ESTALE);
             if(target)cam_sv.credit_seen|=1u<<bank;
-        } else return ESTALE;
+        } else return CAM_FAIL(ESTALE);
     }
     return 0;
 }
@@ -477,7 +477,7 @@ static int cam_sv_guard_impl(void)
             e=cam_sv_gate_observe_word(bank,n,v[n],&allowed);if(e)return e;
             e=cam_sv_qos_observe(bank,cam_sv.offset[n],v[n],&allowed);if(e)return e;
             if(cam_sv_dma_stop_compare_allowed(bank,cam_sv.offset[n],v[n]))allowed=true;
-            if(!allowed)return ESTALE;
+            if(!allowed)return CAM_FAIL(ESTALE);
             if(cam_sv_qos_index(cam_sv.offset[n])<CAM_SV_QOS_COUNT)
                 cam_sv.expected[bank][n]=v[n]; /* actual command/status sample */
         }
@@ -501,7 +501,7 @@ static int cam_sv_request_authority(void)
 {
     const struct x9_camera_camsv_dma *d=&cam_sv.request_dma;
     if(!cam_sv.request_held)return 0;
-    if(!d->context || !d->lease || !d->backing || !d->check)return ESTALE;
+    if(!d->context || !d->lease || !d->backing || !d->check)return CAM_FAIL(ESTALE);
     return d->check(d->context,d->lease,&cam_sv.request);
 }
 static int cam_sv_environment(void)
@@ -528,12 +528,12 @@ static int cam_sv_pending_observe(void)
     for(unsigned sample=0;sample<2;sample++) {
         e=cam_sv_environment();if(e)return e;
         if(cam_rr(cam_sv.view[0],cam_sv.offset[reg])!=cam_sv.pending_next)
-            return cam_sv.pending_seen?cam_sv_fault(ESTALE):EAGAIN;
+            return cam_sv.pending_seen?cam_sv_fault(CAM_FAIL(ESTALE)):EAGAIN;
         /* DB policy is a phase boundary, not just an outer shadow word.
          * Do not issue UP while a late inner DOWN could still arrive. */
         if(cam_sv.pending_slot==CAM_SV_FIELDS &&
            cam_rr(cam_sv.view[1],cam_sv.offset[reg])!=cam_sv.pending_next)
-            return cam_sv.expected[1][reg]==cam_sv.pending_next?cam_sv_fault(ESTALE):EAGAIN;
+            return cam_sv.expected[1][reg]==cam_sv.pending_next?cam_sv_fault(CAM_FAIL(ESTALE)):EAGAIN;
         if(!sample)delay(1);
     }
     cam_sv.expected[0][reg]=cam_sv.pending_next;
@@ -544,13 +544,13 @@ static int cam_sv_pending_wait(uint64_t deadline)
 {
     int e;
     for(unsigned poll=0;poll<10000;poll++) {
-        if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+        if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
         e=cam_sv_pending_observe();
-        if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+        if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
         if(e!=EAGAIN)return e;
         delay(1);
     }
-    return ETIMEDOUT;
+    return CAM_FAIL(ETIMEDOUT);
 }
 /* The single writable view is outer. Register and full next value are
  * journaled BEFORE any posted store; a failed write is never repeated. */
@@ -563,13 +563,13 @@ static int cam_sv_post(unsigned slot,uint32_t next)
     if(cam_sv.credit_issued) {
         bool repeat=false;e=cam_repeat_post_guard(slot,next,&repeat);if(e)return e;
         if(!repeat) {
-            if(!cam_sv.credit_retired || !cam_sv.close_attempted)return EBUSY;
+            if(!cam_sv.credit_retired || !cam_sv.close_attempted)return CAM_FAIL(EBUSY);
             e=cam_irq_credit_retired_guard(cam_sv.epoch);if(e)return e;
-            if(slot<CAM_SV_FIELDS && next!=cam_sv.before[0][reg])return EINVAL;
-            if(slot==CAM_SV_FIELDS && ((next^cam_sv.before[0][reg])&~CAM_SV_DB_EN))return EINVAL;
+            if(slot<CAM_SV_FIELDS && next!=cam_sv.before[0][reg])return CAM_FAIL(EINVAL);
+            if(slot==CAM_SV_FIELDS && ((next^cam_sv.before[0][reg])&~CAM_SV_DB_EN))return CAM_FAIL(EINVAL);
         }
     }
-    if(cam_sv.pending_slot<=CAM_SV_FIELDS)return EBUSY;
+    if(cam_sv.pending_slot<=CAM_SV_FIELDS)return CAM_FAIL(EBUSY);
     if(next==cam_sv.expected[0][reg])return 0;
     cam_sv.pending_slot=slot;cam_sv.pending_next=next;cam_sv.pending_seen=false;
     if(slot<CAM_SV_FIELDS)cam_sv.dirty|=1ull<<slot;
@@ -591,7 +591,7 @@ static int cam_sv_target_observe(void)
     int e;
     for(unsigned sample=0;sample<2;sample++) {
         e=cam_sv_environment();if(e)return e;
-        if(memcmp(cam_sv.expected[0],cam_sv.expected[1],cam_sv.count*sizeof(uint32_t)))return EAGAIN;
+        if(memcmp(cam_sv.expected[0],cam_sv.expected[1],cam_sv.count*sizeof(uint32_t)))return CAM_FAIL(EAGAIN);
         if(!sample)delay(1);
     }
     return 0;
@@ -600,13 +600,13 @@ static int cam_sv_target_wait(uint64_t deadline)
 {
     int e;
     for(unsigned poll=0;poll<10000;poll++) {
-        if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+        if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
         e=cam_sv_target_observe();
-        if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+        if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
         if(e!=EAGAIN)return e;
         delay(1);
     }
-    return ETIMEDOUT;
+    return CAM_FAIL(ETIMEDOUT);
 }
 /* Ordinary DB_EN policy, not a CFG_DONE or image-completion event. Follow
  * the actual upstream down/up, never FORCE_LOAD/SWITCH_FORCE or inner
@@ -620,8 +620,8 @@ static int cam_sv_commit(void)
     int e=cam_sv_environment();if(e)return e;
     nanoseconds_to_absolutetime(10000000,&span);deadline=mach_absolute_time()+span;
     if(!cam_sv.commit_pending) {
-        if(cam_sv.pending_slot<=CAM_SV_FIELDS)return EBUSY;
-        if(cam_sv.sequence==UINT64_MAX)return cam_sv_fault(EOVERFLOW);
+        if(cam_sv.pending_slot<=CAM_SV_FIELDS)return CAM_FAIL(EBUSY);
+        if(cam_sv.sequence==UINT64_MAX)return cam_sv_fault(CAM_FAIL(EOVERFLOW));
         cam_sv.command=++cam_sv.sequence;cam_sv.commit_pending=true;
         db=cam_sv.expected[0][cam_sv.db_reg];
         cam_sv.db_phase=(db&CAM_SV_DB_EN)?CAM_SV_DB_DOWN:CAM_SV_DB_UP;
@@ -631,7 +631,7 @@ static int cam_sv_commit(void)
         db=cam_sv.expected[0][cam_sv.db_reg];
         e=cam_sv_post(CAM_SV_FIELDS,cam_sv.db_phase==CAM_SV_DB_DOWN?db&~CAM_SV_DB_EN:db|CAM_SV_DB_EN);
         if(e && e!=EIO)return e;
-        if(!cam_sv.db_issued)return cam_sv_fault(ESTALE);
+        if(!cam_sv.db_issued)return cam_sv_fault(CAM_FAIL(ESTALE));
     }
     e=cam_sv_pending_wait(deadline);if(e)return e;
     if(cam_sv.db_phase==CAM_SV_DB_DOWN) {
@@ -639,7 +639,7 @@ static int cam_sv_commit(void)
         db=cam_sv.expected[0][cam_sv.db_reg];
         e=cam_sv_post(CAM_SV_FIELDS,db|CAM_SV_DB_EN);
         if(e && e!=EIO)return e;
-        if(!cam_sv.db_issued)return cam_sv_fault(ESTALE);
+        if(!cam_sv.db_issued)return cam_sv_fault(CAM_FAIL(ESTALE));
         e=cam_sv_pending_wait(deadline);if(e)return e;
     }
     e=cam_sv_target_wait(deadline);if(e)return e;
@@ -653,10 +653,10 @@ static int cam_sv_open_locked(uint64_t epoch)
     const struct cam_rx_maps *m;
     unsigned sensor=cam_sensor_live.probe.sensor;
     int e;
-    if(cam_sv.held)return EALREADY;
+    if(cam_sv.held)return CAM_FAIL(EALREADY);
     if(!cam_out.held || cam_out.epoch!=epoch || !cam_out.consumed || cam_out.error ||
        cam_out.commit_pending || !cam_rx_sensor_held_locked(epoch) || cam_rx_live.error ||
-       cam_rx_live.close_attempted)return ESTALE;
+       cam_rx_live.close_attempted)return CAM_FAIL(ESTALE);
     e=cam_pipeline_plan(sensor,&plan);if(e)return e;
     e=cam_out_guard();if(e)return e;
     e=cam_rx_session_guard();if(e)return e;
@@ -679,7 +679,7 @@ static int cam_sv_open_locked(uint64_t epoch)
     cam_sv.db_reg=cam_sv_find(0x1b4);
     for(unsigned slot=0;slot<CAM_SV_FIELDS;slot++) {
         cam_sv.field[slot]=cam_sv_find(cam_sv_fields[slot].offset);
-        if(cam_sv.field[slot]==CAM_SV_MAX_REGS)return EINVAL;
+        if(cam_sv.field[slot]==CAM_SV_MAX_REGS)return CAM_FAIL(EINVAL);
     }
     m=&cam_rx_maps[(sensor-1)];
     cam_sv.view[0]=m->sv[0];cam_sv.view[1]=m->sv[1];cam_sv.epoch=epoch;
@@ -710,13 +710,13 @@ static int cam_sv_open_locked(uint64_t epoch)
         delay(10);e=cam_sv_power_guard();if(e)return cam_sv_fault(e);
         for(unsigned n=0;n<cam_sv.count;n++)b[n]=cam_rr(cam_sv.view[bank],cam_sv.offset[n]);
         cam_sv_observed(bank,b);
-        if(memcmp(a,b,cam_sv.count*sizeof(uint32_t)))return cam_sv_fault(ESTALE);
+        if(memcmp(a,b,cam_sv.count*sizeof(uint32_t)))return cam_sv_fault(CAM_FAIL(ESTALE));
         e=cam_sv_inactive(b);if(e)return cam_sv_fault(e);
         memcpy(cam_sv.before[bank],b,cam_sv.count*sizeof(uint32_t));
     }
     /* DB toggles can transfer more than tag0. Do not publish inherited
      * staged geometry/addresses/other tags/CQ or request policy. */
-    if(memcmp(cam_sv.before[0],cam_sv.before[1],cam_sv.count*sizeof(uint32_t)))return cam_sv_fault(EBUSY);
+    if(memcmp(cam_sv.before[0],cam_sv.before[1],cam_sv.count*sizeof(uint32_t)))return cam_sv_fault(CAM_FAIL(EBUSY));
     memcpy(cam_sv.expected,cam_sv.before,sizeof(cam_sv.expected));
     e=cam_sv_qos_capture();if(e)return cam_sv_fault(e);
     for(unsigned slot=0;slot<CAM_SV_FIELDS;slot++)cam_sv.status.before[slot]=cam_sv.before[0][cam_sv.field[slot]];
@@ -778,10 +778,10 @@ static int cam_sv_fbc_prepare_locked(void)
             observed[bank]=cam_rr(cam_sv.view[bank],0x544);
             cam_sv.status.fbc_sampled|=1u<<bank;
             cam_sv.status.fbc_after[bank]=observed[bank];
-            if(first!=observed[bank])return cam_sv_fault(ESTALE);
-            if(observed[bank]&CAM_SV_FBC_COUNT_MASK)return cam_sv_fault(EBUSY);
+            if(first!=observed[bank])return cam_sv_fault(CAM_FAIL(ESTALE));
+            if(observed[bank]&CAM_SV_FBC_COUNT_MASK)return cam_sv_fault(CAM_FAIL(EBUSY));
         }
-        if(observed[0]!=observed[1])return cam_sv_fault(ESTALE);
+        if(observed[0]!=observed[1])return cam_sv_fault(CAM_FAIL(ESTALE));
         for(unsigned bank=0;bank<2;bank++)
             cam_sv.status.fbc_before[bank]=cam_sv.fbc_before[bank]=observed[bank];
         cam_sv.fbc_sampled=true;
@@ -795,7 +795,7 @@ static int cam_sv_fbc_prepare_locked(void)
     if(!e)e=changed?cam_sv_commit():cam_sv_target_observe();
     if(!e)e=cam_sv_environment();
     if(!e)for(unsigned bank=0;bank<2;bank++)
-        if(cam_sv.expected[bank][cam_sv.field[CAM_SV_FBC]]!=target)e=ESTALE;
+        if(cam_sv.expected[bank][cam_sv.field[CAM_SV_FBC]]!=target)e=CAM_FAIL(ESTALE);
     if(e)return cam_sv_fault(e);
     cam_sv.fbc_ready=true;return 0;
 }
@@ -814,10 +814,10 @@ static int cam_sv_request_prepare_locked(uint64_t epoch,struct x9_camera_camsv_s
     bool changed=false;
     int e;
     if(!slot || !cam_sv.held || cam_sv.epoch!=epoch || cam_sv.close_attempted ||
-       !(cam_sv.status.flags&X9_CAM_SV_HW_CONFIGURED))return ESTALE;
+       !(cam_sv.status.flags&X9_CAM_SV_HW_CONFIGURED))return CAM_FAIL(ESTALE);
     if(cam_sv.error)return cam_sv.error;
-    if(cam_sv.credit_issued)return EBUSY;
-    if(cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS)return EBUSY;
+    if(cam_sv.credit_issued)return CAM_FAIL(EBUSY);
+    if(cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS)return CAM_FAIL(EBUSY);
     /* Copy under the actual slot lock; no callback while it is held. IRQ
      * accepting is still false, and controller serialization pins the slot. */
     lck_mtx_lock(&camera_camsv_lock);
@@ -829,10 +829,10 @@ static int cam_sv_request_prepare_locked(uint64_t epoch,struct x9_camera_camsv_s
        r.frame.time || r.frame.sof_time || !r.frame.generation || !r.frame.capture_id || !r.iova ||
        (r.iova&0x3fffULL) || r.iova>=0x400000000ULL ||
        r.frame.bytes>0x400000000ULL-r.iova || d.version!=X9_CAMERA_CAMSV_VERSION ||
-       d.reserved || !d.context || !d.lease || !d.backing || !d.check)return EINVAL;
+       d.reserved || !d.context || !d.lease || !d.backing || !d.check)return CAM_FAIL(EINVAL);
     if(cam_sv.request_held && (cam_sv.request_slot!=slot ||
        cam_sv.request_dma.context!=d.context || cam_sv.request_dma.check!=d.check ||
-       cam_sv.request_dma.backing!=d.backing))return EBUSY;
+       cam_sv.request_dma.backing!=d.backing))return CAM_FAIL(EBUSY);
     e=d.check(d.context,d.lease,&r);if(e)return e;
     /* Bind BEFORE the first possible posted store. A partial address/DB
      * effect keeps this request's lease/backing and cannot be reset/retried. */
@@ -856,7 +856,7 @@ static int cam_sv_request_prepare_locked(uint64_t epoch,struct x9_camera_camsv_s
     if(!e) {
         for(unsigned bank=0;bank<2;bank++)
             for(unsigned field=CAM_SV_CONFIG_FIELDS;field<=CAM_SV_FH;field++)
-                if(cam_sv.expected[bank][cam_sv.field[field]]!=cam_sv.target[field])e=ESTALE;
+                if(cam_sv.expected[bank][cam_sv.field[field]]!=cam_sv.target[field])e=CAM_FAIL(ESTALE);
     }
     if(!e) {
         e=cam_sv_fbc_prepare_locked();
@@ -877,7 +877,7 @@ static int cam_sv_request_guard_locked(uint64_t epoch,const struct x9_camera_cam
 {
     int e;
     if(!cam_sv.request_held || !cam_sv.request_ready || !cam_sv.fbc_ready || epoch!=cam_sv.epoch ||
-       slot!=cam_sv.request_slot)return ESTALE;
+       slot!=cam_sv.request_slot)return CAM_FAIL(ESTALE);
     lck_mtx_lock(&camera_camsv_lock);
     e=(slot->state!=X9_CAMSV_ARMED && slot->state!=X9_CAMSV_RETIRED &&
          (slot->state!=X9_CAMSV_CANCELLED ||
@@ -885,16 +885,16 @@ static int cam_sv_request_guard_locked(uint64_t epoch,const struct x9_camera_cam
         memcmp(&slot->request,&cam_sv.request,sizeof(cam_sv.request)) ||
         slot->dma.version!=cam_sv.request_dma.version || slot->dma.reserved ||
         slot->dma.context!=cam_sv.request_dma.context || slot->dma.lease!=cam_sv.request_dma.lease ||
-        slot->dma.backing!=cam_sv.request_dma.backing || slot->dma.check!=cam_sv.request_dma.check?ESTALE:0;
+        slot->dma.backing!=cam_sv.request_dma.backing || slot->dma.check!=cam_sv.request_dma.check?CAM_FAIL(ESTALE):0;
     lck_mtx_unlock(&camera_camsv_lock);
     if(!e)e=cam_sv_environment();
-    if(!e && (cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS))e=EBUSY;
+    if(!e && (cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS))e=CAM_FAIL(EBUSY);
     if(!e)for(unsigned bank=0;bank<2;bank++) {
         const uint32_t *v=cam_sv.expected[bank];
         if(v[cam_sv.field[CAM_SV_ADDR_LO]]!=(uint32_t)cam_sv.request.iova ||
            v[cam_sv.field[CAM_SV_ADDR_HI]]!=(uint32_t)(cam_sv.request.iova>>32) ||
            v[cam_sv.field[CAM_SV_FH]]!=cam_sv.request.inner_sequence ||
-           v[cam_sv.field[CAM_SV_FBC]]!=cam_sv.target[CAM_SV_FBC])e=ESTALE;
+           v[cam_sv.field[CAM_SV_FBC]]!=cam_sv.target[CAM_SV_FBC])e=CAM_FAIL(ESTALE);
     }
     return e?cam_sv_fault(e):0;
 }
@@ -912,16 +912,16 @@ static int cam_sv_credit_issue_locked(uint64_t epoch,struct x9_camera_camsv_slot
     uint64_t span,end;
     uint32_t control;
     int e;
-    if(cam_sv.credit_issued || cam_sv.credit_phase!=X9_CAM_SV_CREDIT_EMPTY)return EBUSY;
+    if(cam_sv.credit_issued || cam_sv.credit_phase!=X9_CAM_SV_CREDIT_EMPTY)return CAM_FAIL(EBUSY);
     e=cam_sv_request_guard_locked(epoch,slot);if(e)return e;
     lck_mtx_lock(&camera_camsv_lock);e=slot->state==X9_CAMSV_ARMED?0:ESTALE;
     lck_mtx_unlock(&camera_camsv_lock);if(e)return e;
-    if(cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS)return EBUSY;
+    if(cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS)return CAM_FAIL(EBUSY);
     control=cam_sv.target[CAM_SV_FBC];
-    if((control&CAM_SV_FBC_MASK)!=CAM_SV_FBC_EN)return EINVAL;
+    if((control&CAM_SV_FBC_MASK)!=CAM_SV_FBC_EN)return CAM_FAIL(EINVAL);
     for(unsigned bank=0;bank<2;bank++) {
         uint32_t before=cam_sv.fbc_before[bank];
-        if(before&CAM_SV_FBC_COUNT_MASK)return EBUSY;
+        if(before&CAM_SV_FBC_COUNT_MASK)return CAM_FAIL(EBUSY);
         cam_sv.status.credit_target[bank]=cam_sv.credit_target[bank]=
             (before&~(CAM_SV_FBC_COUNT_MASK|0xffu))|0x10000u|((before+1)&0xffu);
     }
@@ -934,10 +934,10 @@ static int cam_sv_credit_issue_locked(uint64_t epoch,struct x9_camera_camsv_slot
     cam_sv.credit_issued=true;cam_sv.credit_phase=X9_CAM_SV_CREDIT_PENDING;
     cam_sv.credit_seen=cam_sv.credit_ack=cam_sv.credit_samples=0;
     cam_sv_status();cam_rw(cam_sv.view[0],0x540,control|CAM_SV_FBC_RCNT);
-    e=EAGAIN;
+    e=CAM_FAIL(EAGAIN);
     for(unsigned poll=0;poll<10000;poll++) {
         bool target=true;
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
         e=cam_sv_request_guard_locked(epoch,slot);if(e)break;
         e=cam_irq_credit_guard_locked(epoch);if(e)break;
         for(unsigned bank=0;bank<2 && !e;bank++) {
@@ -947,14 +947,14 @@ static int cam_sv_credit_issue_locked(uint64_t epoch,struct x9_camera_camsv_slot
             actual=cam_rr(cam_sv.view[bank],0x540);
             cam_sv.status.fbc_after[bank]=count;cam_sv.status.credit_control[bank]=actual;
             if(count==cam_sv.credit_target[bank])cam_sv.credit_seen|=1u<<bank;
-            else if((cam_sv.credit_seen&(1u<<bank)) || count!=cam_sv.fbc_before[bank])e=ESTALE;
-            if(actual!=control && cam_sv_fbc_compare_word(bank,actual)!=control)e=ESTALE;
+            else if((cam_sv.credit_seen&(1u<<bank)) || count!=cam_sv.fbc_before[bank])e=CAM_FAIL(ESTALE);
+            if(actual!=control && cam_sv_fbc_compare_word(bank,actual)!=control)e=CAM_FAIL(ESTALE);
             if(!e && count==cam_sv.credit_target[bank] && actual==control)
                 cam_sv.credit_ack|=1u<<bank;
             else target=false;
         }
         if(e)break;
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
         cam_sv.credit_samples=target?cam_sv.credit_samples+1:0;
         if(cam_sv.credit_samples==2) {
             cam_sv.credit_phase=X9_CAM_SV_CREDIT_ACCEPTED;
@@ -962,10 +962,10 @@ static int cam_sv_credit_issue_locked(uint64_t epoch,struct x9_camera_camsv_slot
             if(!e)e=cam_irq_credit_guard_locked(epoch);
             break;
         }
-        e=EAGAIN;delay(1);
+        e=CAM_FAIL(EAGAIN);delay(1);
     }
     if(e) {
-        if(e==EAGAIN)e=ETIMEDOUT;
+        if(e==EAGAIN)e=CAM_FAIL(ETIMEDOUT);
         cam_sv.terminal=true;cam_sv_fault(e);
     }
     cam_sv_status();
@@ -994,10 +994,10 @@ static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
     int e;
     if(!cam_sv.held || cam_sv.epoch!=epoch || !cam_sv.request_held ||
        !cam_sv.request_ready || !cam_sv.fbc_ready ||
-       cam_sv.credit_phase!=X9_CAM_SV_CREDIT_ACCEPTED)return ESTALE;
-    if(cam_sv.receive_phase!=(off?X9_CAM_SV_RECEIVE_ARMED:X9_CAM_SV_RECEIVE_IDLE))return EBUSY;
-    if(off && !cam_sv_gate_off_ready())return EBUSY;
-    if(cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS)return EBUSY;
+       cam_sv.credit_phase!=X9_CAM_SV_CREDIT_ACCEPTED)return CAM_FAIL(ESTALE);
+    if(cam_sv.receive_phase!=(off?X9_CAM_SV_RECEIVE_ARMED:X9_CAM_SV_RECEIVE_IDLE))return CAM_FAIL(EBUSY);
+    if(off && !cam_sv_gate_off_ready())return CAM_FAIL(EBUSY);
+    if(cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS)return CAM_FAIL(EBUSY);
     e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)return e;
     e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)return e;
     e=cam_irq_slot_guard_locked(off && session.stream);if(e)return e;
@@ -1005,7 +1005,7 @@ static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
         unsigned reg=cam_sv_find(cam_sv_receive_fields[i].offset);
         uint32_t expected=off?cam_sv_receive_fields[i].target:0;
         if(reg>=cam_sv.count || cam_sv.status.receive_before[i] ||
-           cam_sv.expected[0][reg]!=expected || cam_sv.expected[1][reg]!=expected)return ESTALE;
+           cam_sv.expected[0][reg]!=expected || cam_sv.expected[1][reg]!=expected)return CAM_FAIL(ESTALE);
     }
     nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
     cam_sv.receive_phase=off?X9_CAM_SV_RECEIVE_QUIESCING:X9_CAM_SV_RECEIVE_PENDING;
@@ -1015,38 +1015,38 @@ static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
     for(unsigned i=0;i<X9_CAM_SV_RECEIVE_FIELDS;i++) {
         uint32_t bit=1u<<i,next=off?0:cam_sv_receive_fields[i].target;
         bool complete=false;
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
         e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
         e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
         if(off) {
-            if(cam_sv.receive_off_issued&bit){e=ESTALE;break;}
+            if(cam_sv.receive_off_issued&bit){e=CAM_FAIL(ESTALE);break;}
             cam_sv.receive_off_issued|=bit;
         } else {
-            if(cam_sv.receive_issued&bit){e=ESTALE;break;}
+            if(cam_sv.receive_issued&bit){e=CAM_FAIL(ESTALE);break;}
             cam_sv.receive_issued|=bit;
         }
         cam_sv.receive_samples=0;cam_sv_status();
         cam_rw(cam_sv.view[0],cam_sv_receive_fields[i].offset,next);
         for(unsigned poll=0;poll<10000;poll++) {
             bool match=true;
-            if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+            if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
             e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
             e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
             for(unsigned bank=0;bank<2;bank++)
                 if(cam_sv.status.receive_after[bank][i]!=next)match=false;
-            if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+            if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
             cam_sv.receive_samples=match?cam_sv.receive_samples+1:0;
             if(cam_sv.receive_samples==2){complete=true;break;}
             delay(1);
         }
         if(e)break;
-        if(!complete){e=ETIMEDOUT;break;}
+        if(!complete){e=CAM_FAIL(ETIMEDOUT);break;}
     }
     if(!e) {
         cam_sv.receive_phase=off?X9_CAM_SV_RECEIVE_QUIESCENT:X9_CAM_SV_RECEIVE_ARMED;
         e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);
         if(!e)e=cam_irq_control_guard_locked(epoch,off && session.stream);
-        if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
+        if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
     }
     if(e){cam_sv.terminal=true;cam_sv_fault(e);}
     cam_sv_status();
@@ -1076,10 +1076,10 @@ static int cam_sv_close_locked(uint64_t epoch)
     uint32_t db;
     int e;
     if(!cam_sv.held)return 0;
-    if(cam_sv.epoch!=epoch || cam_sv.close_attempted)return ESTALE;
+    if(cam_sv.epoch!=epoch || cam_sv.close_attempted)return CAM_FAIL(ESTALE);
     /* Only the actual natural spent receipt may restore ordinary FBC EN.
      * EN off/reset cannot revoke pending credit or release its backing. */
-    if(cam_sv.credit_issued && !cam_sv.credit_retired)return cam_sv_fault(EBUSY);
+    if(cam_sv.credit_issued && !cam_sv.credit_retired)return cam_sv_fault(CAM_FAIL(EBUSY));
     cam_sv.close_attempted=true;
     cam_sv.request_ready=cam_sv.fbc_ready=false;
     nanoseconds_to_absolutetime(10000000,&span);deadline=mach_absolute_time()+span;
@@ -1098,7 +1098,7 @@ static int cam_sv_close_locked(uint64_t epoch)
         e=cam_sv_field_write(CAM_SV_FBC,prior);
         if(!e)e=cam_sv_commit();
         if(!e)for(unsigned bank=0;bank<2;bank++)
-            if(cam_sv.expected[bank][cam_sv.field[CAM_SV_FBC]]!=prior)e=cam_sv_fault(ESTALE);
+            if(cam_sv.expected[bank][cam_sv.field[CAM_SV_FBC]]!=prior)e=cam_sv_fault(CAM_FAIL(ESTALE));
     }
     /* Return the stopped TG's OFF/FLUSH profile only after original FBC EN
      * is actually off in both banks. CMOS/VF stay off, source stays stopped,
@@ -1129,7 +1129,7 @@ static int cam_sv_close_locked(uint64_t epoch)
              * retirement. Final normal reset owns their independent release;
              * ordinary config restoration must never replay saved SET words. */
             if(cam_sv_qos_index(cam_sv.offset[n])<CAM_SV_QOS_COUNT)continue;
-            if(cam_sv.expected[bank][n]!=cam_sv.before[bank][n])e=cam_sv_fault(ESTALE);
+            if(cam_sv.expected[bank][n]!=cam_sv.before[bank][n])e=cam_sv_fault(CAM_FAIL(ESTALE));
         }
     }
     if(!e) {

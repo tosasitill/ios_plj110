@@ -32,16 +32,16 @@ static unsigned cam_sv_qos_index(unsigned offset)
 }
 static int cam_sv_qos_capture(void)
 {
-    if(cam_sv_qos.captured && !cam_sv_qos.retired)return ESTALE;
+    if(cam_sv_qos.captured && !cam_sv_qos.retired)return CAM_FAIL(ESTALE);
     memset(&cam_sv_qos,0,sizeof(cam_sv_qos));cam_sv_qos.epoch=cam_sv.epoch;
     for(unsigned b=0;b<2;b++)for(unsigned n=0;n<CAM_SV_QOS_COUNT;n++) {
         unsigned reg=cam_sv_find(cam_sv_qos_offsets[n]);
-        if(reg>=cam_sv.count)return EINVAL;
+        if(reg>=cam_sv.count)return CAM_FAIL(EINVAL);
         cam_sv_qos.before[b][n]=cam_sv.before[b][reg];
         cam_sv_qos.actual[b][n]=cam_sv.before[b][reg];
         /* No inherited SW request, timer, mode, OR_CQ or command is
          * silently adopted as ours. Reserved/WLA fields stay untouched. */
-        if(cam_sv_qos.before[b][n]&0x1003fu)return EBUSY;
+        if(cam_sv_qos.before[b][n]&0x1003fu)return CAM_FAIL(EBUSY);
     }
     cam_sv_qos.captured=true;return 0;
 }
@@ -50,15 +50,15 @@ static int cam_sv_qos_observe(unsigned bank,unsigned offset,uint32_t value,bool 
     unsigned n=cam_sv_qos_index(offset);
     uint32_t mask,base,bit,or_bit;
     if(n==CAM_SV_QOS_COUNT || !cam_sv_qos.captured)return 0;
-    if(bank>=2 || cam_sv_qos.epoch!=cam_sv.epoch || cam_sv_qos.retired)return ESTALE;
+    if(bank>=2 || cam_sv_qos.epoch!=cam_sv.epoch || cam_sv_qos.retired)return CAM_FAIL(ESTALE);
     cam_sv_qos.actual[bank][n]=value;cam_sv_qos.sampled[bank]|=1u<<n;
     if(cam_sv_qos.error)return cam_sv_qos.error;
     bit=1u<<(2*n);or_bit=bit<<1;base=cam_sv_qos.before[bank][n];
     mask=(cam_sv_qos.issued&bit)?CAM_SV_QOS_SET|CAM_SV_QOS_SW_R:0;
     if(cam_sv_qos.issued&or_bit)mask|=CAM_SV_QOS_OR_CQ;
-    if((value&~mask)!=(base&~mask))return ESTALE;
+    if((value&~mask)!=(base&~mask))return CAM_FAIL(ESTALE);
     if(cam_sv_qos.issued&or_bit) {
-        if((cam_sv_qos.seen[bank]&(1u<<n)) && !(value&CAM_SV_QOS_OR_CQ))return ESTALE;
+        if((cam_sv_qos.seen[bank]&(1u<<n)) && !(value&CAM_SV_QOS_OR_CQ))return CAM_FAIL(ESTALE);
         if(value&CAM_SV_QOS_OR_CQ)cam_sv_qos.seen[bank]|=1u<<n;
     }
     /* Only the command/status bits of our issued SET and the ordinary
@@ -69,7 +69,7 @@ static int cam_sv_qos_start(void)
 {
     int e=0;
     if(!cam_sv_qos.captured || cam_sv_qos.epoch!=cam_sv.epoch ||
-       cam_sv_qos.issued || cam_sv_qos.error)return ESTALE;
+       cam_sv_qos.issued || cam_sv_qos.error)return CAM_FAIL(ESTALE);
     for(unsigned step=0;step<6;step++) {
         unsigned n=step/2,offset=cam_sv_qos_offsets[n];
         bool allowed=false;
@@ -91,18 +91,18 @@ static int cam_sv_qos_start(void)
             unsigned samples=0;
             nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
             for(unsigned poll=0;poll<10000;poll++) {
-                if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+                if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
                 e=cam_sv_environment();if(e)break;
-                if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+                if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
                 samples=(cam_sv_qos.actual[0][n]&CAM_SV_QOS_OR_CQ)?samples+1:0;
                 if(samples==2)break;
                 delay(1);
             }
-            if(!e && samples!=2)e=ETIMEDOUT;
+            if(!e && samples!=2)e=CAM_FAIL(ETIMEDOUT);
             if(e)break;
         }
     }
-    if(!e && cam_sv_qos.seen[0]!=7)e=EIO;
+    if(!e && cam_sv_qos.seen[0]!=7)e=CAM_FAIL(EIO);
     if(!e)cam_sv_qos.configured=true;
     else cam_sv_qos.error=e;
     printf("X9 CAMERA CAMSV QOS: epoch=%llu issued=%x seen=%x/%x sampled=%x/%x "

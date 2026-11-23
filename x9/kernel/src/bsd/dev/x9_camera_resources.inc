@@ -52,7 +52,7 @@ static int cam_mm_vote_idle(struct cam_receive_power *p)
         if((cam_rr(p->hwv,CAM_RES_FSM)&0xffff)<=1)return 0;
         delay(1);
     }
-    return ETIMEDOUT;
+    return CAM_FAIL(ETIMEDOUT);
 }
 static bool cam_mm_fsm_stuck(struct cam_receive_power *p)
 {
@@ -80,7 +80,7 @@ static int cam_poll_deadline(vm_offset_t base,unsigned offset,uint32_t mask,
             uint32_t value=cam_rr(base,offset);
             if((value&mask)==target)return 0;
             *timeout=(struct cam_poll_timeout){.offset=offset,.value=value};
-            return ETIMEDOUT;
+            return CAM_FAIL(ETIMEDOUT);
         }
         delay(interval_us);
     }
@@ -125,18 +125,18 @@ static int cam_csi_power_take(struct cam_receive_power *p,struct x9_camera_resou
     cam_csi_snapshot(p,before);
     for(unsigned i=0;i<6;i++) {
         if(i!=3 && ((before[i]^r->csi_before[i])&bit)) {
-            e=EBUSY;
+            e=CAM_FAIL(EBUSY);
             goto fail;
         }
     }
     if(cam_mm_fsm_stuck(p)) {
         step="fsm-pre-vote";
-        e=EBUSY;
+        e=CAM_FAIL(EBUSY);
         goto fail;
     }
     if(before[0]&bit) {
         if(!(before[1]&bit) || !(before[4]&bit)) {
-            e=EBUSY;
+            e=CAM_FAIL(EBUSY);
             goto fail;
         }
         p->csi_borrowed=true;
@@ -144,7 +144,7 @@ static int cam_csi_power_take(struct cam_receive_power *p,struct x9_camera_resou
         /* Unvoted-but-powered is unknown direct/firmware ownership. Other
          * XPUs' voted power may be pinned by our own additional AP vote. */
         if(!!(before[1]&bit)!=!!(before[4]&bit)) {
-            e=EBUSY;
+            e=CAM_FAIL(EBUSY);
             goto fail;
         }
         p->csi_owned=true; /* include an ambiguous SET in the restore journal */
@@ -165,7 +165,7 @@ static int cam_csi_power_take(struct cam_receive_power *p,struct x9_camera_resou
     }
     if(cam_mm_fsm_stuck(p)) {
         step="fsm-post-vote";
-        e=EBUSY;
+        e=CAM_FAIL(EBUSY);
         goto fail;
     }
     r->flags|=X9_CAM_RES_CSI_POWER;
@@ -210,7 +210,7 @@ static int cam_smmu_observe(struct cam_receive_power *p,struct x9_camera_resourc
     cam_smmu_snapshot(p,r);cam_smmu_snapshot(p,&again);
     r->flags|=X9_CAM_RES_SMMU_SNAPSHOT;
     if(!cam_smmu_config_same(r,&again) || r->cr0!=r->cr0ack || r->irq_ctrl!=r->irq_ack) {
-        r->flags|=X9_CAM_RES_SMMU_CHANGED;return EBUSY;
+        r->flags|=X9_CAM_RES_SMMU_CHANGED;return CAM_FAIL(EBUSY);
     }
     /* Capability prerequisite for a future 16KiB stage1 SID80/SSID domain.
      * No page table is allocated or attached by this power-only provider. */
@@ -219,7 +219,7 @@ static int cam_smmu_observe(struct cam_receive_power *p,struct x9_camera_resourc
      * is capability screening only; it allocates/attaches nothing here. */
     if(!cam_smmu_capable(r->idr[0],r->idr[1],r->idr[5])) {
         r->flags|=X9_CAM_RES_SMMU_UNSUPPORTED;
-        r->blockers|=X9_CAM_RES_NEED_SMMU_FEATURE;return ENOTSUP;
+        r->blockers|=X9_CAM_RES_NEED_SMMU_FEATURE;return CAM_FAIL(ENOTSUP);
     }
     if(!r->cr0 && !r->strtab_base && !r->strtab_cfg && !r->cmdq_base &&
        !r->evtq_base && !r->irq_ctrl && (r->gbpa&(1u<<20)) &&
@@ -227,7 +227,7 @@ static int cam_smmu_observe(struct cam_receive_power *p,struct x9_camera_resourc
     else r->flags|=X9_CAM_RES_SMMU_INHERITED;
     /* GERRORN is an acknowledgement, NOT a mask. Reading doesn't clear
      * errors, and a pending global error is not silently repaired here. */
-    return (r->gerror^r->gerrorn)?EIO:0;
+    return (r->gerror^r->gerrorn)?CAM_FAIL(EIO):0;
 }
 static int cam_receive_power_restore(struct cam_receive_power *p,struct x9_camera_resources *r)
 {
@@ -265,12 +265,12 @@ static int cam_receive_power_restore(struct cam_receive_power *p,struct x9_camer
 }
 static int cam_receive_power_take(struct cam_receive_power *p,struct x9_camera_resources *r)
 {
-    if(p->active || p->smmu_owned || p->power_token || p->csi_owned || p->csi_borrowed)return EBUSY;
+    if(p->active || p->smmu_owned || p->power_token || p->csi_owned || p->csi_borrowed)return CAM_FAIL(EBUSY);
     r->stage=X9_CAM_RES_STAGE_MAP;
     if(!p->hwv)p->hwv=ml_io_map(0x31c00000,0x22000);
     if(!p->mmup)p->mmup=ml_io_map(0x31a04000,0x1000);
     if(!p->smmu)p->smmu=ml_io_map(0x30800000,0x20000);
-    if(!p->hwv || !p->mmup || !p->smmu)return ENOMEM;
+    if(!p->hwv || !p->mmup || !p->smmu)return CAM_FAIL(ENOMEM);
     r->hwccf_before=cam_rr(p->hwv,CAM_RES_FSM);
     cam_csi_snapshot(p,r->csi_before);
     r->mm_ack_before=cam_rr(p->hwv,0x12900);
@@ -289,7 +289,7 @@ static int cam_receive_power_take(struct cam_receive_power *p,struct x9_camera_r
     /* MM_2 keeps its real AO/infra0 parent chain awake. Do not invent VMM
      * backup/IRQ votes or initialize their firmware handlers here. */
     if((r->mm_ack_active&CAM_RES_MM_INFRA)!=CAM_RES_MM_INFRA ||
-       (cam_rr(p->hwv,0x1131c)&CAM_RES_MM_INFRA))return ENXIO;
+       (cam_rr(p->hwv,0x1131c)&CAM_RES_MM_INFRA))return CAM_FAIL(ENXIO);
     r->blockers&=~X9_CAM_RES_NEED_MM_INFRA;
     r->stage=X9_CAM_RES_STAGE_CSI;
     int e=cam_csi_power_take(p,r);if(e)return e;
@@ -301,7 +301,7 @@ static int cam_resources_probe(struct x9_camera_resources *r)
 {
     if(cam_sensor_session_active) {
         memset(r,0,sizeof(*r));r->version=1;r->last_errno=EBUSY;
-        return EBUSY; /* no MMIO/unwind of another session's dependencies */
+        return CAM_FAIL(EBUSY); /* no MMIO/unwind of another session's dependencies */
     }
     memset(r,0,sizeof(*r));r->version=1;
     r->blockers=X9_CAM_RES_NEED_CAM_POWER|X9_CAM_RES_NEED_PHY|X9_CAM_RES_NEED_ROUTE|

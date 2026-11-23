@@ -25,8 +25,8 @@ static int cam_vcm_guard(uint64_t deadline)
        !cam_sensor_open.active || cam_sensor_open.close_attempted ||
        cam_sensor_open.restored || session.capture || !cam_journal.afvdd.taken ||
        (!cam_vcm.close_attempted && cam_sensor_live.phase!=CAM_SENSOR_CONFIGURING) ||
-       (session.stream && !cam_vcm.close_attempted))return ESTALE;
-    if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+       (session.stream && !cam_vcm.close_attempted))return CAM_FAIL(ESTALE);
+    if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
     /* stream is an attempted-stream ledger until power(false) returns.
      * Only the actual native retirement receipt admits this close access. */
     e=cam_vcm.close_attempted?cam_native_sensor_retirement_guard_locked(cam_vcm.epoch):0;
@@ -38,7 +38,7 @@ static int cam_vcm_read(uint64_t deadline,uint8_t reg,uint8_t *bytes,unsigned co
     int e;
     if((reg!=2 && reg!=0x16 && reg!=0x84) ||
        count!=(reg==0x84?2u:1u) || (reg!=2 && cam_vcm.sensor!=X9_CAMERA_BACK))
-        return EPERM;
+        return CAM_FAIL(EPERM);
     e=cam_vcm_guard(deadline);
     if(!e)e=cam_bus_transfer_n(&cam_journal.sensor,(uint8_t)cam_vcm.slave,
         &reg,1,bytes,count);
@@ -55,7 +55,7 @@ static int cam_vcm_mode_check(uint64_t deadline,uint8_t target)
     for(unsigned n=0;n<2 && !e;n++) {
         uint8_t mode=0;
         e=cam_vcm_read(deadline,2,&mode,1);
-        if(!e && mode!=target)e=ESTALE;
+        if(!e && mode!=target)e=CAM_FAIL(ESTALE);
     }
     return e;
 }
@@ -70,7 +70,7 @@ static int cam_vcm_position(uint64_t deadline,uint32_t position)
     if(position>1023 || index>=sizeof(cam_vcm.positions)/sizeof(cam_vcm.positions[0]) ||
        cam_vcm.position_acked!=index || cam_vcm.mode_issued!=cam_vcm.mode_acked ||
        (!cam_vcm.close_attempted &&
-        (cam_vcm.sensor!=X9_CAMERA_BACK || index || position!=511)))return EPERM;
+        (cam_vcm.sensor!=X9_CAMERA_BACK || index || position!=511)))return CAM_FAIL(EPERM);
     e=cam_vcm_guard(deadline);
     if(e)return e;
     cam_vcm.positions[index]=position;
@@ -90,7 +90,7 @@ static int cam_vcm_mode(uint64_t deadline)
     unsigned bit=cam_vcm.close_attempted?2u:1u;
     int e;
     if((cam_vcm.mode_issued&bit) || cam_vcm.mode_issued!=cam_vcm.mode_acked ||
-       (!cam_vcm.close_attempted && cam_vcm.sensor!=X9_CAMERA_BACK))return EPERM;
+       (!cam_vcm.close_attempted && cam_vcm.sensor!=X9_CAMERA_BACK))return CAM_FAIL(EPERM);
     e=cam_vcm_guard(deadline);
     if(e)return e;
     cam_vcm.mode_issued|=bit;
@@ -108,7 +108,7 @@ static int cam_vcm_prepare(uint32_t which,struct x9_camera_config *r)
     int e;
     if(!cam_sensor_open_slave(which))return 0;
     if(cam_vcm.epoch!=cam_sensor_live.epoch || cam_vcm.sensor!=which ||
-       cam_vcm.attempted)return ESTALE;
+       cam_vcm.attempted)return CAM_FAIL(ESTALE);
     cam_vcm.attempted=true;r->stage=X9_CAM_CFG_VCM;
     nanoseconds_to_absolutetime(1000000000ull,&span);deadline=mach_absolute_time()+span;
     e=cam_vcm_guard(deadline);
@@ -117,7 +117,7 @@ static int cam_vcm_prepare(uint32_t which,struct x9_camera_config *r)
     if(!e)delay(5100);
     if(!e)e=cam_vcm_read(deadline,2,&mode,1);
     if(!e)delay(3000); /* normal init's first status sample always waits3ms */
-    if(!e && mode)e=ESTALE; /* sensor open already qualified active; no retry */
+    if(!e && mode)e=CAM_FAIL(ESTALE); /* sensor open already qualified active; no retry */
     if(!e && which==X9_CAMERA_BACK) {
         e=cam_vcm_read(deadline,0x16,&pid,1);
         if(!e){cam_vcm.pid=pid;cam_vcm.pid_read=true;} /* mismatch only warns in vendor init */
@@ -151,18 +151,18 @@ static int cam_vcm_close(uint64_t epoch)
     uint64_t span,deadline;
     uint32_t position;
     int e;
-    if(cam_vcm.epoch!=epoch)return ESTALE;
+    if(cam_vcm.epoch!=epoch)return CAM_FAIL(ESTALE);
     if(!cam_vcm.attempted) {
         cam_vcm.closed=true;
         return 0; /* ID-only session or configuration stopped before lens init */
     }
     if(cam_vcm.close_attempted)return cam_vcm.close_error?cam_vcm.close_error:ESTALE;
     cam_vcm.close_attempted=true;
-    e=cam_vcm.error?cam_vcm.error:!cam_vcm.complete?ESTALE:0;
+    e=cam_vcm.error?cam_vcm.error:!cam_vcm.complete?CAM_FAIL(ESTALE):0;
     nanoseconds_to_absolutetime(1000000000ull,&span);deadline=mach_absolute_time()+span;
     if(!e)e=cam_vcm_mode_check(deadline,0);
     position=cam_vcm.control_pos;
-    if(!e && position>1023)e=ESTALE;
+    if(!e && position>1023)e=CAM_FAIL(ESTALE);
     /* Normal release uses focus->val, not the init's separate g_last_pos.
      * The V4L2 control defaults to0 until an absolute control succeeds.
      * Preserve the unconditional final origin store, including equal0. */
@@ -188,14 +188,14 @@ static int cam_vcm_close(uint64_t epoch)
 static int cam_vcm_closed_mode(uint64_t epoch,uint8_t *mode)
 {
     if(cam_vcm.epoch!=epoch || cam_vcm.sensor!=cam_sensor_open.sensor ||
-       cam_vcm.error || cam_vcm.close_error || !cam_vcm.closed)return ESTALE;
+       cam_vcm.error || cam_vcm.close_error || !cam_vcm.closed)return CAM_FAIL(ESTALE);
     *mode=0;
     if(cam_vcm.attempted) {
         if(!cam_vcm.complete || !cam_vcm.close_attempted ||
            cam_vcm.position_issued!=cam_vcm.position_acked ||
            !cam_vcm.position_known || cam_vcm.last_dac ||
            cam_vcm.mode_issued!=cam_vcm.mode_acked || !(cam_vcm.mode_acked&2u) ||
-           cam_vcm.mode_observed!=0x20)return ESTALE;
+           cam_vcm.mode_observed!=0x20)return CAM_FAIL(ESTALE);
         *mode=0x20;
     }
     return 0;

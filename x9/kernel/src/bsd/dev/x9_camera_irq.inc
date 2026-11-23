@@ -96,14 +96,14 @@ static uint8_t cam_irq_priority(unsigned role)
 {return *(volatile uint8_t *)(cam_irq.gic+0x400+cam_irq.layout.intid[role]);}
 static int cam_irq_mapping(void)
 {
-    if(PAGE_SIZE!=0x4000||!cam_irq.gic)return ENXIO;
+    if(PAGE_SIZE!=0x4000||!cam_irq.gic)return CAM_FAIL(ENXIO);
     for(unsigned off=0;off<0x40000;off+=0x4000) {
         addr64_t a=(addr64_t)cam_irq.gic+off;ppnum_t p=pmap_find_phys(kernel_pmap,a);
-        if(!p||ptoa_64(p)+(a&PAGE_MASK)!=0x06800000ULL+off)return EFAULT;
+        if(!p||ptoa_64(p)+(a&PAGE_MASK)!=0x06800000ULL+off)return CAM_FAIL(EFAULT);
     }
     for(unsigned b=0;b<2;b++) {
         addr64_t a=cam_irq.view[b];ppnum_t p=pmap_find_phys(kernel_pmap,a);
-        if(!p||ptoa_64(p)+(a&PAGE_MASK)!=(b?0x3a608000ULL:0x3a600000ULL))return EFAULT;
+        if(!p||ptoa_64(p)+(a&PAGE_MASK)!=(b?0x3a608000ULL:0x3a600000ULL))return CAM_FAIL(EFAULT);
     }
     return 0;
 }
@@ -118,12 +118,12 @@ static int cam_irq_controller_impl(bool pending_ok)
      * admission predicate. Do not write CTLR/IGROUPR/ICFGR: the exact
      * boot topology, level configuration, route/priority/enable readbacks
      * and actual IAR/EOI remain mandatory for our three bound lines. */
-    if((ctl&0x12)!=0x12||(!pending_ok&&(ctl&(1u<<31))))return EBUSY;
+    if((ctl&0x12)!=0x12||(!pending_ok&&(ctl&(1u<<31))))return CAM_FAIL(EBUSY);
     lines=((cam_irq_rd(cam_irq.gic,4)&31)+1)*32;
     for(unsigned i=0;i<3;i++) {
         unsigned id=cam_irq.layout.intid[i];
         if(lines<=id||
-           (cam_irq_rd(cam_irq.gic,0xc00+4*(id/16))&(3u<<((id%16)*2))))return EBUSY;
+           (cam_irq_rd(cam_irq.gic,0xc00+4*(id/16))&(3u<<((id%16)*2))))return CAM_FAIL(EBUSY);
     }
     return 0;
 }
@@ -134,17 +134,17 @@ static int cam_irq_wait_rwp(void)
     uint64_t span,end;
     nanoseconds_to_absolutetime(1000000,&span);end=mach_absolute_time()+span;
     for(unsigned i=0;i<500;i++) {
-        if(mach_absolute_time()>=end)return ETIMEDOUT;
+        if(mach_absolute_time()>=end)return CAM_FAIL(ETIMEDOUT);
         if(!(cam_irq_rd(cam_irq.gic,0)&(1u<<31)))return 0;
         delay(2);
     }
-    return ETIMEDOUT;
+    return CAM_FAIL(ETIMEDOUT);
 }
 static int cam_irq_idle(void)
 {
     for(unsigned i=0;i<3;i++)if((cam_irq_rd(cam_irq.gic,cam_irq_bank(i,0x100))|
         cam_irq_rd(cam_irq.gic,cam_irq_bank(i,0x200))|
-        cam_irq_rd(cam_irq.gic,cam_irq_bank(i,0x300)))&cam_irq_bit(i))return EBUSY;
+        cam_irq_rd(cam_irq.gic,cam_irq_bank(i,0x300)))&cam_irq_bit(i))return CAM_FAIL(EBUSY);
     return 0;
 }
 static int cam_irq_wait_idle(void)
@@ -152,11 +152,11 @@ static int cam_irq_wait_idle(void)
     uint64_t span,end;
     nanoseconds_to_absolutetime(1000000,&span);end=mach_absolute_time()+span;
     for(unsigned i=0;i<500;i++) {
-        if(mach_absolute_time()>=end)return ETIMEDOUT;
+        if(mach_absolute_time()>=end)return CAM_FAIL(ETIMEDOUT);
         if(!cam_irq_idle()){delay(2);if(!cam_irq_idle())return 0;}
         delay(2);
     }
-    return ETIMEDOUT;
+    return CAM_FAIL(ETIMEDOUT);
 }
 /* Only the bound lines; no distributor/redistributor/timer/IPI/security writes.
  * Called under spin. RWP/ACTIVE retirement is checked in thread context. */
@@ -176,17 +176,17 @@ static int cam_irq_power(void)
 {
     uint32_t ack=CAM_RES_MM_INFRA|(1u<<16)|(1u<<15)|(1u<<8);
     if((cam_irq_rd(cam_irq.hwv,0x12900)&ack)!=ack||
-       !(cam_irq_rd(cam_irq.hwv,CAM_RES_CSI_ACK)&CAM_RES_CSI_BIT))return ENXIO;
+       !(cam_irq_rd(cam_irq.hwv,CAM_RES_CSI_ACK)&CAM_RES_CSI_BIT))return CAM_FAIL(ENXIO);
     if((cam_irq_rd(cam_irq.cam_cg,0)&((1u<<1)|(1u<<6)|(1u<<7)))||
        (cam_irq_rd(cam_irq.sv_cg,0)&(7u<<12))||
-       (cam_irq_rd(cam_irq.top,0x270)&cam_irq.fence)!=cam_irq.fence)return ESTALE;
+       (cam_irq_rd(cam_irq.top,0x270)&cam_irq.fence)!=cam_irq.fence)return CAM_FAIL(ESTALE);
     return 0;
 }
 static int cam_irq_config(bool pending_ok)
 {
     int e=cam_irq_controller_impl(pending_ok);if(e)return e;
     for(unsigned i=0;i<3;i++)if(cam_irq_route(i)!=cam_irq.route_expected||
-        cam_irq_priority(i)!=CAM_IRQ_PRIORITY)return ESTALE;
+        cam_irq_priority(i)!=CAM_IRQ_PRIORITY)return CAM_FAIL(ESTALE);
     return 0;
 }
 /* Whole prior/consumed set before EACH route/priority mutation. An accepted
@@ -198,8 +198,8 @@ static int cam_irq_partial_config(void)
         uint32_t bit=1u<<i;
         uint64_t r=cam_irq_route(i),want_r=(cam_irq.dirty_route&bit)?cam_irq.route_expected:cam_irq.route_before[i];
         uint8_t p=cam_irq_priority(i),want_p=(cam_irq.dirty_priority&bit)?CAM_IRQ_PRIORITY:cam_irq.priority_before[i];
-        if(r!=want_r&&(!(cam_irq.uncertain_route&bit)||r!=cam_irq.route_before[i]))return ESTALE;
-        if(p!=want_p&&(!(cam_irq.uncertain_priority&bit)||p!=cam_irq.priority_before[i]))return ESTALE;
+        if(r!=want_r&&(!(cam_irq.uncertain_route&bit)||r!=cam_irq.route_before[i]))return CAM_FAIL(ESTALE);
+        if(p!=want_p&&(!(cam_irq.uncertain_priority&bit)||p!=cam_irq.priority_before[i]))return CAM_FAIL(ESTALE);
     }
     return 0;
 }
@@ -228,7 +228,7 @@ static int cam_irq_credit_guard_locked(uint64_t epoch)
         uint32_t bit=cam_irq_bit(i);
         if(!(cam_irq_rd(cam_irq.gic,cam_irq_bank(i,0x100))&bit) ||
            ((cam_irq_rd(cam_irq.gic,cam_irq_bank(i,0x200))|
-             cam_irq_rd(cam_irq.gic,cam_irq_bank(i,0x300)))&bit))e=EBUSY;
+             cam_irq_rd(cam_irq.gic,cam_irq_bank(i,0x300)))&bit))e=CAM_FAIL(EBUSY);
     }
     return e;
 }
@@ -371,13 +371,13 @@ static int cam_irq_unmask(unsigned role)
     boolean_t old=cam_irq_spin_take();
     uint64_t before;
     int e;
-    if(!cam_irq.accepting||cam_irq.error){cam_irq_spin_drop(old);return ECANCELED;}
+    if(!cam_irq.accepting||cam_irq.error){cam_irq_spin_drop(old);return CAM_FAIL(ECANCELED);}
     before=cam_irq.deliveries[role];
     cam_irq_wr(cam_irq_bank(role,0x100),cam_irq_bit(role));cam_irq_spin_drop(old);
     e=cam_irq_wait_rwp();
     old=cam_irq_spin_take();
     if(!e&&!(cam_irq_rd(cam_irq.gic,cam_irq_bank(role,0x100))&cam_irq_bit(role))&&
-       cam_irq.deliveries[role]==before)e=EIO;
+       cam_irq.deliveries[role]==before)e=CAM_FAIL(EIO);
     cam_irq_spin_drop(old);return e;
 }
 /* A first real completion can race the sensor stream-on ACK -> core flag
@@ -392,11 +392,11 @@ static int cam_irq_core_ready(const struct x9_camera_camsv_irq *f)
     for(;;) {
         int e=0;
         lck_mtx_lock(&camera_lock);
-        if(cam_core_retiring_locked(f->generation,cam_irq.request.frame.sensor))e=ECANCELED;
+        if(cam_core_retiring_locked(f->generation,cam_irq.request.frame.sensor))e=CAM_FAIL(ECANCELED);
         else if((st.flags&X9_CAMERA_FAULT)||st.generation!=f->generation||
-           st.sensor!=cam_irq.request.frame.sensor)e=ESTALE;
-        else if(!(st.flags&X9_CAMERA_STREAMING))e=EAGAIN;
-        if(e==EAGAIN&&mach_absolute_time()>=end)e=ETIMEDOUT;
+           st.sensor!=cam_irq.request.frame.sensor)e=CAM_FAIL(ESTALE);
+        else if(!(st.flags&X9_CAMERA_STREAMING))e=CAM_FAIL(EAGAIN);
+        if(e==EAGAIN&&mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
         if(e!=EAGAIN){lck_mtx_unlock(&camera_lock);return e;}
         assert_wait_deadline((event_t)&st.generation,THREAD_UNINT,end);
         lck_mtx_unlock(&camera_lock);thread_block(THREAD_CONTINUE_NULL);
@@ -423,13 +423,13 @@ static int cam_irq_completed_frame_guard(const struct x9_camera_camsv_slot *slot
        cam_irq_fbc.epoch!=cam_irq.epoch || cam_sv.epoch!=cam_irq.epoch ||
        !(cam_irq_fbc.source_issued&CAM_STREAM_ON) || !(cam_irq_fbc.source_ack&CAM_STREAM_ON) ||
        memcmp(&cam_irq_fbc.done,f,sizeof(*f)) ||
-       memcmp(&cam_irq_fbc.request,&slot->request,sizeof(slot->request))))e=ESTALE;
+       memcmp(&cam_irq_fbc.request,&slot->request,sizeof(slot->request))))e=CAM_FAIL(ESTALE);
     for(unsigned bank=0;bank<2 && !e;bank++) {
         uint32_t control,counter;
         e=cam_irq_power();if(!e)e=cam_irq_config(true);if(e)break;
         control=cam_irq_rd(cam_irq.view[bank],0x540);counter=cam_irq_rd(cam_irq.view[bank],0x544);
         e=cam_irq_fbc_note_locked(bank,control,counter);
-        if(!e && !cam_repeat_done_target_locked(bank,counter))e=ESTALE;
+        if(!e && !cam_repeat_done_target_locked(bank,counter))e=CAM_FAIL(ESTALE);
     }
     cam_irq_spin_drop(old);return e;
 }
@@ -465,7 +465,7 @@ static void __attribute__((noreturn)) cam_irq_worker(void *arg,wait_result_t res
         cam_irq_spin_drop(old);
         if(!e)e=ev.error;
         discard=!e&&!current;
-        if(discard)e=ECANCELED;
+        if(discard)e=CAM_FAIL(ECANCELED);
         if(!e)e=cam_irq_power();
         if(!e)e=cam_irq_wait_rwp();
         if(!e)e=cam_irq_config(false);
@@ -476,7 +476,7 @@ static void __attribute__((noreturn)) cam_irq_worker(void *arg,wait_result_t res
                  * not wait for the core's sensor stream publication. */
                 const struct x9_camera_camsv_dma *d=&cam_irq.slot->dma;
                 e=d->check(d->context,d->lease,&cam_irq.slot->request);
-                if(!e)e=EAGAIN;
+                if(!e)e=CAM_FAIL(EAGAIN);
             } else {
                 e=ev.frame.err_status||(ev.frame.cq_status&~1u)?EIO:cam_irq_core_ready(&ev.frame);
                 if(e==ECANCELED)e=0; /* exact core STOP; qualification still required below */
@@ -528,16 +528,16 @@ static int cam_irq_topology(void)
     struct x9_camera_irq_layout q;
     uint64_t r[4];
     if(SecureDTLookupEntry(NULL,"/chosen",&chosen)!=kSuccess||
-       SecureDTGetProperty(chosen,"x9-camera-irq-layout",&p,&n)!=kSuccess||!p||n!=64)return ENXIO;
+       SecureDTGetProperty(chosen,"x9-camera-irq-layout",&p,&n)!=kSuccess||!p||n!=64)return CAM_FAIL(ENXIO);
     memcpy(&q,p,sizeof(q));
-    if(!x9_camera_irq_layout_valid(&q))return ENXIO;
+    if(!x9_camera_irq_layout_valid(&q))return CAM_FAIL(ENXIO);
     /* The SAME relative GICD address consumed by pe_init_fiq, not a captured
      * dump fallback or an unrelated interrupt controller alias. */
     if(SecureDTLookupEntry(NULL,"/arm-io/gic",&gic)!=kSuccess||
-       SecureDTGetProperty(gic,"reg",&p,&n)!=kSuccess||!p||n!=32)return ENXIO;
+       SecureDTGetProperty(gic,"reg",&p,&n)!=kSuccess||!p||n!=32)return CAM_FAIL(ENXIO);
     memcpy(r,p,sizeof(r));
     if(r[0]!=q.gicd_base-0x400000ULL||r[1]!=q.gicd_bytes||
-       r[2]!=0x06880000-0x400000ULL||r[3]!=0x200000)return ENXIO;
+       r[2]!=0x06880000-0x400000ULL||r[3]!=0x200000)return CAM_FAIL(ENXIO);
     cam_irq.layout=q;
     if(!cam_irq.gic)cam_irq.gic=ml_io_map(q.gicd_base,q.gicd_bytes);
     return cam_irq_mapping();
@@ -548,11 +548,11 @@ static int cam_irq_topology(void)
 static int cam_irq_cold_reset_guard_locked(uint64_t epoch,const struct cam_rx_maps *m)
 {
     int e=0;
-    if(!epoch || !m || epoch!=cam_rx_live.sensor_epoch)return ESTALE;
+    if(!epoch || !m || epoch!=cam_rx_live.sensor_epoch)return CAM_FAIL(ESTALE);
     lck_mtx_lock(&camera_irq_lock);
     if(cam_irq.prepared || cam_irq.owns || cam_irq.accepting || cam_irq.busy ||
        cam_irq.count || cam_irq.error || cam_irq.dirty_route || cam_irq.dirty_priority ||
-       cam_irq.uncertain_route || cam_irq.uncertain_priority)e=EBUSY;
+       cam_irq.uncertain_route || cam_irq.uncertain_priority)e=CAM_FAIL(EBUSY);
     if(!e) {
         cam_irq.view[0]=m->sv[0];cam_irq.view[1]=m->sv[1];
         e=cam_irq_topology();
@@ -568,7 +568,7 @@ static int cam_irq_prepare_locked(uint64_t epoch)
 {
     int e;
     if(!epoch||cam_irq.prepared||epoch<=cam_irq.last_epoch||
-       !x9_camera_sensor_valid(cam_sv.status.sensor))return ESTALE;
+       !x9_camera_sensor_valid(cam_sv.status.sensor))return CAM_FAIL(ESTALE);
     e=cam_irq.error;if(e)return e;
     e=cam_sv_environment();if(e)return e;
     lck_mtx_lock(&camera_irq_lock);
@@ -597,7 +597,7 @@ static int cam_irq_prepare_locked(uint64_t epoch)
     }
     if(!e&&!cam_irq.thread_started) {
         thread_t thread;
-        if(kernel_thread_start(cam_irq_worker,NULL,&thread)!=KERN_SUCCESS)e=ENOMEM;
+        if(kernel_thread_start(cam_irq_worker,NULL,&thread)!=KERN_SUCCESS)e=CAM_FAIL(ENOMEM);
         else {thread_deallocate(thread);cam_irq.thread_started=true;}
     }
     if(!e)e=cam_irq_power();
@@ -613,7 +613,7 @@ static int cam_irq_guard_locked(uint64_t epoch)
     boolean_t old;
     int e;
     if(!cam_irq.prepared)return 0;
-    if(epoch!=cam_irq.epoch)return ESTALE;
+    if(epoch!=cam_irq.epoch)return CAM_FAIL(ESTALE);
     old=cam_irq_spin_take();e=cam_irq.error;cam_irq_spin_drop(old);
     return e;
 }
@@ -629,24 +629,24 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
     int e,cause;
     boolean_t old;
     bool owns,arm_attempted=false;
-    if(!request||!d)return EINVAL;
+    if(!request||!d)return CAM_FAIL(EINVAL);
     r=*request;dma=*d;
-    if(r.tag||r.group)return EINVAL;
+    if(r.tag||r.group)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_irq_lock);
-    e=!cam_irq.prepared||cam_irq.epoch!=epoch||cam_irq.close_attempted?ESTALE:0;
+    e=!cam_irq.prepared||cam_irq.epoch!=epoch||cam_irq.close_attempted?CAM_FAIL(ESTALE):0;
     old=cam_irq_spin_take();
-    if(!e&&(cam_irq.accepting||cam_irq.count||cam_irq.busy))e=EBUSY;
+    if(!e&&(cam_irq.accepting||cam_irq.count||cam_irq.busy))e=CAM_FAIL(EBUSY);
     if(!e)e=cam_irq.error;
     owns=cam_irq.owns;cam_irq_spin_drop(old);
-    if(!e&&r.frame.sensor!=cam_sv.status.sensor)e=EINVAL;
+    if(!e&&r.frame.sensor!=cam_sv.status.sensor)e=CAM_FAIL(EINVAL);
     /* Refuse a new arm BEFORE changing S1 if the previous request has an
      * issued credit. Only the real future producer retirement can end it. */
-    if(!e&&cam_sv.credit_issued)e=EBUSY;
+    if(!e&&cam_sv.credit_issued)e=CAM_FAIL(EBUSY);
     if(!e)e=cam_sv_environment();if(!e)e=cam_sv_gate_admission_locked(epoch);
     if(!e)e=cam_irq_mapping();
     if(!e)e=cam_irq_controller();if(!e)e=cam_irq_idle();
     if(!e&&owns)e=cam_irq_config(false);
-    if(!e&&cam_irq.slot->state!=X9_CAMSV_EMPTY&&cam_irq.slot->state!=X9_CAMSV_RETIRED)e=EBUSY;
+    if(!e&&cam_irq.slot->state!=X9_CAMSV_EMPTY&&cam_irq.slot->state!=X9_CAMSV_RETIRED)e=CAM_FAIL(EBUSY);
     if(!e)e=cam_source_admission_locked(epoch);
     if(!e) {
         step="dma-arm";
@@ -678,13 +678,13 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
             cam_irq.dirty_route|=1u<<i;cam_irq.uncertain_route|=1u<<i;
             *(volatile uint64_t *)(cam_irq.gic+0x6000+8*cam_irq.layout.intid[i])=cam_irq.route_expected;
             __asm__ volatile("dsb sy":::"memory");
-            if(cam_irq_route(i)!=cam_irq.route_expected){e=EIO;break;}
+            if(cam_irq_route(i)!=cam_irq.route_expected){e=CAM_FAIL(EIO);break;}
             cam_irq.uncertain_route&=~(1u<<i);
             e=cam_irq_mutation_guard();if(e)break;
             cam_irq.dirty_priority|=1u<<i;cam_irq.uncertain_priority|=1u<<i;
             *(volatile uint8_t *)(cam_irq.gic+0x400+cam_irq.layout.intid[i])=CAM_IRQ_PRIORITY;
             __asm__ volatile("dsb sy":::"memory");
-            if(cam_irq_priority(i)!=CAM_IRQ_PRIORITY){e=EIO;break;}
+            if(cam_irq_priority(i)!=CAM_IRQ_PRIORITY){e=CAM_FAIL(EIO);break;}
             cam_irq.uncertain_priority&=~(1u<<i);
         }
     }
@@ -753,7 +753,7 @@ int x9_camera_camsv_irq_state(uint64_t epoch,uint32_t *state,int *error)
 {
     int e;
     boolean_t old;
-    if(!state||!error)return EINVAL;
+    if(!state||!error)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_irq_lock);e=cam_irq.prepared&&epoch==cam_irq.epoch?0:ESTALE;
     if(!e) {
         *state=cam_irq.slot->state;old=cam_irq_spin_take();*error=cam_irq.error;
@@ -781,7 +781,7 @@ static int cam_irq_close_locked(uint64_t epoch)
         return 0;
     }
     lck_mtx_lock(&camera_irq_lock);
-    if(epoch!=cam_irq.epoch||cam_irq.close_attempted){lck_mtx_unlock(&camera_irq_lock);return ESTALE;}
+    if(epoch!=cam_irq.epoch||cam_irq.close_attempted){lck_mtx_unlock(&camera_irq_lock);return CAM_FAIL(ESTALE);}
     /* Stop only an inactive arm or the privately qualified streamed request.
      * OFF/DONE/CPU/worker/GIC is necessary for the latter, not AXI drain.
      * No credit revocation/map release or repair of uncertain/foreign input. */
@@ -805,7 +805,7 @@ static int cam_irq_close_locked(uint64_t epoch)
         bool pending;
         old=cam_irq_spin_take();pending=cam_irq.busy||cam_irq.count;
         if(!pending){cam_irq_spin_drop(old);break;}
-        if(mach_absolute_time()>=end){cam_irq_spin_drop(old);if(!e)e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=end){cam_irq_spin_drop(old);if(!e)e=CAM_FAIL(ETIMEDOUT);break;}
         assert_wait_deadline((event_t)&cam_irq.busy,THREAD_UNINT,end);
         cam_irq_spin_drop(old);thread_block(THREAD_CONTINUE_NULL);
     }
@@ -818,7 +818,7 @@ static int cam_irq_close_locked(uint64_t epoch)
     if(!e)e=cam_irq_wait_idle();
     if(!e)e=cam_repeat_cancel_complete_locked(epoch);
     if(!e&&cam_irq.slot->state!=X9_CAMSV_EMPTY&&cam_irq.slot->state!=X9_CAMSV_RETIRED&&
-       cam_irq.slot->state!=X9_CAMSV_CANCELLED)e=EBUSY;
+       cam_irq.slot->state!=X9_CAMSV_CANCELLED)e=CAM_FAIL(EBUSY);
     if(!e)e=cam_sv_environment();
     for(unsigned k=3;k&&!e;k--) {
         unsigned i=k-1;uint32_t bit=1u<<i;
@@ -826,21 +826,21 @@ static int cam_irq_close_locked(uint64_t epoch)
         if(e)break;
         if(cam_irq.dirty_priority&bit) {
             uint8_t p=cam_irq_priority(i);
-            if(p!=CAM_IRQ_PRIORITY&&(!(cam_irq.uncertain_priority&bit)||p!=cam_irq.priority_before[i])){e=ESTALE;break;}
+            if(p!=CAM_IRQ_PRIORITY&&(!(cam_irq.uncertain_priority&bit)||p!=cam_irq.priority_before[i])){e=CAM_FAIL(ESTALE);break;}
             cam_irq.uncertain_priority|=bit;
             *(volatile uint8_t *)(cam_irq.gic+0x400+cam_irq.layout.intid[i])=cam_irq.priority_before[i];
             __asm__ volatile("dsb sy":::"memory");
-            if(cam_irq_priority(i)!=cam_irq.priority_before[i]){e=EIO;break;}
+            if(cam_irq_priority(i)!=cam_irq.priority_before[i]){e=CAM_FAIL(EIO);break;}
             cam_irq.dirty_priority&=~bit;cam_irq.uncertain_priority&=~bit;
         }
         if(cam_irq.dirty_route&bit) {
             uint64_t r=cam_irq_route(i);
             e=cam_irq_mutation_guard();if(e)break;
-            if(r!=cam_irq.route_expected&&(!(cam_irq.uncertain_route&bit)||r!=cam_irq.route_before[i])){e=ESTALE;break;}
+            if(r!=cam_irq.route_expected&&(!(cam_irq.uncertain_route&bit)||r!=cam_irq.route_before[i])){e=CAM_FAIL(ESTALE);break;}
             cam_irq.uncertain_route|=bit;
             *(volatile uint64_t *)(cam_irq.gic+0x6000+8*cam_irq.layout.intid[i])=cam_irq.route_before[i];
             __asm__ volatile("dsb sy":::"memory");
-            if(cam_irq_route(i)!=cam_irq.route_before[i]){e=EIO;break;}
+            if(cam_irq_route(i)!=cam_irq.route_before[i]){e=CAM_FAIL(EIO);break;}
             cam_irq.dirty_route&=~bit;cam_irq.uncertain_route&=~bit;
         }
         e=cam_irq_controller();if(!e)e=cam_irq_idle();
@@ -869,9 +869,9 @@ static int cam_irq_stop_locked(uint64_t epoch)
     if(!epoch || epoch!=cam_irq.epoch || epoch!=cam_sensor_live.epoch ||
        !cam_irq.prepared || !session.power || !session.capture || !session.stream ||
        cam_sensor_live.close_attempted || cam_rx_live.close_attempted ||
-       cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED)return ESTALE;
+       cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED)return CAM_FAIL(ESTALE);
     old=cam_irq_spin_take();
-    e=cam_irq.error?cam_irq.error:cam_irq.close_attempted?EALREADY:0;
+    e=cam_irq.error?cam_irq.error:cam_irq.close_attempted?CAM_FAIL(EALREADY):0;
     cam_irq_spin_drop(old);
     if(!e)e=cam_irq_close_locked(epoch);
     return e;

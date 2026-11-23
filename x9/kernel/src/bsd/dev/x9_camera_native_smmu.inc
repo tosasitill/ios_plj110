@@ -41,11 +41,11 @@ static int cam_native_wp_guard(struct x9_camera_smmu *m)
 {
     struct x9_camera_smmu_policy policy;
     int e=cam_smmu_policy_read(&policy);if(e)return e;
-    if(memcmp(&policy,&m->native_policy,sizeof(policy)))return ESTALE;
-    if(!m->native_wp)return ENXIO;
+    if(memcmp(&policy,&m->native_policy,sizeof(policy)))return CAM_FAIL(ESTALE);
+    if(!m->native_wp)return CAM_FAIL(ENXIO);
     for(unsigned i=0;i<4;i++)
         if(*(volatile uint32_t *)(m->native_wp+cam_native_wp_off[i])!=m->native_wp_expected[i])
-            return ESTALE;
+            return CAM_FAIL(ESTALE);
     __asm__ volatile("dsb sy":::"memory");return 0;
 }
 static void cam_native_read(struct x9_camera_smmu *m,struct cam_native_snapshot *s)
@@ -61,9 +61,9 @@ static int cam_native_match(struct x9_camera_smmu *m,const struct cam_native_sna
     struct cam_native_snapshot now;
     int e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);
     if(e)return e;
-    if(!m->native_wp)return ENXIO;
+    if(!m->native_wp)return CAM_FAIL(ENXIO);
     cam_native_read(m,&now);
-    return memcmp(s,&now,sizeof(now))?ESTALE:0;
+    return memcmp(s,&now,sizeof(now))?CAM_FAIL(ESTALE):0;
 }
 static int cam_native_wp_write(struct x9_camera_smmu *m,struct cam_native_snapshot *s,
     unsigned field,uint32_t mask,uint32_t value)
@@ -130,26 +130,26 @@ static int cam_native_enable(struct x9_camera_smmu *m,struct cam_native_snapshot
         e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);if(e)return e;
         cam_native_read(m,&now);
         uint32_t ack=now.word[CAM_N_ACK];
-        if(ack!=before && ack!=value)return ESTALE;
+        if(ack!=before && ack!=value)return CAM_FAIL(ESTALE);
         now.word[CAM_N_ACK]=s->word[CAM_N_ACK];
-        if(memcmp(s,&now,sizeof(now)))return ESTALE;
+        if(memcmp(s,&now,sizeof(now)))return CAM_FAIL(ESTALE);
         if(ack==value){s->word[CAM_N_ACK]=value;return 0;}
-        if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+        if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
         delay(1);
     }
-    return ETIMEDOUT;
+    return CAM_FAIL(ETIMEDOUT);
 }
 static int cam_native_full_table(struct x9_camera_smmu *m,unsigned shift,bool bypass)
 {
     vm_offset_t va=0;uint64_t pa=0;unsigned bytes=64u<<shift;
-    if(shift<8 || shift>16 || m->exported)return EINVAL;
+    if(shift<8 || shift>16 || m->exported)return CAM_FAIL(EINVAL);
     if(bytes!=m->ste_bytes) {
         if(kmem_alloc_contig(kernel_map,&va,bytes,PAGE_MASK,0,0,
-            KMA_DATA|KMA_ZERO,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS)return ENOMEM;
+            KMA_DATA|KMA_ZERO,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS)return CAM_FAIL(ENOMEM);
         int e=cam_s1_phys(va,cam_s1_oas[m->idr5&7u],&pa);
         for(unsigned off=CAM_S1_PAGE;off<bytes && !e;off+=CAM_S1_PAGE) {
             uint64_t next=0;e=cam_s1_phys(va+off,cam_s1_oas[m->idr5&7u],&next);
-            if(!e && next!=pa+off)e=EFAULT;
+            if(!e && next!=pa+off)e=CAM_FAIL(EFAULT);
         }
         if(e){kmem_free(kernel_map,va,bytes);return e;}
         kmem_free(kernel_map,m->ste.va,m->ste_bytes);m->ste.va=va;m->ste.pa=pa;
@@ -175,9 +175,9 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     struct x9_camera_smmu_policy policy;
     struct x9_camera_smmu probe={0},*m=NULL;
     int e;
-    if(!out || *out || !view || !token)return EINVAL;
+    if(!out || *out || !view || !token)return CAM_FAIL(EINVAL);
     uint64_t el;__asm__ volatile("mrs %0, CurrentEL":"=r"(el));
-    if(el!=4)return ENOTSUP; /* normal EL1 host, not a guessed EL2 handoff */
+    if(el!=4)return CAM_FAIL(ENOTSUP); /* normal EL1 host, not a guessed EL2 handoff */
     /* This boot's qualified controller/master policy, BEFORE MMIO or
      * exporting any storage. No generated/live.dts fallback is a grant. */
     e=cam_smmu_policy_read(&policy);if(e)return e;
@@ -187,13 +187,13 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     if(!cam_native_wp_mmio)cam_native_wp_mmio=ml_io_map(0x309e0000,0x1000);
     mmio=cam_native_mmio;
     lck_mtx_unlock(&camera_smmu_lock);
-    if(!mmio || !cam_native_wp_mmio)return ENOMEM;
+    if(!mmio || !cam_native_wp_mmio)return CAM_FAIL(ENOMEM);
     probe.mmio=mmio;probe.native_wp=cam_native_wp_mmio;probe.native_power=token;
     cam_native_read(&probe,&entry);cam_native_read(&probe,&again);
-    if(memcmp(&entry,&again,sizeof(entry)))return EBUSY;
+    if(memcmp(&entry,&again,sizeof(entry)))return CAM_FAIL(EBUSY);
     unsigned sidbits=entry.word[CAM_N_IDR1]&63u;
     if(!cam_smmu_capable(entry.word[CAM_N_IDR0],entry.word[CAM_N_IDR1],
-         entry.word[CAM_N_IDR5]) || sidbits<8 || sidbits>16)return ENOTSUP;
+         entry.word[CAM_N_IDR5]) || sidbits<8 || sidbits>16)return CAM_FAIL(ENOTSUP);
     /* No normal bases/config/queue/interface are inherited. Initial GBPA
      * is preserved exactly; abort and bypass both have complete STE policies. */
     if(entry.base[0] || entry.base[1] || entry.base[2] ||
@@ -201,8 +201,8 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
        entry.word[CAM_N_IRQ] || entry.word[CAM_N_IRQACK] ||
        entry.word[CAM_N_CP] || entry.word[CAM_N_CC] ||
        entry.word[CAM_N_EP] || entry.word[CAM_N_EC] ||
-       (entry.word[CAM_N_GBPA]&(1u<<31)))return EBUSY;
-    if(entry.word[CAM_N_GE]^entry.word[CAM_N_GEN])return EIO;
+       (entry.word[CAM_N_GBPA]&(1u<<31)))return CAM_FAIL(EBUSY);
+    if(entry.word[CAM_N_GE]^entry.word[CAM_N_GEN])return CAM_FAIL(EIO);
     e=cam_smmu_prepare_replacement(entry.word[CAM_N_IDR0],entry.word[CAM_N_IDR1],
         entry.word[CAM_N_IDR5],iova,bytes,previous,&m);if(e)return e;
     lck_mtx_lock(&camera_smmu_lock);
@@ -290,7 +290,7 @@ int x9_camera_native_smmu_start(uint64_t token,uint64_t iova,uint32_t bytes,
 
 int x9_camera_native_smmu_check(struct x9_camera_smmu *m)
 {
-    if(!m || !m->native || !m->native_started || m->native_retire_attempted)return ENXIO;
+    if(!m || !m->native || !m->native_started || m->native_retire_attempted)return CAM_FAIL(ENXIO);
     return x9_camera_smmu_check(m);
 }
 /* Called only from native_retire.inc after its real, independently checked
@@ -304,7 +304,7 @@ static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m
     e=cam_smmu_identity(m);
     if(!e && (!m->native || !m->native_started || m->native_retire_attempted ||
        m->native_restored || m->pending || m->shared_attempted ||
-       m->native_cr0!=CAM_SMMU_CR0))e=ESTALE;
+       m->native_cr0!=CAM_SMMU_CR0))e=CAM_FAIL(ESTALE);
     if(!e)e=cam_smmu_storage(m);if(!e)e=cam_smmu_live(m);
     if(!e)e=cam_native_producer_guard_locked(epoch,m);
     if(e)goto out;

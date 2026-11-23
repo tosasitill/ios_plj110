@@ -33,7 +33,7 @@ static int cam_irq_slot_guard_locked(bool streamed_stop)
     e=!cam_irq.slot || cam_irq.slot!=cam_sv.request_slot ||
         (cam_irq.slot->state!=(streamed_stop?X9_CAMSV_RETIRED:X9_CAMSV_ARMED) &&
          !(streamed_stop && cam_repeat_cancel_admitted_locked() &&
-           (cam_irq.slot->state==X9_CAMSV_ARMED || cam_irq.slot->state==X9_CAMSV_CANCELLED)))?ESTALE:0;
+           (cam_irq.slot->state==X9_CAMSV_ARMED || cam_irq.slot->state==X9_CAMSV_CANCELLED)))?CAM_FAIL(ESTALE):0;
     lck_mtx_unlock(&camera_camsv_lock);return e;
 }
 /* No SV/OUTMUX recursion: the full caller guard independently samples its
@@ -64,7 +64,7 @@ static int cam_stream_close_guard_locked(uint64_t epoch)
        cam_irq_fbc.source_seen!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||
        cam_irq_fbc.source_sampled!=7 || cam_irq_fbc.source_control ||
        cam_irq_fbc.source_frame_count!=0xff ||
-       memcmp(&cam_irq_fbc.request,&cam_stream_close.request,sizeof(cam_stream_close.request))))e=ESTALE;
+       memcmp(&cam_irq_fbc.request,&cam_stream_close.request,sizeof(cam_stream_close.request))))e=CAM_FAIL(ESTALE);
     for(unsigned bank=0;bank<2 && !e;bank++) {
         e=cam_irq_power();if(!e)e=cam_irq_config(true);if(e)break;
         cam_stream_close.fbc_control[bank]=cam_irq_rd(cam_irq.view[bank],0x540);
@@ -72,7 +72,7 @@ static int cam_stream_close_guard_locked(uint64_t epoch)
         e=cam_irq_fbc_note_locked(bank,cam_stream_close.fbc_control[bank],
             cam_stream_close.fbc_counter[bank]);
         if(!e && (cam_stream_close.fbc_control[bank]!=cam_irq_fbc.control[bank] ||
-           !cam_repeat_done_target_locked(bank,cam_stream_close.fbc_counter[bank])))e=ESTALE;
+           !cam_repeat_done_target_locked(bank,cam_stream_close.fbc_counter[bank])))e=CAM_FAIL(ESTALE);
     }
     cam_irq_spin_drop(old);return e;
 }
@@ -80,7 +80,7 @@ static int cam_irq_control_guard_locked(uint64_t epoch,bool streamed_stop)
 {
     if(!streamed_stop)return cam_irq_credit_guard_locked(epoch);
     if(!cam_stream_close.admitted || cam_stream_close.checking ||
-       cam_stream_close.samples!=2)return ESTALE;
+       cam_stream_close.samples!=2)return CAM_FAIL(ESTALE);
     return cam_stream_close_guard_locked(epoch);
 }
 static int cam_stream_close_begin_locked(uint64_t epoch)
@@ -102,7 +102,7 @@ static int cam_stream_close_begin_locked(uint64_t epoch)
         bool pending;
         old=cam_irq_spin_take();pending=cam_irq.busy || cam_irq.count;
         if(!pending){cam_irq_spin_drop(old);break;}
-        if(mach_absolute_time()>=end){cam_irq_spin_drop(old);e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=end){cam_irq_spin_drop(old);e=CAM_FAIL(ETIMEDOUT);break;}
         assert_wait_deadline((event_t)&cam_irq.busy,THREAD_UNINT,end);
         cam_irq_spin_drop(old);lck_mtx_unlock(&camera_irq_lock);
         thread_block(THREAD_CONTINUE_NULL);lck_mtx_lock(&camera_irq_lock);
@@ -118,15 +118,15 @@ static int cam_stream_close_begin_locked(uint64_t epoch)
         e=cam_stream_close_guard_locked(epoch);if(e)break;
         e=cam_sensor_ap_read(&ap,0x0100,&cam_stream_close.control);
         if(!e)cam_stream_close.sampled|=1;
-        if(!e && cam_stream_close.control)e=ESTALE;
+        if(!e && cam_stream_close.control)e=CAM_FAIL(ESTALE);
         if(!e)e=cam_sensor_ap_read(&ap,0x0104,&cam_stream_close.hold);
         if(!e)cam_stream_close.sampled|=2;
-        if(!e && cam_stream_close.hold)e=ESTALE;
+        if(!e && cam_stream_close.hold)e=CAM_FAIL(ESTALE);
         if(!e)e=cam_sensor_ap_read(&ap,0x0005,&cam_stream_close.frame_count);
         if(!e)cam_stream_close.sampled|=4;
-        if(!e && cam_stream_close.frame_count!=0xff)e=ESTALE;
+        if(!e && cam_stream_close.frame_count!=0xff)e=CAM_FAIL(ESTALE);
         if(!e)e=cam_stream_close_guard_locked(epoch);
-        if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
+        if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
         if(!e)cam_stream_close.samples++;
     }
 out:
@@ -148,7 +148,7 @@ static int cam_stream_close_controls_locked(uint64_t epoch)
     int e=cam_stream_close_guard_locked(epoch);
     if(!e && (cam_stream_close.controls || cam_stream_close.samples!=2 ||
        cam_source.phase!=CAM_SOURCE_STOPPED || cam_source.error ||
-       !cam_sv_gate_off_ready() || cam_sv.receive_phase!=X9_CAM_SV_RECEIVE_QUIESCENT))e=ESTALE;
+       !cam_sv_gate_off_ready() || cam_sv.receive_phase!=X9_CAM_SV_RECEIVE_QUIESCENT))e=CAM_FAIL(ESTALE);
     if(e) {if(!cam_stream_close.error)cam_stream_close.error=e;}
     else cam_stream_close.controls=true;
     printf("X9 CAMERA STREAM CONTROLS: epoch=%llu capture_id=%llu stopped=%u errno=%d "

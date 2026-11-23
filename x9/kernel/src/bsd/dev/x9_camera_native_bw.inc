@@ -31,7 +31,7 @@ static int cam_native_bw_guard(void)
     int e;
     if(!cam_native_bw.held)return 0;
     if(cam_native_bw.conflict || !cam_smi.held || cam_native_bw.epoch!=cam_smi.epoch)
-        return ESTALE;
+        return CAM_FAIL(ESTALE);
     e=x9_mm_power_validate(cam_mm.receive.power_token,X9_MM_POWER_CAMERA);if(e)return e;
     observed=cam_rr(cam_native_bw.mmpc,0x10b0);
     if(observed!=cam_native_bw.mask_expected &&
@@ -57,18 +57,18 @@ conflict:
         cam_native_bw.epoch,cam_rr(cam_native_bw.mmpc,0x10b0),cam_native_bw.pending,
         cam_native_bw.current[0],cam_native_bw.current[1],cam_native_bw.units[0],
         cam_native_bw.units[1]);
-    return ESTALE;
+    return CAM_FAIL(ESTALE);
 }
 static int cam_native_bw_write(unsigned word,uint32_t value)
 {
     uint32_t *expected,offset,observed;
     int e=cam_native_bw_guard();if(e)return e;
-    if(cam_native_bw.pending!=CAM_NATIVE_BW_NO_WORD)return EBUSY;
+    if(cam_native_bw.pending!=CAM_NATIVE_BW_NO_WORD)return CAM_FAIL(EBUSY);
     if(word==CAM_NATIVE_BW_MASK_WORD) {
-        if(value!=0 && value!=0x0fffffffu)return EINVAL;
+        if(value!=0 && value!=0x0fffffffu)return CAM_FAIL(EINVAL);
         expected=&cam_native_bw.mask_expected;offset=0x10b0;
     } else {
-        if(word!=CAM_NATIVE_BW_SRT && word!=CAM_NATIVE_BW_HRT)return EINVAL;
+        if(word!=CAM_NATIVE_BW_SRT && word!=CAM_NATIVE_BW_HRT)return CAM_FAIL(EINVAL);
         expected=&cam_native_bw.expected[word];offset=0xff0+4*word;
     }
     if(*expected==value)return 0;
@@ -81,7 +81,7 @@ static int cam_native_bw_write(unsigned word,uint32_t value)
     observed=cam_rr(cam_native_bw.mmpc,offset);
     if(observed!=value) {
         if(observed!=cam_native_bw.prior)cam_native_bw.conflict=true;
-        return EIO;
+        return CAM_FAIL(EIO);
     }
     cam_native_bw.pending=CAM_NATIVE_BW_NO_WORD;return cam_native_bw_guard();
 }
@@ -90,13 +90,13 @@ static int cam_native_bw_pending_retire(void)
     uint32_t observed,offset;
     int e;
     if(cam_native_bw.pending==CAM_NATIVE_BW_NO_WORD)return 0;
-    if(cam_native_bw.restoring)return EBUSY;
+    if(cam_native_bw.restoring)return CAM_FAIL(EBUSY);
     e=cam_native_bw_guard();if(e)return e;
     offset=cam_native_bw.pending==CAM_NATIVE_BW_MASK_WORD?0x10b0:
         0xff0+4*cam_native_bw.pending;
     observed=cam_rr(cam_native_bw.mmpc,offset);
     /* Prior alone is not retirement; never replay an unresolved write. */
-    if(observed!=cam_native_bw.next)return EBUSY;
+    if(observed!=cam_native_bw.next)return CAM_FAIL(EBUSY);
     cam_native_bw.pending=CAM_NATIVE_BW_NO_WORD;return cam_native_bw_guard();
 }
 static int cam_native_bw_take_locked(uint64_t epoch)
@@ -108,15 +108,15 @@ static int cam_native_bw_take_locked(uint64_t epoch)
     uint32_t ll,fl,min_fl;
     uint64_t pclk,period,margin,mix;
     int e;
-    if(cam_native_bw.held)return EBUSY;
+    if(cam_native_bw.held)return CAM_FAIL(EBUSY);
     if(!cam_native_clock_request.epoch || epoch!=cam_smi.epoch ||
        cam_sensor_live.epoch!=epoch || cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED ||
-       session.capture || session.stream)return ESTALE;
+       session.capture || session.stream)return CAM_FAIL(ESTALE);
     e=cam_pipeline_plan(cam_smi.status.sensor,&plan);if(e)return e;
     ap=(struct cam_sensor_ap){&cam_journal.sensor,
         cam_sensor_slave(cam_smi.status.sensor)};
-    e=cam_sensor_ap_read(&ap,0x0100,&lo);if(!e && lo)e=EBUSY;
-    if(!e)e=cam_sensor_ap_read(&ap,0x0104,&lo);if(!e && lo)e=EBUSY;
+    e=cam_sensor_ap_read(&ap,0x0100,&lo);if(!e && lo)e=CAM_FAIL(EBUSY);
+    if(!e)e=cam_sensor_ap_read(&ap,0x0104,&lo);if(!e && lo)e=CAM_FAIL(EBUSY);
     if(e)return e;
     e=cam_sensor_ap_read(&ap,0x0342,&hi);
     if(!e)e=cam_sensor_ap_read(&ap,0x0343,&lo);if(e)return e;
@@ -127,13 +127,13 @@ static int cam_native_bw_take_locked(uint64_t epoch)
     pclk=sensors[plan.sensor-1].pclk;
     min_fl=sensors[plan.sensor-1].frame_lines;
     if(ll!=sensors[plan.sensor-1].line_length || fl<min_fl || fl<plan.height)
-        return ERANGE;
+        return CAM_FAIL(ERANGE);
     /* AE may extend FL, never shorten the configured minimum. Hold the
      * worst case minimum frame period, even if this actual FL is longer. */
     period=(uint64_t)ll*min_fl;
     if(!mmpc)mmpc=ml_io_map(0x31ae0000,0x2000);
     if(!mminfra)mminfra=ml_io_map(0x30000000,0x1000);
-    if(!mmpc || !mminfra)return ENOMEM;
+    if(!mmpc || !mminfra)return CAM_FAIL(ENOMEM);
     memset(&cam_native_bw,0,sizeof(cam_native_bw));
     cam_native_bw.mmpc=mmpc;cam_native_bw.mminfra=mminfra;cam_native_bw.epoch=epoch;
     cam_native_bw.pclk=pclk;cam_native_bw.ll=ll;cam_native_bw.fl=min_fl;
@@ -145,7 +145,7 @@ static int cam_native_bw_take_locked(uint64_t epoch)
     cam_native_bw.units[0]=(uint32_t)((cam_native_bw.average*10+margin-1)/margin);
     cam_native_bw.units[1]=(uint32_t)((cam_native_bw.peak*10+margin-1)/margin);
     if(!cam_native_bw.units[0] || !cam_native_bw.units[1] ||
-       cam_native_bw.units[0]>1023 || cam_native_bw.units[1]>1023)return ERANGE;
+       cam_native_bw.units[0]>1023 || cam_native_bw.units[1]>1023)return CAM_FAIL(ERANGE);
     /* ISP8s calc_bw -> to_qos_icc truncates B/s /1024 to ICC KB/s,
      * unlike generic Bps_to_icc's /1000. aggregate_requests_v2 then
      * takes max(avg,peak); icc_to_MBps truncates /1000 BEFORE SHIFT_ROUND.
@@ -162,14 +162,14 @@ static int cam_native_bw_take_locked(uint64_t epoch)
         ((cam_native_bw.mix_mbps+511u)>>9)*3u:1u;
     if(cam_native_bw.ostd>64)cam_native_bw.ostd=64;
     e=cam_smi_a0_guard();if(!e)e=cam_smi_a0_idle();if(e)return e;
-    e=cam_sensor_ap_read(&ap,0x0100,&lo);if(!e && lo)e=EBUSY;
-    if(!e)e=cam_sensor_ap_read(&ap,0x0104,&lo);if(!e && lo)e=EBUSY;
+    e=cam_sensor_ap_read(&ap,0x0100,&lo);if(!e && lo)e=CAM_FAIL(EBUSY);
+    if(!e)e=cam_sensor_ap_read(&ap,0x0104,&lo);if(!e && lo)e=CAM_FAIL(EBUSY);
     if(e)return e;
     cam_native_bw.mask_before=cam_native_bw.mask_expected=cam_rr(mmpc,0x10b0);
-    if(cam_native_bw.mask_before!=0 && cam_native_bw.mask_before!=0x0fffffffu)return EBUSY;
+    if(cam_native_bw.mask_before!=0 && cam_native_bw.mask_before!=0x0fffffffu)return CAM_FAIL(EBUSY);
     for(unsigned n=0;n<CAM_NATIVE_BW_WORDS;n++) {
         cam_native_bw.before[n]=cam_native_bw.expected[n]=cam_rr(mmpc,0xff0+4*n);
-        if(cam_native_bw.before[n])return EBUSY;
+        if(cam_native_bw.before[n])return CAM_FAIL(EBUSY);
     }
     delay(10);cam_native_bw.held=true;cam_native_bw.pending=CAM_NATIVE_BW_NO_WORD;
     e=cam_native_bw_guard();
@@ -186,7 +186,7 @@ static int cam_native_bw_take_locked(uint64_t epoch)
            cam_native_bw.current[1]>=cam_native_bw.units[1]) {
             cam_native_bw.complete=true;break;
         }
-        if(n==9999)e=ETIMEDOUT;else delay(10);
+        if(n==9999)e=CAM_FAIL(ETIMEDOUT);else delay(10);
     }
     if(!e)e=cam_smi_a0_write(CAM_SMI_A0_OSTD,UINT32_MAX,cam_native_bw.ostd);
     if(!e)e=cam_smi_a0_write(CAM_SMI_A0_ULTRA,1,0);
@@ -204,7 +204,7 @@ static int cam_native_bw_close_locked(void)
 {
     int e;
     if(!cam_native_bw.held)return 0;
-    if(cam_native_bw.close_attempted || cam_native_bw.epoch!=cam_smi.epoch)return ESTALE;
+    if(cam_native_bw.close_attempted || cam_native_bw.epoch!=cam_smi.epoch)return CAM_FAIL(ESTALE);
     cam_native_bw.close_attempted=true;
     /* This is only supplier withdrawal after the upstream mandatory native
      * engine guard has authorized the actual capture retirement scope.

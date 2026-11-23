@@ -52,22 +52,22 @@ static int cam_s1_dma_device(struct x9_camera_camsv_slot *slot)
     lck_mtx_lock(&camera_s1_lock);
     e=cam_s1_check_private(m);
     if(!e && m->raw_errno)e=m->raw_errno;
-    if(!e && !m->published)e=ENXIO;
+    if(!e && !m->published)e=CAM_FAIL(ENXIO);
     if(!e && ((vm_offset_t)r->frame.raw!=m->raw || r->iova!=m->iova ||
         r->frame.bytes!=m->bytes || !r->frame.generation ||
-        !r->frame.capture_id || r->frame.time || r->frame.sof_time))e=EINVAL;
+        !r->frame.capture_id || r->frame.time || r->frame.sof_time))e=CAM_FAIL(EINVAL);
     if(!e && m->raw_slot && (m->raw_slot!=slot ||
-        m->raw_context!=slot->dma.context || m->raw_check!=slot->dma.check))e=EBUSY;
-    if(!e && m->raw_state!=CAM_RAW_PRIVATE && m->raw_state!=CAM_RAW_IDLE)e=EBUSY;
+        m->raw_context!=slot->dma.context || m->raw_check!=slot->dma.check))e=CAM_FAIL(EBUSY);
+    if(!e && m->raw_state!=CAM_RAW_PRIVATE && m->raw_state!=CAM_RAW_IDLE)e=CAM_FAIL(EBUSY);
     if(!e && m->raw_state==CAM_RAW_IDLE) {
         const struct x9_camera_camsv_request *old=&m->raw_request;
         delta=r->inner_sequence-old->inner_sequence;
         if(r->frame.generation<old->frame.generation ||
             r->frame.sensor!=old->frame.sensor || r->tag!=old->tag ||
-            r->group!=old->group)e=ESTALE;
+            r->group!=old->group)e=CAM_FAIL(ESTALE);
         else if(r->frame.generation==old->frame.generation &&
             (r->frame.capture_id<=old->frame.capture_id || !delta ||
-             delta>=0x80000000u || slot->dma.lease!=m->raw_lease))e=ESTALE;
+             delta>=0x80000000u || slot->dma.lease!=m->raw_lease))e=CAM_FAIL(ESTALE);
     }
     if(!e) {
         /* Bind before any cache op: partial publication cannot be replayed
@@ -92,8 +92,8 @@ static int cam_s1_dma_cpu(struct x9_camera_camsv_slot *slot)
     lck_mtx_lock(&camera_s1_lock);
     e=cam_s1_check_private(m);
     if(!e && m->raw_errno)e=m->raw_errno;
-    if(!e && (!m->published || !cam_s1_dma_match(m,slot)))e=ESTALE;
-    if(!e && m->raw_state!=CAM_RAW_DEVICE)e=EBUSY;
+    if(!e && (!m->published || !cam_s1_dma_match(m,slot)))e=CAM_FAIL(ESTALE);
+    if(!e && m->raw_state!=CAM_RAW_DEVICE)e=CAM_FAIL(EBUSY);
     if(!e) {
         /* Called after the sole PASS1_DONE/tag/group/sequence/error branch.
          * NC device output may coexist with speculatively filled WB lines.
@@ -116,8 +116,8 @@ static int cam_s1_dma_retire(struct x9_camera_camsv_slot *slot)
     lck_mtx_lock(&camera_s1_lock);
     e=cam_s1_check_private(m);
     if(!e && m->raw_errno)e=m->raw_errno;
-    if(!e && (!m->published || !cam_s1_dma_match(m,slot)))e=ESTALE;
-    if(!e && m->raw_state!=CAM_RAW_CPU)e=EBUSY;
+    if(!e && (!m->published || !cam_s1_dma_match(m,slot)))e=CAM_FAIL(ESTALE);
+    if(!e && m->raw_state!=CAM_RAW_CPU)e=CAM_FAIL(EBUSY);
     if(e && m && m->magic==CAM_S1_MAGIC && m->raw_slot==slot)
         cam_s1_dma_latch(m,e);
     else if(!e) {
@@ -135,7 +135,7 @@ static int cam_s1_dma_cancel_unissued(struct x9_camera_camsv_slot *slot)
     struct x9_camera_s1 *m=slot->dma.backing;
     lck_mtx_lock(&camera_s1_lock);int e=cam_s1_check_private(m);
     if(!e && (slot->state!=X9_CAMSV_ARMED || m->raw_state!=CAM_RAW_DEVICE ||
-       m->raw_errno || !m->published || !cam_s1_dma_match(m,slot)))e=ESTALE;
+       m->raw_errno || !m->published || !cam_s1_dma_match(m,slot)))e=CAM_FAIL(ESTALE);
     for(unsigned i=0;!e && i<m->pages;i++)
         e=cam_cache_range(m->raw+(vm_offset_t)i*CAM_S1_PAGE,CAM_S1_PAGE,CAM_CACHE_CPU);
     if(!e)e=cam_s1_check_private(m);

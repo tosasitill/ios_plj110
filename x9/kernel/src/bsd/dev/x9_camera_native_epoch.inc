@@ -57,7 +57,7 @@ static int cam_native_epoch_recycled_check_locked(uint64_t epoch,struct x9_camer
     return !h || !m || m->magic!=CAM_SMMU_MAGIC || !m->native ||
         !m->native_epoch_recycled || !m->native_restored || m->native_started ||
         !m->native_retire_attempted || m->native_retire_epoch!=epoch ||
-        m->native_retire_error || m->pending?ESTALE:0;
+        m->native_retire_error || m->pending?CAM_FAIL(ESTALE):0;
 }
 static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu *m)
 {
@@ -66,7 +66,7 @@ static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu 
     if(!m || m!=cam_smmu_namespace || m->magic!=CAM_SMMU_MAGIC || !m->native ||
        !m->exported || !m->native_restored || !m->native_retire_attempted ||
        m->native_retire_epoch!=epoch || m->native_retire_error || m->native_started ||
-       m->pending || m->native_epoch_recycled || !m->map)return ESTALE;
+       m->pending || m->native_epoch_recycled || !m->map)return CAM_FAIL(ESTALE);
     /* Sensor/session close recorded its ACTUAL reverse journal success.
      * MM is already off: DO NOT touch sensor/receiver/SMMU registers or try
      * to validate the now-released old MM token here. Their actual restore
@@ -80,30 +80,30 @@ static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu 
        !cam_sv.close_attempted || cam_sv.status.restore_errno || cam_sv.error ||
        cam_sv.terminal || cam_sv.request_held || cam_sv.request_slot ||
        cam_phy.held || cam_mac.held || cam_out.held || cam_smi.held || cam_smi_a0.held ||
-       cam_smi_shared.held || cam_smi_shared.captured)return ESTALE;
+       cam_smi_shared.held || cam_smi_shared.captured)return CAM_FAIL(ESTALE);
     if(cam_sv_qos.epoch!=epoch || !cam_sv_qos.configured || !cam_sv_qos.retired ||
        cam_sv_qos.error || cam_sv_shutdown.epoch!=epoch || !cam_sv_shutdown.complete ||
-       cam_sv_shutdown.error || cam_sv_shutdown.post_samples!=2)return ESTALE;
+       cam_sv_shutdown.error || cam_sv_shutdown.post_samples!=2)return CAM_FAIL(ESTALE);
     if(cam_sensor_open.epoch!=epoch || cam_sensor_open.sensor!=cam_sv.status.sensor ||
        cam_sensor_open.error || cam_sensor_open.restore_error ||
        !cam_sensor_open.restored ||
        (cam_sensor_open_slave(cam_sensor_open.sensor) &&
-        (!cam_sensor_open.complete || !cam_sensor_open.acked)))return ESTALE;
+        (!cam_sensor_open.complete || !cam_sensor_open.acked)))return CAM_FAIL(ESTALE);
     if(cam_vcm_closed_mode(epoch,&vcm_mode) ||
        (cam_sensor_open_slave(cam_sensor_open.sensor) &&
-        (!cam_vcm.attempted || !cam_vcm.complete)))return ESTALE;
+        (!cam_vcm.attempted || !cam_vcm.complete)))return CAM_FAIL(ESTALE);
     if(!x9_camera_sensor_valid(cam_sensor_cal.sensor) || cam_sensor_cal.epoch!=epoch ||
        cam_sensor_cal.sensor!=cam_sv.status.sensor || cam_sensor_cal.error ||
        (cam_cal_profiles[cam_sensor_cal.sensor-1].header &&
         (!cam_sensor_cal.preloaded || !cam_sensor_cal.applied || !cam_sensor_cal.mode_checked)))
-        return ESTALE;
+        return CAM_FAIL(ESTALE);
     if(!m->native_unstarted_retired && (!cam_native_ae.seeded ||
-       cam_native_ae.epoch!=epoch || cam_native_ae.sensor!=cam_sv.status.sensor))return ESTALE;
+       cam_native_ae.epoch!=epoch || cam_native_ae.sensor!=cam_sv.status.sensor))return CAM_FAIL(ESTALE);
     if(cam_native_ae.epoch==epoch && (cam_native_ae.error ||
-       cam_native_ae.ob_acked_type!=cam_native_ae.ob_applied_type))return ESTALE;
+       cam_native_ae.ob_acked_type!=cam_native_ae.ob_applied_type))return CAM_FAIL(ESTALE);
     vm_offset_t receipt_va=0;
     if(kmem_alloc(kernel_map,&receipt_va,round_page(sizeof(struct cam_native_epoch_receipt)),
-       KMA_DATA|KMA_ZERO,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS)return ENOMEM;
+       KMA_DATA|KMA_ZERO,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS)return CAM_FAIL(ENOMEM);
     struct cam_native_epoch_receipt *h=(struct cam_native_epoch_receipt *)receipt_va;
     lck_mtx_lock(&camera_irq_lock);
     boolean_t old=cam_irq_spin_take();
@@ -111,17 +111,17 @@ static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu 
        cam_irq.accepting || cam_irq.busy || cam_irq.count || cam_irq.error ||
        cam_irq.dirty_route || cam_irq.dirty_priority || cam_irq.uncertain_route ||
        cam_irq.uncertain_priority || cam_irq_fbc.error || cam_irq_fbc.source_error ||
-       cam_repeat.error || cam_source.error || cam_stream_close.error || cam_dma_stop.error)e=ESTALE;
+       cam_repeat.error || cam_source.error || cam_stream_close.error || cam_dma_stop.error)e=CAM_FAIL(ESTALE);
     if(!e && !m->native_unstarted_retired &&
        (!cam_irq_fbc.bound || !cam_repeat_retirement_receipt_locked() ||
         cam_irq_fbc.epoch!=epoch || cam_irq_fbc.source_phase!=CAM_STREAM_STOPPED ||
         cam_irq_fbc.source_issued!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||
         cam_irq_fbc.source_ack!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||
         !cam_sv.credit_retired || !cam_source.captured || cam_source.phase!=CAM_SOURCE_STOPPED ||
-        cam_dma_stop.phase!=CAM_DMA_STOP_RESTORED || !cam_stream_close.controls))e=ESTALE;
+        cam_dma_stop.phase!=CAM_DMA_STOP_RESTORED || !cam_stream_close.controls))e=CAM_FAIL(ESTALE);
     if(!e && m->native_unstarted_retired &&
        (cam_irq_fbc.bound || cam_irq_fbc.source_issued || cam_sv.credit_issued ||
-        cam_source.captured || m->native_setup_issued))e=ESTALE;
+        cam_source.captured || m->native_setup_issued))e=CAM_FAIL(ESTALE);
     if(!e) {h->irq=cam_irq;h->fbc=cam_irq_fbc;h->repeat=cam_repeat;h->cancel=cam_repeat_cancel;}
     cam_irq_spin_drop(old);
     /* The always-powered GIC is independently live; never sample the gated
@@ -134,9 +134,9 @@ static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu 
        cam_irq.slot->state!=(m->native_unstarted_retired?X9_CAMSV_EMPTY:
            cam_repeat_cancel.cancelled?X9_CAMSV_CANCELLED:X9_CAMSV_RETIRED) ||
        m->map->raw_state!=(m->native_unstarted_retired?CAM_RAW_PRIVATE:
-           cam_repeat_cancel.cancelled?CAM_RAW_CANCELLED:CAM_RAW_IDLE)))e=ESTALE;
+           cam_repeat_cancel.cancelled?CAM_RAW_CANCELLED:CAM_RAW_IDLE)))e=CAM_FAIL(ESTALE);
     if(!e && !m->native_unstarted_retired &&
-       (cam_irq.slot->dma.backing!=m->map || !cam_s1_dma_match(m->map,cam_irq.slot)))e=ESTALE;
+       (cam_irq.slot->dma.backing!=m->map || !cam_s1_dma_match(m->map,cam_irq.slot)))e=CAM_FAIL(ESTALE);
     lck_mtx_unlock(&camera_s1_lock);lck_mtx_unlock(&camera_camsv_lock);
     if(!e) {
         h->epoch=epoch;h->smmu=m;h->source=cam_source;h->stream_close=cam_stream_close;
@@ -180,11 +180,11 @@ static int cam_native_reopen_dormant_locked(uint64_t epoch,uint64_t token)
        !cam_mm.active || cam_mm.receive.power_token!=token || !cam_sv.held ||
        cam_sv.epoch!=epoch || cam_sv.close_attempted || cam_sv.request_held ||
        cam_sv.credit_issued || cam_sv.receive_issued || cam_source.captured ||
-       cam_sv_gate.issued || session.capture || session.stream)return ESTALE;
+       cam_sv_gate.issued || session.capture || session.stream)return CAM_FAIL(ESTALE);
     boolean_t old=cam_irq_spin_take();
     if(!cam_irq.prepared || cam_irq.close_attempted || cam_irq.owns || cam_irq.accepting ||
        cam_irq.busy || cam_irq.count || cam_irq.error || cam_irq_fbc.bound ||
-       cam_irq_fbc.source_issued || cam_repeat.enabled)e=ESTALE;
+       cam_irq_fbc.source_issued || cam_repeat.enabled)e=CAM_FAIL(ESTALE);
     cam_irq_spin_drop(old);
     if(!e)e=x9_mm_power_validate(token,X9_MM_POWER_CAMERA);
     if(!e)e=cam_sv_environment();if(!e)e=cam_irq_mapping();if(!e)e=cam_irq_power();
@@ -196,7 +196,7 @@ static int cam_native_reopen_dormant_locked(uint64_t epoch,uint64_t token)
         uint8_t value;
         for(unsigned i=0;i<3 && !e;i++) {
             e=cam_sensor_ap_read(&ap,regs[i],&value);
-            if(!e && value!=(i==2?0xff:0))e=ESTALE;
+            if(!e && value!=(i==2?0xff:0))e=CAM_FAIL(ESTALE);
         }
         if(!sample && !e)delay(1);
     }
@@ -206,11 +206,11 @@ static int cam_native_reopen_locked(uint64_t epoch,struct x9_camera_smmu *previo
     uint64_t token,uint64_t iova,uint32_t bytes,struct x9_camera_smmu **out,
     struct x9_camera_smmu_export *view)
 {
-    if(!previous || previous!=cam_smmu_namespace || !out || *out || !view)return EINVAL;
+    if(!previous || previous!=cam_smmu_namespace || !out || *out || !view)return CAM_FAIL(EINVAL);
     int e=cam_native_epoch_recycled_check_locked(previous->native_retire_epoch,previous);
     /* Bound accumulation: up to eight exported lifetimes remain pinned.
      * Refuse BEFORE namespace/slot mutation or new hardware exposure. */
-    if(!e && cam_native_epoch_count>=CAM_NATIVE_MAX_PINNED_EPOCHS)e=ENOSPC;
+    if(!e && cam_native_epoch_count>=CAM_NATIVE_MAX_PINNED_EPOCHS)e=CAM_FAIL(ENOSPC);
     if(e)return e;
     lck_mtx_lock(&camera_irq_lock);
     e=cam_native_reopen_dormant_locked(epoch,token);
@@ -226,7 +226,7 @@ static int cam_native_reopen_locked(uint64_t epoch,struct x9_camera_smmu *previo
     struct cam_native_epoch_receipt *slot_history=NULL;
     unsigned which=cam_sv.status.sensor-1;
     if(!e && (which>=X9_CAMERA_SENSOR_COUNT ||
-       cam_irq.slot!=&cam_irq.slots[which] || cam_irq.slot->last_errno))e=ESTALE;
+       cam_irq.slot!=&cam_irq.slots[which] || cam_irq.slot->last_errno))e=CAM_FAIL(ESTALE);
     if(!e && (cam_irq.slot->state==X9_CAMSV_RETIRED || cam_irq.slot->state==X9_CAMSV_CANCELLED)) {
         for(struct cam_native_epoch_receipt *h=cam_native_epochs;h;h=h->previous) {
             if(h->smmu->map!=cam_irq.slot->dma.backing)continue;
@@ -237,12 +237,12 @@ static int cam_native_reopen_locked(uint64_t epoch,struct x9_camera_smmu *previo
                 memcmp(&cam_irq.slot->request,&h->cancel.next,sizeof(h->cancel.next)))) ||
                h->smmu->map->raw_errno ||
                !cam_s1_dma_match(h->smmu->map,cam_irq.slot) ||
-               memcmp(cam_irq.slot,&h->irq.slots[which],sizeof(*cam_irq.slot)))e=ESTALE;
+               memcmp(cam_irq.slot,&h->irq.slots[which],sizeof(*cam_irq.slot)))e=CAM_FAIL(ESTALE);
             else slot_history=h;
             break;
         }
-        if(!slot_history && !e)e=ESTALE;
-    } else if(!e && cam_irq.slot->state!=X9_CAMSV_EMPTY)e=EBUSY;
+        if(!slot_history && !e)e=CAM_FAIL(ESTALE);
+    } else if(!e && cam_irq.slot->state!=X9_CAMSV_EMPTY)e=CAM_FAIL(EBUSY);
     if(!e && slot_history) {
         /* Archive above already contains every old slot/request/callback.
          * No old map is freed, moved or made DEVICE. This rebuild follows

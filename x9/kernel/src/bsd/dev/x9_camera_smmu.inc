@@ -75,7 +75,7 @@ static int cam_smmu_policy_read(struct x9_camera_smmu_policy *out)
     _Static_assert(sizeof(*out)==X9_CAM_SMMU_POLICY_BYTES,"camera SMMU policy");
     if(SecureDTLookupEntry(NULL,"/chosen",&chosen)!=kSuccess ||
        SecureDTGetProperty(chosen,"x9-camera-smmu-policy",&p,&n)!=kSuccess ||
-       !p || n!=sizeof(*out))return ENXIO;
+       !p || n!=sizeof(*out))return CAM_FAIL(ENXIO);
     memcpy(out,p,sizeof(*out));
     return x9_camera_smmu_policy_valid(out)?0:EINVAL;
 }
@@ -126,7 +126,7 @@ static int cam_smmu_latch(struct x9_camera_smmu *m,int e)
 
 static int cam_smmu_identity(struct x9_camera_smmu *m)
 {
-    if(!m || m!=cam_smmu_namespace || m->magic!=CAM_SMMU_MAGIC)return EINVAL;
+    if(!m || m!=cam_smmu_namespace || m->magic!=CAM_SMMU_MAGIC)return CAM_FAIL(EINVAL);
     if(m->last_errno)return (int)m->last_errno;
     return 0;
 }
@@ -153,8 +153,8 @@ static int cam_smmu_storage(struct x9_camera_smmu *m)
     int e;
     if(!cam_smmu_capable(m->idr0,m->idr1,m->idr5) || !m->map ||
         m->cmd_shift<2 || m->cmd_shift>8 || m->evt_shift<2 || m->evt_shift>7)
-        return EFAULT;
-    if(m->native && !x9_camera_smmu_policy_valid(&m->native_policy))return ESTALE;
+        return CAM_FAIL(EFAULT);
+    if(m->native && !x9_camera_smmu_policy_valid(&m->native_policy))return CAM_FAIL(ESTALE);
     oas=cam_s1_oas[m->idr5&7u];
     e=x9_camera_s1_validate(m->map);
     if(e)return e;
@@ -162,29 +162,29 @@ static int cam_smmu_storage(struct x9_camera_smmu *m)
         uint64_t pa=0;
         e=cam_s1_phys(pages[i]->va,oas,&pa);
         if(e)return e;
-        if(pa!=pages[i]->pa)return ESTALE;
-        for(unsigned j=0;j<i;j++)if(pa==pages[j]->pa)return EFAULT;
+        if(pa!=pages[i]->pa)return CAM_FAIL(ESTALE);
+        for(unsigned j=0;j<i;j++)if(pa==pages[j]->pa)return CAM_FAIL(EFAULT);
         /* RAW must never be able to DMA over its translation or command
          * storage, even if a bad physical alias escaped the VM allocator. */
-        if(pa==m->map->root.pa || pa==m->map->cd.pa)return EFAULT;
+        if(pa==m->map->root.pa || pa==m->map->cd.pa)return CAM_FAIL(EFAULT);
         for(unsigned j=0;j<m->map->leaves;j++)
-            if(pa==m->map->leaf[j].pa)return EFAULT;
+            if(pa==m->map->leaf[j].pa)return CAM_FAIL(EFAULT);
         for(unsigned j=0;j<m->map->pages;j++)
-            if(pa==m->map->raw_pa[j])return EFAULT;
+            if(pa==m->map->raw_pa[j])return CAM_FAIL(EFAULT);
     }
     if(m->ste_shift<8 || m->ste_shift>16 ||
        m->ste_bytes!=(64u<<m->ste_shift) ||
-       (!m->native && m->ste_shift!=8))return EFAULT;
+       (!m->native && m->ste_shift!=8))return CAM_FAIL(EFAULT);
     for(unsigned off=0;off<m->ste_bytes;off+=CAM_S1_PAGE) {
         uint64_t pa=0;e=cam_s1_phys(m->ste.va+off,oas,&pa);
         if(e)return e;
-        if(pa!=m->ste.pa+off)return ESTALE;
-        for(unsigned j=1;j<3;j++)if(pa==pages[j]->pa)return EFAULT;
-        if(pa==m->map->root.pa || pa==m->map->cd.pa)return EFAULT;
+        if(pa!=m->ste.pa+off)return CAM_FAIL(ESTALE);
+        for(unsigned j=1;j<3;j++)if(pa==pages[j]->pa)return CAM_FAIL(EFAULT);
+        if(pa==m->map->root.pa || pa==m->map->cd.pa)return CAM_FAIL(EFAULT);
         for(unsigned j=0;j<m->map->leaves;j++)
-            if(pa==m->map->leaf[j].pa)return EFAULT;
+            if(pa==m->map->leaf[j].pa)return CAM_FAIL(EFAULT);
         for(unsigned j=0;j<m->map->pages;j++)
-            if(pa==m->map->raw_pa[j])return EFAULT;
+            if(pa==m->map->raw_pa[j])return CAM_FAIL(EFAULT);
     }
     ste=(const volatile uint64_t *)m->ste.va;
     for(unsigned sid=0;sid<(1u<<m->ste_shift);sid++) {
@@ -211,7 +211,7 @@ static int cam_smmu_storage(struct x9_camera_smmu *m)
                     expected=cam_smmu_s1_ste_word1(m);
                 }
             }
-            if(ste[sid*CAM_SMMU_STE_WORDS+w]!=expected)return ESTALE;
+            if(ste[sid*CAM_SMMU_STE_WORDS+w]!=expected)return CAM_FAIL(ESTALE);
         }
     }
     __asm__ volatile("dsb sy":::"memory");return 0;
@@ -223,16 +223,16 @@ static int cam_smmu_prepare_replacement(uint32_t idr0,uint32_t idr1,uint32_t idr
     struct x9_camera_smmu *m;
     unsigned cmd=(idr1>>21)&31u,evt=(idr1>>16)&31u;
     int e;
-    if(!out || *out)return EINVAL;
-    if(!cam_smmu_capable(idr0,idr1,idr5))return ENOTSUP;
+    if(!out || *out)return CAM_FAIL(EINVAL);
+    if(!cam_smmu_capable(idr0,idr1,idr5))return CAM_FAIL(ENOTSUP);
     lck_mtx_lock(&camera_smmu_lock);
     if(cam_smmu_namespace!=previous || (previous &&
        (!previous->native || !previous->native_restored || !previous->native_epoch_recycled ||
         previous->native_started || previous->pending || previous->native_retire_error))) {
-        lck_mtx_unlock(&camera_smmu_lock);return EBUSY;
+        lck_mtx_unlock(&camera_smmu_lock);return CAM_FAIL(EBUSY);
     }
     m=kalloc_type(struct x9_camera_smmu,Z_WAITOK|Z_ZERO);
-    if(!m){lck_mtx_unlock(&camera_smmu_lock);return ENOMEM;}
+    if(!m){lck_mtx_unlock(&camera_smmu_lock);return CAM_FAIL(ENOMEM);}
     m->magic=CAM_SMMU_MAGIC;m->idr0=idr0;m->idr1=idr1;m->idr5=idr5;
     m->native_previous=previous;
     m->ste_shift=8;m->ste_bytes=CAM_S1_PAGE;
@@ -248,7 +248,7 @@ static int cam_smmu_prepare_replacement(uint32_t idr0,uint32_t idr1,uint32_t idr
         ste[CAM_SMMU_DISPLAY*CAM_SMMU_STE_WORDS]=1ull|(4ull<<1);
         if(idr1&(1u<<27))ste[CAM_SMMU_DISPLAY*CAM_SMMU_STE_WORDS+1]=1ull<<44;
         m->mmio=ml_io_map(0x30800000,0x20000); /* mapping, not an MMIO read */
-        if(!m->mmio)e=ENOMEM;
+        if(!m->mmio)e=CAM_FAIL(ENOMEM);
     }
     if(!e)e=cam_smmu_storage(m);
     if(e)cam_smmu_unpublished_free(m);
@@ -265,10 +265,10 @@ int x9_camera_smmu_prepare(uint32_t idr0,uint32_t idr1,uint32_t idr5,
 int x9_camera_smmu_export(struct x9_camera_smmu *m,struct x9_camera_smmu_export *out)
 {
     int e;
-    if(!out)return EINVAL;
+    if(!out)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_smmu_lock);
     e=cam_smmu_identity(m);
-    if(!e && m->exported)e=EBUSY;
+    if(!e && m->exported)e=CAM_FAIL(EBUSY);
     if(!e)e=cam_smmu_storage(m);
     if(!e) {
         uint64_t *ste=(uint64_t *)m->ste.va;
@@ -302,11 +302,11 @@ int x9_camera_smmu_export(struct x9_camera_smmu *m,struct x9_camera_smmu_export 
 int x9_camera_smmu_discard(struct x9_camera_smmu **map)
 {
     int e;
-    if(!map)return EINVAL;
+    if(!map)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_smmu_lock);
     e=0;
-    if(!*map || *map!=cam_smmu_namespace || (*map)->magic!=CAM_SMMU_MAGIC)e=EINVAL;
-    else if((*map)->exported)e=EBUSY;
+    if(!*map || *map!=cam_smmu_namespace || (*map)->magic!=CAM_SMMU_MAGIC)e=CAM_FAIL(EINVAL);
+    else if((*map)->exported)e=CAM_FAIL(EBUSY);
     if(!e){cam_smmu_unpublished_free(*map);*map=NULL;}
     lck_mtx_unlock(&camera_smmu_lock);return e;
 }
@@ -323,11 +323,11 @@ static int cam_smmu_evtq_service_locked(struct x9_camera_smmu *m)
     const uint32_t ring=1u<<m->evt_shift, mask=2u*ring-1u, ovf=1u<<31;
     uint32_t prod,cons=cam_smmu_rr(m,0x100ac);
     unsigned count=0,rounds=0;int e;
-    if((cons&~(mask|ovf)) || cons!=m->evt_owned_cons)return ESTALE;
+    if((cons&~(mask|ovf)) || cons!=m->evt_owned_cons)return CAM_FAIL(ESTALE);
     for(;;) {
         uint32_t next;
         prod=cam_smmu_rr(m,0x100a8);
-        if((prod&~(mask|ovf)) || (((prod&mask)-(cons&mask))&mask)>ring)return ESTALE;
+        if((prod&~(mask|ovf)) || (((prod&mask)-(cons&mask))&mask)>ring)return CAM_FAIL(ESTALE);
         if((prod^m->evt_last_prod)&ovf) {
             m->evt_overflows++;
             printf("X9 CAMERA SMMU EVTQ: overflow prod=%x previous=%x cons=%x lost=unknown\n",
@@ -342,7 +342,7 @@ static int cam_smmu_evtq_service_locked(struct x9_camera_smmu *m)
             if(count++>=4u*ring) {
                 m->evt_prod=prod;m->evt_cons=cons;
                 printf("X9 CAMERA SMMU EVTQ: drain bound prod=%x cons=%x count=%u\n",prod,cons,count-1);
-                return EOVERFLOW;
+                return CAM_FAIL(EOVERFLOW);
             }
             e=cam_cache_range(m->evt.va,CAM_S1_PAGE,CAM_CACHE_CPU);if(e)return e;
             entry=(const volatile uint64_t *)m->evt.va+(cons&(ring-1u))*4u;
@@ -367,7 +367,7 @@ static int cam_smmu_evtq_service_locked(struct x9_camera_smmu *m)
         if(++rounds>=4u*ring) {
             m->evt_prod=prod;m->evt_cons=cons;
             printf("X9 CAMERA SMMU EVTQ: producer changes exceed bound prod=%x cons=%x rounds=%u\n",prod,cons,rounds);
-            return EOVERFLOW;
+            return CAM_FAIL(EOVERFLOW);
         }
     }
     if((prod^cons)&ovf) {
@@ -390,7 +390,7 @@ static int cam_smmu_gerror_service_locked(struct x9_camera_smmu *m)
     if(!active)return 0;
     printf("X9 CAMERA SMMU GERROR: raw=%x ack=%x active=%x cmd_cons=%x pending=%u\n",
         g,gn,active,cam_smmu_rr(m,0x9c),m->pending);
-    if(active&~known)return EIO; /* don't acknowledge an unhandled source */
+    if(active&~known)return CAM_FAIL(EIO); /* don't acknowledge an unhandled source */
     if(active&(1u<<8)) {
         /* Android disables the device on Service Failure Mode before ACK. */
         uint64_t span,deadline;
@@ -401,7 +401,7 @@ static int cam_smmu_gerror_service_locked(struct x9_camera_smmu *m)
             int e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);
             if(e)return e;
             if(!cam_smmu_rr(m,0x24))break;
-            if(mach_absolute_time()>=deadline || n==9999)return ETIMEDOUT;
+            if(mach_absolute_time()>=deadline || n==9999)return CAM_FAIL(ETIMEDOUT);
             delay(1);
         }
     }
@@ -414,12 +414,12 @@ static int cam_smmu_gerror_service_locked(struct x9_camera_smmu *m)
          * illegal/unknown commands are changed to CMD_SYNC in place. */
         if(code && code!=2 && code!=3) {
             unsigned i;struct cam_smmu_cmd *slot;int e;
-            if(!m->pending || !m->batch_count)return ESTALE;
+            if(!m->pending || !m->batch_count)return CAM_FAIL(ESTALE);
             for(i=0;i<m->batch_count;i++)
                 if(((m->batch_start+i)&mask)==position)break;
-            if(i==m->batch_count)return ESTALE;
+            if(i==m->batch_count)return CAM_FAIL(ESTALE);
             slot=(struct cam_smmu_cmd *)m->cmd.va+(position&(ring-1u));
-            if(slot->word[0]!=m->batch[i].word[0] || slot->word[1]!=m->batch[i].word[1])return ESTALE;
+            if(slot->word[0]!=m->batch[i].word[0] || slot->word[1]!=m->batch[i].word[1])return CAM_FAIL(ESTALE);
             printf("X9 CAMERA SMMU CMDQ ERROR: replacing command=%llx/%llx with SYNC\n",
                 slot->word[0],slot->word[1]);
             *slot=(struct cam_smmu_cmd){{CAM_SMMU_CMD_SYNC,0}};
@@ -431,7 +431,7 @@ static int cam_smmu_gerror_service_locked(struct x9_camera_smmu *m)
     /* Snapshot write is the architected toggle ACK. A newer GERROR value is
      * not acknowledged by this older sample. */
     cam_smmu_rw(m,0x64,g);m->gerror=g;m->gerrorn=g;
-    return EIO;
+    return CAM_FAIL(EIO);
 }
 
 /* Android mtk_smmu_irq_handler: IRQ_STA covers the shared MM SMMU,
@@ -453,7 +453,7 @@ static int cam_smmu_wp_irq_service_locked(struct x9_camera_smmu *m)
         printf("X9 CAMERA SMMU WRAPPER IRQ: sta=%x bit=%u count=%u\n",sta,bit,count);
     }
     if(unknown)printf("X9 CAMERA SMMU WRAPPER IRQ: unknown=%x retained sta=%x\n",unknown,sta);
-    return unknown?EIO:0;
+    return unknown?CAM_FAIL(EIO):0;
 }
 
 /* The powered, authoritative native controller must own this namespace.
@@ -466,7 +466,7 @@ static int cam_smmu_live_impl(struct x9_camera_smmu *m, bool irq_observed)
     uint32_t mask=(1u<<(m->cmd_shift+1))-1u;
     uint32_t evt_mask=(1u<<(m->evt_shift+1))-1u;
     int first_error=0;
-    if(!m->exported)return ENXIO;
+    if(!m->exported)return CAM_FAIL(ENXIO);
     if(m->native) {
         int e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);
         if(!e)e=cam_native_wp_guard(m);
@@ -484,14 +484,14 @@ static int cam_smmu_live_impl(struct x9_camera_smmu *m, bool irq_observed)
         (m->native?cam_smmu_rr(m,0x44)!=m->native_gbpa:
           (cam_smmu_rr(m,0x44)&((1u<<31)|(1u<<20)))!=(1u<<20)) ||
         cam_smmu_rr(m,0x50)!=(m->native?m->native_irq_ctrl:0) ||
-        cam_smmu_rr(m,0x54)!=(m->native?m->native_irq_ctrl:0))return ESTALE;
+        cam_smmu_rr(m,0x54)!=(m->native?m->native_irq_ctrl:0))return CAM_FAIL(ESTALE);
     m->last_prod=cam_smmu_rr(m,0x98);m->last_cons=cam_smmu_rr(m,0x9c);
     m->gerror=cam_smmu_rr(m,0x60);m->gerrorn=cam_smmu_rr(m,0x64);
     /* Android combined handler services GERROR, wrapper IRQ counts, then
      * the EVTQ thread. Only a real IAR authorizes wrapper ACKs here. */
     if(m->gerror^m->gerrorn) {
         int e;
-        if(!m->native || ((m->gerror^m->gerrorn)&~0x1fdu))return EIO;
+        if(!m->native || ((m->gerror^m->gerrorn)&~0x1fdu))return CAM_FAIL(EIO);
         e=cam_smmu_gerror_service_locked(m);
         if(e && (e!=EIO || m->gerror!=m->gerrorn))return e;
         if(e)first_error=e;
@@ -512,16 +512,16 @@ static int cam_smmu_live_impl(struct x9_camera_smmu *m, bool irq_observed)
         if(!first_error)first_error=EIO;
     }
     if(first_error)return first_error;
-    if(m->last_cons&~mask)return EIO;
-    if(m->last_prod!=m->prod)return ESTALE;
-    if(!m->pending && m->last_cons!=m->cons)return ESTALE;
+    if(m->last_cons&~mask)return CAM_FAIL(EIO);
+    if(m->last_prod!=m->prod)return CAM_FAIL(ESTALE);
+    if(!m->pending && m->last_cons!=m->cons)return CAM_FAIL(ESTALE);
     if(m->pending) {
         /* Only our serial batch is in flight. Consumer must move forward
          * inside [last_confirmed_cons, submitted_prod], including wrap.
          */
         uint32_t remaining=(m->prod-m->wait_cons)&mask;
         uint32_t advanced=(m->last_cons-m->wait_cons)&mask;
-        if(advanced>remaining)return ESTALE;
+        if(advanced>remaining)return CAM_FAIL(ESTALE);
         m->wait_cons=m->last_cons;
     }
     return 0;
@@ -550,15 +550,15 @@ static int cam_smmu_batch_check(struct x9_camera_smmu *m)
 {
     uint32_t ring=1u<<m->cmd_shift,mask=2*ring-1;
     if(!m->batch_count || m->batch_count>3 || m->batch_count>ring ||
-        (m->batch_start&~mask))return EINVAL;
+        (m->batch_start&~mask))return CAM_FAIL(EINVAL);
     if(m->pending && (m->cons!=m->batch_start ||
-        m->prod!=((m->batch_start+m->batch_count)&mask)))return ESTALE;
+        m->prod!=((m->batch_start+m->batch_count)&mask)))return CAM_FAIL(ESTALE);
     if(m->batch[m->batch_count-1].word[0]!=CAM_SMMU_CMD_SYNC ||
-        m->batch[m->batch_count-1].word[1])return ESTALE;
+        m->batch[m->batch_count-1].word[1])return CAM_FAIL(ESTALE);
     for(unsigned i=0;i<m->batch_count;i++) {
         unsigned slot=(m->batch_start+i)&(ring-1);
         const volatile uint64_t *entry=(const volatile uint64_t *)m->cmd.va+slot*2;
-        if(entry[0]!=m->batch[i].word[0] || entry[1]!=m->batch[i].word[1])return ESTALE;
+        if(entry[0]!=m->batch[i].word[0] || entry[1]!=m->batch[i].word[1])return CAM_FAIL(ESTALE);
     }
     __asm__ volatile("dsb sy":::"memory");return 0;
 }
@@ -571,18 +571,18 @@ static int cam_smmu_batch_check(struct x9_camera_smmu *m)
 static void cam_smmu_retire_timeout(struct x9_camera_smmu *m)
 {
     uint64_t span,deadline;
-    int e=ETIMEDOUT;
+    int e=CAM_FAIL(ETIMEDOUT);
     if(!m->pending || m->last_errno!=ETIMEDOUT || m->close_attempted)return;
     m->close_attempted=true;
     nanoseconds_to_absolutetime(10000000ull,&span);
     deadline=mach_absolute_time()+span;
     e=cam_smmu_storage(m);
     for(unsigned poll=0;poll<10000 && !e;poll++) {
-        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=deadline){e=CAM_FAIL(ETIMEDOUT);break;}
         e=cam_smmu_batch_check(m);if(!e)e=cam_smmu_live(m);
         if(e)break;
         m->close_samples++;
-        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=deadline){e=CAM_FAIL(ETIMEDOUT);break;}
         if(m->last_cons!=m->prod){delay(1);continue;}
         /* First full target observation is irreversible: live's forward
          * window now has zero remaining; a regression/ABA is a conflict. */
@@ -592,12 +592,12 @@ static void cam_smmu_retire_timeout(struct x9_camera_smmu *m)
         if(!e)e=cam_smmu_live(m);
         if(e)break;
         m->close_samples++;
-        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
-        if(m->last_cons!=m->prod){e=ESTALE;break;}
+        if(mach_absolute_time()>=deadline){e=CAM_FAIL(ETIMEDOUT);break;}
+        if(m->last_cons!=m->prod){e=CAM_FAIL(ESTALE);break;}
         m->cons=m->prod;m->pending=false;m->timedout_retired=true;
         __asm__ volatile("dsb sy":::"memory");break;
     }
-    if(!e && !m->timedout_retired)e=ETIMEDOUT;
+    if(!e && !m->timedout_retired)e=CAM_FAIL(ETIMEDOUT);
     m->close_errno=(uint32_t)e;
     printf("X9 CAMERA SMMU CLOSE: original=%u qualify=%u pending=%u retired=%u "
         "samples=%u batch=%x/%u actual=%x/%x target=%x "
@@ -616,13 +616,13 @@ static int cam_smmu_submit(struct x9_camera_smmu *m,const struct cam_smmu_cmd *c
     uint32_t ring=(1u<<m->cmd_shift),mask=2*ring-1,old=m->prod;
     uint64_t interval,deadline;
     int e;
-    if(m->pending || m->prod!=m->cons)return EBUSY;
-    if(count+1>ring || count>2)return EINVAL;
+    if(m->pending || m->prod!=m->cons)return CAM_FAIL(EBUSY);
+    if(count+1>ring || count>2)return CAM_FAIL(EINVAL);
     e=cam_smmu_storage(m);if(!e)e=cam_smmu_live(m);
     /* A matching normal-bank snapshot alone is insufficient during cold
      * startup: CMDQ must be acknowledged enabled before publishing PROD.
      * Otherwise a disabled queue can only time out, leaving backing pinned. */
-    if(!e && !(cam_smmu_rr(m,0x24)&CAM_SMMU_CR0_CMDQEN))e=ENXIO;
+    if(!e && !(cam_smmu_rr(m,0x24)&CAM_SMMU_CR0_CMDQEN))e=CAM_FAIL(ENXIO);
     if(e)return cam_smmu_latch(m,e);
     m->batch_start=old;m->batch_count=count+1;
     for(unsigned i=0;i<=count;i++) {
@@ -664,10 +664,10 @@ static int cam_smmu_commands(struct x9_camera_smmu *m,unsigned operation)
     int e;
     lck_mtx_lock(&camera_smmu_lock);
     e=cam_smmu_identity(m);
-    if(!e && !m->exported)e=ENXIO;
+    if(!e && !m->exported)e=CAM_FAIL(ENXIO);
     /* Shared attachment owns its inherited queue through the retained host,
      * never the private own-base command path or an unleased CFGI/TLBI. */
-    if(!e && m->shared_attempted)e=ENOTSUP;
+    if(!e && m->shared_attempted)e=CAM_FAIL(ENOTSUP);
     if(!e) {
         if(operation==1) {
             cmd[0]=(struct cam_smmu_cmd){{CAM_SMMU_CFGI_STE|((uint64_t)CAM_SMMU_SID<<32),1}};

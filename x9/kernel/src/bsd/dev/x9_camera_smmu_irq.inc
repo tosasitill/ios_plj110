@@ -45,31 +45,31 @@ static int cam_smmu_irq_wait_rwp(void)
     uint64_t span,end;nanoseconds_to_absolutetime(1000000,&span);end=mach_absolute_time()+span;
     for(unsigned i=0;i<500;i++) {
         if(!(cam_smmu_irq_read(0)&(1u<<31)))return 0;
-        if(mach_absolute_time()>=end)return ETIMEDOUT;
+        if(mach_absolute_time()>=end)return CAM_FAIL(ETIMEDOUT);
         delay(2);
     }
-    return ETIMEDOUT;
+    return CAM_FAIL(ETIMEDOUT);
 }
 static int cam_smmu_irq_topology(void)
 {
     DTEntry chosen,gic;const void *p;unsigned n;
     struct x9_camera_smmu_irq_layout q;uint64_t reg[4];
     if(SecureDTLookupEntry(NULL,"/chosen",&chosen)!=kSuccess ||
-       SecureDTGetProperty(chosen,"x9-camera-smmu-irq",&p,&n)!=kSuccess || !p || n!=sizeof(q))return ENXIO;
-    memcpy(&q,p,sizeof(q));if(!x9_camera_smmu_irq_layout_valid(&q))return EINVAL;
+       SecureDTGetProperty(chosen,"x9-camera-smmu-irq",&p,&n)!=kSuccess || !p || n!=sizeof(q))return CAM_FAIL(ENXIO);
+    memcpy(&q,p,sizeof(q));if(!x9_camera_smmu_irq_layout_valid(&q))return CAM_FAIL(EINVAL);
     if(SecureDTLookupEntry(NULL,"/arm-io/gic",&gic)!=kSuccess ||
-       SecureDTGetProperty(gic,"reg",&p,&n)!=kSuccess || !p || n!=sizeof(reg))return ENXIO;
+       SecureDTGetProperty(gic,"reg",&p,&n)!=kSuccess || !p || n!=sizeof(reg))return CAM_FAIL(ENXIO);
     memcpy(reg,p,sizeof(reg));
     if(reg[0]!=q.gicd_base-0x400000ULL || reg[1]!=q.gicd_bytes ||
-       reg[2]!=0x06880000-0x400000ULL || reg[3]!=0x200000)return ENXIO;
+       reg[2]!=0x06880000-0x400000ULL || reg[3]!=0x200000)return CAM_FAIL(ENXIO);
     if(!cam_smmu_irq.gic)cam_smmu_irq.gic=ml_io_map(q.gicd_base,q.gicd_bytes);
-    if(!cam_smmu_irq.gic || PAGE_SIZE!=0x4000)return ENXIO;
+    if(!cam_smmu_irq.gic || PAGE_SIZE!=0x4000)return CAM_FAIL(ENXIO);
     for(unsigned off=0;off<0x40000;off+=0x4000) {
         addr64_t a=(addr64_t)cam_smmu_irq.gic+off;ppnum_t page=pmap_find_phys(kernel_pmap,a);
-        if(!page || ptoa_64(page)+(a&PAGE_MASK)!=0x06800000ULL+off)return EFAULT;
+        if(!page || ptoa_64(page)+(a&PAGE_MASK)!=0x06800000ULL+off)return CAM_FAIL(EFAULT);
     }
     if((cam_smmu_irq_read(0)&0x12)!=0x12 || (cam_smmu_irq_read(0)&(1u<<31)) ||
-       ((cam_smmu_irq_read(4)&31u)+1u)*32u<=SMMU_IRQ_ID)return EBUSY;
+       ((cam_smmu_irq_read(4)&31u)+1u)*32u<=SMMU_IRQ_ID)return CAM_FAIL(EBUSY);
     return 0;
 }
 /* The IRQ source's configuration is serialized by camera_smmu_lock. During
@@ -89,7 +89,7 @@ static int cam_smmu_irq_snapshot_match(struct x9_camera_smmu *m,
         comparable.word[CAM_N_EP]=expected->word[CAM_N_EP];
         comparable.word[CAM_N_CC]=expected->word[CAM_N_CC];
     }
-    return memcmp(&comparable,expected,sizeof(comparable))?ESTALE:0;
+    return memcmp(&comparable,expected,sizeof(comparable))?CAM_FAIL(ESTALE):0;
 }
 /* IRQ_CTRLACK may move only from the sampled old value to the requested one. */
 static int cam_smmu_irq_control_locked(struct x9_camera_smmu *m,struct cam_native_snapshot *s,
@@ -104,7 +104,7 @@ static int cam_smmu_irq_control_locked(struct x9_camera_smmu *m,struct cam_nativ
         uint32_t ack;
         e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);if(e)return e;
         cam_native_read(m,&now);ack=now.word[CAM_N_IRQACK];
-        if(ack!=before && ack!=value)return ESTALE;
+        if(ack!=before && ack!=value)return CAM_FAIL(ESTALE);
         if(quiescing) {
             /* Preserve actual dynamic values in s after the ACK, while the
              * comparison below continues to protect every static register. */
@@ -112,12 +112,12 @@ static int cam_smmu_irq_control_locked(struct x9_camera_smmu *m,struct cam_nativ
             s->word[CAM_N_EP]=now.word[CAM_N_EP];s->word[CAM_N_CC]=now.word[CAM_N_CC];
         }
         now.word[CAM_N_IRQACK]=s->word[CAM_N_IRQACK];
-        if(memcmp(&now,s,sizeof(now)))return ESTALE;
+        if(memcmp(&now,s,sizeof(now)))return CAM_FAIL(ESTALE);
         if(ack==value){s->word[CAM_N_IRQACK]=value;return 0;}
-        if(mach_absolute_time()>=end)return ETIMEDOUT;
+        if(mach_absolute_time()>=end)return CAM_FAIL(ETIMEDOUT);
         delay(1);
     }
-    return ETIMEDOUT;
+    return CAM_FAIL(ETIMEDOUT);
 }
 static bool cam_smmu_irq_filter(uint32_t intid)
 {
@@ -155,7 +155,7 @@ static void __attribute__((noreturn)) cam_smmu_irq_worker(void *unused,wait_resu
              * already pending at the GIC. Service its real queue/status while
              * preserving the original error, then allow shutdown to drain it. */
             e=!m || m!=cam_smmu_namespace || m->magic!=CAM_SMMU_MAGIC ||
-                !m->native || !m->exported?EINVAL:0;
+                !m->native || !m->exported?CAM_FAIL(EINVAL):0;
             if(!e)e=cam_smmu_storage(m);
             if(!e)e=cam_smmu_live_impl(m,true);
             if(!e && m->last_errno)e=(int)m->last_errno;
@@ -182,12 +182,12 @@ static int cam_smmu_irq_setup_guard_locked(struct x9_camera_smmu *m,struct cam_n
     int e=cam_native_match(m,s);if(e)return e;
     if((cam_smmu_irq_read(0)&0x12)!=0x12 || (cam_smmu_irq_read(0)&(1u<<31)) ||
        ((cam_smmu_irq_read(SMMU_IRQ_ENABLE)|cam_smmu_irq_read(SMMU_IRQ_PENDING)|
-         cam_smmu_irq_read(SMMU_IRQ_ACTIVE))&SMMU_IRQ_BIT))return EBUSY;
+         cam_smmu_irq_read(SMMU_IRQ_ACTIVE))&SMMU_IRQ_BIT))return CAM_FAIL(EBUSY);
     if((cam_smmu_irq_read(SMMU_IRQ_CONFIG)&(3u<<SMMU_IRQ_SHIFT))!=
        ((cam_smmu_irq.dirty&1)?(2u<<SMMU_IRQ_SHIFT):cam_smmu_irq.saved_config) ||
        cam_smmu_irq_route()!=((cam_smmu_irq.dirty&2)?cam_smmu_irq.route:cam_smmu_irq.saved_route) ||
        *(volatile uint8_t *)(cam_smmu_irq.gic+SMMU_IRQ_PRIORITY)!=
-       ((cam_smmu_irq.dirty&4)?0xa0:cam_smmu_irq.saved_priority))return ESTALE;
+       ((cam_smmu_irq.dirty&4)?0xa0:cam_smmu_irq.saved_priority))return CAM_FAIL(ESTALE);
     return 0;
 }
 /* Called with camera_smmu_lock held after EVTQ is ready, before SMMUEN. */
@@ -198,14 +198,14 @@ static int cam_smmu_irq_bind_impl_locked(struct x9_camera_smmu *m,struct cam_nat
     if(!e)e=cam_native_match(m,s);
     if(e)return e;
     *step="admission";old=cam_smmu_irq_spin_take();
-    if(cam_smmu_irq.owns || cam_smmu_irq.pending || cam_smmu_irq.busy)e=EBUSY;
+    if(cam_smmu_irq.owns || cam_smmu_irq.pending || cam_smmu_irq.busy)e=CAM_FAIL(EBUSY);
     cam_smmu_irq_spin_drop(old);if(e)return e;
     if((cam_smmu_irq_read(SMMU_IRQ_ENABLE)|cam_smmu_irq_read(SMMU_IRQ_PENDING)|
-        cam_smmu_irq_read(SMMU_IRQ_ACTIVE))&SMMU_IRQ_BIT)return EBUSY;
+        cam_smmu_irq_read(SMMU_IRQ_ACTIVE))&SMMU_IRQ_BIT)return CAM_FAIL(EBUSY);
     *step="worker";
     if(!cam_smmu_irq.thread_started) {
         thread_t thread;
-        if(kernel_thread_start(cam_smmu_irq_worker,NULL,&thread)!=KERN_SUCCESS)return ENOMEM;
+        if(kernel_thread_start(cam_smmu_irq_worker,NULL,&thread)!=KERN_SUCCESS)return CAM_FAIL(ENOMEM);
         thread_deallocate(thread);cam_smmu_irq.thread_started=true;
     }
     cam_smmu_irq.saved_route=cam_smmu_irq_route();
@@ -222,22 +222,22 @@ static int cam_smmu_irq_bind_impl_locked(struct x9_camera_smmu *m,struct cam_nat
     cam_smmu_irq.dirty|=1;
     cam_smmu_irq_write(SMMU_IRQ_CONFIG,(config&~(3u<<SMMU_IRQ_SHIFT))|(2u<<SMMU_IRQ_SHIFT));
     e=cam_smmu_irq_wait_rwp();if(e)return e;
-    if((cam_smmu_irq_read(SMMU_IRQ_CONFIG)&(3u<<SMMU_IRQ_SHIFT))!=(2u<<SMMU_IRQ_SHIFT))return EIO;
+    if((cam_smmu_irq_read(SMMU_IRQ_CONFIG)&(3u<<SMMU_IRQ_SHIFT))!=(2u<<SMMU_IRQ_SHIFT))return CAM_FAIL(EIO);
     *step="route";e=cam_smmu_irq_setup_guard_locked(m,s);if(e)return e;
     cam_smmu_irq.dirty|=2;
     *(volatile uint64_t *)(cam_smmu_irq.gic+SMMU_IRQ_ROUTE)=cam_smmu_irq.route;
     __asm__ volatile("dsb sy":::"memory");
-    if(cam_smmu_irq_route()!=cam_smmu_irq.route)return EIO;
+    if(cam_smmu_irq_route()!=cam_smmu_irq.route)return CAM_FAIL(EIO);
     *step="priority";e=cam_smmu_irq_setup_guard_locked(m,s);if(e)return e;
     cam_smmu_irq.dirty|=4;
     *(volatile uint8_t *)(cam_smmu_irq.gic+SMMU_IRQ_PRIORITY)=0xa0;
     __asm__ volatile("dsb sy":::"memory");
-    if(*(volatile uint8_t *)(cam_smmu_irq.gic+SMMU_IRQ_PRIORITY)!=0xa0)return EIO;
+    if(*(volatile uint8_t *)(cam_smmu_irq.gic+SMMU_IRQ_PRIORITY)!=0xa0)return CAM_FAIL(EIO);
     *step="source-ack";e=cam_smmu_irq_setup_guard_locked(m,s);if(e)return e;
     e=cam_smmu_irq_control_locked(m,s,5,false);if(e)return e; /* EVTQ + GERROR */
     *step="gic-enable";old=cam_smmu_irq_spin_take();
     if(cam_smmu_irq.deliveries==UINT64_MAX) {
-        cam_smmu_irq_spin_drop(old);return EOVERFLOW;
+        cam_smmu_irq_spin_drop(old);return CAM_FAIL(EOVERFLOW);
     }
     cam_smmu_irq.armed=true;before=cam_smmu_irq.deliveries;
     cam_smmu_irq_write(SMMU_IRQ_ENABLE,SMMU_IRQ_BIT);cam_smmu_irq_spin_drop(old);
@@ -245,7 +245,7 @@ static int cam_smmu_irq_bind_impl_locked(struct x9_camera_smmu *m,struct cam_nat
     if(!e) {
         old=cam_smmu_irq_spin_take();
         if(!(cam_smmu_irq_read(SMMU_IRQ_ENABLE)&SMMU_IRQ_BIT) &&
-           cam_smmu_irq.deliveries==before)e=EIO;
+           cam_smmu_irq.deliveries==before)e=CAM_FAIL(EIO);
         cam_smmu_irq_spin_drop(old);
     }
     return e;
@@ -265,7 +265,7 @@ static int cam_smmu_irq_shutdown(struct x9_camera_smmu *m)
     boolean_t old=cam_smmu_irq_spin_take();bool ours=cam_smmu_irq.owns;
     bool match=cam_smmu_irq.owner==m;int e;uint64_t span,end;
     cam_smmu_irq_spin_drop(old);
-    if(!ours)return 0;if(!match)return ESTALE;
+    if(!ours)return 0;if(!match)return CAM_FAIL(ESTALE);
     lck_mtx_lock(&camera_smmu_lock);
     e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);
     if(!e) {
@@ -291,7 +291,7 @@ static int cam_smmu_irq_shutdown(struct x9_camera_smmu *m)
             uint8_t priority=*(volatile uint8_t *)(cam_smmu_irq.gic+SMMU_IRQ_PRIORITY);
             if((cam_smmu_irq.dirty&7)!=7 || config!=(2u<<SMMU_IRQ_SHIFT) ||
                cam_smmu_irq_route()!=cam_smmu_irq.route || priority!=0xa0) {
-                cam_smmu_irq_spin_drop(old);return ESTALE;
+                cam_smmu_irq_spin_drop(old);return CAM_FAIL(ESTALE);
             }
             cam_smmu_irq.armed=true;
             cam_smmu_irq_write(SMMU_IRQ_ENABLE,SMMU_IRQ_BIT);
@@ -304,7 +304,7 @@ static int cam_smmu_irq_shutdown(struct x9_camera_smmu *m)
         if(mach_absolute_time()>=end) {
             printf("X9 CAMERA SMMU IRQ: drain timeout pending=%x active=%x enabled=%x worker_busy=%u\n",
                 pending,active,enabled,busy);
-            return ETIMEDOUT;
+            return CAM_FAIL(ETIMEDOUT);
         }
         delay(10);
     }
@@ -312,29 +312,29 @@ static int cam_smmu_irq_shutdown(struct x9_camera_smmu *m)
     old=cam_smmu_irq_spin_take();
     if(cam_smmu_irq.busy || cam_smmu_irq.pending ||
        ((cam_smmu_irq_read(SMMU_IRQ_ENABLE)|cam_smmu_irq_read(SMMU_IRQ_PENDING)|
-         cam_smmu_irq_read(SMMU_IRQ_ACTIVE))&SMMU_IRQ_BIT))e=EBUSY;
+         cam_smmu_irq_read(SMMU_IRQ_ACTIVE))&SMMU_IRQ_BIT))e=CAM_FAIL(EBUSY);
     cam_smmu_irq_spin_drop(old);if(e)return e;
     if(cam_smmu_irq.dirty&4) {
         uint8_t current=*(volatile uint8_t *)(cam_smmu_irq.gic+SMMU_IRQ_PRIORITY);
-        if(current!=0xa0 && current!=cam_smmu_irq.saved_priority)return ESTALE;
+        if(current!=0xa0 && current!=cam_smmu_irq.saved_priority)return CAM_FAIL(ESTALE);
         *(volatile uint8_t *)(cam_smmu_irq.gic+SMMU_IRQ_PRIORITY)=cam_smmu_irq.saved_priority;
         __asm__ volatile("dsb sy":::"memory");
-        if(*(volatile uint8_t *)(cam_smmu_irq.gic+SMMU_IRQ_PRIORITY)!=cam_smmu_irq.saved_priority)return EIO;
+        if(*(volatile uint8_t *)(cam_smmu_irq.gic+SMMU_IRQ_PRIORITY)!=cam_smmu_irq.saved_priority)return CAM_FAIL(EIO);
     }
     if(cam_smmu_irq.dirty&2) {
         uint64_t current=cam_smmu_irq_route();
-        if(current!=cam_smmu_irq.route && current!=cam_smmu_irq.saved_route)return ESTALE;
+        if(current!=cam_smmu_irq.route && current!=cam_smmu_irq.saved_route)return CAM_FAIL(ESTALE);
         *(volatile uint64_t *)(cam_smmu_irq.gic+SMMU_IRQ_ROUTE)=cam_smmu_irq.saved_route;
         __asm__ volatile("dsb sy":::"memory");
-        if(cam_smmu_irq_route()!=cam_smmu_irq.saved_route)return EIO;
+        if(cam_smmu_irq_route()!=cam_smmu_irq.saved_route)return CAM_FAIL(EIO);
     }
     if(cam_smmu_irq.dirty&1) {
         uint32_t config=cam_smmu_irq_read(SMMU_IRQ_CONFIG);
         uint32_t current=config&(3u<<SMMU_IRQ_SHIFT);
-        if(current!=(2u<<SMMU_IRQ_SHIFT) && current!=cam_smmu_irq.saved_config)return ESTALE;
+        if(current!=(2u<<SMMU_IRQ_SHIFT) && current!=cam_smmu_irq.saved_config)return CAM_FAIL(ESTALE);
         cam_smmu_irq_write(SMMU_IRQ_CONFIG,(config&~(3u<<SMMU_IRQ_SHIFT))|cam_smmu_irq.saved_config);
         e=cam_smmu_irq_wait_rwp();if(e)return e;
-        if((cam_smmu_irq_read(SMMU_IRQ_CONFIG)&(3u<<SMMU_IRQ_SHIFT))!=cam_smmu_irq.saved_config)return EIO;
+        if((cam_smmu_irq_read(SMMU_IRQ_CONFIG)&(3u<<SMMU_IRQ_SHIFT))!=cam_smmu_irq.saved_config)return CAM_FAIL(EIO);
     }
     old=cam_smmu_irq_spin_take();cam_smmu_irq.owns=false;cam_smmu_irq.owner=NULL;
     cam_smmu_irq.dirty=0;cam_smmu_irq_spin_drop(old);

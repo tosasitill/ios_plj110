@@ -50,9 +50,9 @@ static int cam_cal_guard(uint64_t end)
     if(!x9_camera_sensor_valid(which) || cam_sensor_cal.epoch!=cam_sensor_live.epoch ||
        cam_sensor_live.probe.sensor!=which ||
        cam_sensor_live.phase!=CAM_SENSOR_CONFIGURING ||
-       cam_sensor_live.close_attempted || session.capture || session.stream)return ESTALE;
+       cam_sensor_live.close_attempted || session.capture || session.stream)return CAM_FAIL(ESTALE);
     if(cam_sensor_cal.error)return cam_sensor_cal.error;
-    if(mach_absolute_time()>=end)return ETIMEDOUT;
+    if(mach_absolute_time()>=end)return CAM_FAIL(ETIMEDOUT);
     return cam_sensor_ap_guard(&ap);
 }
 static int cam_cal_read(uint64_t end,uint16_t reg,uint8_t *bytes,unsigned count)
@@ -60,7 +60,7 @@ static int cam_cal_read(uint64_t end,uint16_t reg,uint8_t *bytes,unsigned count)
     const struct cam_cal_profile *p=&cam_cal_profiles[cam_sensor_cal.sensor-1];
     const uint8_t tx[2]={(uint8_t)(reg>>8),(uint8_t)reg};
     int e=cam_cal_guard(end);
-    if(!count || count>CAM_I2C_FIFO_BYTES || !bytes)return EINVAL;
+    if(!count || count>CAM_I2C_FIFO_BYTES || !bytes)return CAM_FAIL(EINVAL);
     cam_sensor_cal.reg=reg;
     /* This is only the EEPROM address-pointer read used by Android, never
      * its programming/write-protection commands or an arbitrary slave. */
@@ -89,13 +89,13 @@ static int cam_cal_preload(uint32_t which)
     int e=0;
     /* configure is single-attempt for this epoch. A later genuine cold
      * epoch may replace only after the preceding physical close/recycle. */
-    if(cam_sensor_cal.attempted && cam_sensor_cal.epoch==cam_sensor_live.epoch)return EALREADY;
+    if(cam_sensor_cal.attempted && cam_sensor_cal.epoch==cam_sensor_live.epoch)return CAM_FAIL(EALREADY);
     bzero(&cam_sensor_cal,sizeof(cam_sensor_cal));
     cam_sensor_cal.epoch=cam_sensor_live.epoch;cam_sensor_cal.sensor=which;
     cam_sensor_cal.attempted=true;
     if(!p->header){cam_cal_log("unsupported",0);return 0;}
     for(unsigned b=0;b<3;b++)cam_sensor_cal.bytes+=p->block[b].bytes;
-    if(cam_sensor_cal.bytes>CAM_CAL_MAX_BYTES)return cam_cal_fault(EOVERFLOW);
+    if(cam_sensor_cal.bytes>CAM_CAL_MAX_BYTES)return cam_cal_fault(CAM_FAIL(EOVERFLOW));
     nanoseconds_to_absolutetime(15000000000ULL,&span);end=mach_absolute_time()+span;
     for(unsigned pass=0;pass<2 && !e;pass++) {
         uint8_t header[4]={0};
@@ -105,7 +105,7 @@ static int cam_cal_preload(uint32_t which)
         if(!e) {
             cam_sensor_cal.header[pass]=(uint32_t)header[0]|((uint32_t)header[1]<<8)|
                 ((uint32_t)header[2]<<16)|((uint32_t)header[3]<<24);
-            if(cam_sensor_cal.header[pass]!=p->header)e=ENODEV;
+            if(cam_sensor_cal.header[pass]!=p->header)e=CAM_FAIL(ENODEV);
         }
         for(unsigned b=0;b<3 && !e;b++) {
             const struct cam_cal_block *d=&p->block[b];
@@ -121,7 +121,7 @@ static int cam_cal_preload(uint32_t which)
                 if(!e) {
                     cam_sensor_cal.read_bytes[pass]+=count;
                     if(!pass)memcpy(cam_sensor_cal.payload+index+n,bytes,count);
-                    else if(memcmp(cam_sensor_cal.payload+index+n,bytes,count))e=ESTALE;
+                    else if(memcmp(cam_sensor_cal.payload+index+n,bytes,count))e=CAM_FAIL(ESTALE);
                 }
             }
             index+=d->bytes;
@@ -131,7 +131,7 @@ static int cam_cal_preload(uint32_t which)
         if(!e) {
             cam_sensor_cal.header_after[pass]=(uint32_t)header[0]|((uint32_t)header[1]<<8)|
                 ((uint32_t)header[2]<<16)|((uint32_t)header[3]<<24);
-            if(cam_sensor_cal.header_after[pass]!=p->header)e=ESTALE;
+            if(cam_sensor_cal.header_after[pass]!=p->header)e=CAM_FAIL(ESTALE);
         }
     }
     if(!e)cam_sensor_cal.preloaded=true;
@@ -166,8 +166,8 @@ static int cam_cal_write_seq(struct cam_sensor_io *io,uint16_t reg,
     uint8_t tx[CAM_I2C_FIFO_BYTES];
     uint32_t acked=r->written;
     int e;
-    if(!count || count>CAM_CAL_WR_PAYLOAD || !values)return EINVAL;
-    if(cam_sensor_forbidden(reg))return EPERM;
+    if(!count || count>CAM_CAL_WR_PAYLOAD || !values)return CAM_FAIL(EINVAL);
+    if(cam_sensor_forbidden(reg))return CAM_FAIL(EPERM);
     e=cam_cal_guard(io->deadline);if(e)return e;
     tx[0]=(uint8_t)(reg>>8);tx[1]=(uint8_t)reg;
     memcpy(tx+2,values,count);
@@ -178,7 +178,7 @@ static int cam_cal_write_seq(struct cam_sensor_io *io,uint16_t reg,
     e=cam_bus_transfer(ap->bus,ap->slave,tx,(unsigned)(2+count),NULL);
     if(!e)r->written++; /* ACK still counts if the budget expired meanwhile. */
     cam_sensor_cal.acked+=r->written-acked;
-    if(!e && mach_absolute_time()>=io->deadline)e=ETIMEDOUT;
+    if(!e && mach_absolute_time()>=io->deadline)e=CAM_FAIL(ETIMEDOUT);
     return e;
 }
 static int cam_cal_apply(struct cam_sensor_io *io,uint32_t which,struct x9_camera_config *r)
@@ -197,7 +197,7 @@ static int cam_cal_apply(struct cam_sensor_io *io,uint32_t which,struct x9_camer
     end=mach_absolute_time()+span;
     e=cam_cal_guard(end);
     if(!e && (!cam_sensor_cal.preloaded || cam_sensor_cal.sensor!=which ||
-       cam_sensor_cal.apply_attempted || !p->header))e=ESTALE;
+       cam_sensor_cal.apply_attempted || !p->header))e=CAM_FAIL(ESTALE);
     if(e) {
         io->deadline=saved;
         return cam_cal_fault(e);
@@ -237,14 +237,14 @@ static int cam_cal_mode_check(uint32_t which,struct x9_camera_config *r)
     int e=0;
     if(!p->header)return 0;
     if(cam_sensor_cal.epoch!=cam_sensor_live.epoch || cam_sensor_cal.sensor!=which ||
-       !cam_sensor_cal.applied || cam_sensor_cal.error)return ESTALE;
+       !cam_sensor_cal.applied || cam_sensor_cal.error)return CAM_FAIL(ESTALE);
     /* Preview is allowed to override the open-time QSC enable. In
      * particular front preview's3621=0 must not be "repaired" to1. */
     for(unsigned n=0;n<t.np;n+=2)if(t.preview[n]==p->enable)expected=t.preview[n+1];
     r->stage=X9_CAM_CFG_CAL_MODE;r->reg=p->enable;r->expected=expected;r->observed=UINT32_MAX;
     e=cam_sensor_ap_read(&ap,p->enable,&actual);
     if(!e){cam_sensor_cal.final_enable=actual;r->observed=actual;}
-    if(!e && actual!=expected)e=EIO;
+    if(!e && actual!=expected)e=CAM_FAIL(EIO);
     if(!e)cam_sensor_cal.mode_checked=true;
     else cam_cal_fault(e);
     cam_cal_log("mode",e);return e;

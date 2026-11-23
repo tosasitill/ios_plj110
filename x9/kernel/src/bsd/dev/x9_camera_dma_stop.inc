@@ -32,33 +32,33 @@ static int cam_sv_dma_stop_observe(unsigned bank,vm_offset_t view,unsigned offse
     uint32_t value,bool *allowed)
 {
     if((offset!=0x1020 && offset!=0x7c) || !cam_dma_stop.captured)return 0;
-    if(bank>=2 || view!=cam_sv.view[bank])return cam_sv_dma_stop_fault(ESTALE);
+    if(bank>=2 || view!=cam_sv.view[bank])return cam_sv_dma_stop_fault(CAM_FAIL(ESTALE));
     if(offset==0x7c) {
         cam_dma_stop.dcm_actual[bank]=value;cam_dma_stop.dcm_sampled|=1u<<bank;
     } else {cam_dma_stop.actual[bank]=value;cam_dma_stop.sampled|=1u<<bank;}
     if(cam_dma_stop.error)return cam_dma_stop.error;
     if(cam_dma_stop.epoch!=cam_sv.epoch || !cam_sv.request_held || cam_sv.terminal ||
        memcmp(&cam_dma_stop.request,&cam_sv.request,sizeof(cam_sv.request)))
-        return cam_sv_dma_stop_fault(ESTALE);
+        return cam_sv_dma_stop_fault(CAM_FAIL(ESTALE));
     if(offset==0x7c) {
         if(!cam_dma_stop.dcm_issued)
-            return value==cam_dma_stop.dcm_prior[bank]?0:cam_sv_dma_stop_fault(ESTALE);
+            return value==cam_dma_stop.dcm_prior[bank]?0:cam_sv_dma_stop_fault(CAM_FAIL(ESTALE));
         if(cam_dma_stop.dcm_restore_issued) {
             if((cam_dma_stop.phase!=CAM_DMA_STOP_RESTORING &&
                 cam_dma_stop.phase!=CAM_DMA_STOP_RESTORED) ||
                (value!=cam_dma_stop.dcm_prior[bank] &&
                 ((cam_dma_stop.dcm_restore_seen&(1u<<bank)) || value!=1)))
-                return cam_sv_dma_stop_fault(ESTALE);
+                return cam_sv_dma_stop_fault(CAM_FAIL(ESTALE));
             if(value==cam_dma_stop.dcm_prior[bank])cam_dma_stop.dcm_restore_seen|=1u<<bank;
             *allowed=true;return 0;
         }
         if(value!=1 && ((cam_dma_stop.dcm_seen&(1u<<bank)) ||
-           value!=cam_dma_stop.dcm_prior[bank]))return cam_sv_dma_stop_fault(ESTALE);
+           value!=cam_dma_stop.dcm_prior[bank]))return cam_sv_dma_stop_fault(CAM_FAIL(ESTALE));
         if(value==1)cam_dma_stop.dcm_seen|=1u<<bank;
         *allowed=true;return 0;
     }
     if(!cam_dma_stop.issued) {
-        return value==cam_dma_stop.prior[bank]?0:cam_sv_dma_stop_fault(ESTALE);
+        return value==cam_dma_stop.prior[bank]?0:cam_sv_dma_stop_fault(CAM_FAIL(ESTALE));
     }
     /* The normal reader requires ACK bit1, NOT sticky request bit0. Accept
      * full status2 or3 only after OUR issued command; do not infer that
@@ -68,14 +68,14 @@ static int cam_sv_dma_stop_observe(unsigned bank,vm_offset_t view,unsigned offse
      * Inner may remain prior: no guessed inner ACK requirement or write. */
     if(cam_dma_stop.release_issued && value==cam_dma_stop.prior[bank]) {
         if(cam_dma_stop.phase!=CAM_DMA_STOP_RESTORING &&
-           cam_dma_stop.phase!=CAM_DMA_STOP_RESTORED)return cam_sv_dma_stop_fault(ESTALE);
+           cam_dma_stop.phase!=CAM_DMA_STOP_RESTORED)return cam_sv_dma_stop_fault(CAM_FAIL(ESTALE));
         cam_dma_stop.release_seen|=1u<<bank;*allowed=true;return 0;
     }
     if((cam_dma_stop.release_seen&(1u<<bank)) ||
        (cam_dma_stop.phase!=CAM_DMA_STOP_PENDING && cam_dma_stop.phase!=CAM_DMA_STOP_ACKED &&
         cam_dma_stop.phase!=CAM_DMA_STOP_RESTORING) ||
        (value&~3u) || ((cam_dma_stop.seen[bank]&2u) && !(value&2u)) ||
-       ((cam_dma_stop.seen[bank]&4u) && (value&1u)))return cam_sv_dma_stop_fault(ESTALE);
+       ((cam_dma_stop.seen[bank]&4u) && (value&1u)))return cam_sv_dma_stop_fault(CAM_FAIL(ESTALE));
     if(value&1u)cam_dma_stop.seen[bank]|=1u;
     if(value&2u)cam_dma_stop.seen[bank]|=2u;
     if(value==2)cam_dma_stop.seen[bank]|=4u;
@@ -109,7 +109,7 @@ static int cam_sv_dma_stop_guard_locked(uint64_t epoch)
        !cam_smi.held || !cam_smi_a0.held || !cam_smi.larb[0] ||
        cam_smi.epoch!=epoch || cam_smi_a0.epoch!=epoch || cam_smi.close_attempted ||
        cam_smi_a0.close_attempted || cam_smi.error || cam_smi.status.a0.last_errno ||
-       memcmp(&cam_dma_stop.request,&cam_stream_close.request,sizeof(cam_dma_stop.request)))return ESTALE;
+       memcmp(&cam_dma_stop.request,&cam_stream_close.request,sizeof(cam_dma_stop.request)))return CAM_FAIL(ESTALE);
     e=cam_stream_close_guard_locked(epoch);if(e)return e;
     /* Full actual CAMSV/TG/SMI/receiver/PHY/MAC/OUTMUX plus original S1
      * range/owner, not an idle register or software receipt used as a grant. */
@@ -139,10 +139,10 @@ static int cam_sv_dma_stop_locked(uint64_t epoch)
     unsigned dcm_reg=cam_sv_find(0x7c),stop_reg=cam_sv_find(0x1020);
     int e;
     if(cam_dma_stop.captured)return cam_dma_stop.error?cam_dma_stop.error:ESTALE;
-    if(dcm_reg>=cam_sv.count || stop_reg>=cam_sv.count)return ESTALE;
+    if(dcm_reg>=cam_sv.count || stop_reg>=cam_sv.count)return CAM_FAIL(ESTALE);
     for(unsigned bank=0;bank<2;bank++) {
-        if(cam_sv.expected[bank][dcm_reg]>1)return EBUSY;
-        if(cam_sv.expected[bank][stop_reg])return EBUSY;
+        if(cam_sv.expected[bank][dcm_reg]>1)return CAM_FAIL(EBUSY);
+        if(cam_sv.expected[bank][stop_reg])return CAM_FAIL(EBUSY);
         cam_dma_stop.dcm_prior[bank]=cam_sv.expected[bank][dcm_reg];
         cam_dma_stop.prior[bank]=cam_sv.expected[bank][stop_reg];
     }
@@ -160,7 +160,7 @@ static int cam_sv_dma_stop_locked(uint64_t epoch)
     }
     nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
     e=cam_sv_dma_stop_guard_locked(epoch);if(e)goto out;
-    if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+    if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
     /* Normal common_disable first inhibits DMA DCM (+7c=1). Do not issue
      * a stop while its internal clock can be gated. This ordinary control
      * readback is NOT a DMA ACK. Borrowed1 is never rewritten/released;
@@ -172,7 +172,7 @@ static int cam_sv_dma_stop_locked(uint64_t epoch)
     }
     for(unsigned poll=0;poll<100000;poll++) {
         bool allowed=false;
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
         e=cam_sv_dma_stop_guard_locked(epoch);if(e)break;
         e=cam_sv_power_guard();if(e)break;
         e=cam_sv_dma_stop_observe(0,cam_sv.view[0],0x7c,
@@ -181,13 +181,13 @@ static int cam_sv_dma_stop_locked(uint64_t epoch)
         if(cam_dma_stop.dcm_samples==2)break;
         delay(1);
     }
-    if(!e && cam_dma_stop.dcm_samples!=2)e=ETIMEDOUT;
+    if(!e && cam_dma_stop.dcm_samples!=2)e=CAM_FAIL(ETIMEDOUT);
     if(!e)e=cam_sv_dma_stop_guard_locked(epoch);if(e)goto out;
-    if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+    if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
     cam_dma_stop.phase=CAM_DMA_STOP_PENDING;cam_dma_stop.issued=true;
     cam_rw(cam_sv.view[0],0x1020,1); /* BEFORE possibly posted store: issue above */
     for(unsigned poll=0;poll<100000;poll++) {
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
         e=cam_sv_dma_stop_guard_locked(epoch);if(e)break;
         e=cam_sv_dma_stop_sample_locked();if(e)break;
         cam_dma_stop.samples=(cam_dma_stop.actual[0]&2u)?cam_dma_stop.samples+1:0;
@@ -199,13 +199,13 @@ static int cam_sv_dma_stop_locked(uint64_t epoch)
         }
         delay(1);
     }
-    if(!e && (cam_dma_stop.samples<2 || cam_dma_stop.port_samples!=2))e=ETIMEDOUT;
+    if(!e && (cam_dma_stop.samples<2 || cam_dma_stop.port_samples!=2))e=CAM_FAIL(ETIMEDOUT);
     if(!e)e=cam_sv_dma_stop_guard_locked(epoch);
     if(!e)e=cam_sv_dma_stop_sample_locked();
     if(!e)e=cam_sv_dma_stop_port_sample_locked();
-    if(!e && (!(cam_dma_stop.actual[0]&2u) || cam_dma_stop.ostd[0] || cam_dma_stop.ostd[1]))e=ESTALE;
+    if(!e && (!(cam_dma_stop.actual[0]&2u) || cam_dma_stop.ostd[0] || cam_dma_stop.ostd[1]))e=CAM_FAIL(ESTALE);
     if(!e)e=cam_sv_dma_stop_guard_locked(epoch);
-    if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
+    if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
     if(!e)cam_dma_stop.phase=CAM_DMA_STOP_ACKED;
 out:
     if(e)e=cam_sv_dma_stop_fault(e);
@@ -246,7 +246,7 @@ static int cam_sv_dma_restore_sample_locked(bool *match)
             *match=false;
     }
     e=cam_sv_dma_stop_port_sample_locked();if(e)return e;
-    if(cam_dma_stop.ostd[0] || cam_dma_stop.ostd[1])return EBUSY;
+    if(cam_dma_stop.ostd[0] || cam_dma_stop.ostd[1])return CAM_FAIL(EBUSY);
     return 0;
 }
 static int cam_sv_dma_stop_restore_locked(uint64_t epoch)
@@ -267,14 +267,14 @@ static int cam_sv_dma_stop_restore_locked(uint64_t epoch)
         e=cam_sv_dma_stop_sample_locked();if(e)goto out;
         e=cam_sv_dma_stop_port_sample_locked();if(e)goto out;
         if(!(cam_dma_stop.actual[0]&2u) || cam_dma_stop.ostd[0] || cam_dma_stop.ostd[1]) {
-            e=ESTALE;goto out;
+            e=CAM_FAIL(ESTALE);goto out;
         }
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
     }
     cam_dma_stop.phase=CAM_DMA_STOP_RESTORING;
     if(cam_dma_stop.dcm_issued) {
         e=cam_sv_dma_stop_guard_locked(epoch);if(e)goto out;
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
         cam_dma_stop.dcm_restore_issued=true;
         cam_rw(cam_sv.view[0],0x7c,cam_dma_stop.dcm_prior[0]);
     }
@@ -284,25 +284,25 @@ static int cam_sv_dma_stop_restore_locked(uint64_t epoch)
         bool complete=false;
         if(stage) {
             e=cam_sv_dma_stop_guard_locked(epoch);if(e)goto out;
-            if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+            if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
             cam_dma_stop.release_issued=true;
             cam_rw(cam_sv.view[0],0x1020,cam_dma_stop.prior[0]);
         }
         cam_dma_stop.restore_samples=0;
         for(unsigned poll=0;poll<100000;poll++) {
             bool match;
-            if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+            if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
             e=cam_sv_dma_stop_guard_locked(epoch);if(e)goto out;
             e=cam_sv_dma_restore_sample_locked(&match);if(e)goto out;
-            if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+            if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
             cam_dma_stop.restore_samples=match?cam_dma_stop.restore_samples+1:0;
             if(cam_dma_stop.restore_samples==2){complete=true;break;}
             delay(1);
         }
-        if(!complete){e=ETIMEDOUT;goto out;}
+        if(!complete){e=CAM_FAIL(ETIMEDOUT);goto out;}
     }
     e=cam_sv_dma_stop_guard_locked(epoch);if(e)goto out;
-    if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+    if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
     cam_dma_stop.phase=CAM_DMA_STOP_RESTORED;
 out:
     if(e)e=cam_sv_dma_stop_fault(e);

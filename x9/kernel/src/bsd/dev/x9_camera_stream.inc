@@ -9,19 +9,19 @@ static int cam_stream_guard_locked(const struct x9_camera_sensor *s,bool before_
 {
     boolean_t old;
     int e;
-    if(!x9_camera_sensor_valid(s->sensor))return EINVAL;
+    if(!x9_camera_sensor_valid(s->sensor))return CAM_FAIL(EINVAL);
     if(s!=&sensors[s->sensor-1] || !session.capture || !session.stream ||
        cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED || cam_sensor_live.close_attempted ||
        !cam_source.captured || cam_source.phase!=CAM_SOURCE_ARMED || cam_source.error ||
        cam_source.pending!=CAM_SOURCE_STEPS || cam_source.epoch!=cam_sensor_live.epoch ||
-       cam_sv.epoch!=cam_source.epoch || cam_sv.status.sensor!=s->sensor)return ESTALE;
+       cam_sv.epoch!=cam_source.epoch || cam_sv.status.sensor!=s->sensor)return CAM_FAIL(ESTALE);
     old=cam_irq_spin_take();
     e=cam_irq_fbc.error?cam_irq_fbc.error:cam_irq_fbc.source_error;
     if(!e && (!cam_irq_fbc.bound || cam_irq_fbc.epoch!=cam_source.epoch ||
        cam_irq.epoch!=cam_source.epoch || !cam_irq.prepared || !cam_irq.owns ||
        cam_irq.close_attempted || cam_irq_fbc.request.frame.sensor!=s->sensor ||
        cam_irq_fbc.request.frame.generation!=session.generation ||
-       memcmp(&cam_irq_fbc.request,&cam_sv.request,sizeof(cam_sv.request))))e=ESTALE;
+       memcmp(&cam_irq_fbc.request,&cam_sv.request,sizeof(cam_sv.request))))e=CAM_FAIL(ESTALE);
     cam_irq_spin_drop(old);if(e)return e;
     e=cam_sv_request_guard_locked(cam_source.epoch,cam_irq.slot);if(e)return e;
     e=cam_irq_mapping();if(!e)e=cam_irq_power();if(!e)e=cam_irq_wait_rwp();
@@ -38,8 +38,8 @@ static int cam_stream_control_note_locked(uint8_t value,bool off)
     cam_irq_fbc.source_control=value;
     cam_irq_fbc.source_sampled|=1;
     if(!e && (!(cam_irq_fbc.source_issued&bit) ||
-       cam_irq_fbc.source_phase!=(off?CAM_STREAM_OFF_PENDING:CAM_STREAM_ON_PENDING)))e=ESTALE;
-    if(!e && value!=target && ((cam_irq_fbc.source_seen&bit) || value!=prior))e=ESTALE;
+       cam_irq_fbc.source_phase!=(off?CAM_STREAM_OFF_PENDING:CAM_STREAM_ON_PENDING)))e=CAM_FAIL(ESTALE);
+    if(!e && value!=target && ((cam_irq_fbc.source_seen&bit) || value!=prior))e=CAM_FAIL(ESTALE);
     if(!e) {
         if(value==target)cam_irq_fbc.source_seen|=bit;
         cam_irq_fbc.source_samples=value==target?cam_irq_fbc.source_samples+1:0;
@@ -66,16 +66,16 @@ static int cam_stream_set_locked(const struct x9_camera_sensor *s,uint8_t value)
     uint32_t issued=0,ack=0,seen=0,samples=0,phase=0,idle_samples=0,sampled=0;
     bool idle_seen=false,command=false;
     int e;
-    if(!s || value>1)return EINVAL;
+    if(!s || value>1)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_irq_lock);
     if(off)cam_repeat_stop_locked(cam_sensor_live.epoch);
     e=cam_stream_guard_locked(s,!off);if(e)goto out;
     old=cam_irq_spin_take();
-    if(cam_irq_fbc.source_issued&bit)e=EBUSY;
+    if(cam_irq_fbc.source_issued&bit)e=CAM_FAIL(EBUSY);
     else if(off) {
         if(cam_irq_fbc.source_phase!=CAM_STREAM_RUNNING ||
-           !(cam_irq_fbc.source_ack&CAM_STREAM_ON))e=ESTALE;
-    } else if(cam_irq_fbc.source_phase!=CAM_STREAM_IDLE || cam_irq_fbc.source_issued)e=ESTALE;
+           !(cam_irq_fbc.source_ack&CAM_STREAM_ON))e=CAM_FAIL(ESTALE);
+    } else if(cam_irq_fbc.source_phase!=CAM_STREAM_IDLE || cam_irq_fbc.source_issued)e=CAM_FAIL(ESTALE);
     cam_irq_spin_drop(old);if(e)goto out;
     ap=(struct cam_sensor_ap){&cam_journal.sensor,cam_sensor_slave(s->sensor)};
     /* Fresh actual prior/hold observations. Idle-on additionally checks
@@ -85,12 +85,12 @@ static int cam_stream_set_locked(const struct x9_camera_sensor *s,uint8_t value)
         e=cam_sensor_ap_read(&ap,0x0100,&byte);if(e)goto out;
         old=cam_irq_spin_take();cam_irq_fbc.source_prior_control=byte;
         cam_irq_fbc.source_sampled|=4;cam_irq_spin_drop(old);
-        if(byte!=(off?1:0)){e=ESTALE;goto out;}
+        if(byte!=(off?1:0)){e=CAM_FAIL(ESTALE);goto out;}
         e=cam_sensor_ap_read(&ap,0x0104,&byte);if(e)goto out;
-        if(byte){e=EBUSY;goto out;}
+        if(byte){e=CAM_FAIL(EBUSY);goto out;}
         if(!off) {
             e=cam_sensor_ap_read(&ap,0x0005,&byte);if(e)goto out;
-            if(byte!=0xff){e=EBUSY;goto out;}
+            if(byte!=0xff){e=CAM_FAIL(EBUSY);goto out;}
         }
     }
     e=cam_stream_guard_locked(s,!off);if(e)goto out;
@@ -110,7 +110,7 @@ static int cam_stream_set_locked(const struct x9_camera_sensor *s,uint8_t value)
     }
     cam_irq_spin_drop(old);if(e)goto out;
     e=cam_sensor_ap_guard(&ap);if(e)goto out;
-    if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+    if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
     {
         const uint8_t tx[3]={0x01,0x00,value};
         /* Already journaled BEFORE the possibly posted AP START. Generic
@@ -119,7 +119,7 @@ static int cam_stream_set_locked(const struct x9_camera_sensor *s,uint8_t value)
         e=cam_bus_transfer(ap.bus,ap.slave,tx,sizeof(tx),NULL);if(e)goto out;
     }
     for(unsigned poll=0;poll<500;poll++) {
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
         e=cam_stream_guard_locked(s,false);if(e)break;
         e=cam_stream_read_control_locked(&ap,off);if(e)break;
         old=cam_irq_spin_take();samples=cam_irq_fbc.source_samples;cam_irq_spin_drop(old);
@@ -128,17 +128,17 @@ static int cam_stream_set_locked(const struct x9_camera_sensor *s,uint8_t value)
             e=cam_sensor_ap_read(&ap,0x0005,&byte);if(e)break;
             old=cam_irq_spin_take();cam_irq_fbc.source_frame_count=byte;
             cam_irq_fbc.source_sampled|=2;cam_irq_spin_drop(old);
-            if(idle_seen && byte!=0xff){e=ESTALE;break;}
+            if(idle_seen && byte!=0xff){e=CAM_FAIL(ESTALE);break;}
             if(byte==0xff){idle_seen=true;idle_samples++;}
             if(idle_samples==2)break;
         }
         delay(1000);
     }
-    if(!e && (samples<2 || (off && idle_samples!=2)))e=ETIMEDOUT;
+    if(!e && (samples<2 || (off && idle_samples!=2)))e=CAM_FAIL(ETIMEDOUT);
     if(!e)e=cam_stream_guard_locked(s,false);
     if(!e)e=cam_sensor_ap_guard(&ap);
     if(!e) {
-        e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=EBUSY;
+        e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=CAM_FAIL(EBUSY);
     }
     if(!e)e=cam_stream_read_control_locked(&ap,off);
     if(!e)e=cam_stream_guard_locked(s,false);
@@ -147,11 +147,11 @@ static int cam_stream_set_locked(const struct x9_camera_sensor *s,uint8_t value)
         if(!e) {
             old=cam_irq_spin_take();cam_irq_fbc.source_frame_count=byte;
             cam_irq_fbc.source_sampled|=2;cam_irq_spin_drop(old);
-            if(byte!=0xff)e=ESTALE;
+            if(byte!=0xff)e=CAM_FAIL(ESTALE);
         }
         if(!e)e=cam_stream_guard_locked(s,false);
     }
-    if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
+    if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
     if(!e) {
         old=cam_irq_spin_take();
         if(cam_irq_fbc.error || cam_irq_fbc.source_error)

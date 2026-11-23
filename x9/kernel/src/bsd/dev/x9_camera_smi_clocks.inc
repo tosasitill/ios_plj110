@@ -62,9 +62,9 @@ static int cam_smi_parent_guard(void)
     uint32_t cfg;
     int e=cam_mm_guard(&cam_mm,true);if(e)return e;
     cfg=(cam_rr(cam_mm.top,0x10)>>16)&0xff;
-    if(cfg!=cam_smi.parent_cfg)return ESTALE;
-    if(cam_rr(cam_mm.top,0x330)&(1u<<29))return EBUSY;
-    if(!(cam_rr(cam_mm.top,0x270)&(1u<<29)))return ENXIO;
+    if(cfg!=cam_smi.parent_cfg)return CAM_FAIL(ESTALE);
+    if(cam_rr(cam_mm.top,0x330)&(1u<<29))return CAM_FAIL(EBUSY);
+    if(!(cam_rr(cam_mm.top,0x270)&(1u<<29)))return CAM_FAIL(ENXIO);
     /* MMINFRA is an AL mux; no AP SET/parent/PDN/PLL manipulation. The
      * MM_2 reference holds its power, FENC is still an observation,
      * not a throughput or continuous rate lease. */
@@ -102,7 +102,7 @@ static int cam_smi_clock_only_guard(void)
     int e;
     if(!cam_smi.held)return 0;
     if(cam_smi.epoch!=cam_rx_live.sensor_epoch || cam_rx_live.epoch!=cam_mm_live.epoch)
-        return ESTALE;
+        return CAM_FAIL(ESTALE);
     e=cam_smi_parent_guard();if(e)return e;
     e=cam_smi_shared_voter_guard();if(e)return e;
     for(unsigned n=0;n<CAM_SMI_SLOTS;n++)if(cam_smi.seen&(1u<<n)) {
@@ -110,15 +110,15 @@ static int cam_smi_clock_only_guard(void)
         e=cam_smi_slot_idle(n,"guard-sta");if(e)return e;
         cam_smi_sample(n,v);
         if(v[0]!=g->ap_expected && !(cam_smi.pending==CAM_SMI_SET&&cam_smi.pending_slot==n&&
-            v[0]==g->ap_before))return ESTALE;
-        if((v[1]&g->borrowed)!=g->borrowed || (v[2]&g->borrowed))return ESTALE;
+            v[0]==g->ap_before))return CAM_FAIL(ESTALE);
+        if((v[1]&g->borrowed)!=g->borrowed || (v[2]&g->borrowed))return CAM_FAIL(ESTALE);
         if(cam_smi.completed&(1u<<n)) {
-            if(v[1]!=g->mask || v[2])return ESTALE;
+            if(v[1]!=g->mask || v[2])return CAM_FAIL(ESTALE);
         } else {
             /* A SET may automatically ungate before normal CG_CLR. No
              * newly gated bit is permitted, even on a partial admission. */
-            if(v[2]&~g->cg_before)return ESTALE;
-            if(!cam_smi.pending && v[2]!=g->cg_expected)return ESTALE;
+            if(v[2]&~g->cg_before)return CAM_FAIL(ESTALE);
+            if(!cam_smi.pending && v[2]!=g->cg_expected)return CAM_FAIL(ESTALE);
         }
     }
     return 0;
@@ -136,9 +136,9 @@ static int cam_smi_slot_take(unsigned n)
     int e=cam_smi_clock_guard();if(e)return e;
     e=cam_smi_slot_idle(n,"pre-sta");if(e)return e;
     cam_smi_sample(n,a);delay(10);e=cam_smi_slot_idle(n,"pre-sta");if(e)return e;
-    cam_smi_sample(n,b);if(memcmp(a,b,sizeof(a)))return ESTALE;
+    cam_smi_sample(n,b);if(memcmp(a,b,sizeof(a)))return CAM_FAIL(ESTALE);
     /* No voted-but-gated repair, or unvoted direct-clock owner takeover. */
-    if((a[0]&~a[1]) || (a[2]&a[1]) || ((~a[2]&~a[1])&g->mask))return EBUSY;
+    if((a[0]&~a[1]) || (a[2]&a[1]) || ((~a[2]&~a[1])&g->mask))return CAM_FAIL(EBUSY);
     g->ap_before=g->ap_expected=a[0];g->borrowed=a[0];
     g->cg_before=g->cg_expected=a[2];cam_smi.seen|=1u<<n;
     g->owned=g->mask&~a[0];
@@ -153,7 +153,7 @@ static int cam_smi_slot_take(unsigned n)
         if(!e)e=cam_smi_slot_idle(n,"set-final-sta");
         if(e)return e;
         cam_smi.pending=CAM_SMI_NONE;
-        cam_smi_sample(n,b);if(b[2]&~g->cg_before)return ESTALE;
+        cam_smi_sample(n,b);if(b[2]&~g->cg_before)return CAM_FAIL(ESTALE);
         g->cg_expected=b[2];
         if(b[2]) {
             e=cam_smi_clock_guard();if(e)return e;
@@ -164,7 +164,7 @@ static int cam_smi_slot_take(unsigned n)
         }
     }
     cam_smi_sample(n,b);
-    if(b[0]!=g->mask || b[1]!=g->mask || b[2])return ESTALE;
+    if(b[0]!=g->mask || b[1]!=g->mask || b[2])return CAM_FAIL(ESTALE);
     cam_smi.completed|=1u<<n;return cam_smi_clock_guard();
 }
 /* Pending control retirement requires observed TARGET and voter idle.
@@ -174,15 +174,15 @@ static int cam_smi_pending_retire(void)
 {
     struct cam_smi_gate *g;uint32_t v[3];int e;
     if(!cam_smi.pending)return 0;
-    if(cam_smi.pending==CAM_SMI_CLR)return EBUSY; /* sole close already failed */
+    if(cam_smi.pending==CAM_SMI_CLR)return CAM_FAIL(EBUSY); /* sole close already failed */
     g=&cam_smi.gate[cam_smi.pending_slot];
     e=cam_smi_slot_idle(cam_smi.pending_slot,"retire-sta");if(e)return e;
     cam_smi_sample(cam_smi.pending_slot,v);
-    if(v[0]!=g->ap_expected || v[1]!=g->mask)return EBUSY;
+    if(v[0]!=g->ap_expected || v[1]!=g->mask)return CAM_FAIL(EBUSY);
     if(cam_smi.pending==CAM_SMI_SET) {
-        if(v[1]!=g->mask || (v[2]&~g->cg_before))return EBUSY;
+        if(v[1]!=g->mask || (v[2]&~g->cg_before))return CAM_FAIL(EBUSY);
         g->cg_expected=v[2];
-    } else if(v[2]!=g->cg_expected)return EBUSY;
+    } else if(v[2]!=g->cg_expected)return CAM_FAIL(EBUSY);
     cam_smi.pending=CAM_SMI_NONE;return cam_smi_clock_guard();
 }
 static int cam_smi_larb_idle(void)
@@ -201,7 +201,7 @@ static int cam_smi_larb_idle(void)
             if(cam_rr(g->cg,0)&bit)continue;
             cam_smi.status.larb_busy[n][0]=cam_rr(cam_smi.larb[n],0);
             cam_smi.status.larb_busy[n][1]=cam_rr(cam_smi.larb[n],0x500);
-            if(cam_smi.status.larb_busy[n][0] || cam_smi.status.larb_busy[n][1])return EBUSY;
+            if(cam_smi.status.larb_busy[n][0] || cam_smi.status.larb_busy[n][1])return CAM_FAIL(EBUSY);
         }
         delay(10);
     }
@@ -211,7 +211,7 @@ static int cam_smi_clocks_close_locked(uint64_t epoch)
 {
     int e;
     if(!cam_smi.held)return 0;
-    if(epoch!=cam_smi.epoch || cam_smi.close_attempted)return ESTALE;
+    if(epoch!=cam_smi.epoch || cam_smi.close_attempted)return CAM_FAIL(ESTALE);
     cam_smi.close_attempted=true;
     e=cam_sv_qos_release_guard(epoch);
     if(!e)e=cam_smi_pending_retire();if(!e)e=cam_smi_clock_only_guard();
@@ -240,10 +240,10 @@ static int cam_smi_clocks_close_locked(uint64_t epoch)
             if(!e)e=cam_smi_slot_idle(n,"clr-final-sta");
             if(e)break;
             cam_smi_sample(n,v);
-            if(g->cg_before&v[1]) {e=ESTALE;break;} /* a new owner keeps dependencies */
+            if(g->cg_before&v[1]) {e=CAM_FAIL(ESTALE);break;} /* a new owner keeps dependencies */
             e=cam_wait_bits(g->cg,0,g->cg_before,g->cg_before,10000);if(e)break;
             cam_smi_sample(n,v);
-            if((v[1]&g->borrowed)!=g->borrowed || (v[2]&g->borrowed)) {e=ESTALE;break;}
+            if((v[1]&g->borrowed)!=g->borrowed || (v[2]&g->borrowed)) {e=CAM_FAIL(ESTALE);break;}
             cam_smi.pending=CAM_SMI_NONE;g->owned=0;
         }
         cam_smi.completed&=~(1u<<n);cam_smi.seen&=~(1u<<n);g->borrowed=0;
@@ -264,11 +264,11 @@ static int cam_smi_clocks_open_locked(uint64_t epoch,unsigned sensor)
     static vm_offset_t cg[2],larb[3];
     static const uint64_t larb_pa[3]={0x3a01b000,0x3a01a000,0x3a01e000};
     int e=cam_rx_session_guard();if(e)return e;
-    if(cam_smi.held)return EALREADY;
+    if(cam_smi.held)return CAM_FAIL(EALREADY);
     if(!cg[0])cg[0]=ml_io_map(0x3c80d000,0x1000);
     if(!cg[1])cg[1]=ml_io_map(0x3a680000,0x1000);
     for(unsigned n=0;n<3;n++)if(!larb[n])larb[n]=ml_io_map(larb_pa[n],0x1000);
-    if(!cg[0]||!cg[1]||!larb[0]||!larb[1]||!larb[2])return ENOMEM;
+    if(!cg[0]||!cg[1]||!larb[0]||!larb[1]||!larb[2])return CAM_FAIL(ENOMEM);
     memset(&cam_smi,0,sizeof(cam_smi));cam_smi.epoch=epoch;
     cam_smi.parent_cfg=(cam_rr(cam_mm.top,0x10)>>16)&0xff;
     /* CG35 R1A subcomm1/2/3 bits13/14/15, CG34 CAM_MRAW larb14/19/29
@@ -301,7 +301,7 @@ static int cam_smi_retirement_guard(uint64_t epoch)
 {
     int e;
     if(!cam_smi.held)return 0;
-    if(epoch!=cam_smi.epoch)return ESTALE;
+    if(epoch!=cam_smi.epoch)return CAM_FAIL(ESTALE);
     /* First qualify posted controls at their actual TARGET while every
      * dependent component is still powered. This is not DMA drain. */
     e=cam_smi_pending_retire();
@@ -313,22 +313,22 @@ static int cam_smi_retirement_guard(uint64_t epoch)
 int x9_camera_sensor_session_prepare_smi_clocks(uint64_t epoch,struct x9_camera_smi_clock_status *s)
 {
     struct cam_sensor_ap ap;uint8_t byte=0;int e;
-    if(!s)return EINVAL;
+    if(!s)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_control_lock);memset(s,0,sizeof(*s));s->sensor_epoch=epoch;
     e=cam_sensor_session_match(epoch);
     if(!e&&cam_sensor_live.error)e=cam_sensor_live.error;
-    if(!e&&(cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED||session.capture||session.stream))e=EBUSY;
-    if(!e&&!cam_rx_sensor_held_locked(epoch))e=ENXIO;
-    if(!e&&cam_smi.held)e=EALREADY;
-    if(!e&&(cam_mac.held||cam_phy.held||cam_out.held))e=EBUSY;
+    if(!e&&(cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED||session.capture||session.stream))e=CAM_FAIL(EBUSY);
+    if(!e&&!cam_rx_sensor_held_locked(epoch))e=CAM_FAIL(ENXIO);
+    if(!e&&cam_smi.held)e=CAM_FAIL(EALREADY);
+    if(!e&&(cam_mac.held||cam_phy.held||cam_out.held))e=CAM_FAIL(EBUSY);
     if(!e) {
         s->sensor=cam_sensor_live.probe.sensor;
         ap=(struct cam_sensor_ap){&cam_journal.sensor,cam_sensor_slave(s->sensor)};
-        e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e&&byte)e=EBUSY;
-        if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e&&byte)e=EBUSY;
+        e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e&&byte)e=CAM_FAIL(EBUSY);
+        if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e&&byte)e=CAM_FAIL(EBUSY);
         if(!e)e=cam_smi_clocks_open_locked(epoch,s->sensor);
-        if(!e)e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e&&byte)e=EBUSY;
-        if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e&&byte)e=EBUSY;
+        if(!e)e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e&&byte)e=CAM_FAIL(EBUSY);
+        if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e&&byte)e=CAM_FAIL(EBUSY);
         if(!e)e=cam_sensor_ap_guard(&ap);
         if(e) {
             if(cam_smi.held) {cam_smi_fault(e);cam_rx_session_fault(e);}

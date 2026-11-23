@@ -46,8 +46,8 @@ static int cam_irq_fbc_bind_locked(uint64_t epoch)
     boolean_t old;
     int e;
     if(cam_sv_gate.phase!=X9_CAM_SV_GATE_ARMED || cam_sv_gate.error ||
-       cam_sv.receive_phase!=X9_CAM_SV_RECEIVE_ARMED)return ESTALE;
-    old=cam_irq_spin_take();e=cam_irq_fbc.bound?EBUSY:0;cam_irq_spin_drop(old);
+       cam_sv.receive_phase!=X9_CAM_SV_RECEIVE_ARMED)return CAM_FAIL(ESTALE);
+    old=cam_irq_spin_take();e=cam_irq_fbc.bound?CAM_FAIL(EBUSY):0;cam_irq_spin_drop(old);
     if(e)return e; /* no rebasing/rearm before real whole-producer retirement */
     for(unsigned sample=0;sample<2;sample++) {
         e=cam_sv_request_guard_locked(epoch,cam_irq.slot);if(e)return e;
@@ -58,7 +58,7 @@ static int cam_irq_fbc_bind_locked(uint64_t epoch)
             counter[bank]=cam_irq_rd(cam_irq.view[bank],0x544);
             if(control[bank]!=cam_sv.expected[bank][cam_sv.field[CAM_SV_FBC]] ||
                counter[bank]!=cam_sv.credit_target[bank] ||
-               (counter[bank]&CAM_IRQ_FBC_CNT)!=0x10000u)return ESTALE;
+               (counter[bank]&CAM_IRQ_FBC_CNT)!=0x10000u)return CAM_FAIL(ESTALE);
         }
         if(!sample)delay(1);
     }
@@ -66,7 +66,7 @@ static int cam_irq_fbc_bind_locked(uint64_t epoch)
     e=cam_irq_credit_guard_locked(epoch);if(e)return e;
     old=cam_irq_spin_take();
     if(cam_irq_fbc.bound || cam_irq.epoch!=epoch || cam_irq.error || !cam_irq.accepting ||
-       cam_irq.sof_seen || cam_irq.busy || cam_irq.count)e=ESTALE;
+       cam_irq.sof_seen || cam_irq.busy || cam_irq.count)e=CAM_FAIL(ESTALE);
     else {
         cam_irq_fbc.epoch=epoch;cam_irq_fbc.request=cam_irq.request;
         for(unsigned bank=0;bank<2;bank++) {
@@ -148,14 +148,14 @@ static int cam_irq_fbc_live_sample(uint64_t epoch,unsigned bank,vm_offset_t view
         *live=true;
         if(bank>=2 || !cam_irq_fbc.bound || epoch!=cam_irq_fbc.epoch || epoch!=cam_irq.epoch ||
            view!=cam_irq.view[bank] || accepted!=cam_irq_fbc.before[bank] ||
-           memcmp(r,&cam_irq_fbc.request,sizeof(*r)))e=ESTALE;
+           memcmp(r,&cam_irq_fbc.request,sizeof(*r)))e=CAM_FAIL(ESTALE);
         if(!e)e=cam_irq_power();
         if(!e && cam_irq.close_attempted) {
             /* The qualified control stop precedes route/priority unwind.
              * Compare the exact original dirty/uncertain journal here, not
              * the all-published target after OUR first prior restoration.
              * No generic close flag or masked line grants this exception. */
-            if(!cam_stream_close_restore_ready())e=ESTALE;
+            if(!cam_stream_close_restore_ready())e=CAM_FAIL(ESTALE);
             if(!e)e=cam_irq_controller_impl(true);
             if(!e)e=cam_irq_partial_config();
         } else if(!e)e=cam_irq_config(true);
@@ -225,13 +225,13 @@ static int cam_irq_fbc_done_locked(const struct cam_irq_event *ev)
     if(!e && (!cam_irq_fbc.bound || !(cam_irq_fbc.source_ack&CAM_STREAM_ON) ||
        !cam_irq_fbc.done_seen || cam_irq_fbc.attempted ||
        cam_irq_fbc.epoch!=cam_irq.epoch || ev->role!=X9_CAM_IRQ_HYBRID || ev->error || ev->fbc_sampled!=3u ||
-       memcmp(&cam_irq_fbc.done,&ev->frame,sizeof(ev->frame))))e=ESTALE;
+       memcmp(&cam_irq_fbc.done,&ev->frame,sizeof(ev->frame))))e=CAM_FAIL(ESTALE);
     if(!e)cam_irq_fbc.attempted=true;
     cam_irq_spin_drop(old);if(e)return e;
     nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
     for(unsigned poll=0;poll<10000;poll++) {
         bool match=true;
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
         e=d->check(d->context,d->lease,&cam_irq.slot->request);if(e)break; /* never under spin */
         if(!e)e=cam_irq_mapping();if(!e)e=cam_irq_power();
         if(!e)e=cam_irq_config(false);if(e)break;
@@ -250,11 +250,11 @@ static int cam_irq_fbc_done_locked(const struct cam_irq_event *ev)
         samples=cam_irq_fbc.samples;
         cam_irq_spin_drop(old);if(e)break;
         e=d->check(d->context,d->lease,&cam_irq.slot->request);if(e)break;
-        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
         if(samples==2){accepted=true;break;}
         delay(1);
     }
-    if(!e && !accepted)e=ETIMEDOUT;
+    if(!e && !accepted)e=CAM_FAIL(ETIMEDOUT);
     old=cam_irq_spin_take();
     if(!e && cam_irq.error)e=cam_irq.error;
     /* The last owner check may have taken time. Re-read the exact final
@@ -266,9 +266,9 @@ static int cam_irq_fbc_done_locked(const struct cam_irq_event *ev)
         uint32_t control=cam_irq_rd(cam_irq.view[bank],0x540);
         uint32_t counter=cam_irq_rd(cam_irq.view[bank],0x544);
         e=cam_irq_fbc_note_locked(bank,control,counter);
-        if(!e && !cam_repeat_done_target_locked(bank,counter))e=ESTALE;
+        if(!e && !cam_repeat_done_target_locked(bank,counter))e=CAM_FAIL(ESTALE);
     }
-    if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
+    if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
     if(e)e=cam_irq_fbc_fault_locked(e);
     else cam_irq_fbc.count_accepted=true;
     memcpy(actual,cam_irq_fbc.after,sizeof(actual));memcpy(seen,cam_irq_fbc.seen,sizeof(seen));

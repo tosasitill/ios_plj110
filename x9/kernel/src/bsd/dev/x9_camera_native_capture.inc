@@ -62,9 +62,9 @@ static int cam_native_capture_sensor(uint64_t epoch,const struct x9_camera_senso
 {
     int e;
     if(!s || !x9_camera_sensor_valid(s->sensor) ||
-       s!=&sensors[s->sensor-1])return EINVAL;
+       s!=&sensors[s->sensor-1])return CAM_FAIL(EINVAL);
     e=cam_sensor_session_match(epoch);if(e)return e;
-    if(cam_sensor_live.probe.sensor!=s->sensor)return ESTALE;
+    if(cam_sensor_live.probe.sensor!=s->sensor)return CAM_FAIL(ESTALE);
     if(cam_sensor_live.error)return cam_sensor_live.error;
     return cam_sensor_live.phase==CAM_SENSOR_CONFIGURED?0:ESTALE;
 }
@@ -84,7 +84,7 @@ static int cam_native_capture_route_guard(uint64_t epoch)
        !cam_out.held || cam_out.epoch!=epoch || cam_out.close_attempted || cam_out.error ||
        !cam_out.consumed || cam_out_irq.poison || !cam_out_irq.mode_ready ||
        !cam_smi.held || cam_smi.epoch!=epoch || cam_smi.close_attempted || cam_smi.error ||
-       !cam_sv.held || cam_sv.epoch!=epoch || cam_sv.close_attempted || cam_sv.error)return ESTALE;
+       !cam_sv.held || cam_sv.epoch!=epoch || cam_sv.close_attempted || cam_sv.error)return CAM_FAIL(ESTALE);
     e=cam_out_top_guard(false);if(e)return e;
     e=cam_smi_clock_guard();if(e)return e;
     e=cam_mac_guard();if(e)return e;
@@ -103,11 +103,11 @@ static int cam_native_capture_route_guard(uint64_t epoch)
                 else if(v[n]==cam_out.expected[0][n])allowed=true;
             }
             allowed=cam_out_irq_control_allowed(bank,n,v[n],allowed);
-            if(!allowed)return ESTALE;
+            if(!allowed)return CAM_FAIL(ESTALE);
         }
         uint32_t pending=cam_rr(cam_out.out[bank],0x1c)|cam_rr(cam_out.out[bank],0x38);
-        if(pending&~1u)return EIO;
-        if((!cam_out.commit_pending || cam_out_irq_inner_target_required()) && (pending&1))return EBUSY;
+        if(pending&~1u)return CAM_FAIL(EIO);
+        if((!cam_out.commit_pending || cam_out_irq_inner_target_required()) && (pending&1))return CAM_FAIL(EBUSY);
     }
     return 0;
 }
@@ -135,7 +135,7 @@ static int cam_native_capture_old_teardown(uint64_t epoch,uint64_t token,
         memcmp(&cam_sv.request,r,sizeof(*r)) || !cam_sv.credit_retired ||
         !cam_sv.request_held || cam_sv.epoch!=epoch || cam_sv.terminal || cam_sv.error ||
         slot->dma.backing!=m->map || slot->dma.context!=&cam_native_capture ||
-        slot->dma.lease!=lease || slot->dma.check!=cam_native_capture_dma_check?ESTALE:0;
+        slot->dma.lease!=lease || slot->dma.check!=cam_native_capture_dma_check?CAM_FAIL(ESTALE):0;
     cam_irq_spin_drop(old);if(e)return e;
     lck_mtx_lock(&camera_s1_lock);
     e=cam_s1_check_private(m->map);
@@ -145,7 +145,7 @@ static int cam_native_capture_old_teardown(uint64_t epoch,uint64_t token,
     lck_mtx_unlock(&camera_s1_lock);if(e)return e;
     if(!cam_mm.active || cam_mm.receive.power_token!=token ||
        m->native_power!=token || cam_native_capture.controller_busy ||
-       cam_native_capture.repeat_admission)return ESTALE;
+       cam_native_capture.repeat_admission)return CAM_FAIL(ESTALE);
     return x9_camera_native_smmu_retirement_check(epoch,m);
 }
 
@@ -158,10 +158,10 @@ static int cam_native_capture_cancel_teardown(uint64_t epoch,uint64_t token,
     struct x9_camera_smmu *m,const struct x9_camera_camsv_request *r,uint32_t phase)
 {
     if(phase!=CAM_CAPTURE_LOCAL_CANCELLED_STOPPED &&
-       phase!=CAM_CAPTURE_CANCELLED_TRANSLATION_RETIRED)return ESTALE;
+       phase!=CAM_CAPTURE_CANCELLED_TRANSLATION_RETIRED)return CAM_FAIL(ESTALE);
     if(!cam_mm.active || cam_mm.receive.power_token!=token ||
        m->native_power!=token || cam_native_capture.controller_busy ||
-       cam_native_capture.repeat_admission)return ESTALE;
+       cam_native_capture.repeat_admission)return CAM_FAIL(ESTALE);
     int e=cam_repeat_cancelled_check_locked(epoch,r,m->map);
     if(e)return e;
     /* Local cancel has retired the real producer/worker/unused request,
@@ -180,19 +180,19 @@ static int cam_native_capture_dma_check(void *context,uint64_t lease,
     uint64_t epoch,token;
     uint32_t phase;
     int e;
-    if(c!=&cam_native_capture || !r || !lease)return EINVAL;
+    if(c!=&cam_native_capture || !r || !lease)return CAM_FAIL(EINVAL);
     /* Never keep this mutex while invoking another component. A completion
      * pins the immutable request/namespace; STOP cannot free or rebind them. */
     lck_mtx_lock(&camera_native_capture_lock);
     e=c->error;
     if(!e && (!c->prepared || !c->reserved || !c->request_held ||
-       !c->smmu || c->lease!=lease || memcmp(r,&c->request,sizeof(*r))))e=ESTALE;
+       !c->smmu || c->lease!=lease || memcmp(r,&c->request,sizeof(*r))))e=CAM_FAIL(ESTALE);
     epoch=c->epoch;token=c->power_token;smmu=c->smmu;view=c->view;phase=c->phase;
     if(!e && (!epoch || !token || r->frame.sensor!=c->sensor ||
        r->frame.generation!=c->generation || r->iova!=CAM_NATIVE_IOVA ||
        r->iova!=view.map.iova || r->frame.raw!=view.map.raw ||
        r->frame.bytes!=view.map.bytes || view.map.mapped_bytes!=c->reservation_bytes ||
-       view.asid!=CAM_SMMU_ASID || !view.map.backing))e=ESTALE;
+       view.asid!=CAM_SMMU_ASID || !view.map.backing))e=CAM_FAIL(ESTALE);
     lck_mtx_unlock(&camera_native_capture_lock);
     if(e)return e;
     if(phase==CAM_CAPTURE_TRANSLATION_RETIRED)
@@ -200,12 +200,12 @@ static int cam_native_capture_dma_check(void *context,uint64_t lease,
     if(phase==CAM_CAPTURE_CANCELLED_TRANSLATION_RETIRED ||
        phase==CAM_CAPTURE_LOCAL_CANCELLED_STOPPED)
         return cam_native_capture_cancel_teardown(epoch,token,smmu,r,phase);
-    if(phase!=CAM_CAPTURE_LIVE && phase!=CAM_CAPTURE_LOCAL_STOPPED)return ESTALE;
+    if(phase!=CAM_CAPTURE_LIVE && phase!=CAM_CAPTURE_LOCAL_STOPPED)return CAM_FAIL(ESTALE);
     /* These are live consumed dependencies, not a cached MM_GET/idle grant.
      * The normal host re-walks the whole owned S1/CD/STE/queue storage and
      * verifies exact own controller configuration/producers and real power. */
     if(cam_sensor_live.epoch!=epoch || cam_sensor_live.close_attempted ||
-       cam_mm.receive.power_token!=token || !cam_mm.active)return ESTALE;
+       cam_mm.receive.power_token!=token || !cam_mm.active)return CAM_FAIL(ESTALE);
     e=x9_mm_power_validate(token,X9_MM_POWER_CAMERA);
     if(!e)e=cam_mm_session_check(cam_rx_live.epoch);
     if(!e)e=cam_native_source_rate_guard_locked(epoch);
@@ -217,7 +217,7 @@ static int cam_native_capture_dma_check(void *context,uint64_t lease,
     lck_mtx_lock(&camera_native_capture_lock);
     e=c->error?c->error:c->epoch!=epoch || c->power_token!=token ||
         c->smmu!=smmu || c->lease!=lease || !c->request_held ||
-        memcmp(r,&c->request,sizeof(*r))?ESTALE:0;
+        memcmp(r,&c->request,sizeof(*r))?CAM_FAIL(ESTALE):0;
     lck_mtx_unlock(&camera_native_capture_lock);
     return e;
 }
@@ -242,7 +242,7 @@ static int cam_native_capture_thread_start_locked(void)
     bool started=cam_native_capture.controller_started;
     lck_mtx_unlock(&camera_native_capture_lock);
     if(started)return 0;
-    if(kernel_thread_start(cam_native_capture_controller,NULL,&thread)!=KERN_SUCCESS)return ENOMEM;
+    if(kernel_thread_start(cam_native_capture_controller,NULL,&thread)!=KERN_SUCCESS)return CAM_FAIL(ENOMEM);
     thread_deallocate(thread);
     lck_mtx_lock(&camera_native_capture_lock);
     cam_native_capture.controller_started=true;
@@ -286,7 +286,7 @@ static void __attribute__((noreturn)) cam_native_capture_controller(void *arg,wa
         bool admitted=cam_native_capture.repeat_admission && cam_native_capture.epoch==epoch;
         if(admitted)cam_native_capture.controller_busy=true;
         lck_mtx_unlock(&camera_native_capture_lock);
-        int e=ECANCELED;
+        int e=CAM_FAIL(ECANCELED);
         if(admitted) {
             lck_mtx_lock(&camera_irq_lock);
             e=cam_native_capture_next_locked(epoch);
@@ -334,10 +334,10 @@ static int cam_native_capture_admit(void *context)
     uint64_t reg[4];
     uint64_t el;
     int e;
-    if(context!=&cam_native_capture)return EINVAL;
-    if(!sweet_early_is_x9() || st.mode!=2)return EPERM;
+    if(context!=&cam_native_capture)return CAM_FAIL(EINVAL);
+    if(!sweet_early_is_x9() || st.mode!=2)return CAM_FAIL(EPERM);
     __asm__ volatile("mrs %0, CurrentEL":"=r"(el));
-    if(el!=4 || PAGE_SIZE!=0x4000)return ENOTSUP;
+    if(el!=4 || PAGE_SIZE!=0x4000)return CAM_FAIL(ENOTSUP);
     /* Runtime boot topology, not generated constants alone. Registration
      * performs only actual cold sensor ID probes. CSI/CAM/SMMU reads and
      * rate/floor/BW checks must wait for prepare's real MM power token.
@@ -345,31 +345,31 @@ static int cam_native_capture_admit(void *context)
      * voltage floor becoming ready, and don't sample unpowered CAMSV here. */
     if(SecureDTLookupEntry(NULL,"/chosen",&chosen)!=kSuccess ||
        SecureDTGetProperty(chosen,"x9-camera-irq-layout",&p,&n)!=kSuccess ||
-       !p || n!=sizeof(q))return ENXIO;
-    memcpy(&q,p,sizeof(q));if(!x9_camera_irq_layout_valid(&q))return ENXIO;
+       !p || n!=sizeof(q))return CAM_FAIL(ENXIO);
+    memcpy(&q,p,sizeof(q));if(!x9_camera_irq_layout_valid(&q))return CAM_FAIL(ENXIO);
     if(SecureDTLookupEntry(NULL,"/arm-io/gic",&gic)!=kSuccess ||
-       SecureDTGetProperty(gic,"reg",&p,&n)!=kSuccess || !p || n!=sizeof(reg))return ENXIO;
+       SecureDTGetProperty(gic,"reg",&p,&n)!=kSuccess || !p || n!=sizeof(reg))return CAM_FAIL(ENXIO);
     memcpy(reg,p,sizeof(reg));
     if(reg[0]!=q.gicd_base-0x400000ull || reg[1]!=q.gicd_bytes ||
-       reg[2]!=0x06880000-0x400000ull || reg[3]!=0x200000)return ENXIO;
+       reg[2]!=0x06880000-0x400000ull || reg[3]!=0x200000)return CAM_FAIL(ENXIO);
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
     e=st.mode!=2?EPERM:hw.version || opened || cam_sensor_session_active ||
         cam_stop_owned() || session.latched || frame_readers ||
-        (st.flags&(X9_CAMERA_FAULT|X9_CAMERA_RETAINED|X9_CAMERA_STREAMING))?EBUSY:0;
+        (st.flags&(X9_CAMERA_FAULT|X9_CAMERA_RETAINED|X9_CAMERA_STREAMING))?CAM_FAIL(EBUSY):0;
     lck_mtx_unlock(&camera_lock);
     lck_mtx_lock(&camera_native_capture_lock);
     if(!e && (cam_native_capture.error || cam_native_capture.prepare_attempted ||
        cam_native_capture.smmu || cam_native_capture.phase!=CAM_CAPTURE_EMPTY ||
-       cam_native_capture.controller_busy || cam_native_capture.repeat_admission))e=EBUSY;
+       cam_native_capture.controller_busy || cam_native_capture.repeat_admission))e=CAM_FAIL(EBUSY);
     lck_mtx_unlock(&camera_native_capture_lock);
     if(!e && (cam_mm.active || cam_rx_live.epoch || cam_sv.held || cam_smi.held ||
-       cam_mac.held || cam_phy.held || cam_out.held))e=EBUSY;
+       cam_mac.held || cam_phy.held || cam_out.held))e=CAM_FAIL(EBUSY);
     boolean_t old=cam_irq_spin_take();
     if(!e && (cam_irq.prepared || cam_irq.owns || cam_irq.accepting ||
-       cam_irq.busy || cam_irq.count || cam_irq.error))e=EBUSY;
+       cam_irq.busy || cam_irq.count || cam_irq.error))e=CAM_FAIL(EBUSY);
     cam_irq_spin_drop(old);
     lck_mtx_lock(&camera_smmu_lock);
-    if(!e && cam_smmu_namespace)e=EBUSY;
+    if(!e && cam_smmu_namespace)e=CAM_FAIL(EBUSY);
     lck_mtx_unlock(&camera_smmu_lock);
     lck_mtx_unlock(&camera_control_lock);
     /* The native lifecycle includes actual streamed/unstarted retirement,
@@ -390,7 +390,7 @@ static int cam_native_capture_prepare(void *context,uint64_t epoch,
     const char *step="sensor";
     uint64_t token=0;
     int e;
-    if(c!=&cam_native_capture || !s)return EINVAL;
+    if(c!=&cam_native_capture || !s)return CAM_FAIL(EINVAL);
     e=cam_native_capture_sensor(epoch,s);
     if(e)goto out;
     step="standby";
@@ -405,7 +405,7 @@ static int cam_native_capture_prepare(void *context,uint64_t epoch,
        cam_irq.close_attempted || !cam_native_source.rate_valid ||
        cam_native_source.status.sensor_epoch!=epoch ||
        cam_native_source.status.stage!=X9_CAM_NATIVE_SOURCE_CONFIGURED) {
-        e=ENXIO;
+        e=CAM_FAIL(ENXIO);
         goto out;
     }
     step="rate-guard";
@@ -413,7 +413,7 @@ static int cam_native_capture_prepare(void *context,uint64_t epoch,
     if(e)goto out;
     step="reserve";
     lck_mtx_lock(&camera_native_capture_lock);
-    e=c->error?c->error:c->prepare_attempted?EALREADY:0;
+    e=c->error?c->error:c->prepare_attempted?CAM_FAIL(EALREADY):0;
     old_smmu=c->smmu; /* pinned retired namespace, never freed/reset as live */
     if(!e) {
         c->prepare_attempted=true;c->epoch=epoch;c->sensor=s->sensor;
@@ -442,7 +442,7 @@ static int cam_native_capture_prepare(void *context,uint64_t epoch,
        view.map.iova!=CAM_NATIVE_IOVA || view.map.bytes!=plan.bytes ||
        view.map.mapped_bytes!=c->reservation_bytes || view.asid!=CAM_SMMU_ASID)) {
         step="smmu-export";
-        e=EFAULT;
+        e=CAM_FAIL(EFAULT);
     }
     if(e && !c->error)c->error=e;
     if(!e){c->prepared=true;c->phase=CAM_CAPTURE_LIVE;}
@@ -478,7 +478,7 @@ static int cam_native_capture_power_guard_locked(uint64_t epoch)
     e=!m || recycled_idle?0:cam_native_capture.epoch!=epoch?ESTALE:
         cam_native_capture.controller_busy || cam_native_capture.repeat_admission?EBUSY:
         phase!=CAM_CAPTURE_TRANSLATION_RETIRED && phase!=CAM_CAPTURE_UNSTARTED_RETIRED &&
-        phase!=CAM_CAPTURE_CANCELLED_TRANSLATION_RETIRED?EBUSY:0;
+        phase!=CAM_CAPTURE_CANCELLED_TRANSLATION_RETIRED?CAM_FAIL(EBUSY):0;
     bool never_candidate=m && cam_native_capture.epoch==epoch &&
         phase==CAM_CAPTURE_PREPARING && !cam_native_capture.prepared &&
         !cam_native_capture.on_attempted && !cam_native_capture.request_held &&
@@ -508,7 +508,7 @@ static int cam_native_capture_power_guard_locked(uint64_t epoch)
     if(e || !m)return e;
     if(phase==CAM_CAPTURE_CANCELLED_TRANSLATION_RETIRED)
         return cam_native_capture_cancel_teardown(epoch,token,m,&request,phase);
-    if(!cam_mm.active || cam_mm.receive.power_token!=token || m->native_power!=token)return ESTALE;
+    if(!cam_mm.active || cam_mm.receive.power_token!=token || m->native_power!=token)return CAM_FAIL(ESTALE);
     /* Keep the handle/history forever; the real restored register/storage
      * check, not c.smmu=NULL or error clearing, grants supplier teardown. */
     return x9_camera_native_smmu_retirement_check(epoch,m);
@@ -517,7 +517,7 @@ static int cam_native_capture_retirement_guard(void *context,uint64_t epoch,
     const struct x9_camera_sensor *s)
 {
     if(context!=&cam_native_capture || !s || s->sensor<X9_CAMERA_BACK ||
-       s->sensor>X9_CAMERA_SENSOR_COUNT || s!=&sensors[s->sensor-1])return EINVAL;
+       s->sensor>X9_CAMERA_SENSOR_COUNT || s!=&sensors[s->sensor-1])return CAM_FAIL(EINVAL);
     return cam_native_capture_power_guard_locked(epoch);
 }
 
@@ -533,7 +533,7 @@ static int cam_native_capture_recycle_locked(uint64_t epoch)
     struct cam_native_capture_receipt *receipt;
     struct x9_camera_smmu *m;
     int e;
-    if(!epoch)return EINVAL;
+    if(!epoch)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_native_capture_lock);
     if(!c->epoch || c->epoch!=epoch || !c->prepare_attempted) {
         lck_mtx_unlock(&camera_native_capture_lock);return 0;
@@ -547,10 +547,10 @@ static int cam_native_capture_recycle_locked(uint64_t epoch)
         c->controller_busy || c->repeat_admission ||
         (c->phase!=CAM_CAPTURE_TRANSLATION_RETIRED &&
          c->phase!=CAM_CAPTURE_UNSTARTED_RETIRED &&
-         c->phase!=CAM_CAPTURE_CANCELLED_TRANSLATION_RETIRED)?EBUSY:0;
+         c->phase!=CAM_CAPTURE_CANCELLED_TRANSLATION_RETIRED)?CAM_FAIL(EBUSY):0;
     lck_mtx_unlock(&camera_native_capture_lock);if(e)return e;
     receipt=kalloc_type(struct cam_native_capture_receipt,Z_WAITOK|Z_ZERO);
-    if(!receipt)return ENOMEM;
+    if(!receipt)return CAM_FAIL(ENOMEM);
     lck_mtx_lock(&camera_native_capture_lock);
     receipt->owner=*c;
     lck_mtx_unlock(&camera_native_capture_lock);
@@ -582,7 +582,7 @@ static int cam_native_capture_off_locked(struct cam_native_capture_context *c,ui
     cam_native_capture_stop_locked(epoch);
     lck_mtx_lock(&camera_native_capture_lock);
     e=c->epoch!=epoch || c->sensor!=s->sensor?ESTALE:c->off_attempted?
-        c->off_error?c->off_error:ESTALE:c->controller_busy?EBUSY:0;
+        c->off_error?c->off_error:ESTALE:c->controller_busy?CAM_FAIL(EBUSY):0;
     if(!e){c->off_attempted=true;m=c->smmu;request=c->request;}
     else m=NULL;
     lck_mtx_unlock(&camera_native_capture_lock);if(e)return e;
@@ -627,10 +627,10 @@ static int cam_native_capture_capture(void *context,uint64_t epoch,
     int e;
     if(c!=&cam_native_capture || !s || s->sensor<X9_CAMERA_BACK ||
        s->sensor>X9_CAMERA_SENSOR_COUNT || s!=&sensors[s->sensor-1] ||
-       (on!=0 && on!=1) || !generation)return EINVAL;
+       (on!=0 && on!=1) || !generation)return CAM_FAIL(EINVAL);
     if(!on)return cam_native_capture_off_locked(c,epoch,s);
     lck_mtx_lock(&camera_native_capture_lock);
-    e=c->epoch!=epoch || c->sensor!=s->sensor?ESTALE:0;
+    e=c->epoch!=epoch || c->sensor!=s->sensor?CAM_FAIL(ESTALE):0;
     if(!e && (c->error || !c->prepared || c->on_attempted || c->request_held))
         e=c->error?c->error:EBUSY;
     if(!e) {c->on_attempted=true;c->generation=generation;}
@@ -638,7 +638,7 @@ static int cam_native_capture_capture(void *context,uint64_t epoch,
     if(e)goto report;
     step="sensor-session";
     e=cam_native_capture_sensor(epoch,s);
-    if(!e && (!session.capture || session.stream || session.generation!=generation))e=ESTALE;
+    if(!e && (!session.capture || session.stream || session.generation!=generation))e=CAM_FAIL(ESTALE);
     if(e)goto fault;
     step="initial-controls";
     e=cam_native_ae_seed_locked(epoch,config);
@@ -646,7 +646,7 @@ static int cam_native_capture_capture(void *context,uint64_t epoch,
     if(e)goto fault;
     step="raw-request";
     lck_mtx_lock(&camera_native_capture_lock);
-    if(c->capture_serial==UINT64_MAX)e=EOVERFLOW;
+    if(c->capture_serial==UINT64_MAX)e=CAM_FAIL(EOVERFLOW);
     if(!e) {
         r.frame.version=X9_CAMERA_COMPLETED_VERSION;r.frame.sensor=s->sensor;
         r.frame.stride=c->plan.stride;r.frame.bytes=c->plan.bytes;
@@ -695,13 +695,13 @@ static int cam_native_capture_exposure(void *context,uint64_t epoch,
 {
     struct cam_native_capture_context *c=context;
     int e;
-    if(c!=&cam_native_capture)return EINVAL;
+    if(c!=&cam_native_capture)return CAM_FAIL(EINVAL);
     e=cam_native_capture_sensor(epoch,s);if(e)return e;
     lck_mtx_lock(&camera_native_capture_lock);
     e=c->error?c->error:c->epoch!=epoch || c->sensor!=s->sensor ||
-        !c->prepared || !c->request_held || c->off_attempted?ESTALE:0;
+        !c->prepared || !c->request_held || c->off_attempted?CAM_FAIL(ESTALE):0;
     lck_mtx_unlock(&camera_native_capture_lock);
-    if(!e && (!session.capture || !session.stream))e=ENXIO;
+    if(!e && (!session.capture || !session.stream))e=CAM_FAIL(ENXIO);
     /* Accepts a unit request only. Current immutable frame metadata does
      * not change merely because an AE request was queued successfully. */
     return e?e:cam_native_ae_queue_locked(epoch,lines,gain,frame_lines);
@@ -716,10 +716,10 @@ static int cam_native_capture_publish_next(void *context,
 {
     struct cam_native_capture_context *c=context;
     int e;
-    if(c!=&cam_native_capture || !r || !d)return EINVAL;
+    if(c!=&cam_native_capture || !r || !d)return CAM_FAIL(EINVAL);
     boolean_t old=cam_irq_spin_take();
     e=cam_repeat.phase!=CAM_REPEAT_PREPARING || !cam_repeat.admission ||
-        cam_irq.busy || cam_irq.count || cam_irq.accepting?ESTALE:0;
+        cam_irq.busy || cam_irq.count || cam_irq.accepting?CAM_FAIL(ESTALE):0;
     cam_irq_spin_drop(old);if(e)return e;
     lck_mtx_lock(&camera_native_capture_lock);
     e=c->error?c->error:!c->repeat_admission || !c->controller_busy || c->off_attempted ||
@@ -731,7 +731,7 @@ static int cam_native_capture_publish_next(void *context,
         r->frame.time || r->frame.sof_time || r->tag || r->group || r->reserved ||
         d->version!=X9_CAMERA_CAMSV_VERSION || d->reserved || d->context!=c ||
         d->lease!=c->lease || d->backing!=c->view.map.backing ||
-        d->check!=cam_native_capture_dma_check?ESTALE:0;
+        d->check!=cam_native_capture_dma_check?CAM_FAIL(ESTALE):0;
     if(!e)e=cam_completed_layout(&sensors[c->sensor-1],&r->frame);
     if(!e)e=cam_completed_controls(&sensors[c->sensor-1],&r->frame);
     if(!e) {
@@ -752,17 +752,17 @@ static int cam_native_capture_next_locked(uint64_t epoch)
     int e;
     lck_mtx_lock(&camera_native_capture_lock);
     e=!c->repeat_admission || c->epoch!=epoch?ECANCELED:c->error?c->error:
-        !c->prepared || !c->request_held || !c->controller_busy || c->off_attempted?ESTALE:0;
+        !c->prepared || !c->request_held || !c->controller_busy || c->off_attempted?CAM_FAIL(ESTALE):0;
     r=c->request;
     d=(struct x9_camera_camsv_dma){.version=X9_CAMERA_CAMSV_VERSION,.context=c,
         .lease=c->lease,.backing=c->view.map.backing,.check=cam_native_capture_dma_check};
-    if(!e && c->capture_serial==UINT64_MAX)e=EOVERFLOW;
+    if(!e && c->capture_serial==UINT64_MAX)e=CAM_FAIL(EOVERFLOW);
     lck_mtx_unlock(&camera_native_capture_lock);if(e)return e;
     lck_mtx_lock(&camera_lock);
     bool current=(st.flags&X9_CAMERA_STREAMING) && !(st.flags&X9_CAMERA_FAULT) &&
         st.sensor==r.frame.sensor && st.generation==r.frame.generation &&
         session.capture && session.stream && !session.stopping && !session.latched;
-    lck_mtx_unlock(&camera_lock);if(!current)return ECANCELED;
+    lck_mtx_unlock(&camera_lock);if(!current)return CAM_FAIL(ECANCELED);
     e=cam_repeat_cpu_boundary_locked(epoch);if(e)return e;
     e=cam_native_ae_next_locked(epoch,&r.frame);if(e)return e;
     /* next() may spend up to the real settling deadline. Preserve/check

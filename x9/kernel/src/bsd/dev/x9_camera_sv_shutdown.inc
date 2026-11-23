@@ -33,7 +33,7 @@ static int cam_sv_shutdown_guard(uint64_t epoch)
        !cam_rx_live.close_attempted || !cam_rx_sensor_held_locked(epoch) ||
        !cam_sv_controls_restored() || cam_mac.held || cam_phy.held || cam_out.held ||
        !cam_smi.held || cam_smi.epoch!=epoch || cam_smi.close_attempted ||
-       cam_smi.completed!=3 || cam_smi.error)return ESTALE;
+       cam_smi.completed!=3 || cam_smi.error)return CAM_FAIL(ESTALE);
     /* The parent close already asserted reset and disconnected MCLK.
      * Sensor I2C is no longer valid here; prove the real pin isolation,
      * not a second AP read after cam_sensor_live entered CLOSING. */
@@ -41,27 +41,27 @@ static int cam_sv_shutdown_guard(uint64_t epoch)
     if(!cam_journal.pins_owned || cam_pin_mode(cam_journal.gpio,cam_journal.reset.pin) ||
        !cam_pin_get(cam_journal.gpio,0,cam_journal.reset.pin) ||
        cam_pin_get(cam_journal.gpio,0x100,cam_journal.reset.pin) ||
-       cam_pin_mode(cam_journal.gpio,cam_journal.mclk.pin))return EBUSY;
+       cam_pin_mode(cam_journal.gpio,cam_journal.mclk.pin))return CAM_FAIL(EBUSY);
     e=cam_native_sensor_retirement_guard_locked(epoch);if(e)return e;
     e=cam_irq_cold_reset_guard_locked(epoch,m);if(e)return e;
     e=cam_rx_sample(m,&current);if(e)return e;
     cam_sv_shutdown.after=current;
-    if(cam_rx_busy(&current,cam_sensor_port(cam_sv_shutdown.sensor),0,0,0,0,0,0))return EBUSY;
+    if(cam_rx_busy(&current,cam_sensor_port(cam_sv_shutdown.sensor),0,0,0,0,0,0))return CAM_FAIL(EBUSY);
     non_sv=current;memcpy(non_sv.sv,cam_sv_shutdown.before.sv,sizeof(non_sv.sv));
     if(cam_rx_changed(&cam_sv_shutdown.before,&non_sv,cam_sensor_port(cam_sv_shutdown.sensor)))
-        return ESTALE;
+        return CAM_FAIL(ESTALE);
     for(unsigned bank=0;bank<2;bank++) {
         e=cam_sv_power_guard();if(e)return e;
         for(unsigned n=0;n<sizeof(disabled)/sizeof(disabled[0]);n++)
-            if(cam_rr(m->sv[bank],disabled[n]))return EBUSY;
+            if(cam_rr(m->sv[bank],disabled[n]))return CAM_FAIL(EBUSY);
     }
     for(unsigned n=0;n<sizeof(ports)/sizeof(ports[0]);n++) {
         vm_offset_t larb=cam_smi.larb[ports[n].larb];
         e=cam_smi_clock_guard();if(e)return e;
-        if(!larb)return ENXIO;
+        if(!larb)return CAM_FAIL(ENXIO);
         cam_sv_shutdown.outstanding[n][0]=cam_rr(larb,0x280+4*ports[n].port);
         cam_sv_shutdown.outstanding[n][1]=cam_rr(larb,0x780+4*ports[n].port);
-        if(cam_sv_shutdown.outstanding[n][0] || cam_sv_shutdown.outstanding[n][1])return EBUSY;
+        if(cam_sv_shutdown.outstanding[n][0] || cam_sv_shutdown.outstanding[n][1])return CAM_FAIL(EBUSY);
     }
     return cam_irq_cold_reset_guard_locked(epoch,m);
 }
@@ -80,7 +80,7 @@ static int cam_sv_shutdown_admit(uint64_t epoch)
     lck_mtx_lock(&camera_irq_lock);
     old=cam_irq_spin_take();
     if(cam_irq.prepared || cam_irq.owns || cam_irq.accepting || cam_irq.busy ||
-       cam_irq.count || cam_irq.error || (cam_irq.epoch && cam_irq.epoch!=epoch))e=ESTALE;
+       cam_irq.count || cam_irq.error || (cam_irq.epoch && cam_irq.epoch!=epoch))e=CAM_FAIL(ESTALE);
     if(!e && cam_sv.credit_issued) {
         if(!cam_sv.credit_retired || !cam_irq.close_attempted || !cam_irq_fbc.bound ||
            !cam_repeat_retirement_receipt_locked() || cam_irq_fbc.error ||
@@ -90,16 +90,16 @@ static int cam_sv_shutdown_admit(uint64_t epoch)
            cam_irq_fbc.source_ack!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||
            cam_source.phase!=CAM_SOURCE_STOPPED || cam_source.epoch!=epoch || cam_source.error ||
            cam_dma_stop.phase!=CAM_DMA_STOP_RESTORED || cam_dma_stop.epoch!=epoch ||
-           cam_dma_stop.error || !cam_stream_close_restore_ready())e=ESTALE;
+           cam_dma_stop.error || !cam_stream_close_restore_ready())e=CAM_FAIL(ESTALE);
         for(unsigned bank=0;bank<2 && !e;bank++) {
             uint32_t ctl,cnt;
             e=cam_irq_power();if(e)break; /* non-sleeping under IRQ spin */
             ctl=cam_rr(cam_sv.view[bank],0x540);cnt=cam_rr(cam_sv.view[bank],0x544);
             e=cam_irq_fbc_note_locked(bank,ctl,cnt);
             cam_sv_shutdown.fbc_before[bank]=cnt;
-            if(!e && (cnt!=cam_sv.credit_spent_count[bank] || (cnt&CAM_IRQ_FBC_CNT)))e=ESTALE;
+            if(!e && (cnt!=cam_sv.credit_spent_count[bank] || (cnt&CAM_IRQ_FBC_CNT)))e=CAM_FAIL(ESTALE);
         }
-    } else if(!e && (cam_source.captured || cam_irq_fbc.bound || cam_irq_fbc.source_issued))e=ESTALE;
+    } else if(!e && (cam_source.captured || cam_irq_fbc.bound || cam_irq_fbc.source_issued))e=CAM_FAIL(ESTALE);
     cam_irq_spin_drop(old);
     if(!e) {
         struct x9_camera_camsv_slot *slot=cam_irq.slot;
@@ -107,14 +107,14 @@ static int cam_sv_shutdown_admit(uint64_t epoch)
         if(cam_sv.credit_issued && (!slot || slot->last_errno ||
            (slot->state!=X9_CAMSV_RETIRED && slot->state!=X9_CAMSV_CANCELLED) ||
            memcmp(&slot->request,&cam_sv.request,sizeof(cam_sv.request)) ||
-           slot->dma.backing!=cam_sv.request_dma.backing))e=ESTALE;
+           slot->dma.backing!=cam_sv.request_dma.backing))e=CAM_FAIL(ESTALE);
         if(!e && cam_sv.credit_issued) {
             struct x9_camera_s1 *map=slot->dma.backing;
             lck_mtx_lock(&camera_s1_lock);
             e=map?cam_s1_check_private(map):ESTALE;
             if(!e && (map->raw_errno ||
                map->raw_state!=(slot->state==X9_CAMSV_CANCELLED?CAM_RAW_CANCELLED:CAM_RAW_IDLE) ||
-               !cam_s1_dma_match(map,slot)))e=ESTALE;
+               !cam_s1_dma_match(map,slot)))e=CAM_FAIL(ESTALE);
             lck_mtx_unlock(&camera_s1_lock);
         }
         lck_mtx_unlock(&camera_camsv_lock);
@@ -129,19 +129,19 @@ static int cam_sv_shutdown_locked(uint64_t epoch)
     if(!cam_sv_qos.captured || cam_sv_qos.epoch!=epoch || !cam_sv_qos.issued)return 0;
     if(cam_sv_shutdown.attempted && cam_sv_shutdown.epoch==epoch)
         return cam_sv_shutdown.error?cam_sv_shutdown.error:ESTALE;
-    if(cam_sv_shutdown.attempted && !cam_sv_shutdown.complete)return ESTALE;
+    if(cam_sv_shutdown.attempted && !cam_sv_shutdown.complete)return CAM_FAIL(ESTALE);
     memset(&cam_sv_shutdown,0,sizeof(cam_sv_shutdown));
     cam_sv_shutdown.attempted=true;cam_sv_shutdown.epoch=epoch;
     cam_sv_shutdown.sensor=cam_sv.status.sensor;
     if(!x9_camera_sensor_valid(cam_sv_shutdown.sensor) || !cam_sv_qos.configured ||
-       cam_sv_qos.error || cam_sv_qos.retired){e=ESTALE;goto out;}
+       cam_sv_qos.error || cam_sv_qos.retired){e=CAM_FAIL(ESTALE);goto out;}
     m=&cam_rx_maps[cam_sv_shutdown.sensor-1];
     e=cam_sv_shutdown_admit(epoch);if(e)goto out;
     e=cam_rx_sample(m,&cam_sv_shutdown.before);if(e)goto out;
     e=cam_sv_shutdown_guard(epoch);if(e)goto out;
     for(unsigned b=0;b<2;b++) {
         for(unsigned n=0;n<3;n++)
-            if(cam_rr(m->sv[b],cam_sv_shutdown_stop[n])){e=EBUSY;goto out;}
+            if(cam_rr(m->sv[b],cam_sv_shutdown_stop[n])){e=CAM_FAIL(EBUSY);goto out;}
         for(unsigned n=0;n<CAM_SV_QOS_COUNT;n++) {
             bool allowed=false;
             e=cam_sv_power_guard();if(e)goto out;
@@ -149,7 +149,7 @@ static int cam_sv_shutdown_locked(uint64_t epoch)
                 cam_rr(m->sv[b],cam_sv_qos_offsets[n]),&allowed);if(e)goto out;
         }
     }
-    if(cam_rr(m->sv[0],0x7c)>1 || cam_rr(m->sv[0],0x1d0)){e=EBUSY;goto out;}
+    if(cam_rr(m->sv[0],0x7c)>1 || cam_rr(m->sv[0],0x1d0)){e=CAM_FAIL(EBUSY);goto out;}
     cam_sv_shutdown.phase=1;
     /* common_disable inhibits DMA DCM before sv_reset. */
     e=cam_sv_shutdown_guard(epoch);if(e)goto out;
@@ -173,11 +173,11 @@ static int cam_sv_shutdown_locked(uint64_t epoch)
         uint64_t span,end;
         nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
         for(unsigned poll=0;poll<100000;poll++) {
-            if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+            if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
             e=cam_sv_shutdown_guard(epoch);if(e)goto out;
             cam_sv_shutdown.actual[role]=cam_rr(m->sv[0],cam_sv_shutdown_stop[role]);
-            if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
-            if(cam_sv_shutdown.actual[role]&~3u){e=ESTALE;goto out;}
+            if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
+            if(cam_sv_shutdown.actual[role]&~3u){e=CAM_FAIL(ESTALE);goto out;}
             cam_sv_shutdown.samples[role]=(cam_sv_shutdown.actual[role]&2)?
                 cam_sv_shutdown.samples[role]+1:0;
             if(cam_sv_shutdown.samples[role]==2) {
@@ -185,11 +185,11 @@ static int cam_sv_shutdown_locked(uint64_t epoch)
             }
             delay(1);
         }
-        if(cam_sv_shutdown.samples[role]!=2){e=ETIMEDOUT;goto out;}
+        if(cam_sv_shutdown.samples[role]!=2){e=CAM_FAIL(ETIMEDOUT);goto out;}
     }
     e=cam_sv_shutdown_guard(epoch);if(e)goto out;
     for(unsigned role=0;role<3;role++)
-        if(!(cam_rr(m->sv[0],cam_sv_shutdown_stop[role])&2)){e=ESTALE;goto out;}
+        if(!(cam_rr(m->sv[0],cam_sv_shutdown_stop[role])&2)){e=CAM_FAIL(ESTALE);goto out;}
     cam_sv_shutdown.phase=2;
     /* Original normal tail, kept contiguous while central reset is held.
      * No guarded CSR/I2C sampling between SW_CTL=1 and SW_CTL=0. */
@@ -208,18 +208,18 @@ static int cam_sv_shutdown_locked(uint64_t epoch)
                 cam_sv_shutdown.post_regs[sample][bank][n]=cam_rr(m->sv[bank],cam_sv.offset[n]);
             for(unsigned n=0;n<CAM_SV_QOS_COUNT;n++)
                 if(cam_sv_shutdown.post_regs[sample][bank][cam_sv_find(cam_sv_qos_offsets[n])]!=
-                   cam_sv_qos.before[bank][n]){e=EBUSY;goto out;}
+                   cam_sv_qos.before[bank][n]){e=CAM_FAIL(EBUSY);goto out;}
             cam_sv_shutdown.fbc_after[bank]=cam_rr(m->sv[bank],0x544);
-            if(cam_sv_shutdown.fbc_after[bank]&CAM_IRQ_FBC_CNT){e=EBUSY;goto out;}
+            if(cam_sv_shutdown.fbc_after[bank]&CAM_IRQ_FBC_CNT){e=CAM_FAIL(EBUSY);goto out;}
         }
         for(unsigned role=0;role<3;role++) {
             cam_sv_shutdown.actual[role]=cam_rr(m->sv[0],cam_sv_shutdown_stop[role]);
-            if(cam_sv_shutdown.actual[role]){e=ESTALE;goto out;}
+            if(cam_sv_shutdown.actual[role]){e=CAM_FAIL(ESTALE);goto out;}
         }
         if(cam_rr(m->sv[0],0x7c) || cam_rr(m->sv[0],0x2008) ||
-           cam_rr(m->sv[0],0x1d0)){e=ESTALE;goto out;}
+           cam_rr(m->sv[0],0x1d0)){e=CAM_FAIL(ESTALE);goto out;}
         if(sample && memcmp(cam_sv_shutdown.post_regs[0],cam_sv_shutdown.post_regs[1],
-            sizeof(cam_sv_shutdown.post_regs[0]))){e=ESTALE;goto out;}
+            sizeof(cam_sv_shutdown.post_regs[0]))){e=CAM_FAIL(ESTALE);goto out;}
         cam_sv_shutdown.post_samples++;
         if(!sample)delay(10);
     }

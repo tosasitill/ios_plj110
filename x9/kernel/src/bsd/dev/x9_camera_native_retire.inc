@@ -20,7 +20,7 @@ static int cam_native_producer_guard_locked(uint64_t epoch,struct x9_camera_smmu
        cam_dma_stop.samples<2 || cam_dma_stop.port_samples!=2 || cam_dma_stop.restore_samples!=2 ||
        cam_dma_stop.release_seen!=3 || !cam_smi.held || !cam_smi_a0.held ||
        cam_smi.epoch!=epoch || cam_smi_a0.epoch!=epoch || cam_smi.close_attempted ||
-       cam_smi_a0.close_attempted || !cam_smi_shared.common || cam_smi_shared.epoch!=epoch)return ESTALE;
+       cam_smi_a0.close_attempted || !cam_smi_shared.common || cam_smi_shared.epoch!=epoch)return CAM_FAIL(ESTALE);
     e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);if(e)return e;
     e=cam_irq_mapping();if(!e)e=cam_irq_power();if(!e)e=cam_irq_controller();
     if(!e)e=cam_irq_idle();if(!e)e=cam_irq_credit_retired_slot();if(e)return e;
@@ -32,12 +32,12 @@ static int cam_native_producer_guard_locked(uint64_t epoch,struct x9_camera_smmu
        cam_irq_fbc.source_phase!=CAM_STREAM_STOPPED ||
        cam_irq_fbc.source_issued!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||
        cam_irq_fbc.source_ack!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||
-       cam_irq_fbc.source_control || cam_irq_fbc.source_frame_count!=0xff))e=ESTALE;
+       cam_irq_fbc.source_control || cam_irq_fbc.source_frame_count!=0xff))e=CAM_FAIL(ESTALE);
     for(unsigned bank=0;bank<2 && !e;bank++) {
         uint32_t ctl=cam_irq_rd(cam_irq.view[bank],0x540);
         uint32_t count=cam_irq_rd(cam_irq.view[bank],0x544);
         e=cam_irq_fbc_note_locked(bank,ctl,count);
-        if(!e && ((count&CAM_IRQ_FBC_CNT) || count!=cam_sv.credit_spent_count[bank]))e=ESTALE;
+        if(!e && ((count&CAM_IRQ_FBC_CNT) || count!=cam_sv.credit_spent_count[bank]))e=CAM_FAIL(ESTALE);
     }
     cam_irq_spin_drop(old);if(e)return e;
     /* No request-authority callback here: BBM/CR0 disable must not recurse
@@ -50,7 +50,7 @@ static int cam_native_producer_guard_locked(uint64_t epoch,struct x9_camera_smmu
     const uint16_t regs[]={0x0100,0x0104,0x0005};
     for(unsigned i=0;i<3;i++) {
         e=cam_sensor_ap_read(&ap,regs[i],&byte);if(e)return e;
-        if(byte!=(i==2?0xff:0))return ESTALE;
+        if(byte!=(i==2?0xff:0))return CAM_FAIL(ESTALE);
     }
     e=cam_smi_a0_guard();if(!e)e=cam_smi_shared_voter_guard();if(e)return e;
     for(unsigned sample=0;sample<2;sample++) {
@@ -59,9 +59,9 @@ static int cam_native_producer_guard_locked(uint64_t epoch,struct x9_camera_smmu
          * common DEBUG_S OSTD mask 0x7ffe000 and DEBUG_MISC bit0=idle.
          * No debug-selector, clamp, common0 or read-clear/status write. */
         if(cam_rr(cam_smi.larb[0],0x280) || cam_rr(cam_smi.larb[0],0x780) ||
-           cam_rr(cam_smi.larb[0],0) || cam_rr(cam_smi.larb[0],0x500))return EBUSY;
-        for(unsigned p=0;p<8;p++)if(cam_rr(cam_smi_shared.common,0x400+4*p)&0x07ffe000u)return EBUSY;
-        if(!(cam_rr(cam_smi_shared.common,0x440)&1u))return EBUSY;
+           cam_rr(cam_smi.larb[0],0) || cam_rr(cam_smi.larb[0],0x500))return CAM_FAIL(EBUSY);
+        for(unsigned p=0;p<8;p++)if(cam_rr(cam_smi_shared.common,0x400+4*p)&0x07ffe000u)return CAM_FAIL(EBUSY);
+        if(!(cam_rr(cam_smi_shared.common,0x440)&1u))return CAM_FAIL(EBUSY);
         if(!sample)delay(10);
     }
     return cam_irq_power();
@@ -109,7 +109,7 @@ static int cam_native_unstarted_retire_locked(uint64_t epoch,struct x9_camera_sm
     if(dormant && !session.capture && !session.stream && !cam_sv.request_held &&
        !cam_sv.credit_issued && m && m==cam_smmu_namespace && !m->native_setup_issued) {
         lck_mtx_lock(&camera_camsv_lock);
-        e=!cam_irq.slot || cam_irq.slot->state!=X9_CAMSV_EMPTY?ESTALE:0;
+        e=!cam_irq.slot || cam_irq.slot->state!=X9_CAMSV_EMPTY?CAM_FAIL(ESTALE):0;
         lck_mtx_unlock(&camera_camsv_lock);
         if(!e)e=cam_irq_close_locked(epoch);
         if(e)return e;
@@ -123,10 +123,10 @@ static int cam_native_unstarted_retire_locked(uint64_t epoch,struct x9_camera_sm
        cam_sv.request_held || cam_sv.credit_issued || cam_sv.receive_issued ||
        cam_source.captured || cam_sv_gate.pending!=X9_CAM_SV_GATE_STEPS ||
        cam_sv_gate.issued || !m->map ||
-       m->map->raw_state!=CAM_RAW_PRIVATE)e=ESTALE;
+       m->map->raw_state!=CAM_RAW_PRIVATE)e=CAM_FAIL(ESTALE);
     boolean_t old=cam_irq_spin_take();
     if(!e && (cam_irq.prepared || cam_irq.owns || cam_irq.accepting || cam_irq.busy ||
-       cam_irq.count || cam_irq_fbc.bound || cam_irq_fbc.source_issued))e=ESTALE;
+       cam_irq.count || cam_irq_fbc.bound || cam_irq_fbc.source_issued))e=CAM_FAIL(ESTALE);
     cam_irq_spin_drop(old);
     if(!e)e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);
     if(!e) {
@@ -136,7 +136,7 @@ static int cam_native_unstarted_retire_locked(uint64_t epoch,struct x9_camera_sm
         const uint16_t regs[]={0x0100,0x0104,0x0005};
         for(unsigned i=0;i<3 && !e;i++) {
             e=cam_sensor_ap_read(&ap,regs[i],&value);
-            if(!e && value!=(i==2?0xff:0))e=ESTALE;
+            if(!e && value!=(i==2?0xff:0))e=CAM_FAIL(ESTALE);
         }
     }
     if(!e) {
@@ -172,10 +172,10 @@ int x9_camera_native_smmu_retirement_check(uint64_t epoch,struct x9_camera_smmu 
     lck_mtx_lock(&camera_smmu_lock);
     /* A private export/cache error may stay terminal even when independent
      * never-exposed cleanup is proved; do not erase it to permit cleanup. */
-    int e=!m || m!=cam_smmu_namespace || m->magic!=CAM_SMMU_MAGIC?EINVAL:0;
+    int e=!m || m!=cam_smmu_namespace || m->magic!=CAM_SMMU_MAGIC?CAM_FAIL(EINVAL):0;
     if(!e && !m->native_unstarted_retired)e=cam_smmu_identity(m);
     if(!e && (!m->native || !m->native_retire_attempted || !m->native_restored ||
-       m->native_started || m->native_retire_epoch!=epoch || m->native_retire_error || m->pending))e=ESTALE;
+       m->native_started || m->native_retire_epoch!=epoch || m->native_retire_error || m->pending))e=CAM_FAIL(ESTALE);
     if(!e && !m->native_unstarted_retired)e=cam_smmu_storage(m);
     if(!e) {
         struct cam_native_snapshot prior;

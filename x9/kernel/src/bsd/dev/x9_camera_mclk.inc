@@ -13,16 +13,16 @@ static int cam_clock_conflict(struct cam_probe_journal *j,unsigned reg,
         "owned=%u/%u uncertain=%u/%u (retained, no overwrite)\n",
         j->board.clk_off,j->board.clk_shift,reg,expected,observed,
         j->mux_owned,j->vote_owned,j->mux_uncertain,j->vote_uncertain);
-    return EBUSY;
+    return CAM_FAIL(EBUSY);
 }
 /* Inactive cleanup may admit an unresolved write's prior; active use may
  * not. DONE/CKSTA have bounded waits, FENC is checked only for active use.
  * Do not infer a frequency measurement from CON1 or FENC. */
 static int cam_clock_check(struct cam_probe_journal *j,bool cleanup,bool active)
 {
-    if(j->clock_conflict)return EBUSY;
-    if(!j->clock_seen)return active?ENOTSUP:0;
-    if(!cleanup && (j->mux_uncertain || j->vote_uncertain || j->mux_update_pending))return EIO;
+    if(j->clock_conflict)return CAM_FAIL(EBUSY);
+    if(!j->clock_seen)return active?CAM_FAIL(ENOTSUP):0;
+    if(!cleanup && (j->mux_uncertain || j->vote_uncertain || j->mux_update_pending))return CAM_FAIL(EIO);
     uint32_t bit=cam_vote_bit(j);
     int e=cam_wait_bits(j->hwv,cam_done_off(j),bit,bit,10000);
     if(!e)e=cam_wait_bits(j->vlp,0x330,1u<<j->board.clk_status_bit,0,1000);
@@ -37,7 +37,7 @@ static int cam_clock_check(struct cam_probe_journal *j,bool cleanup,bool active)
     if(con1!=j->pll_saved)return cam_clock_conflict(j,0x0c,j->pll_saved,con1);
     if(active) {
         if(j->mux_uncertain || j->vote_uncertain || j->mux_update_pending ||
-           (cfg&15)!=7 || !ap)return EBUSY;
+           (cfg&15)!=7 || !ap)return CAM_FAIL(EBUSY);
         uint32_t fenc=cam_rr(j->vlp,0x270)&(1u<<j->board.clk_status_bit);
         if(!fenc)return cam_clock_conflict(j,0x270,1u<<j->board.clk_status_bit,fenc);
         fenc=cam_rr(j->pll,0x34)&(1u<<4);
@@ -51,7 +51,7 @@ static int cam_mux_off_guard(struct cam_probe_journal *j,bool cleanup)
     uint32_t bit=cam_vote_bit(j);
     if((cam_rr(j->hwv,cam_all_off(j))&bit) ||
        (cam_rr(j->hwv,cam_vote_off(j)+8)&bit) ||
-       (cam_rr(j->vlp,0x270)&(1u<<j->board.clk_status_bit)))return EBUSY;
+       (cam_rr(j->vlp,0x270)&(1u<<j->board.clk_status_bit)))return CAM_FAIL(EBUSY);
     /* The off-owner checks are several reads, not an atomic reservation. */
     uint32_t cfg=cam_clk_byte(j)&0x7f;
     if(cfg!=j->clk_expected && !(cleanup && j->mux_uncertain && cfg==j->clk_prior))
@@ -74,7 +74,7 @@ static int cam_mux_field_write(struct cam_probe_journal *j,unsigned off,
     uint32_t observed=cam_clk_byte(j)&0x7f;
     if(observed!=expected) {
         if(observed!=before)return cam_clock_conflict(j,j->board.clk_off,expected,observed);
-        return EIO; /* unresolved write: ONLY this exact prior is admissible */
+        return CAM_FAIL(EIO); /* unresolved write: ONLY this exact prior is admissible */
     }
     j->mux_uncertain=false; /* confirmed CLR/SET may not later fall back */
     return 0;
@@ -82,7 +82,7 @@ static int cam_mux_field_write(struct cam_probe_journal *j,unsigned off,
 /* Parent changes require every XPU unvoted and CAMTG FENC off. */
 static int cam_mux_parent(struct cam_probe_journal *j,unsigned parent,bool take)
 {
-    if(parent>15)return EINVAL;
+    if(parent>15)return CAM_FAIL(EINVAL);
     int e=cam_mux_off_guard(j,!take);if(e)return e;
     if((cam_clk_byte(j)&0x7f)==((j->clk_saved&0x70)|parent) && !j->mux_update_pending) {
         /* An unresolved CLR/SET still at the entry needs no redundant write. */
@@ -110,7 +110,7 @@ static int cam_clock_vote(struct cam_probe_journal *j,bool on)
     bool before=!!(cam_rr(j->hwv,off+8)&bit);
     if(before!=j->vote_expected && !(!on && j->vote_uncertain && before==j->vote_prior))
         return cam_clock_conflict(j,off+8,j->vote_expected,before);
-    if(on && before)return EBUSY;
+    if(on && before)return CAM_FAIL(EBUSY);
     if(!on && !before) {
         /* Confirmed off after an unresolved SET: no redundant CLR. */
         j->vote_expected=false;j->vote_uncertain=false;j->clock_active=false;
@@ -140,12 +140,12 @@ static int cam_clock_take(struct cam_probe_journal *j,struct x9_camera_probe *r)
     r->pll_con1=j->pll_saved=cam_rr(j->pll,0x0c);
     r->pll_fence=cam_rr(j->pll,0x34);
     j->clk_saved=cam_clk_byte(j);j->clk_expected=j->clk_prior=j->clk_saved&0x7f;
-    if(!cam_pll_compatible(j->pll_saved))return ENOTSUP;
+    if(!cam_pll_compatible(j->pll_saved))return CAM_FAIL(ENOTSUP);
     e=cam_wait_bits(j->hwv,cam_done_off(j),bit,bit,10000);
     if(!e)e=cam_wait_bits(j->vlp,0x330,1u<<j->board.clk_status_bit,0,1000);
     if(e)return e;
     if(cam_clk_byte(j)!=j->clk_saved || cam_rr(j->hwv,cam_vote_off(j)+8)!=ap ||
-       cam_rr(j->pll,0x0c)!=j->pll_saved)return EBUSY;
+       cam_rr(j->pll,0x0c)!=j->pll_saved)return CAM_FAIL(EBUSY);
     j->vote_expected=j->vote_prior=!!(ap&bit);j->clock_seen=true;
     all=cam_rr(j->hwv,cam_all_off(j));
     uint32_t fenc_on=cam_rr(j->vlp,0x270)&(1u<<j->board.clk_status_bit);
@@ -157,7 +157,7 @@ static int cam_clock_take(struct cam_probe_journal *j,struct x9_camera_probe *r)
      * live/voted clock is borrowed: parent must already be 7 and is never
      * changed under it; only the AP vote below is ours. */
     if(((ap|all)&bit) || fenc_on) {
-        if((j->clk_saved&15)!=7)return EBUSY;
+        if((j->clk_saved&15)!=7)return CAM_FAIL(EBUSY);
     } else {
         if((j->clk_saved&15)!=7){e=cam_mux_parent(j,7,true);if(e)return e;}
     }

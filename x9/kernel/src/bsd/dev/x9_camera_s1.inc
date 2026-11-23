@@ -60,20 +60,20 @@ static int cam_s1_phys(vm_offset_t va, uint32_t oas, uint64_t *out)
 {
     ppnum_t first,last;
     uint64_t pa,limit;
-    if(!va || (va&(CAM_S1_PAGE-1)) || oas<32 || oas>48)return EINVAL;
+    if(!va || (va&(CAM_S1_PAGE-1)) || oas<32 || oas>48)return CAM_FAIL(EINVAL);
     first=pmap_find_phys(kernel_pmap,(addr64_t)va);
     last=pmap_find_phys(kernel_pmap,(addr64_t)(va+CAM_S1_PAGE-1));
-    if(!first || first!=last)return EFAULT;
+    if(!first || first!=last)return CAM_FAIL(EFAULT);
     pa=ptoa_64(first);limit=1ull<<oas;
     if((pa&(CAM_S1_PAGE-1)) || pa>=limit || CAM_S1_PAGE>limit-pa ||
-        (pa&~CAM_S1_PA_MASK))return ERANGE;
+        (pa&~CAM_S1_PA_MASK))return CAM_FAIL(ERANGE);
     *out=pa;return 0;
 }
 
 static int cam_s1_alloc_page(struct cam_s1_page *p, uint32_t oas)
 {
     if(kmem_alloc(kernel_map,&p->va,CAM_S1_PAGE,KMA_DATA|KMA_ZERO,
-        VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS)return ENOMEM;
+        VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS)return CAM_FAIL(ENOMEM);
     return cam_s1_phys(p->va,oas,&p->pa);
 }
 
@@ -112,7 +112,7 @@ static int cam_s1_check_private(struct x9_camera_s1 *m)
     const struct cam_s1_page *table[4];
     const volatile uint64_t *root,*cd;
     unsigned count;
-    if(!m || m->magic!=CAM_S1_MAGIC)return EINVAL;
+    if(!m || m->magic!=CAM_S1_MAGIC)return CAM_FAIL(EINVAL);
     if(m->last_errno)return m->last_errno;
     /* Validate full address/size geometry before indexing any PTE. */
     if(PAGE_SHIFT!=CAM_S1_SHIFT || m->ips>=6 || m->oas!=cam_s1_oas[m->ips] ||
@@ -126,26 +126,26 @@ static int cam_s1_check_private(struct x9_camera_s1 *m)
         m->leaves!=1+((m->iova+m->mapped_bytes-1)>>CAM_S1_L2_SHIFT)-m->first_root ||
         !m->leaves || m->leaves>CAM_S1_MAX_LEAVES ||
         m->first_root+m->leaves>CAM_S1_ROOT_ENTRIES ||
-        !m->raw || !m->root.va || !m->cd.va)return EFAULT;
+        !m->raw || !m->root.va || !m->cd.va)return CAM_FAIL(EFAULT);
     table[0]=&m->root;table[1]=&m->cd;table[2]=&m->leaf[0];table[3]=&m->leaf[1];
     count=2+m->leaves;
     for(unsigned i=m->leaves;i<CAM_S1_MAX_LEAVES;i++)
-        if(m->leaf[i].va || m->leaf[i].pa)return EFAULT;
-    for(unsigned i=m->pages;i<CAM_S1_MAX_PAGES;i++)if(m->raw_pa[i])return EFAULT;
+        if(m->leaf[i].va || m->leaf[i].pa)return CAM_FAIL(EFAULT);
+    for(unsigned i=m->pages;i<CAM_S1_MAX_PAGES;i++)if(m->raw_pa[i])return CAM_FAIL(EFAULT);
     for(unsigned i=0;i<count;i++) {
         uint64_t pa=0;
         int e=cam_s1_phys(table[i]->va,m->oas,&pa);
         if(e)return e;
-        if(pa!=table[i]->pa)return ESTALE;
-        for(unsigned j=0;j<i;j++)if(pa==table[j]->pa)return EFAULT;
+        if(pa!=table[i]->pa)return CAM_FAIL(ESTALE);
+        for(unsigned j=0;j<i;j++)if(pa==table[j]->pa)return CAM_FAIL(EFAULT);
     }
     for(unsigned i=0;i<m->pages;i++) {
         uint64_t pa=0;
         int e=cam_s1_phys(m->raw+(vm_offset_t)i*CAM_S1_PAGE,m->oas,&pa);
         if(e)return e;
-        if(pa!=m->raw_pa[i])return ESTALE;
-        for(unsigned t=0;t<count;t++)if(pa==table[t]->pa)return EFAULT;
-        for(unsigned j=0;j<i;j++)if(pa==m->raw_pa[j])return EFAULT;
+        if(pa!=m->raw_pa[i])return CAM_FAIL(ESTALE);
+        for(unsigned t=0;t<count;t++)if(pa==table[t]->pa)return CAM_FAIL(EFAULT);
+        for(unsigned j=0;j<i;j++)if(pa==m->raw_pa[j])return CAM_FAIL(EFAULT);
     }
     /* Entire tables, including inactive root entries and all unmapped
      * leaf slots, must match. No aliases, block/contiguous entries or
@@ -156,7 +156,7 @@ static int cam_s1_check_private(struct x9_camera_s1 *m)
         uint64_t expected=0;
         if(i>=m->first_root && i<m->first_root+m->leaves)
             expected=m->leaf[i-m->first_root].pa|3ull;
-        if(root[i]!=expected)return ESTALE;
+        if(root[i]!=expected)return CAM_FAIL(ESTALE);
     }
     for(unsigned t=0;t<m->leaves;t++) {
         const volatile uint64_t *leaf=(const volatile uint64_t *)m->leaf[t].va;
@@ -165,7 +165,7 @@ static int cam_s1_check_private(struct x9_camera_s1 *m)
             uint64_t va=base+((uint64_t)i<<CAM_S1_SHIFT),expected=0;
             if(va>=m->iova && va-m->iova<m->mapped_bytes)
                 expected=m->raw_pa[(va-m->iova)>>CAM_S1_SHIFT]|CAM_S1_PAGE_ATTR;
-            if(leaf[i]!=expected)return ESTALE;
+            if(leaf[i]!=expected)return CAM_FAIL(ESTALE);
         }
     }
     cd=(const volatile uint64_t *)m->cd.va;
@@ -176,7 +176,7 @@ static int cam_s1_check_private(struct x9_camera_s1 *m)
             else if(i==1)expected=m->root.pa;
             else if(i==3)expected=CAM_S1_MAIR;
         }
-        if(cd[i]!=expected)return ESTALE;
+        if(cd[i]!=expected)return CAM_FAIL(ESTALE);
     }
     __asm__ volatile("dsb sy":::"memory");
     return 0;
@@ -193,18 +193,18 @@ int x9_camera_s1_create(uint32_t idr5,uint64_t iova,uint32_t bytes,
     struct x9_camera_s1 *m;
     int e=0;
     if(!out || *out || !bytes || bytes>X9_CAMERA_MAX_BYTES || !iova ||
-        (iova&(CAM_S1_PAGE-1)) || iova>=CAM_S1_IOVA_LIMIT)return EINVAL;
-    if(PAGE_SHIFT!=CAM_S1_SHIFT || !(idr5&(1u<<5)) || ips>=6)return ENOTSUP;
+        (iova&(CAM_S1_PAGE-1)) || iova>=CAM_S1_IOVA_LIMIT)return CAM_FAIL(EINVAL);
+    if(PAGE_SHIFT!=CAM_S1_SHIFT || !(idr5&(1u<<5)) || ips>=6)return CAM_FAIL(ENOTSUP);
     mapped=(bytes+CAM_S1_PAGE-1)&~(CAM_S1_PAGE-1);
-    if(mapped>CAM_S1_IOVA_LIMIT-iova)return ERANGE;
+    if(mapped>CAM_S1_IOVA_LIMIT-iova)return CAM_FAIL(ERANGE);
     m=kalloc_type(struct x9_camera_s1,Z_WAITOK|Z_ZERO);
-    if(!m)return ENOMEM;
+    if(!m)return CAM_FAIL(ENOMEM);
     m->magic=CAM_S1_MAGIC;m->iova=iova;m->bytes=bytes;m->mapped_bytes=mapped;
     m->pages=mapped/CAM_S1_PAGE;m->oas=cam_s1_oas[ips];m->ips=ips;
     m->first_root=(uint32_t)(iova>>CAM_S1_L2_SHIFT);
     m->leaves=(uint32_t)((iova+mapped-1)>>CAM_S1_L2_SHIFT)-m->first_root+1;
     if(kmem_alloc(kernel_map,&m->raw,mapped,KMA_DATA|KMA_ZERO,
-        VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS)e=ENOMEM;
+        VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS)e=CAM_FAIL(ENOMEM);
     if(!e)e=cam_s1_alloc_page(&m->root,m->oas);
     for(unsigned i=0;i<m->leaves && !e;i++)e=cam_s1_alloc_page(&m->leaf[i],m->oas);
     if(!e)e=cam_s1_alloc_page(&m->cd,m->oas);
@@ -241,10 +241,10 @@ int x9_camera_s1_export(struct x9_camera_s1 *m,uint32_t asid,
 {
     int e;
     uint64_t *cd;
-    if(!out || !asid || asid>255)return EINVAL;
+    if(!out || !asid || asid>255)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_s1_lock);
     e=cam_s1_check_private(m);
-    if(!e && m->published)e=EBUSY;
+    if(!e && m->published)e=CAM_FAIL(EBUSY);
     if(!e) {
         /* No address escapes before the permanent retention bit is set.
          * Failed hardware attach is NOT grounds to discard these pages.
@@ -283,11 +283,11 @@ int x9_camera_s1_discard(struct x9_camera_s1 **map)
 {
     struct x9_camera_s1 *m;
     int e=0;
-    if(!map)return EINVAL;
+    if(!map)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_s1_lock);
     m=*map;
-    if(!m || m->magic!=CAM_S1_MAGIC)e=EINVAL;
-    else if(m->published)e=EBUSY;
+    if(!m || m->magic!=CAM_S1_MAGIC)e=CAM_FAIL(EINVAL);
+    else if(m->published)e=CAM_FAIL(EBUSY);
     else {
         /* Even a failed software validation cannot have exposed this
          * opaque object's addresses. Unpublished allocation can unwind.
@@ -337,7 +337,7 @@ static int cam_s1_id_check(struct x9_camera_s1_id *m)
     const struct cam_s1_page *table[4];
     unsigned count;
     uint64_t pa_limit;
-    if(!m || m->magic!=CAM_S1_ID_MAGIC)return EINVAL;
+    if(!m || m->magic!=CAM_S1_ID_MAGIC)return CAM_FAIL(EINVAL);
     if(m->last_errno)return m->last_errno;
     if(PAGE_SHIFT!=CAM_S1_SHIFT || m->ips>=6 || m->oas!=cam_s1_oas[m->ips] ||
         m->asid>255 || (m->asid && !m->published) ||
@@ -351,20 +351,20 @@ static int cam_s1_id_check(struct x9_camera_s1_id *m)
         m->leaves!=1+((m->iova+m->mapped_bytes-1)>>CAM_S1_L2_SHIFT)-m->first_root ||
         !m->leaves || m->leaves>CAM_S1_MAX_LEAVES ||
         m->first_root+m->leaves>CAM_S1_ROOT_ENTRIES ||
-        !m->root.va || !m->cd.va)return EFAULT;
+        !m->root.va || !m->cd.va)return CAM_FAIL(EFAULT);
     pa_limit=1ull<<m->oas;
     if(m->pa>=pa_limit || m->mapped_bytes>pa_limit-m->pa ||
-        (m->pa&~CAM_S1_PA_MASK))return ERANGE;
+        (m->pa&~CAM_S1_PA_MASK))return CAM_FAIL(ERANGE);
     table[0]=&m->root;table[1]=&m->cd;table[2]=&m->leaf[0];table[3]=&m->leaf[1];
     count=2+m->leaves;
     for(unsigned i=m->leaves;i<CAM_S1_MAX_LEAVES;i++)
-        if(m->leaf[i].va || m->leaf[i].pa)return EFAULT;
+        if(m->leaf[i].va || m->leaf[i].pa)return CAM_FAIL(EFAULT);
     for(unsigned i=0;i<count;i++) {
         uint64_t pa=0;
         int e=cam_s1_phys(table[i]->va,m->oas,&pa);
         if(e)return e;
-        if(pa!=table[i]->pa)return ESTALE;
-        for(unsigned j=0;j<i;j++)if(pa==table[j]->pa)return EFAULT;
+        if(pa!=table[i]->pa)return CAM_FAIL(ESTALE);
+        for(unsigned j=0;j<i;j++)if(pa==table[j]->pa)return CAM_FAIL(EFAULT);
     }
     {
         const volatile uint64_t *root=(const volatile uint64_t *)m->root.va;
@@ -372,7 +372,7 @@ static int cam_s1_id_check(struct x9_camera_s1_id *m)
             uint64_t expected=0;
             if(i>=m->first_root && i<m->first_root+m->leaves)
                 expected=m->leaf[i-m->first_root].pa|3ull;
-            if(root[i]!=expected)return ESTALE;
+            if(root[i]!=expected)return CAM_FAIL(ESTALE);
         }
     }
     for(unsigned t=0;t<m->leaves;t++) {
@@ -382,7 +382,7 @@ static int cam_s1_id_check(struct x9_camera_s1_id *m)
             uint64_t va=base+((uint64_t)i<<CAM_S1_SHIFT),expected=0;
             if(va>=m->iova && va-m->iova<m->mapped_bytes)
                 expected=(m->pa+(va-m->iova))|CAM_S1_PAGE_ATTR;
-            if(leaf[i]!=expected)return ESTALE;
+            if(leaf[i]!=expected)return CAM_FAIL(ESTALE);
         }
     }
     {
@@ -394,7 +394,7 @@ static int cam_s1_id_check(struct x9_camera_s1_id *m)
                 else if(i==1)expected=m->root.pa;
                 else if(i==3)expected=CAM_S1_MAIR;
             }
-            if(cd[i]!=expected)return ESTALE;
+            if(cd[i]!=expected)return CAM_FAIL(ESTALE);
         }
     }
     __asm__ volatile("dsb sy":::"memory");
@@ -410,19 +410,19 @@ int x9_camera_s1_id_create(uint32_t idr5,uint64_t iova,uint64_t pa,
     int e=0;
     if(!out || *out || !bytes || bytes>X9_CAMERA_MAX_BYTES || !iova ||
         (iova&(CAM_S1_PAGE-1)) || iova>=CAM_S1_IOVA_LIMIT ||
-        !pa || (pa&(CAM_S1_PAGE-1)))return EINVAL;
-    if(PAGE_SHIFT!=CAM_S1_SHIFT || !(idr5&(1u<<5)) || ips>=6)return ENOTSUP;
+        !pa || (pa&(CAM_S1_PAGE-1)))return CAM_FAIL(EINVAL);
+    if(PAGE_SHIFT!=CAM_S1_SHIFT || !(idr5&(1u<<5)) || ips>=6)return CAM_FAIL(ENOTSUP);
     mapped=(bytes+CAM_S1_PAGE-1)&~(CAM_S1_PAGE-1);
-    if(mapped>CAM_S1_IOVA_LIMIT-iova)return ERANGE;
+    if(mapped>CAM_S1_IOVA_LIMIT-iova)return CAM_FAIL(ERANGE);
     m=kalloc_type(struct x9_camera_s1_id,Z_WAITOK|Z_ZERO);
-    if(!m)return ENOMEM;
+    if(!m)return CAM_FAIL(ENOMEM);
     m->magic=CAM_S1_ID_MAGIC;m->iova=iova;m->pa=pa;m->bytes=bytes;
     m->mapped_bytes=mapped;m->pages=mapped/CAM_S1_PAGE;
     m->oas=cam_s1_oas[ips];m->ips=ips;
     m->first_root=(uint32_t)(iova>>CAM_S1_L2_SHIFT);
     m->leaves=(uint32_t)((iova+mapped-1)>>CAM_S1_L2_SHIFT)-m->first_root+1;
     if(m->leaves>CAM_S1_MAX_LEAVES || m->first_root+m->leaves>CAM_S1_ROOT_ENTRIES)
-        e=ERANGE;
+        e=CAM_FAIL(ERANGE);
     if(!e)e=cam_s1_alloc_page(&m->root,m->oas);
     for(unsigned i=0;i<m->leaves && !e;i++)e=cam_s1_alloc_page(&m->leaf[i],m->oas);
     if(!e)e=cam_s1_alloc_page(&m->cd,m->oas);
@@ -456,10 +456,10 @@ int x9_camera_s1_id_export(struct x9_camera_s1_id *m,uint32_t asid,
 {
     int e;
     uint64_t *cd;
-    if(!out || !asid || asid>255)return EINVAL;
+    if(!out || !asid || asid>255)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_s1_lock);
     e=cam_s1_id_check(m);
-    if(!e && m->published)e=EBUSY;
+    if(!e && m->published)e=CAM_FAIL(EBUSY);
     if(!e) {
         m->published=true;m->asid=asid;
         cd=(uint64_t *)m->cd.va;
@@ -490,11 +490,11 @@ int x9_camera_s1_id_discard(struct x9_camera_s1_id **map)
 {
     struct x9_camera_s1_id *m;
     int e=0;
-    if(!map)return EINVAL;
+    if(!map)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_s1_lock);
     m=*map;
-    if(!m || m->magic!=CAM_S1_ID_MAGIC)e=EINVAL;
-    else if(m->published)e=EBUSY;
+    if(!m || m->magic!=CAM_S1_ID_MAGIC)e=CAM_FAIL(EINVAL);
+    else if(m->published)e=CAM_FAIL(EBUSY);
     else { *map=NULL;cam_s1_id_free_unpublished(m); }
     lck_mtx_unlock(&camera_s1_lock);return e;
 }

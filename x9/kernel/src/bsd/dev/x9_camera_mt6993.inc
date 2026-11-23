@@ -121,7 +121,7 @@ static int cam_wait_bits(vm_offset_t base, unsigned off, uint32_t mask,
         if((cam_rr(base,off)&mask)==value)return 0;
         delay(1);
     }
-    return ETIMEDOUT;
+    return CAM_FAIL(ETIMEDOUT);
 }
 static unsigned cam_vote_off(struct cam_probe_journal *j)
 { return 0x20000+j->board.clk_group*12; }
@@ -147,7 +147,7 @@ static uint32_t cam_pin_mode(vm_offset_t gpio, unsigned pin)
 { return (cam_rr(gpio,0x300+(pin/4)*16)>>((pin%4)*8))&31; }
 static int cam_pin_mux(vm_offset_t gpio, unsigned pin, unsigned mode)
 {
-    if(mode>15)return EINVAL;
+    if(mode>15)return CAM_FAIL(EINVAL);
     /* MT6993 FLAG_RACE_FREE_ACCESS: MODE MWR, bit4 is modify-enable.
      * No full-word RMW or transient CLR of another pin's mode. */
     cam_rw(gpio,0x300+(pin/4)*16+12,(16u|mode)<<((pin%4)*8));
@@ -171,10 +171,10 @@ static int cam_bus_idle(struct cam_probe_bus *b)
         /* Vendor i2c-mt65xx: INTR_MASK is per-transfer configuration and
          * stale STAT/FIFO are cleared by init_hw/each transfer; only a
          * running START (bit0) or an enabled APDMA is real activity. */
-        if(cam_rr(c,CAM_I2C_START)&1)return EBUSY;
+        if(cam_rr(c,CAM_I2C_START)&1)return CAM_FAIL(EBUSY);
     }
     for(unsigned channel=0;channel<b->dma_banks;channel++)
-        if(cam_rr(b->dma,channel*0x10000+0x08)&1)return EBUSY;
+        if(cam_rr(b->dma,channel*0x10000+0x08)&1)return CAM_FAIL(EBUSY);
     return 0;
 }
 #include "x9_camera_i2c_clock.inc"
@@ -189,16 +189,16 @@ static int cam_bus_conflict(struct cam_probe_bus *b, unsigned reg, uint32_t expe
     b->conflict=true;
     printf("X9 CAMERA AP CONFLICT: gate=%x reg=%x expected=%08x observed=%08x dirty=%x uncertain=%x (retained, no overwrite)\n",
         b->gate_bit,reg,expected,observed,b->dirty,b->uncertain);
-    return EBUSY;
+    return CAM_FAIL(EBUSY);
 }
 static int cam_bus_controls(struct cam_probe_bus *b, bool restoring)
 {
-    if(b->conflict)return EBUSY;
-    if(!restoring && b->uncertain)return EIO;
+    if(b->conflict)return CAM_FAIL(EBUSY);
+    if(!restoring && b->uncertain)return CAM_FAIL(EIO);
     int e=cam_pins_guard(&cam_journal,restoring);if(e)return e;
     e=cam_clock_check(&cam_journal,restoring,cam_journal.clock_active);if(e)return e;
     e=cam_bus_clock(b);if(e)return e;
-    if(cam_rr(b->gate,0xe00)&b->gate_bit)return EBUSY;
+    if(cam_rr(b->gate,0xe00)&b->gate_bit)return CAM_FAIL(EBUSY);
     uint32_t multi=cam_rr(b->base,CAM_I2C_MULTI);
     if(multi!=b->multi_entry)return cam_bus_conflict(b,CAM_I2C_MULTI,b->multi_entry,multi);
     for(unsigned i=0;i<CAM_I2C_SAVED_COUNT;i++) {
@@ -212,7 +212,7 @@ static int cam_bus_control_write(struct cam_probe_bus *b, unsigned reg, uint32_t
                                   bool restoring)
 {
     unsigned i=0;while(i<CAM_I2C_SAVED_COUNT && cam_i2c_saved_regs[i]!=reg)i++;
-    if(i==CAM_I2C_SAVED_COUNT || !b->owned)return EINVAL;
+    if(i==CAM_I2C_SAVED_COUNT || !b->owned)return CAM_FAIL(EINVAL);
     int e=cam_bus_controls(b,restoring);if(e)return e;
     uint32_t before=cam_rr(b->base,reg),bit=1u<<i;
     if(before!=b->expected[i] && !(restoring && (b->uncertain&bit) && before==b->prior[i]))
@@ -229,7 +229,7 @@ static int cam_bus_control_write(struct cam_probe_bus *b, unsigned reg, uint32_t
     if(got!=value) {
         printf("X9 CAMERA AP WRITE: gate=%x reg=%x before=%x want=%x got=%x\n",
             b->gate_bit,reg,before,value,got);
-        return EIO;
+        return CAM_FAIL(EIO);
     }
     b->uncertain&=~bit;if(restoring)b->dirty&=~bit;
     return 0;
@@ -242,7 +242,7 @@ static int cam_bus_take(struct cam_probe_bus *b)
      * reparented. Journal BEFORE CLR, including an unconfirmed gate write. */
     if(cam_rr(b->gate,0xe00)&b->gate_bit) {
         for(unsigned channel=0;channel<b->dma_banks;channel++)
-            if(cam_rr(b->dma,channel*0x10000+0x08)&1)return EBUSY;
+            if(cam_rr(b->dma,channel*0x10000+0x08)&1)return CAM_FAIL(EBUSY);
         b->gate_owned=true;
         cam_rw(b->gate,0xe04,b->gate_bit);
         e=cam_wait_bits(b->gate,0xe00,b->gate_bit,0,1000);if(e)return e;
@@ -276,7 +276,7 @@ static int cam_bus_take(struct cam_probe_bus *b)
     uint32_t stale=cam_rr(b->base,CAM_I2C_STAT);
     if(stale)cam_rw(b->base,CAM_I2C_STAT,stale);
     cam_rw(b->base,CAM_I2C_FIFO_CLR,1);
-    if(cam_rr(b->base,CAM_I2C_STAT) || (cam_rr(b->base,CAM_I2C_FIFO)&31))return EBUSY;
+    if(cam_rr(b->base,CAM_I2C_STAT) || (cam_rr(b->base,CAM_I2C_FIFO)&31))return CAM_FAIL(EBUSY);
     b->multi_entry=cam_rr(b->base,CAM_I2C_MULTI);
     for(unsigned i=0;i<CAM_I2C_SAVED_COUNT;i++)b->saved[i]=cam_rr(b->base,cam_i2c_saved_regs[i]);
     memcpy(b->expected,b->saved,sizeof(b->saved));
@@ -307,7 +307,7 @@ static bool cam_bus_unretired(const struct cam_probe_bus *b)
  * by the owned/gate flags or by a subsequently cleared START bit. */
 static int cam_bus_supply_guard(struct cam_probe_bus *b)
 {
-    if(cam_bus_unretired(b))return EBUSY;
+    if(cam_bus_unretired(b))return CAM_FAIL(EBUSY);
     if(!b->owned)return 0; /* no complete control snapshot to validate */
     int e=cam_bus_controls(b,true);
     if(!e)e=cam_bus_idle(b);
@@ -316,10 +316,10 @@ static int cam_bus_supply_guard(struct cam_probe_bus *b)
 }
 static int cam_bus_restore(struct cam_probe_bus *b)
 {
-    if(cam_bus_unretired(b))return EBUSY;
+    if(cam_bus_unretired(b))return CAM_FAIL(EBUSY);
     if(!b->owned && !b->gate_owned)return 0;
     int e=cam_bus_clock(b);if(e)return e;
-    if(cam_bus_idle(b))return EBUSY;
+    if(cam_bus_idle(b))return CAM_FAIL(EBUSY);
     if(b->owned) {
         e=cam_bus_controls(b,true);if(e)return e;
         for(unsigned n=CAM_I2C_SAVED_COUNT;n>0;n--) {
@@ -347,9 +347,9 @@ static int cam_wl_write(struct cam_probe_journal *j, uint8_t reg, uint8_t value)
         if(reg==3+j->board.wl_channel[i])voltage=true;
     /* ENABLE is an explicit single-channel operation, never a caller's
      * stale whole-byte value. This helper only programs disabled selectors. */
-    if(!voltage)return EPERM;
+    if(!voltage)return CAM_FAIL(EPERM);
     uint8_t enable=0;int e=cam_wl_guard(j,false,&enable);if(e)return e;
-    if(enable&(1u<<(reg-4)))return EBUSY; /* no live voltage change */
+    if(enable&(1u<<(reg-4)))return CAM_FAIL(EBUSY); /* no live voltage change */
     uint8_t tx[2]={reg,value},back=0;
     e=cam_bus_transfer(&j->ldo,0x35,tx,2,NULL);
     if(!e)e=cam_wl_read(j,reg,&back);
@@ -359,11 +359,11 @@ static int cam_pmif_wait(vm_offset_t bus, unsigned expected)
 {
     for(unsigned i=0;i<1000;i++) {
         uint32_t s=cam_rr(bus,0x8a8);
-        if(s&(1u<<18))return EIO;
+        if(s&(1u<<18))return CAM_FAIL(EIO);
         if(((s>>1)&7)==expected)return 0;
         delay(1);
     }
-    return ETIMEDOUT;
+    return CAM_FAIL(ETIMEDOUT);
 }
 /* PMIF SWINF2 is serialized with every other X9 PMIC consumer. Rail
  * snapshot -> ownership checks -> voltage/SET/CLR -> readback hold ONE lock.
@@ -371,7 +371,7 @@ static int cam_pmif_wait(vm_offset_t bus, unsigned expected)
 static int cam_pmic_xfer_locked(struct cam_probe_journal *j, unsigned sid,
                                 unsigned reg, uint8_t *v, bool write)
 {
-    if((sid!=3 && sid!=6 && !(sid==5 && j->board.sensor==X9_CAMERA_ULTRAWIDE)) || reg>0xffff)return EPERM;
+    if((sid!=3 && sid!=6 && !(sid==5 && j->board.sensor==X9_CAMERA_ULTRAWIDE)) || reg>0xffff)return CAM_FAIL(EPERM);
     bool uw_rail=j->board.sensor==X9_CAMERA_ULTRAWIDE && sid==5 &&
         (reg==j->dvdd.sel_reg || reg==j->afvdd.sel_reg ||
          ((reg==j->dvdd.en_reg+1 || reg==j->dvdd.en_reg+2 ||
@@ -380,11 +380,11 @@ static int cam_pmic_xfer_locked(struct cam_probe_journal *j, unsigned sid,
         (reg==j->afvdd.sel_reg || ((reg==j->afvdd.en_reg+1 || reg==j->afvdd.en_reg+2) && *v==1))) || (sid==3 && (reg==0x24a ||
         ((reg==0x2048 || reg==0x2049) && *v==1) ||
         ((reg==0x178b || reg==0x178c) && *v==4) || reg==0x244 || reg==0x1687)) ||
-        (sid==6 && (reg==0x1e61 || ((reg==0x1f08 || reg==0x1f09) && *v==1)))))return EPERM;
-    if(j->pmif_fault)return EIO;
+        (sid==6 && (reg==0x1e61 || ((reg==0x1f08 || reg==0x1f09) && *v==1)))))return CAM_FAIL(EPERM);
+    if(j->pmif_fault)return CAM_FAIL(EIO);
     /* Captured spmi-dev-mask55a8: SID3/5 on P, SID6 on M. */
     vm_offset_t bus=(sid==3 || sid==5)?j->pmif_p:j->pmif_m;
-    if(!bus || !(cam_rr(bus,0)&1))return ENXIO;
+    if(!bus || !(cam_rr(bus,0)&1))return CAM_FAIL(ENXIO);
     int e=cam_pmif_wait(bus,0);if(e)return e;
     j->pmif_pending=bus;
     if(write)cam_rw(bus,0x884,*v);
@@ -414,13 +414,13 @@ static int cam_vs_vote(struct cam_probe_journal *j, bool on)
 {
     if(!on && !j->vs_owned)return 0;
     int e=cam_pins_guard(j,!on);if(e)return e;
-    if(X9PMIFAcquire())return EBUSY;
+    if(X9PMIFAcquire())return CAM_FAIL(EBUSY);
     uint8_t en=0;e=cam_pmic_r(j,3,0x178a,&en);
     if(!e && (on?!(en&4):true)) {
         if(on)j->vs_owned=true;
         e=cam_pmic_w(j,3,on?0x178b:0x178c,4);
         if(!e)e=cam_pmic_r(j,3,0x178a,&en);
-        if(!e && !!(en&4)!=on)e=EIO;
+        if(!e && !!(en&4)!=on)e=CAM_FAIL(EIO);
         if(!e && !on)j->vs_owned=false;
     }
     if(!e && on) {
@@ -445,7 +445,7 @@ static int cam_vs_vote(struct cam_probe_journal *j, bool on)
                 if(!e && (bda&1))break;
             }
             if(!e)e=cam_pmic_r(j,3,0x1687,&ben);
-            if(!e && (!(ben&1) || !(bda&1)))e=EIO;
+            if(!e && (!(ben&1) || !(bda&1)))e=CAM_FAIL(EIO);
             if(!e)delay(200); /* regulator-enable-ramp-delay 180 us */
         }
         printf("X9 CAMERA BUCK5: en=%02x->%02x da=%02x->%02x vosel=%02x->%02x errno=%d (Android always-on: 01/03/be)\n",
@@ -466,7 +466,7 @@ static int cam_wl_restore_channel(struct cam_probe_journal *j, unsigned i)
         uint8_t voltage=0;
         e=cam_wl_read(j,(uint8_t)(3+j->board.wl_channel[i]),&voltage);
         if(e)return e;
-        if(voltage!=j->wl_voltage[i] && voltage!=j->board.wl_code[i])return EBUSY;
+        if(voltage!=j->wl_voltage[i] && voltage!=j->board.wl_code[i])return CAM_FAIL(EBUSY);
         e=cam_wl_write(j,(uint8_t)(3+j->board.wl_channel[i]),j->wl_voltage[i]);
         if(!e)j->wl_programmed&=~bit;
     }
@@ -481,7 +481,7 @@ static int cam_wake_restore(struct cam_probe_journal *j)
      * unrelated WL channels to be off just to retire a reference. */
     if(p->owned || p->dirty) {
         uint8_t enable=0;e=cam_wl_read(j,3,&enable);if(e)return e;
-        if((enable&j->board.wl_mask) || j->wl_owned)return EBUSY;
+        if((enable&j->board.wl_mask) || j->wl_owned)return CAM_FAIL(EBUSY);
         /* Log 335: ENABLE keeps non-LDO bit7 (entry c8 = ours|0x80), so an
          * all-zero requirement always failed. Vendor wl28681c probe selects
          * reset_high once and never drives it low (GPIO203 is also RT5133
@@ -657,7 +657,7 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
                               struct x9_camera_probe *r)
 {
     memset(j,0,sizeof(*j));
-    if(!x9_camera_sensor_valid(which))return EINVAL;
+    if(!x9_camera_sensor_valid(which))return CAM_FAIL(EINVAL);
     bool back=which==X9_CAMERA_BACK,tele=which==X9_CAMERA_TELEPHOTO,uw=which==X9_CAMERA_ULTRAWIDE;
     j->board=(struct cam_probe_board){
         .sensor=which, .reset=uw?205:tele?189:back?171:170, .mclk=uw?192:tele?188:back?208:72,
@@ -701,7 +701,7 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
         .group_gate_mask=0x0d};
     if(!j->gpio || !j->vlp || !j->top || !j->hwv || !j->pll || !j->mainpll || !j->pmif_p || ((back||tele) && !j->pmif_m) ||
        !j->board.drive_base || !j->sensor.base || !j->sensor.dma || !j->sensor.gate ||
-       !j->ldo.base || !j->ldo.dma || !j->ldo.gate)return ENOMEM;
+       !j->ldo.base || !j->ldo.dma || !j->ldo.gate)return CAM_FAIL(ENOMEM);
     r->mclk_cfg=cam_rr(j->vlp,j->board.clk_off);
     r->mclk_status=cam_rr(j->vlp,0x330);
     /* mt6993-pinfunc.h: sensor SCL/SDA (172-175,190/191,200/201) are AP
@@ -731,7 +731,7 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
         if(cam_pin_check(j,pins[i],false))r->blockers|=i<3?X9_CAM_BLOCK_INHERITED:X9_CAM_BLOCK_ROUTE;
     }
     if(cam_drive_check(j,false))r->blockers|=X9_CAM_BLOCK_INHERITED;
-    if(r->blockers)return ENOTSUP;
+    if(r->blockers)return CAM_FAIL(ENOTSUP);
     r->stage=X9_CAM_STAGE_PMIC;
     int e=cam_shared_rails(j,r);if(e)return e;
     r->stage=X9_CAM_STAGE_CLOCK;
@@ -755,7 +755,7 @@ static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
         r->stage=X9_CAM_STAGE_LDO;
         e=cam_wake_take(j);
         if(!e)e=cam_wl_read(j,0,&v);r->wl_id=v;
-        if(!e && v!=0x0d)e=ENODEV;
+        if(!e && v!=0x0d)e=CAM_FAIL(ENODEV);
         if(!e) {
             /* Oplus wl28681c-regulator.c probe, after reset_high and
              * regulator registration: regmap_write(0x11, 0x07) "disable UVP".
@@ -770,7 +770,7 @@ static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
                 const uint8_t tx[2]={0x11,0x07};uint8_t back=0;
                 e=cam_bus_transfer(&j->ldo,0x35,tx,2,NULL);
                 if(!e)e=cam_wl_read(j,0x11,&back);
-                if(!e && back!=0x07)e=EIO;
+                if(!e && back!=0x07)e=CAM_FAIL(EIO);
                 printf("X9 CAMERA WL UVP: reg11=%02x->%02x errno=%d (Android probe: disable UVP)\n",uvp,back,e);
             } else if(!e) printf("X9 CAMERA WL UVP: reg11=07 already (Android probe value)\n");
         }
@@ -786,7 +786,7 @@ static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
                 j->wl_enable,j->board.wl_mask);
             e=cam_bus_transfer(&j->ldo,0x35,tx,2,NULL);
             if(!e)e=cam_wl_read(j,3,&j->wl_enable);
-            if(!e && (j->wl_enable&j->board.wl_mask))e=EIO;
+            if(!e && (j->wl_enable&j->board.wl_mask))e=CAM_FAIL(EIO);
             /* Android: WL default-on rails stay up after probe, then
              * regulator_late_cleanup turns them off tens of seconds before
              * the first camera open, so the sensor starts from a long full
@@ -922,7 +922,7 @@ static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
         printf("X9 CAMERA ID: sensor=%u slave=%02x attempts=%u id=%02x%02x errno=%d status=%08x\n",
             which,slave,attempt>10?10:attempt,hi,lo,e,j->sensor.last_status);
         if(!e)r->chip_id=((uint32_t)hi<<8)|lo;
-        if(!e && r->chip_id!=sensors[which-1].chip_id)e=ENODEV;
+        if(!e && r->chip_id!=sensors[which-1].chip_id)e=CAM_FAIL(ENODEV);
         if(!e)r->flags|=X9_CAM_PROBE_MATCHED;
     }
     r->i2c_status[0]=j->sensor.last_status;

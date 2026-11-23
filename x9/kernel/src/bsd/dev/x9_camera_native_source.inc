@@ -19,12 +19,12 @@ static int cam_native_source_standby_locked(uint64_t epoch)
     int e=cam_sensor_session_match(epoch);
     if(!e && cam_sensor_live.error)e=cam_sensor_live.error;
     if(!e && (cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED ||
-        session.capture || session.stream))e=EBUSY;
+        session.capture || session.stream))e=CAM_FAIL(EBUSY);
     if(e)return e;
     ap=(struct cam_sensor_ap){&cam_journal.sensor,
         cam_sensor_slave(cam_sensor_live.probe.sensor)};
-    e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e && byte)e=EBUSY;
-    if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=EBUSY;
+    e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e && byte)e=CAM_FAIL(EBUSY);
+    if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=CAM_FAIL(EBUSY);
     return e?e:cam_sensor_ap_guard(&ap);
 }
 
@@ -72,11 +72,11 @@ static int cam_native_source_voltage_locked(void)
 {
     struct x9_camera_native_source_status *s=&cam_native_source.status;
     uint32_t *v=s->vcore;
-    if(!sweet_x9_vcore_ufs_check(v))return ENXIO;
+    if(!sweet_x9_vcore_ufs_check(v))return CAM_FAIL(ENXIO);
     /* The step index equals the regulator selector only for these four
      * supported CDPHY steps. UFS may retain a stronger monotonic floor. */
     if(((v[1]>>4)&7)<s->inherited_step ||
-       ((v[2]>>8)&7)<s->inherited_step)return ERANGE;
+       ((v[2]>>8)&7)<s->inherited_step)return CAM_FAIL(ERANGE);
     return 0;
 }
 static uint64_t cam_native_source_pll_hz(uint32_t con1)
@@ -96,21 +96,21 @@ static int cam_native_source_rate_guard_locked(uint64_t epoch)
     int e;
     if(s->last_errno)return s->last_errno;
     if(!cam_native_source.rate_valid || s->sensor_epoch!=epoch || !cam_native_source.pll ||
-       !cam_rx_sensor_held_locked(epoch) || !cam_mm.active)return ESTALE;
+       !cam_rx_sensor_held_locked(epoch) || !cam_mm.active)return CAM_FAIL(ESTALE);
     if(((cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff)!=s->csi_parent ||
        (cam_rr(cam_mm.top,0x330)&d->effect_mask) ||
        !(cam_rr(cam_mm.top,0x270)&(1u<<(14-cam_phy.status.csi_port))) ||
        (cam_rr(cam_native_source.pll,0x34)&0x10)!=s->pll_fenc ||
-       (cam_rr(cam_native_source.pll,0xc)&0x073fffff)!=s->pll_rate)return ESTALE;
+       (cam_rr(cam_native_source.pll,0xc)&0x073fffff)!=s->pll_rate)return CAM_FAIL(ESTALE);
     e=cam_native_rate_guard(&cam_mm,false);if(e)return e;
     if(!cam_native_rate.seen || !cam_native_rate.applied || cam_native_rate.level!=2 ||
-       !s->cam_clock_hz || !(cam_rr(cam_mm.top,0x270)&(1u<<18)))return ESTALE;
+       !s->cam_clock_hz || !(cam_rr(cam_mm.top,0x270)&(1u<<18)))return CAM_FAIL(ESTALE);
     e=cam_native_bw_guard();if(e)return e;
     e=cam_smi_a0_guard();if(e)return e;
     if(!cam_native_bw.held || !cam_native_bw.complete || cam_native_bw.epoch!=epoch ||
        cam_smi_a0.expected[CAM_SMI_A0_OSTD]!=cam_native_bw.ostd ||
        (cam_smi_a0.expected[CAM_SMI_A0_ULTRA]&1) ||
-       (cam_smi_a0.expected[CAM_SMI_A0_NONSEC]&8))return ESTALE;
+       (cam_smi_a0.expected[CAM_SMI_A0_NONSEC]&8))return CAM_FAIL(ESTALE);
     e=cam_native_source_voltage_locked();
     return e;
 }
@@ -120,16 +120,21 @@ static int cam_native_source_processing_locked(void)
     uint64_t hz;
     int e=cam_native_rate_guard(&cam_mm,false);if(e)return e;
     if(!cam_native_rate.seen || !cam_native_rate.applied || cam_native_rate.level!=2)
-        return ENXIO;
+        return CAM_FAIL(ENXIO);
     s->cam_parent=cam_native_rate.expected_cfg;s->cam_rc_level=cam_native_rate.rc_level;
-    if((s->cam_parent&15)!=10)return ERANGE;
+    /* RC runs at max(all XPU votes) like Android: require at least our
+     * level-2 rate (416 MHz), measured, not an exact parent/rate. */
     hz=cam_native_source_pll_hz(cam_native_rate.pcw)/6;
-    for(unsigned n=0;n<2;n++) {
-        uint64_t actual,target,delta;
-        e=cam_phy_meter_measure(X9_CAM_MM_CAM_MUX,14,&s->cam_clock_count[n]);if(e)return e;
-        actual=(uint64_t)s->cam_clock_count[n]*26000000*2;target=hz*1024;
-        delta=actual>target?actual-target:target-actual;
-        if(delta>2ull*26000000*2)return ERANGE;
+    {
+        uint64_t sum=0;
+        for(unsigned n=0;n<2;n++) {
+            uint64_t actual,target;
+            e=cam_phy_meter_measure(X9_CAM_MM_CAM_MUX,14,&s->cam_clock_count[n]);if(e)return e;
+            actual=(uint64_t)s->cam_clock_count[n]*26000000*2;target=hz*1024;
+            if(actual+2ull*26000000*2<target)return CAM_FAIL(ERANGE);
+            sum+=actual/1024;
+        }
+        hz=sum/2;
     }
     e=cam_native_rate_guard(&cam_mm,false);if(e)return e;
     s->cam_clock_hz=hz;
@@ -155,39 +160,39 @@ static int cam_native_source_rate_locked(uint64_t epoch)
     int e=cam_phy_dependencies();if(e)return e;
     if(!cam_phy.held || cam_phy.epoch!=epoch || cam_phy.error ||
        !(cam_phy.status.flags&X9_CAM_PHY_TIMING_CONFIGURED) ||
-       cam_phy.status.clock_pending)return ESTALE;
+       cam_phy.status.clock_pending)return CAM_FAIL(ESTALE);
     parent=(cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff;s->csi_parent=parent;
-    if(parent&0xf0)return ENOTSUP;
+    if(parent&0xf0)return CAM_FAIL(ENOTSUP);
     for(step=0;step<sizeof(steps)/sizeof(steps[0]);step++)if(parent==steps[step].parent)break;
-    if(step==sizeof(steps)/sizeof(steps[0]))return ERANGE;
+    if(step==sizeof(steps)/sizeof(steps[0]))return CAM_FAIL(ERANGE);
     s->inherited_step=step;s->required_vcore_uv=steps[step].uv;
     e=cam_native_source_voltage_locked();if(e)return e;
     pll_slot=steps[step].pll_base==0x10043000?0:1;
     if(!pll_maps[pll_slot])pll_maps[pll_slot]=ml_io_map(steps[step].pll_base,0x100);
     cam_native_source.pll=pll_maps[pll_slot];
-    if(!cam_native_source.pll)return ENOMEM;
+    if(!cam_native_source.pll)return CAM_FAIL(ENOMEM);
     s->pll_rate=cam_rr(cam_native_source.pll,0xc)&0x073fffff;
     s->pll_fenc=cam_rr(cam_native_source.pll,0x34)&0x10;
-    if(s->pll_fenc!=0x10)return ENXIO;
+    if(s->pll_fenc!=0x10)return CAM_FAIL(ENXIO);
     /* Borrow the existing normal PLL only. A valid unrelated rate cannot
      * be converted into the named CDPHY operating point by rounding. */
     clock=cam_native_source_pll_hz(s->pll_rate)/steps[step].div;
     diff=clock>steps[step].hz?clock-steps[step].hz:steps[step].hz-clock;
-    if(diff>steps[step].hz/1000)return ERANGE;
+    if(diff>steps[step].hz/1000)return CAM_FAIL(ERANGE);
     for(unsigned n=0;n<2;n++) {
         uint64_t actual=(uint64_t)cam_phy.status.clock_count[n]*26000000*2;
         uint64_t target=clock*1024;
         uint64_t delta=actual>target?actual-target:target-actual;
-        if(!cam_phy.status.clock_count[n] || delta>2ull*26000000*2)return ERANGE;
+        if(!cam_phy.status.clock_count[n] || delta>2ull*26000000*2)return CAM_FAIL(ERANGE);
     }
     if((cam_phy.status.cphy && cam_phy.status.nominal_data_rate>=5400000000ull) ||
-       (!cam_phy.status.cphy && cam_phy.status.nominal_data_rate>=9000000000ull))return ERANGE;
+       (!cam_phy.status.cphy && cam_phy.status.nominal_data_rate>=9000000000ull))return CAM_FAIL(ERANGE);
     /* Recheck the real retained source after both observations; an observed
      * rate still does not permit the capture authority to assert RATE/SMI. */
     e=cam_native_source_processing_locked();
     if(!e)e=cam_native_bw_take_locked(epoch);
     if(!e)e=cam_phy_dependencies();
-    if(!e && ((cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff)!=parent)e=ESTALE;
+    if(!e && ((cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff)!=parent)e=CAM_FAIL(ESTALE);
     if(!e) {
         cam_native_source.rate_valid=true;e=cam_native_source_rate_guard_locked(epoch);
         if(e)cam_native_source.rate_valid=false;
@@ -215,7 +220,7 @@ static int cam_native_source_prepare_locked(uint64_t epoch,
     struct x9_camera_native_source_status *s=&cam_native_source.status;
     const char *step;
     int e;
-    if(!result)return EINVAL;
+    if(!result)return CAM_FAIL(EINVAL);
     memset(result,0,sizeof(*result));result->sensor_epoch=epoch;
     e=cam_native_source_standby_locked(epoch);
     if(e) {
