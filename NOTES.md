@@ -160,6 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 编译检查（仅 kernel 步骤，无 boot.img）
+
+- 命令：`build.py kernel --boot-config x9/build/boot-device.json --name x9-compilecheck-smmuinit-20261123`，exit 0；104/104 overlay 对象编译、链接并 strip 成功，`x9_mm_power.c` 无新增 warning/error。产物 `x9/out/x9-compilecheck-smmuinit-20261123/kernel.development.sweet`（sha256 `008f51c06c47…f34d`），**目录里没有 boot.img**，未打包、未上机。
+- 含 opt-in 路径 `x9_mmup_smmu_init`；参数不在 boot-device.json，默认行为不变。若批准上机验证，用 `build.py all --boot-arg x9_mmup_smmu_init=1` 另出镜像，看 `X9 MM VCP SMMU INIT: smc=…`（a0==0xc2000514 表示 ATF 未处理）以及 stage=4 是否通过。
+- 证据等级仍为推断（INIT 缺失 → stage0 取回垃圾镜像），EL1 能否调用 INIT 与 INIT 对 GCE 的影响只能上机确认。
+
 #### 2026-11-23 MMUP stage0 取指链（静态）：INIT 假设复活，且比之前更有依据；SID 0xa1 判断作废
 
 - **观察（mmup.dis + bin + 366 HDR）**：`tinysys-mmup-RV33_A.bin` 前 0x20 字节只有 `0x1a0b5`，其余为 0；366 实读 SRAM 头 `1a0b5 6c37001 2000 6c39001 48c00` = ATF（0x28f98）在偏移 4/8/0xc/0x10 写入的字段。stage0 的 `0x370-0x3bc`：`t0=4`，**src=[0xc]=0x6c39001（IOVA 0x1_06c39000，经 0x304 加 0xe0000000 窗）**，**dst=[8]=0x2000**，**len=[0x10]-[8]=0x46c00**，即把主镜像 0x46c00 字节从 DRAM IOVA 0x1_06c39000 逐字拷进 SRAM 0x2000。ATF 只用 0x28f98 里的循环把前 0x2000 字节 stub 拷进 SRAM。
