@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 368（诊断镜像 x9-mmup-smmuinit-diag-20261123）：PM_GET 成功，INIT 卡 3.55 秒后返回 2
+
+- **实测**：`PM_GET ret=0 elapsed_us=13`；`INIT ret=2 elapsed_us=3546868`；三次 HWV 快照完全相同（en=0 glob=0 sta=0 done=ffffffff int=0 fsm=1 all=0 ack=c2f10152 infra=e3fc0000）。BOOT 与 366/367 一致（stage=4 errno=60，nest=0x3be37，TBUF 0x19c→0x4a14 后随机）。
+- **排除 A（投票循环依赖）**：PM_GET 13µs 成功且 voter 寄存器不变，ATF 没有发投票（引用/AO 路径）。MM 电源侧看起来已开：ack 的 bit31/30（x9 stage5 判据 0xc0000000）已置位，infra 的 bit31/29 已置位。
+- **INIT 失败点 = 某个寄存器握手轮询超时（推断）**：3.55 s 只能来自 INIT 内的一次 1,000,001 次轮询（计数初值 0xfff0bdbf，每次 delay(1µs)+一次 SMMU MMIO 读）。INIT 内这种轮询有：`0x46048`（S_CR0=0 后等 S_CR0ACK==0）、`0x46498`（S_CR0|=8、|=0xc 后等 ACK 相等；S_INIT(+0x803c)=1 后等清零）、`0x47c9c`→`0x4775c`（CFGI_STE+CMD_SYNC 等 secure CMDQ 消费）、`0x47bd4`（S_CR0 置 SMMUEN 等 ACK）。任一超时都返回 2，日志无法区分是哪一个（ATF 打印走 UART）。共同含义：**secure 组对寄存器写/命令不响应**。
+- **与 Android 的剩余差异**：Android 顺序是 PM_GET → `smmu_sec_wpcfg`(SMC cmd 12) → `arm_smmu_device_reset`（NS 组 CR0 关→表/队列→CR0 开，每步等 CR0ACK）→ INIT。iOS 只做了 PM_GET+INIT，没做 WPCFG 和 NS reset。
+- **下一步诊断（需批准）**：① PM_GET 后先发 WPCFG(x1=0x80c) 记返回/耗时（电源已持有，写 WP 寄存器的风险已降低）；② 做 NS 组无副作用握手测试：GBPA 回写同值并置 UPDATE(bit31)，测 UPDATE 清零耗时；读 CR0/CR0ACK/GERROR/GERRORN/IRQ_CTRL/IRQ_CTRLACK。若 NS 的 GBPA.UPDATE 也不清零 → SMMU 核心不处理寄存器更新（时钟/复位问题，和 secure 无关）；若 NS 很快 → 问题在 secure 组或 secure CMDQ；③ 然后 INIT 照旧。
+
 #### 2026-11-23 批量诊断镜像 x9-mmup-smmuinit-diag-20261123（用户批准，未上机）
 
 - 命令：`build.py all --boot-config x9/build/boot-device.json --boot-arg x9_mmup_smmu_init=1 --name x9-mmup-smmuinit-diag-20261123`，exit 0，x9_mm_power.c 无 warning；`x9/out/x9-mmup-smmuinit-diag-20261123/boot.img` 15147008 B，sha256 `e3f6265c5ea8de599694eea1b8048f76fe2824afe7f561f94ec01cce26246c92`。
