@@ -61,14 +61,33 @@ static int cam_smi_parent_guard(void)
 {
     uint32_t cfg;
     int e=cam_mm_guard(&cam_mm,true);if(e)return e;
+    /* Android clk-mux.c waits for CKSTA busy, never refuses. mm_mminfra_sel
+     * (CFG_0[19:16]) is the RC SMI mux DVFS'd by MMPC XPU12 / VCP XPU3
+     * (mmdvfs-mt6993.h); Android never pins its parent. Adopt and log. */
+    e=cam_wait_bits(cam_mm.top,0x330,1u<<29,0,10000);if(e)return e;
     cfg=(cam_rr(cam_mm.top,0x10)>>16)&0xff;
-    if(cfg!=cam_smi.parent_cfg)return CAM_FAIL(ESTALE);
-    if(cam_rr(cam_mm.top,0x330)&(1u<<29))return CAM_FAIL(EBUSY);
+    if(cfg!=cam_smi.parent_cfg) {
+        if(cam_smi.held)
+            printf("X9 CAMERA SMI MMINFRA ADOPT: parent cfg %x -> %x (MMPC/VCP DVFS, not refused)\n",
+                cam_smi.parent_cfg,cfg);
+        cam_smi.parent_cfg=cfg;
+    }
     if(!(cam_rr(cam_mm.top,0x270)&(1u<<29)))return CAM_FAIL(ENXIO);
-    /* MMINFRA is an AL mux; no AP SET/parent/PDN/PLL manipulation. The
-     * MM_2 reference holds its power, FENC is still an observation,
-     * not a throughput or continuous rate lease. */
     return 0;
+}
+/* Android hwccf_api.c _v1_mm_hwccf_voter_ctrl: before a SET, poll
+ * CCF_STATUS[15:0]<=1 (0 = an IRQ voter, e.g. VCP/MMUP, in flight),
+ * MTK_WAIT_GHWV_DONE_CNT=10000 x 1us. */
+static int cam_smi_ccf_idle(void)
+{
+    uint32_t v=0;unsigned i;
+    for(i=0;i<10000;i++) {
+        v=cam_rr(cam_mm.receive.hwv,0x10000);
+        if((v&0xffff)<=1)return 0;
+        delay(1);
+    }
+    printf("X9 CAMERA SMI CCF_STATUS: vote_idle timeout status=%x\n",v);
+    return CAM_FAIL(ETIMEDOUT);
 }
 static int cam_smi_voter_poll(unsigned slot,const char *step,unsigned offset,
     uint32_t target,unsigned timeout_us)
@@ -159,8 +178,25 @@ static int cam_smi_slot_take(unsigned n)
     int e=cam_smi_clock_guard();if(e)return e;
     e=cam_smi_slot_idle(n,"pre-sta");if(e)return e;
     cam_smi_sample(n,a);delay(10);e=cam_smi_slot_idle(n,"pre-sta");if(e)return e;
-    cam_smi_sample(n,b);if(memcmp(a,b,sizeof(a)))return CAM_FAIL(ESTALE);
-    /* No voted-but-gated repair. An unvoted-but-ungated clock (direct
+    cam_smi_sample(n,b);
+    if(memcmp(a,b,sizeof(a))) {
+        printf("X9 CAMERA SMI SLOT %u ADOPT: foreign voter moved ap=%x/%x global=%x/%x cg=%x/%x (latest used)\n",
+            n,a[0],b[0],a[1],b[1],a[2],b[2]);
+        memcpy(a,b,sizeof(a));
+    }
+    /* Android generic HWV gate never refuses voted-but-gated: it votes,
+     * retriggers the MTCMOS FSM and waits the gate (clk-gate.c). */
+    if(a[2]&a[1]) {
+        int r;
+        printf("X9 CAMERA SMI SLOT %u INHERITED: voted-but-gated ap=%x global=%x cg=%x (FSM retrigger+wait as Android)\n",
+            n,a[0],a[1],a[2]);
+        r=cam_smi_fsm_retrigger(n==0?35u:34u);
+        if(r && r!=0x100a)return r;
+        e=cam_wait_bits(g->cg,0,a[1]&g->mask,0,100000);if(e)return e;
+        e=cam_smi_slot_idle(n,"inherit-sta");if(e)return e;
+        cam_smi_sample(n,a);
+    }
+    /* Voted-but-gated is repaired above. An unvoted-but-ungated clock (direct
      * owner, e.g. the now-running VCP/MMUP mmqos) is NOT refused: Android's
      * clk/HWV path just adds its own vote; our later CLR leaves the gate to
      * the HWV aggregate. Logged so a shared clock is visible. */
@@ -173,6 +209,7 @@ static int cam_smi_slot_take(unsigned n)
     g->owned=g->mask&~a[0];
     if(g->owned) {
         e=cam_smi_clock_guard();if(e)return e;
+        e=cam_smi_ccf_idle();if(e)return e;
         cam_smi.pending_slot=n;cam_smi.pending=CAM_SMI_SET;
         g->ap_expected=g->mask; /* mark BEFORE the posted SET */
         cam_rw(cam_mm.receive.hwv,g->set,g->owned);
@@ -208,7 +245,11 @@ static int cam_smi_pending_retire(void)
 {
     struct cam_smi_gate *g;uint32_t v[3];int e;
     if(!cam_smi.pending)return 0;
-    if(cam_smi.pending==CAM_SMI_CLR)return CAM_FAIL(EBUSY); /* sole close already failed */
+    if(cam_smi.pending==CAM_SMI_CLR) {
+        /* A failed close may be retried: an HWV CLR is idempotent. */
+        printf("X9 CAMERA SMI CLOSE RETRY: slot=%u pending CLR re-armed\n",cam_smi.pending_slot);
+        cam_smi.pending=CAM_SMI_NONE;return 0;
+    }
     g=&cam_smi.gate[cam_smi.pending_slot];
     e=cam_smi_slot_idle(cam_smi.pending_slot,"retire-sta");if(e)return e;
     cam_smi_sample(cam_smi.pending_slot,v);
@@ -245,7 +286,9 @@ static int cam_smi_clocks_close_locked(uint64_t epoch)
 {
     int e;
     if(!cam_smi.held)return 0;
-    if(epoch!=cam_smi.epoch || cam_smi.close_attempted)return CAM_FAIL(ESTALE);
+    if(epoch!=cam_smi.epoch)return CAM_FAIL(ESTALE);
+    if(cam_smi.close_attempted)
+        printf("X9 CAMERA SMI CLOSE RETRY: epoch=%llu last_errno=%d (non-wedging)\n",epoch,cam_smi.error);
     cam_smi.close_attempted=true;
     e=cam_sv_qos_release_guard(epoch);
     if(!e)e=cam_smi_pending_retire();if(!e)e=cam_smi_clock_only_guard();
@@ -274,10 +317,16 @@ static int cam_smi_clocks_close_locked(uint64_t epoch)
             if(!e)e=cam_smi_slot_idle(n,"clr-final-sta");
             if(e)break;
             cam_smi_sample(n,v);
-            if(g->cg_before&v[1]) {e=CAM_FAIL(ESTALE);break;} /* a new owner keeps dependencies */
-            e=cam_wait_bits(g->cg,0,g->cg_before,g->cg_before,10000);if(e)break;
+            /* Android unvote only drops our own vote; another XPU (VCP/MMUP)
+             * may keep the clock on. Only wait bits nobody votes. */
+            if(g->cg_before&v[1])
+                printf("X9 CAMERA SMI CLOSE INHERITED: slot=%u foreign vote keeps clock global=%x cg_before=%x\n",
+                    n,v[1],g->cg_before);
+            e=cam_wait_bits(g->cg,0,g->cg_before&~v[1],g->cg_before&~v[1],10000);if(e)break;
             cam_smi_sample(n,v);
-            if((v[1]&g->borrowed)!=g->borrowed || (v[2]&g->borrowed)) {e=CAM_FAIL(ESTALE);break;}
+            if((v[1]&g->borrowed)!=g->borrowed || (v[2]&g->borrowed))
+                printf("X9 CAMERA SMI CLOSE INHERITED: slot=%u borrowed=%x global=%x cg=%x (foreign owner changed)\n",
+                    n,g->borrowed,v[1],v[2]);
             cam_smi.pending=CAM_SMI_NONE;g->owned=0;
         }
         cam_smi.completed&=~(1u<<n);cam_smi.seen&=~(1u<<n);g->borrowed=0;
@@ -353,7 +402,14 @@ int x9_camera_sensor_session_prepare_smi_clocks(uint64_t epoch,struct x9_camera_
     if(!e&&cam_sensor_live.error)e=cam_sensor_live.error;
     if(!e&&(cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED||session.capture||session.stream))e=CAM_FAIL(EBUSY);
     if(!e&&!cam_rx_sensor_held_locked(epoch))e=CAM_FAIL(ENXIO);
-    if(!e&&cam_smi.held)e=CAM_FAIL(EALREADY);
+    if(!e&&cam_smi.held) {
+        if(cam_smi.epoch!=epoch && !cam_mac.held && !cam_phy.held && !cam_out.held) {
+            printf("X9 CAMERA SMI STALE ADOPT: abandoning epoch=%llu state errno=%d shared=%u a0=%u bw=%u (HW kept; Android resume reconfigures)\n",
+                cam_smi.epoch,cam_smi.error,cam_smi_shared.captured,cam_smi_a0.held,cam_native_bw.held);
+            memset(&cam_smi,0,sizeof(cam_smi));memset(&cam_smi_shared,0,sizeof(cam_smi_shared));
+            memset(&cam_smi_a0,0,sizeof(cam_smi_a0));memset(&cam_native_bw,0,sizeof(cam_native_bw));
+        } else e=CAM_FAIL(EALREADY);
+    }
     if(!e&&(cam_mac.held||cam_phy.held||cam_out.held))e=CAM_FAIL(EBUSY);
     if(!e) {
         s->sensor=cam_sensor_live.probe.sensor;

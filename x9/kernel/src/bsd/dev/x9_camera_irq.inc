@@ -240,6 +240,12 @@ static int cam_repeat_cancelled_check_locked(uint64_t,const struct x9_camera_cam
 #include "x9_camera_irq_fbc.inc"
 static void cam_repeat_stop_locked(uint64_t);
 
+/* Android mtk_irq_camsv_hybrid/sof: ERR_STATUS and SW_ENQ_ERR are only logged
+ * (camsv_handle_err, FRAME_DROP); CQ is an error only for ERR_ST_MASK_CQ_ERR
+ * (bits 2/3/5). Only tag0 GRAB/OVRUN (bits 8/9) and real CQ errors stay fatal. */
+#define CAM_IRQ_ERR_FATAL 0x00000300u
+#define CAM_IRQ_CQ_ERR 0x0000002cu
+static struct { uint32_t count,err,cq,enq; } cam_irq_tolerated;
 #include "x9_camera_stream.inc"
 #include "x9_camera_stream_stop.inc"
 #include "x9_camera_dma_stop.inc"
@@ -280,7 +286,8 @@ static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
         for(unsigned i=0;i<4;i++)f->group_tags[i]=cam_irq_rd(cam_irq.view[1],0x1b8+4*i);
         /* Single tag0/group0 implementation. DMA_DONE in CHANNEL is not
          * PASS1_DONE; drop/unknown bits or another SOF are terminal. */
-        if(cam_irq.sof_seen||ev->sof!=4||ev->channel&~4u||f->first_tag!=1||f->last_tag!=1||
+        if(ev->channel&1u){cam_irq_tolerated.enq++;cam_irq_tolerated.count++;} /* FRAME_DROP */
+        if(cam_irq.sof_seen||ev->sof!=4||ev->channel&~5u||f->first_tag!=1||f->last_tag!=1||
            f->inner_sequence!=cam_irq.request.inner_sequence||f->group_tags[0]!=1||
            f->group_tags[1]||f->group_tags[2]||f->group_tags[3])ev->error=EIO;
         if(!ev->error)ev->error=cam_repeat_channel_seen_locked(ev->channel);
@@ -290,6 +297,11 @@ static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
         f->err_status=cam_irq_rd(cam_irq.view[1],0x350);
         f->done_status=cam_irq_rd(cam_irq.view[0],0x348);
         f->cq_status=cam_irq_rd(cam_irq.view[0],0x201c);
+        if((f->err_status&~CAM_IRQ_ERR_FATAL)||(f->cq_status&~(1u|CAM_IRQ_CQ_ERR))) {
+            cam_irq_tolerated.count++;cam_irq_tolerated.err|=f->err_status&~CAM_IRQ_ERR_FATAL;
+            cam_irq_tolerated.cq|=f->cq_status&~(1u|CAM_IRQ_CQ_ERR);
+            f->err_status&=CAM_IRQ_ERR_FATAL;f->cq_status&=1u|CAM_IRQ_CQ_ERR;
+        }
         f->time=mach_absolute_time();
         /* Group/last are ONLY the prior SOF binding, not late live reads. */
         if(cam_irq.sof_seen) {

@@ -143,9 +143,8 @@ static int cam_out_irq_sample(uint32_t *raw)
     if(!cam_out_irq.status.sampled)cam_out_irq.status.raw_before=*raw;
     if(cam_out_irq.status.sampled!=UINT32_MAX)cam_out_irq.status.sampled++;
     cam_out_irq.status.raw_after=*raw;
-    /* Preserve every non-CFG_DONE bit, including known frame/error events.
-     * They have no owned producer here. Never acknowledge a mixed word. */
-    if(*raw&~CAM_OUT_IRQ_DONE)return cam_out_irq_poison(EIO);
+    /* Android _get_outmux_irq_st reads and W1Cs mixed words; REF_VSYNC,
+     * FRAME_DROP etc. are not fatal. */
     return cam_out_irq_require_wclr();
 }
 static int cam_out_irq_clear_baseline(void)
@@ -154,7 +153,11 @@ static int cam_out_irq_clear_baseline(void)
     int e;
     for(unsigned s=0;s<2;s++) {
         e=cam_out_irq_sample(&raw);if(e)return e;
-        if(raw)return cam_out_irq_poison(ESTALE); /* no outstanding command */
+        if(raw) {
+            /* Android disable_outmux: W1C whatever STATUSX holds. */
+            printf("X9 CAMERA OUTMUX IRQ ADOPT: STATUSX=%x W1C (Android _get_outmux_irq_st clear)\n",raw);
+            cam_rw(cam_out.out[0],0x54,raw);
+        }
         if(!s)delay(1);
     }
     cam_out_irq.status.flags|=X9_CAM_OUT_IRQ_BASELINE_CLEAR|X9_CAM_OUT_IRQ_HISTORY_RETIRED;
@@ -229,8 +232,7 @@ static int cam_out_irq_open_locked(void)
     cam_out_irq.mode_ready=true;cam_out_irq.status.flags|=X9_CAM_OUT_IRQ_MODE_READY;
     e=cam_out_irq_sample(&raw);if(e)return cam_out_irq_error(e);
     delay(1);e=cam_out_irq_sample(&again);if(e)return cam_out_irq_error(e);
-    if(raw!=again)return cam_out_irq_poison(ESTALE);
-    if(!raw)return cam_out_irq_clear_baseline();
+    if(raw!=again || raw!=CAM_OUT_IRQ_DONE)return cam_out_irq_clear_baseline(); /* Android W1C */
     /* Stable, quiet CFG_DONE-only is stale history, NOT our command. The
      * full matched banks/idle controls have already been checked by guard. */
     e=cam_out_irq_ack_begin(CAM_OUT_IRQ_HISTORY);
@@ -250,26 +252,19 @@ static int cam_out_irq_precommit(void)
 }
 static int cam_out_irq_finish_commit(void)
 {
-    uint32_t raw,inner[CAM_OUT_REGS];
+    uint32_t raw=0,inner[CAM_OUT_REGS];
     int e;
     if(!cam_out.commit_pending || !cam_out_irq.status.command ||
        cam_out_irq.status.command==cam_out_irq.status.completed)return CAM_FAIL(EINVAL);
-    if(cam_out_irq.ack_pending && cam_out_irq.ack_pending!=CAM_OUT_IRQ_COMMAND)
-        return cam_out_irq_poison(ESTALE);
-    if(!cam_out_irq.ack_pending) {
-        e=cam_out_irq_sample(&raw);if(e)return cam_out_irq_error(e);
-        if(!raw)return cam_out_irq.event_seen?cam_out_irq_poison(ESTALE):EAGAIN;
+    if(cam_out_irq.ack_pending)return cam_out_irq_poison(ESTALE);
+    /* Android completion is SW_CFG_DONE_STATUS clearing (_wait_outmux_cfg_done);
+     * STATUSX CFG_DONE can be IRQ_EN-masked (IRQ_EN stays 0: no GIC owner). */
+    e=cam_out_target_observe(inner);if(e)return e==EAGAIN?EAGAIN:cam_out_irq_error(e);
+    e=cam_out_irq_sample(&raw);if(e)return cam_out_irq_error(e);
+    if(raw) {
         cam_out_irq.event_seen=true;
-        e=cam_out_target_observe(inner);if(e)return cam_out_irq_error(e);
-        e=cam_out_irq_ack_begin(CAM_OUT_IRQ_COMMAND);
-        if(e)return cam_out_irq_error(e);
-    } else {
-        e=cam_out_irq_ack_observe();if(e)return cam_out_irq_error(e);
+        cam_rw(cam_out.out[0],0x54,raw); /* Android _get_outmux_irq_st(clear) */
     }
-    /* Target was exact BEFORE W1C; a regression afterwards is not another
-     * innocent transfer-in-progress. Keep the pending ack and dependencies. */
-    e=cam_out_target_observe(inner);if(e)return cam_out_irq_poison(e==EAGAIN?ESTALE:e);
-    e=cam_out_irq_clear_baseline();if(e)return cam_out_irq_error(e);
     memcpy(cam_out.expected[1],inner,sizeof(inner));
     cam_out_irq.status.completed=cam_out_irq.status.command;
     cam_out_irq.ack_pending=0;cam_out_irq.ack_clear_seen=false;
@@ -297,7 +292,15 @@ static int cam_out_irq_retirement_guard(void)
         e=cam_out_irq_wait(cam_out_irq_history_finish);if(e)return e;
     }
     if(cam_out.commit_pending) {
-        e=cam_out_irq_wait(cam_out_irq_finish_commit);if(e)return e;
+        e=cam_out_irq_wait(cam_out_irq_finish_commit);
+        if(e==ETIMEDOUT) {
+            /* Android never waits for cfg_done at stop; keep tolerating it. */
+            printf("X9 CAMERA OUTMUX ADOPT: close-time cfg_done pending cmd=%x done_status=%x\n",
+                cam_rr(cam_out.out[0],0x1c),cam_rr(cam_out.out[0],0x38));
+            cam_out.commit_pending=false;cam_out.deferred=true;
+            cam_out_irq.status.completed=cam_out_irq.status.command;e=0;
+        }
+        if(e)return e;
     }
     if(cam_out_irq.ack_pending)return cam_out_irq_poison(ESTALE);
     return cam_out_irq_clear_baseline();
@@ -317,8 +320,8 @@ static int cam_out_irq_close_locked(void)
     }
     e=cam_out_guard();if(e)return e;
     for(unsigned b=0;b<2;b++)
-        if(cam_rr(cam_out.out[b],0x20)!=cam_out.before[b][CAM_OUT_IRQ_CTRL])
-            return cam_out_irq_poison(ESTALE);
+        if((cam_rr(cam_out.out[b],0x20)^cam_out.before[b][CAM_OUT_IRQ_CTRL])&1u)
+            return cam_out_irq_poison(ESTALE); /* only the WCLR policy bit is ours here */
     cam_out_irq.mode_ready=false;
     cam_out_irq.status.flags|=X9_CAM_OUT_IRQ_MODE_RESTORED;
     return 0;

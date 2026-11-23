@@ -55,6 +55,21 @@ static void cam_smi_a0_sample(uint32_t larb[CAM_SMI_A0_WORDS],
     memcpy(cam_smi.status.a0.larb_after,larb,sizeof(cam_smi_a0.expected));
     memcpy(cam_smi.status.a0.common_after,common,sizeof(cam_smi_a0.common_expected));
 }
+/* Android never reads these back. Only the fields this path programs are
+ * compared: L19 CMD_THRT/SW_FLAG, P0 DISABLE_ULTRA bit0, P0 OSTDL, P0
+ * NONSEC bit3, and COMM33 L1LEN/PREULTRA_MASK1/DUMMY. Other bits (other
+ * ports, MMU/bank/path, L1ARB/BUS_SEL) may be owned by SMMU/mmqos/VCP. */
+static const uint32_t cam_smi_a0_larb_check[CAM_SMI_A0_WORDS]={
+    UINT32_MAX,UINT32_MAX,1,0,0, UINT32_MAX,0,0,0,0, 8,0,0,0,0
+};
+static bool cam_smi_a0_match(const uint32_t larb[CAM_SMI_A0_WORDS],
+    const uint32_t common[CAM_SMI_A0_COMMON_WORDS])
+{
+    for(unsigned n=0;n<CAM_SMI_A0_WORDS;n++)
+        if((larb[n]^cam_smi_a0.expected[n])&cam_smi_a0_larb_check[n])return false;
+    return common[0]==cam_smi_a0.common_expected[0] &&
+        common[10]==cam_smi_a0.common_expected[10] && common[11]==cam_smi_a0.common_expected[11];
+}
 /* Nonrecursive: called by receiver/AP/PHY's clock dependency guard.
  * This checks controls, not STAT/IRQ history or DMA/worker retirement. */
 static int cam_smi_a0_guard(void)
@@ -65,8 +80,7 @@ static int cam_smi_a0_guard(void)
         return CAM_FAIL(ESTALE);
     e=cam_smi_clock_only_guard();if(e)return e;
     cam_smi_a0_sample(larb,common);
-    if(memcmp(larb,cam_smi_a0.expected,sizeof(larb)) ||
-        memcmp(common,cam_smi_a0.common_expected,sizeof(common)))return CAM_FAIL(ESTALE);
+    if(!cam_smi_a0_match(larb,common))return CAM_FAIL(ESTALE);
     return cam_smi_a0.pending?CAM_FAIL(EBUSY):0;
 }
 static int cam_smi_a0_idle(void)
@@ -101,7 +115,13 @@ static int cam_smi_a0_write(unsigned word,uint32_t mask,uint32_t value)
     e=cam_rx_session_guard();if(e)return e;
     e=cam_smi_a0_idle();if(e)return e;
     e=cam_smi_a0_guard();if(e)return e;
-    old=cam_smi_a0.expected[word];next=(old&~mask)|(value&mask);
+    /* Android RMWs the live register (mtk_smi_larb_bw_thr etc.); rebase
+     * the unowned bits on the actual value so foreign bits are kept. */
+    old=cam_rr(cam_smi.larb[0],cam_smi_a0_larb_offsets[word]);
+    if((old^cam_smi_a0.expected[word])&~mask)
+        printf("X9 CAMERA SMI A0 ADOPT: word=%u off=%x expected=%x actual=%x (foreign bits kept)\n",
+            word,cam_smi_a0_larb_offsets[word],cam_smi_a0.expected[word],old);
+    cam_smi_a0.expected[word]=old;next=(old&~mask)|(value&mask);
     if(old==next)return 0; /* borrowed target: no write, no restoration */
     cam_smi_a0.owned_mask[word]=mask;
     cam_smi_a0.owned|=1u<<word;cam_smi_a0.expected[word]=next;
@@ -117,14 +137,19 @@ static int cam_smi_a0_pending_retire(void)
 {
     uint32_t larb[CAM_SMI_A0_WORDS],common[CAM_SMI_A0_COMMON_WORDS];int e;
     if(!cam_smi_a0.pending)return 0;
-    if(cam_smi_a0.restoring)return CAM_FAIL(EBUSY); /* failed sole close: never replay */
+    if(cam_smi_a0.restoring) {
+        /* Failed restore retry: re-arm; close rewrites the owned field. */
+        unsigned w=cam_smi_a0.pending_word;
+        cam_smi_a0.expected[w]=cam_rr(cam_smi.larb[0],cam_smi_a0_larb_offsets[w]);
+        printf("X9 CAMERA SMI A0 CLOSE RETRY: word=%u actual=%x re-armed\n",w,cam_smi_a0.expected[w]);
+        cam_smi_a0.pending=false;cam_smi_a0.restoring=false;cam_smi_a0_status();
+        return cam_smi_a0_guard();
+    }
     for(unsigned sample=0;sample<2;sample++) {
         e=cam_smi_clock_only_guard();if(e)return e;
         cam_smi_a0_sample(larb,common);
-        /* Require the posted TARGET, preserving every other consumed
-         * control. A prior value alone is NOT request retirement. */
-        if(memcmp(larb,cam_smi_a0.expected,sizeof(larb)) ||
-            memcmp(common,cam_smi_a0.common_expected,sizeof(common)))return CAM_FAIL(EBUSY);
+        /* Require the posted TARGET on the programmed fields. */
+        if(!cam_smi_a0_match(larb,common))return CAM_FAIL(EBUSY);
         delay(10);
     }
     cam_smi_a0.pending=false;cam_smi_a0_status();return cam_smi_a0_guard();
@@ -134,7 +159,9 @@ static int cam_smi_a0_close_locked(void)
     static const unsigned order[3]={CAM_SMI_A0_NONSEC,CAM_SMI_A0_ULTRA,CAM_SMI_A0_OSTD};
     struct x9_camera_smi_a0_status *s=&cam_smi.status.a0;int e;
     if(!cam_smi_a0.held)return 0;
-    if(cam_smi_a0.epoch!=cam_smi.epoch || cam_smi_a0.close_attempted)return CAM_FAIL(ESTALE);
+    if(cam_smi_a0.epoch!=cam_smi.epoch)return CAM_FAIL(ESTALE);
+    if(cam_smi_a0.close_attempted)
+        printf("X9 CAMERA SMI A0 CLOSE RETRY: owned=%x (non-wedging)\n",cam_smi_a0.owned);
     cam_smi_a0.close_attempted=true;
     e=cam_smi_a0_pending_retire();if(!e)e=cam_rx_session_guard();
     if(!e)e=cam_smi_a0_idle();
@@ -145,6 +172,7 @@ static int cam_smi_a0_close_locked(void)
         if(!(cam_smi_a0.owned&(1u<<word)))continue;
         e=cam_rx_session_guard();if(!e)e=cam_smi_a0_idle();
         if(!e)e=cam_smi_a0_guard();if(e)break;
+        cam_smi_a0.expected[word]=cam_rr(cam_smi.larb[0],cam_smi_a0_larb_offsets[word]);
         next=(cam_smi_a0.expected[word]&~mask)|(s->larb_before[word]&mask);
         cam_smi_a0.expected[word]=next;cam_smi_a0.pending_word=word;
         cam_smi_a0.pending=true;cam_smi_a0.restoring=true;cam_smi_a0_status();
@@ -191,7 +219,9 @@ static int cam_smi_a0_open_locked(void)
      * A0 never acquires whole-common authority or repairs that profile. */
     if(a[CAM_SMI_A0_CMD]!=0x370456 || a[CAM_SMI_A0_FLAG]!=1 ||
         c[0]!=0xa || c[10]!=0x4146 || c[11]!=1)return cam_smi_a0_fault(EOPNOTSUPP);
-    if((a[CAM_SMI_A0_FORCE]|a[CAM_SMI_A0_PRE])&1)return cam_smi_a0_fault(CAM_FAIL(EBUSY));
+    if((a[CAM_SMI_A0_FORCE]|a[CAM_SMI_A0_PRE])&1)  /* Android never touches/reads them */
+        printf("X9 CAMERA SMI A0 INHERITED: FORCE_ULTRA=%x FORCE_PREULTRA=%x (not refused)\n",
+            a[CAM_SMI_A0_FORCE],a[CAM_SMI_A0_PRE]);
     cam_smi.status.a0.flags|=X9_CAM_SMI_A0_SHARED_PROFILE_MATCHED;
     cam_smi.status.a0.stage=3;e=cam_smi_a0_write(CAM_SMI_A0_OSTD,UINT32_MAX,1);
     if(!e) {cam_smi.status.a0.stage=4;e=cam_smi_a0_write(CAM_SMI_A0_ULTRA,1,1);}

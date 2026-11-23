@@ -83,6 +83,7 @@ static int cam_smmu_irq_snapshot_match(struct x9_camera_smmu *m,
     struct cam_native_snapshot comparable;
     int e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);if(e)return e;
     cam_native_read(m,now);comparable=*now;
+    memcpy(comparable.wp,expected->wp,sizeof(comparable.wp));
     if(quiescing) {
         comparable.word[CAM_N_GE]=expected->word[CAM_N_GE];
         comparable.word[CAM_N_GEN]=expected->word[CAM_N_GEN];
@@ -99,8 +100,8 @@ static int cam_smmu_irq_control_locked(struct x9_camera_smmu *m,struct cam_nativ
     int e=cam_smmu_irq_snapshot_match(m,s,&now,quiescing);if(e)return e;
     before=s->word[CAM_N_IRQACK];m->native_irq_ctrl=value;
     cam_smmu_rw(m,0x50,value);s->word[CAM_N_IRQ]=value;
-    nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
-    for(unsigned i=0;i<10000;i++) {
+    nanoseconds_to_absolutetime(1000000000ull,&span);end=mach_absolute_time()+span;
+    for(unsigned i=0;i<1000000;i++) {
         uint32_t ack;
         e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);if(e)return e;
         cam_native_read(m,&now);ack=now.word[CAM_N_IRQACK];
@@ -112,6 +113,7 @@ static int cam_smmu_irq_control_locked(struct x9_camera_smmu *m,struct cam_nativ
             s->word[CAM_N_EP]=now.word[CAM_N_EP];s->word[CAM_N_CC]=now.word[CAM_N_CC];
         }
         now.word[CAM_N_IRQACK]=s->word[CAM_N_IRQACK];
+        memcpy(now.wp,s->wp,sizeof(now.wp));
         if(memcmp(&now,s,sizeof(now)))return CAM_FAIL(ESTALE);
         if(ack==value){s->word[CAM_N_IRQACK]=value;return 0;}
         if(mach_absolute_time()>=end)return CAM_FAIL(ETIMEDOUT);
@@ -180,9 +182,7 @@ static void __attribute__((noreturn)) cam_smmu_irq_worker(void *unused,wait_resu
 static int cam_smmu_irq_setup_guard_locked(struct x9_camera_smmu *m,struct cam_native_snapshot *s)
 {
     int e=cam_native_match(m,s);if(e)return e;
-    if((cam_smmu_irq_read(0)&0x12)!=0x12 || (cam_smmu_irq_read(0)&(1u<<31)) ||
-       ((cam_smmu_irq_read(SMMU_IRQ_ENABLE)|cam_smmu_irq_read(SMMU_IRQ_PENDING)|
-         cam_smmu_irq_read(SMMU_IRQ_ACTIVE))&SMMU_IRQ_BIT))return CAM_FAIL(EBUSY);
+    if((cam_smmu_irq_read(0)&0x12)!=0x12 || (cam_smmu_irq_read(0)&(1u<<31)))return CAM_FAIL(EBUSY);
     if((cam_smmu_irq_read(SMMU_IRQ_CONFIG)&(3u<<SMMU_IRQ_SHIFT))!=
        ((cam_smmu_irq.dirty&1)?(2u<<SMMU_IRQ_SHIFT):cam_smmu_irq.saved_config) ||
        cam_smmu_irq_route()!=((cam_smmu_irq.dirty&2)?cam_smmu_irq.route:cam_smmu_irq.saved_route) ||
@@ -201,7 +201,10 @@ static int cam_smmu_irq_bind_impl_locked(struct x9_camera_smmu *m,struct cam_nat
     if(cam_smmu_irq.owns || cam_smmu_irq.pending || cam_smmu_irq.busy)e=CAM_FAIL(EBUSY);
     cam_smmu_irq_spin_drop(old);if(e)return e;
     if((cam_smmu_irq_read(SMMU_IRQ_ENABLE)|cam_smmu_irq_read(SMMU_IRQ_PENDING)|
-        cam_smmu_irq_read(SMMU_IRQ_ACTIVE))&SMMU_IRQ_BIT)return CAM_FAIL(EBUSY);
+        cam_smmu_irq_read(SMMU_IRQ_ACTIVE))&SMMU_IRQ_BIT)
+        printf("X9 CAMERA SMMU IRQ ADOPT: intid=%u en=%x pend=%x act=%x at bind (request_irq tolerates)\n",
+            SMMU_IRQ_ID,cam_smmu_irq_read(SMMU_IRQ_ENABLE)&SMMU_IRQ_BIT,
+            cam_smmu_irq_read(SMMU_IRQ_PENDING)&SMMU_IRQ_BIT,cam_smmu_irq_read(SMMU_IRQ_ACTIVE)&SMMU_IRQ_BIT);
     *step="worker";
     if(!cam_smmu_irq.thread_started) {
         thread_t thread;

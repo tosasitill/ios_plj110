@@ -196,7 +196,9 @@ static int cam_native_reopen_dormant_locked(uint64_t epoch,uint64_t token)
         uint8_t value;
         for(unsigned i=0;i<3 && !e;i++) {
             e=cam_sensor_ap_read(&ap,regs[i],&value);
-            if(!e && value!=(i==2?0xff:0))e=CAM_FAIL(ESTALE);
+            if(!e && i==2 && value!=0xff) {
+                if(!sample)printf("X9 CAMERA NATIVE EPOCH ADOPT: frame_count=%x (Android check_stream_off only logs)\n",value);
+            } else if(!e && i<2 && value)e=CAM_FAIL(ESTALE);
         }
         if(!sample && !e)delay(1);
     }

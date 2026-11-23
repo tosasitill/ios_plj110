@@ -113,6 +113,39 @@ static int cam_mac_write(unsigned slot,uint32_t value)
     r->expected=seen&r->mask;cam_mac.pending_slot=CAM_MAC_WRITES;cam_mac_publish();
     return cam_mac_dependencies();
 }
+/* Android config_hw_csi -> _reset -> _reset_csi_top/_reset_csi before any
+ * CSI programming: pulse this port's CSI_CSR_TOP_SW_RESET_B nibble
+ * (csi-top-0 0x138b0000 +8, active low), then W1C the CSI2 MAC IRQ status
+ * and the DPHY/CPHY SOT IRQ status. MAC-top words the receiver sampled are
+ * re-published if the reset changed them. */
+static int cam_mac_csi_reset(unsigned idx,uint32_t port)
+{
+    static vm_offset_t csi_top,phyd[X9_CAMERA_SENSOR_COUNT][2];
+    static const unsigned top_offsets[4]={0,4,0x40,0x70};
+    uint32_t ctrl,old[4],now;
+    if(port>5)return CAM_FAIL(EINVAL);
+    if(!csi_top)csi_top=ml_io_map(0x138b0000,0x1000);
+    if(!phyd[idx][0])phyd[idx][0]=ml_io_map(0x13882000ull+port*0x8000ull,0x1000);
+    if(!phyd[idx][1])phyd[idx][1]=ml_io_map(0x13883000ull+port*0x8000ull,0x1000);
+    if(!csi_top || !phyd[idx][0] || !phyd[idx][1])return CAM_FAIL(ENOMEM);
+    for(unsigned k=0;k<4;k++)old[k]=cam_rr(cam_mac.bank[CAM_MAC_TOP],top_offsets[k]);
+    ctrl=cam_rr(csi_top,8);
+    cam_rw(csi_top,8,ctrl&~(0xfu<<(4*port)));delay(1);cam_rw(csi_top,8,ctrl);
+    now=cam_rr(cam_mac.bank[CAM_MAC_A],0xc8);
+    cam_rw(cam_mac.bank[CAM_MAC_A],0xc8,UINT32_MAX);
+    cam_rw(phyd[idx][0],0x98,UINT32_MAX);
+    cam_rw(phyd[idx][1],0xf4,0x0f0f0000u);
+    printf("X9 CAMERA MAC ADOPT: CSI%u top reset ctrl=%x->%x, csi2 irq=%x cleared (Android _reset)\n",
+        port,ctrl,cam_rr(csi_top,8),now);
+    for(unsigned k=0;k<4;k++) {
+        now=cam_rr(cam_mac.bank[CAM_MAC_TOP],top_offsets[k]);
+        if(now!=old[k]) {
+            printf("X9 CAMERA MAC INHERITED: top+%x %x->%x after CSI reset\n",top_offsets[k],old[k],now);
+            cam_rx_live.expected.mac[k]=now;
+        }
+    }
+    return 0;
+}
 static int cam_mac_open_locked(uint64_t epoch,struct x9_camera_mac_status *s)
 {
     struct x9_camera_pipeline plan;
@@ -144,6 +177,7 @@ static int cam_mac_open_locked(uint64_t epoch,struct x9_camera_mac_status *s)
     cam_mac.bank[CAM_MAC_ASYNC]=cam_rx_maps[idx].async;
     cam_mac.bank[CAM_MAC_CAM]=cam_mm.cam_cg;cam_mac.bank[CAM_MAC_SENINF]=seninf_top;
     for(unsigned k=0;k<CAM_MAC_BANKS;k++)if(!cam_mac.bank[k])return CAM_FAIL(ENOMEM);
+    e=cam_mac_csi_reset(idx,port);if(e)return e;
     cam_mac.count=0;
     ctrl=cam_mac_add(CAM_MAC_TOP,0,UINT32_MAX);
     phy=cam_mac_add(CAM_MAC_TOP,0x40,UINT32_MAX);
@@ -223,7 +257,13 @@ static int cam_mac_open_locked(uint64_t epoch,struct x9_camera_mac_status *s)
             (r->offset==0x30+port*0x20 && (r->before&1)) ||
             (r->offset==0x34+port*0x20 && (r->before&0x13))))return CAM_FAIL(EBUSY);
         if(r->bank==CAM_MAC_CAM && (r->offset==0x7e4 || r->offset==0x7ec) && (r->before&bit))return CAM_FAIL(EBUSY);
-        if(r->bank==CAM_MAC_SENINF && r->before)return CAM_FAIL(EBUSY); /* no borrowed CG, reset or IRQ */
+        if(r->bank==CAM_MAC_SENINF && r->before) {
+            /* Android common_reg_setup forces ASYNC_CG_EN/OVERRUN_IRQ_EN to
+             * all-ones and never clears them (shared with AOV SCP). Only an
+             * asserted async reset is still a live conflict. */
+            if(!r->offset)return CAM_FAIL(EBUSY);
+            printf("X9 CAMERA MAC INHERITED: seninf_top+%x=%x (Android keeps these on)\n",r->offset,r->before);
+        }
         r->expected=r->before;
     }
     /* Only documented fixed packet fields; CPHY3 header length index3=4,
@@ -248,8 +288,11 @@ static int cam_mac_open_locked(uint64_t epoch,struct x9_camera_mac_status *s)
     e=cam_mac_dependencies();
     if(!e) {
         uint32_t cg=cam_rr(seninf_top,8),v;
-        if(cg&bit)e=CAM_FAIL(EBUSY);
-        else {
+        if(cg&bit) {
+            /* Borrowed always-on async CG (Android): adopt, never clear. */
+            printf("X9 CAMERA MAC ADOPT: async CG=%x already on for port %u, not owned\n",cg,cam_mac.status.csi_port);
+            cam_mac.cg_owned=false;cam_mac.reg[cam_mac.cg_reg].expected=cg&bit;e=cam_mac_dependencies();
+        } else {
             cam_mac.cg_owned=cam_mac.cg_uncertain=true; /* BEFORE shared RMW */
             cam_rw(seninf_top,8,cg|bit);
             v=cam_rr(seninf_top,8);

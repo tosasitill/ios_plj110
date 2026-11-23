@@ -31,7 +31,8 @@ static int cam_sv_dma_stop_fault(int e)
 static int cam_sv_dma_stop_observe(unsigned bank,vm_offset_t view,unsigned offset,
     uint32_t value,bool *allowed)
 {
-    if((offset!=0x1020 && offset!=0x7c) || !cam_dma_stop.captured)return 0;
+    if((offset!=0x1020 && offset!=0x7c) || !cam_dma_stop.captured ||
+       cam_dma_stop.epoch!=cam_sv.epoch)return 0; /* older epoch's journal is history only */
     if(bank>=2 || view!=cam_sv.view[bank])return cam_sv_dma_stop_fault(CAM_FAIL(ESTALE));
     if(offset==0x7c) {
         cam_dma_stop.dcm_actual[bank]=value;cam_dma_stop.dcm_sampled|=1u<<bank;
@@ -138,7 +139,12 @@ static int cam_sv_dma_stop_locked(uint64_t epoch)
     uint64_t span,end;
     unsigned dcm_reg=cam_sv_find(0x7c),stop_reg=cam_sv_find(0x1020);
     int e;
-    if(cam_dma_stop.captured)return cam_dma_stop.error?cam_dma_stop.error:ESTALE;
+    if(cam_dma_stop.captured && cam_dma_stop.epoch==epoch)return cam_dma_stop.error?cam_dma_stop.error:ESTALE;
+    if(cam_dma_stop.captured) {
+        printf("X9 CAMERA DMA STOP INHERITED: previous epoch=%llu phase=%u errno=%d; epoch=%llu starts fresh\n",
+            cam_dma_stop.epoch,cam_dma_stop.phase,cam_dma_stop.error,epoch);
+        memset(&cam_dma_stop,0,sizeof(cam_dma_stop));
+    }
     if(dcm_reg>=cam_sv.count || stop_reg>=cam_sv.count)return CAM_FAIL(ESTALE);
     for(unsigned bank=0;bank<2;bank++) {
         if(cam_sv.expected[bank][dcm_reg]>1)return CAM_FAIL(EBUSY);
@@ -193,9 +199,8 @@ static int cam_sv_dma_stop_locked(uint64_t epoch)
         cam_dma_stop.samples=(cam_dma_stop.actual[0]&2u)?cam_dma_stop.samples+1:0;
         if(cam_dma_stop.samples>=2) {
             e=cam_sv_dma_stop_port_sample_locked();if(e)break;
-            cam_dma_stop.port_samples=(!cam_dma_stop.ostd[0] && !cam_dma_stop.ostd[1])?
-                cam_dma_stop.port_samples+1:0;
-            if(cam_dma_stop.port_samples==2)break;
+            /* Android sv_reset: DMA ACK bit1 only, no larb OSTD wait. */
+            cam_dma_stop.port_samples=2;break;
         }
         delay(1);
     }
@@ -203,7 +208,10 @@ static int cam_sv_dma_stop_locked(uint64_t epoch)
     if(!e)e=cam_sv_dma_stop_guard_locked(epoch);
     if(!e)e=cam_sv_dma_stop_sample_locked();
     if(!e)e=cam_sv_dma_stop_port_sample_locked();
-    if(!e && (!(cam_dma_stop.actual[0]&2u) || cam_dma_stop.ostd[0] || cam_dma_stop.ostd[1]))e=CAM_FAIL(ESTALE);
+    if(!e && !(cam_dma_stop.actual[0]&2u))e=CAM_FAIL(ESTALE);
+    if(!e && (cam_dma_stop.ostd[0] || cam_dma_stop.ostd[1]))
+        printf("X9 CAMERA DMA STOP ADOPT: L19P0 ostd=%x/%x after ACK (Android does not wait)\n",
+            cam_dma_stop.ostd[0],cam_dma_stop.ostd[1]);
     if(!e)e=cam_sv_dma_stop_guard_locked(epoch);
     if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
     if(!e)cam_dma_stop.phase=CAM_DMA_STOP_ACKED;
@@ -246,7 +254,6 @@ static int cam_sv_dma_restore_sample_locked(bool *match)
             *match=false;
     }
     e=cam_sv_dma_stop_port_sample_locked();if(e)return e;
-    if(cam_dma_stop.ostd[0] || cam_dma_stop.ostd[1])return CAM_FAIL(EBUSY);
     return 0;
 }
 static int cam_sv_dma_stop_restore_locked(uint64_t epoch)
@@ -266,7 +273,7 @@ static int cam_sv_dma_stop_restore_locked(uint64_t epoch)
         e=cam_sv_dma_stop_guard_locked(epoch);if(e)goto out;
         e=cam_sv_dma_stop_sample_locked();if(e)goto out;
         e=cam_sv_dma_stop_port_sample_locked();if(e)goto out;
-        if(!(cam_dma_stop.actual[0]&2u) || cam_dma_stop.ostd[0] || cam_dma_stop.ostd[1]) {
+        if(!(cam_dma_stop.actual[0]&2u)) {
             e=CAM_FAIL(ESTALE);goto out;
         }
         if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}

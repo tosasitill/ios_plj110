@@ -42,13 +42,8 @@ static int cam_native_bw_guard(void)
         if(observed!=cam_native_bw.expected[n] &&
            !(cam_native_bw.pending==n && observed==cam_native_bw.prior))goto conflict;
     }
-    if(cam_native_bw.complete && cam_native_bw.pending==CAM_NATIVE_BW_NO_WORD) {
-        cam_native_bw.current[0]=cam_rr(cam_native_bw.mmpc,0xd8c+4*CAM_NATIVE_BW_SRT);
-        cam_native_bw.current[1]=cam_rr(cam_native_bw.mmpc,0xd8c+4*CAM_NATIVE_BW_HRT);
-        if(cam_native_bw.current[0]==0xffffffffu || cam_native_bw.current[1]==0xffffffffu ||
-           cam_native_bw.current[0]<cam_native_bw.units[0] ||
-           cam_native_bw.current[1]<cam_native_bw.units[1])goto conflict;
-    }
+    /* Android mmqos-mtk.c never reads TOTAL_CURRENT back (debug dump only);
+     * it is a system-wide MMPC aggregate, not an admission check. */
     return 0;
 conflict:
     cam_native_bw.conflict=true;
@@ -90,7 +85,17 @@ static int cam_native_bw_pending_retire(void)
     uint32_t observed,offset;
     int e;
     if(cam_native_bw.pending==CAM_NATIVE_BW_NO_WORD)return 0;
-    if(cam_native_bw.restoring)return CAM_FAIL(EBUSY);
+    if(cam_native_bw.restoring) {
+        /* Failed restore retry: adopt the actual value; close rewrites it. */
+        offset=cam_native_bw.pending==CAM_NATIVE_BW_MASK_WORD?0x10b0:
+            0xff0+4*cam_native_bw.pending;
+        observed=cam_rr(cam_native_bw.mmpc,offset);
+        if(cam_native_bw.pending==CAM_NATIVE_BW_MASK_WORD)cam_native_bw.mask_expected=observed;
+        else cam_native_bw.expected[cam_native_bw.pending]=observed;
+        printf("X9 CAMERA MMQOS CLOSE RETRY: pending=%u actual=%x re-armed\n",cam_native_bw.pending,observed);
+        cam_native_bw.pending=CAM_NATIVE_BW_NO_WORD;cam_native_bw.conflict=false;
+        return cam_native_bw_guard();
+    }
     e=cam_native_bw_guard();if(e)return e;
     offset=cam_native_bw.pending==CAM_NATIVE_BW_MASK_WORD?0x10b0:
         0xff0+4*cam_native_bw.pending;
@@ -166,10 +171,16 @@ static int cam_native_bw_take_locked(uint64_t epoch)
     if(!e)e=cam_sensor_ap_read(&ap,0x0104,&lo);if(!e && lo)e=CAM_FAIL(EBUSY);
     if(e)return e;
     cam_native_bw.mask_before=cam_native_bw.mask_expected=cam_rr(mmpc,0x10b0);
-    if(cam_native_bw.mask_before!=0 && cam_native_bw.mask_before!=0x0fffffffu)return CAM_FAIL(EBUSY);
+    /* Android start/stop_write_bw + set_channel_bw_to_hw overwrite mask
+     * and all 24 AP words without any prior-state check. We write only our
+     * two words; inherited values are kept and restored at close. */
+    if(cam_native_bw.mask_before!=0 && cam_native_bw.mask_before!=0x0fffffffu)
+        printf("X9 CAMERA MMQOS ADOPT: inherited AP mask=%x (Android overwrites)\n",cam_native_bw.mask_before);
     for(unsigned n=0;n<CAM_NATIVE_BW_WORDS;n++) {
         cam_native_bw.before[n]=cam_native_bw.expected[n]=cam_rr(mmpc,0xff0+4*n);
-        if(cam_native_bw.before[n])return CAM_FAIL(EBUSY);
+        if(cam_native_bw.before[n])
+            printf("X9 CAMERA MMQOS ADOPT: inherited AP word%u=%x%s\n",n,cam_native_bw.before[n],
+                (n==CAM_NATIVE_BW_SRT||n==CAM_NATIVE_BW_HRT)?" (overwritten, restored at close)":" (kept)");
     }
     delay(10);cam_native_bw.held=true;cam_native_bw.pending=CAM_NATIVE_BW_NO_WORD;
     e=cam_native_bw_guard();
@@ -186,7 +197,13 @@ static int cam_native_bw_take_locked(uint64_t epoch)
            cam_native_bw.current[1]>=cam_native_bw.units[1]) {
             cam_native_bw.complete=true;break;
         }
-        if(n==9999)e=CAM_FAIL(ETIMEDOUT);else delay(10);
+        if(n==9999) {
+            /* Advisory only: Android posts the table and never waits. */
+            printf("X9 CAMERA MMQOS ADOPT: TOTAL_CURRENT %x/%x < units %x/%x after 100ms (Android does not wait)\n",
+                cam_native_bw.current[0],cam_native_bw.current[1],cam_native_bw.units[0],cam_native_bw.units[1]);
+            cam_native_bw.complete=true;break;
+        }
+        delay(10);
     }
     if(!e)e=cam_smi_a0_write(CAM_SMI_A0_OSTD,UINT32_MAX,cam_native_bw.ostd);
     if(!e)e=cam_smi_a0_write(CAM_SMI_A0_ULTRA,1,0);
@@ -204,7 +221,18 @@ static int cam_native_bw_close_locked(void)
 {
     int e;
     if(!cam_native_bw.held)return 0;
-    if(cam_native_bw.close_attempted || cam_native_bw.epoch!=cam_smi.epoch)return CAM_FAIL(ESTALE);
+    if(cam_native_bw.epoch!=cam_smi.epoch)return CAM_FAIL(ESTALE);
+    if(cam_native_bw.close_attempted || cam_native_bw.conflict) {
+        /* Non-wedging retry: re-adopt the live table as our baseline. */
+        printf("X9 CAMERA MMQOS CLOSE RETRY: conflict=%u pending=%u mask=%x (re-adopt live table)\n",
+            cam_native_bw.conflict,cam_native_bw.pending,cam_rr(cam_native_bw.mmpc,0x10b0));
+        if(cam_native_bw.pending==CAM_NATIVE_BW_NO_WORD) {
+            cam_native_bw.mask_expected=cam_rr(cam_native_bw.mmpc,0x10b0);
+            for(unsigned n=0;n<CAM_NATIVE_BW_WORDS;n++)
+                cam_native_bw.expected[n]=cam_rr(cam_native_bw.mmpc,0xff0+4*n);
+            cam_native_bw.conflict=false;
+        }
+    }
     cam_native_bw.close_attempted=true;
     /* This is only supplier withdrawal after the upstream mandatory native
      * engine guard has authorized the actual capture retirement scope.

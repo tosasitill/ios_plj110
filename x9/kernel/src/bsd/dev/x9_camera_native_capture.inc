@@ -103,11 +103,13 @@ static int cam_native_capture_route_guard(uint64_t epoch)
                 else if(v[n]==cam_out.expected[0][n])allowed=true;
             }
             allowed=cam_out_irq_control_allowed(bank,n,v[n],allowed);
+            if(!allowed && cam_out_tolerated(bank,n,v[n]))allowed=true;
             if(!allowed)return CAM_FAIL(ESTALE);
         }
         uint32_t pending=cam_rr(cam_out.out[bank],0x1c)|cam_rr(cam_out.out[bank],0x38);
         if(pending&~1u)return CAM_FAIL(EIO);
-        if((!cam_out.commit_pending || cam_out_irq_inner_target_required()) && (pending&1))return CAM_FAIL(EBUSY);
+        if(!cam_out.deferred && (!cam_out.commit_pending || cam_out_irq_inner_target_required()) &&
+           (pending&1))return CAM_FAIL(EBUSY);
     }
     return 0;
 }

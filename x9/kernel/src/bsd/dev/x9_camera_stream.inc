@@ -63,8 +63,8 @@ static int cam_stream_set_locked(const struct x9_camera_sensor *s,uint8_t value)
     uint64_t span,end=0;
     boolean_t old;
     uint8_t byte=0,control=0,frame_count=0,prior_control=0;
-    uint32_t issued=0,ack=0,seen=0,samples=0,phase=0,idle_samples=0,sampled=0;
-    bool idle_seen=false,command=false;
+    uint32_t issued=0,ack=0,seen=0,samples=0,phase=0,idle_samples=0,sampled=0,fc_polls=0;
+    bool command=false;
     int e;
     if(!s || value>1)return CAM_FAIL(EINVAL);
     lck_mtx_lock(&camera_irq_lock);
@@ -88,11 +88,14 @@ static int cam_stream_set_locked(const struct x9_camera_sensor *s,uint8_t value)
         if(byte!=(off?1:0)){e=CAM_FAIL(ESTALE);goto out;}
         e=cam_sensor_ap_read(&ap,0x0104,&byte);if(e)goto out;
         if(byte){e=CAM_FAIL(EBUSY);goto out;}
-        if(!off) {
+        if(!off && !sample) {
+            /* Android streaming_control never reads frame_count before ON. */
             e=cam_sensor_ap_read(&ap,0x0005,&byte);if(e)goto out;
-            if(byte!=0xff){e=CAM_FAIL(EBUSY);goto out;}
+            if(byte!=0xff)printf("X9 CAMERA SENSOR STREAM INHERITED: frame_count=%x before ON (Android never checks)\n",byte);
         }
     }
+    /* Android set_engines_mux_ready(true) precedes the sensor START. */
+    if(!off){e=cam_out_ready_raise_locked(cam_source.epoch);if(e)goto out;}
     e=cam_stream_guard_locked(s,!off);if(e)goto out;
     /* Fixed bounded observation, not a FPS/rate lease inferred from pclk.
      * Budget includes actual AP write/read transactions and last guards. */
@@ -128,13 +131,17 @@ static int cam_stream_set_locked(const struct x9_camera_sensor *s,uint8_t value)
             e=cam_sensor_ap_read(&ap,0x0005,&byte);if(e)break;
             old=cam_irq_spin_take();cam_irq_fbc.source_frame_count=byte;
             cam_irq_fbc.source_sampled|=2;cam_irq_spin_drop(old);
-            if(idle_seen && byte!=0xff){e=CAM_FAIL(ESTALE);break;}
-            if(byte==0xff){idle_seen=true;idle_samples++;}
+            if(byte==0xff)idle_samples++;
+            else if(++fc_polls>=101) {
+                /* Android check_stream_off: ~1 frame budget; a timeout only logs. */
+                printf("X9 CAMERA SENSOR STREAM ADOPT: frame_count=%x not FF %u ms after OFF (Android only logs)\n",byte,fc_polls);
+                break;
+            }
             if(idle_samples==2)break;
         }
         delay(1000);
     }
-    if(!e && (samples<2 || (off && idle_samples!=2)))e=CAM_FAIL(ETIMEDOUT);
+    if(!e && samples<2)e=CAM_FAIL(ETIMEDOUT);
     if(!e)e=cam_stream_guard_locked(s,false);
     if(!e)e=cam_sensor_ap_guard(&ap);
     if(!e) {
@@ -147,7 +154,8 @@ static int cam_stream_set_locked(const struct x9_camera_sensor *s,uint8_t value)
         if(!e) {
             old=cam_irq_spin_take();cam_irq_fbc.source_frame_count=byte;
             cam_irq_fbc.source_sampled|=2;cam_irq_spin_drop(old);
-            if(byte!=0xff)e=CAM_FAIL(ESTALE);
+            if(byte!=0xff && fc_polls<101)
+                printf("X9 CAMERA SENSOR STREAM ADOPT: final frame_count=%x after OFF (Android only logs)\n",byte);
         }
         if(!e)e=cam_stream_guard_locked(s,false);
     }
@@ -162,6 +170,7 @@ static int cam_stream_set_locked(const struct x9_camera_sensor *s,uint8_t value)
         }
         cam_irq_spin_drop(old);
     }
+    if(!e && !off)cam_out_settle_locked(); /* deferred OUTMUX cfg_done, now with VSYNC */
 out:
     old=cam_irq_spin_take();
     if(e && command && !cam_irq_fbc.source_error)cam_irq_fbc.source_error=e;
@@ -178,5 +187,8 @@ out:
         "seen=%x prior_control=%x control=%x frame_count=%x sampled=%x samples=%u idle_samples=%u errno=%d "
         "(real AP 0100; NOT RAW/AXI/IRQ/worker/map drain)\n",
         cam_source.epoch,s->sensor,off,phase,issued,ack,seen,prior_control,control,frame_count,sampled,samples,idle_samples,e);
+    if(cam_irq_tolerated.count)
+        printf("X9 CAMERA CAMSV TOLERATED: count=%u err=%x cq=%x enq_err=%u (Android camsv_handle_err logs only)\n",
+            cam_irq_tolerated.count,cam_irq_tolerated.err,cam_irq_tolerated.cq,cam_irq_tolerated.enq);
     lck_mtx_unlock(&camera_irq_lock);return e;
 }

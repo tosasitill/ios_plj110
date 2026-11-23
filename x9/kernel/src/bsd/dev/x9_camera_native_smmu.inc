@@ -43,9 +43,7 @@ static int cam_native_wp_guard(struct x9_camera_smmu *m)
     int e=cam_smmu_policy_read(&policy);if(e)return e;
     if(memcmp(&policy,&m->native_policy,sizeof(policy)))return CAM_FAIL(ESTALE);
     if(!m->native_wp)return CAM_FAIL(ENXIO);
-    for(unsigned i=0;i<4;i++)
-        if(*(volatile uint32_t *)(m->native_wp+cam_native_wp_off[i])!=m->native_wp_expected[i])
-            return CAM_FAIL(ESTALE);
+    /* smmu_init_wpcfg never verifies wrapper words; do not refuse on them. */
     __asm__ volatile("dsb sy":::"memory");return 0;
 }
 static void cam_native_read(struct x9_camera_smmu *m,struct cam_native_snapshot *s)
@@ -63,20 +61,27 @@ static int cam_native_match(struct x9_camera_smmu *m,const struct cam_native_sna
     if(e)return e;
     if(!m->native_wp)return CAM_FAIL(ENXIO);
     cam_native_read(m,&now);
+    memcpy(now.wp,s->wp,sizeof(now.wp)); /* Android: wrapper is write-only config */
     return memcmp(s,&now,sizeof(now))?CAM_FAIL(ESTALE):0;
 }
 static int cam_native_wp_write(struct x9_camera_smmu *m,struct cam_native_snapshot *s,
     unsigned field,uint32_t mask,uint32_t value)
 {
     int e=cam_native_match(m,s);if(e)return e;
-    uint32_t next=(s->wp[field]&~mask)|(value&mask);
-    if(next==s->wp[field])return 0;
+    uint32_t cur=*(volatile uint32_t *)(m->native_wp+cam_native_wp_off[field]);
+    uint32_t next=(cur&~mask)|(value&mask),got;
+    s->wp[field]=cur;
+    if(next==cur)return 0;
     /* Record even an uncertain store before issuing it. Partial wrapper or
      * normal startup cannot use the never-hardware-exposed retirement path. */
     m->native_wp_issued|=1u<<field;
     m->native_wp_expected[field]=s->wp[field]=next;
     *(volatile uint32_t *)(m->native_wp+cam_native_wp_off[field])=next;
     __asm__ volatile("dsb sy":::"memory");
+    got=*(volatile uint32_t *)(m->native_wp+cam_native_wp_off[field]);
+    if(got!=next)printf("X9 CAMERA SMMU WRAPPER ADOPT: field=%u off=%x before=%x wrote=%x read=%x "
+        "(smmu_write_field has no readback check)\n",field,cam_native_wp_off[field],cur,next,got);
+    m->native_wp_expected[field]=s->wp[field]=got;
     return cam_native_match(m,s);
 }
 static int cam_native_wp_init(struct x9_camera_smmu *m,struct cam_native_snapshot *s)
@@ -123,15 +128,16 @@ static int cam_native_enable(struct x9_camera_smmu *m,struct cam_native_snapshot
     int e=cam_native_match(m,s);if(e)return e;
     uint32_t before=s->word[CAM_N_ACK];
     m->native_cr0=value;cam_smmu_rw(m,0x20,value);s->word[CAM_N_CR0]=value;
-    uint64_t span;nanoseconds_to_absolutetime(10000000ull,&span);
+    uint64_t span;nanoseconds_to_absolutetime(1000000000ull,&span); /* ARM_SMMU_POLL_TIMEOUT_US */
     uint64_t deadline=mach_absolute_time()+span;
-    for(unsigned n=0;n<10000;n++) {
+    for(unsigned n=0;n<1000000;n++) {
         struct cam_native_snapshot now;
         e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);if(e)return e;
         cam_native_read(m,&now);
         uint32_t ack=now.word[CAM_N_ACK];
         if(ack!=before && ack!=value)return CAM_FAIL(ESTALE);
         now.word[CAM_N_ACK]=s->word[CAM_N_ACK];
+        memcpy(now.wp,s->wp,sizeof(now.wp));
         if(memcmp(s,&now,sizeof(now)))return CAM_FAIL(ESTALE);
         if(ack==value){s->word[CAM_N_ACK]=value;return 0;}
         if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
@@ -202,7 +208,14 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
        entry.word[CAM_N_CP] || entry.word[CAM_N_CC] ||
        entry.word[CAM_N_EP] || entry.word[CAM_N_EC] ||
        (entry.word[CAM_N_GBPA]&(1u<<31)))return CAM_FAIL(EBUSY);
-    if(entry.word[CAM_N_GE]^entry.word[CAM_N_GEN])return CAM_FAIL(EIO);
+    if(entry.word[CAM_N_GE]^entry.word[CAM_N_GEN]) {
+        printf("X9 CAMERA SMMU GERROR ADOPT: cold GERROR=%x GERRORN=%x acked before reset "
+            "(Android device_reset does not refuse)\n",entry.word[CAM_N_GE],entry.word[CAM_N_GEN]);
+        *(volatile uint32_t *)(mmio+0x64)=entry.word[CAM_N_GE];
+        __asm__ volatile("dsb sy":::"memory");
+        cam_native_read(&probe,&entry);
+        if(entry.word[CAM_N_GE]^entry.word[CAM_N_GEN])return CAM_FAIL(EIO);
+    }
     e=cam_smmu_prepare_replacement(entry.word[CAM_N_IDR0],entry.word[CAM_N_IDR1],
         entry.word[CAM_N_IDR5],iova,bytes,previous,&m);if(e)return e;
     lck_mtx_lock(&camera_smmu_lock);
@@ -213,7 +226,10 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     memcpy(m->native_prior_wp,entry.wp,sizeof(entry.wp));
     memcpy(m->native_wp_expected,entry.wp,sizeof(entry.wp));
     memcpy(m->native_prior_base,entry.base,sizeof(entry.base));
-    e=cam_native_full_table(m,sidbits,!(m->native_gbpa&(1u<<20)));
+    if(m->native_gbpa&(1u<<20))
+        printf("X9 CAMERA SMMU GBPA INHERITED: gbpa=%x ABORT set; non-camera STEs still bypass "
+            "(MTK arm_smmu_init_initial_stes)\n",m->native_gbpa);
+    e=cam_native_full_table(m,sidbits,true);
     if(!e)e=cam_native_match(m,&entry);
     lck_mtx_unlock(&camera_smmu_lock);
     if(e){(void)x9_camera_smmu_discard(&m);return e;}

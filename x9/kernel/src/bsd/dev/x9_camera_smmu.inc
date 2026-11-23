@@ -20,7 +20,7 @@ extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
  * the CAMSV fault-source IDs into a new secure mapping/SMC sequence. */
 enum { CAM_SMMU_SID=0x80, CAM_SMMU_DISPLAY=0x90, CAM_SMMU_ASID=1,
     CAM_SMMU_STES=256, CAM_SMMU_STE_WORDS=8,
-    CAM_SMMU_CR1=(2u<<10)|(2u<<4), /* NC, outer-shareable table/queue */
+    CAM_SMMU_CR1=(3u<<10)|(3u<<4), /* NC (mtk_smmu_device_reset), ISH table/queue as Android */
     CAM_SMMU_CR2=6, /* private TLB maintenance + report invalid SID, !E2H */
     /* arm-smmu-v3-common.h: CR0_CMDQEN is bit3, EVTQEN is bit2.
      * device_reset enables CMDQ alone before its first CFGI_ALL + SYNC. */
@@ -85,7 +85,7 @@ static uint64_t cam_smmu_s1_ste_word1(const struct x9_camera_smmu *m)
      * this fixed non-ATS master has a valid CD pointer, so DT TCU_PF
      * applies to bits57:56. Keep NC/outer-shareable CD fetch and NS-EL1.
      * The inherited-host API retains its original provider contract. */
-    return 2ull|(2ull<<6)|((((m->idr0>>24)&3u)==0)?1ull<<27:0)|
+    return 2ull|(3ull<<6)|((((m->idr0>>24)&3u)==0)?1ull<<27:0)|
         (m->native?(uint64_t)m->native_policy.tcu_prefetch<<56:0);
 }
 
@@ -376,7 +376,8 @@ static int cam_smmu_evtq_service_locked(struct x9_camera_smmu *m)
     }
     if(count>16)printf("X9 CAMERA SMMU EVTQ: consumed=%u additional_logs_suppressed=%u\n",count,count-16);
     m->evt_prod=prod;m->evt_cons=cons;
-    return count || m->evt_overflows ? EIO : 0;
+    /* Android evtq thread reports and continues; faults never stop the SMMU. */
+    return 0;
 }
 
 /* Android arm_smmu_gerror_handler's normal-bank handling, serialized with
@@ -390,18 +391,21 @@ static int cam_smmu_gerror_service_locked(struct x9_camera_smmu *m)
     if(!active)return 0;
     printf("X9 CAMERA SMMU GERROR: raw=%x ack=%x active=%x cmd_cons=%x pending=%u\n",
         g,gn,active,cam_smmu_rr(m,0x9c),m->pending);
-    if(active&~known)return CAM_FAIL(EIO); /* don't acknowledge an unhandled source */
+    if(active&~known)printf("X9 CAMERA SMMU GERROR ADOPT: unknown=%x ignored (Android masks GERROR_ERR_MASK)\n",
+        active&~known);
+    active&=known;
+    if(!active)return 0;
     if(active&(1u<<8)) {
         /* Android disables the device on Service Failure Mode before ACK. */
         uint64_t span,deadline;
         m->native_cr0=0;cam_smmu_rw(m,0x20,0);
-        nanoseconds_to_absolutetime(10000000ull,&span);
+        nanoseconds_to_absolutetime(1000000000ull,&span);
         deadline=mach_absolute_time()+span;
-        for(unsigned n=0;n<10000;n++) {
+        for(unsigned n=0;n<1000000;n++) {
             int e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);
             if(e)return e;
             if(!cam_smmu_rr(m,0x24))break;
-            if(mach_absolute_time()>=deadline || n==9999)return CAM_FAIL(ETIMEDOUT);
+            if(mach_absolute_time()>=deadline || n==999999)return CAM_FAIL(ETIMEDOUT);
             delay(1);
         }
     }
@@ -431,7 +435,8 @@ static int cam_smmu_gerror_service_locked(struct x9_camera_smmu *m)
     /* Snapshot write is the architected toggle ACK. A newer GERROR value is
      * not acknowledged by this older sample. */
     cam_smmu_rw(m,0x64,g);m->gerror=g;m->gerrorn=g;
-    return CAM_FAIL(EIO);
+    /* arm_smmu_gerror_handler acks and continues; only SFM is fatal. */
+    return (active&(1u<<8))?CAM_FAIL(EIO):0;
 }
 
 /* Android mtk_smmu_irq_handler: IRQ_STA covers the shared MM SMMU,
@@ -453,7 +458,7 @@ static int cam_smmu_wp_irq_service_locked(struct x9_camera_smmu *m)
         printf("X9 CAMERA SMMU WRAPPER IRQ: sta=%x bit=%u count=%u\n",sta,bit,count);
     }
     if(unknown)printf("X9 CAMERA SMMU WRAPPER IRQ: unknown=%x retained sta=%x\n",unknown,sta);
-    return unknown?CAM_FAIL(EIO):0;
+    return 0; /* mtk_smmu_irq_handler logs, never stops the SMMU */
 }
 
 /* The powered, authoritative native controller must own this namespace.
@@ -491,7 +496,7 @@ static int cam_smmu_live_impl(struct x9_camera_smmu *m, bool irq_observed)
      * the EVTQ thread. Only a real IAR authorizes wrapper ACKs here. */
     if(m->gerror^m->gerrorn) {
         int e;
-        if(!m->native || ((m->gerror^m->gerrorn)&~0x1fdu))return CAM_FAIL(EIO);
+        if(!m->native)return CAM_FAIL(EIO);
         e=cam_smmu_gerror_service_locked(m);
         if(e && (e!=EIO || m->gerror!=m->gerrorn))return e;
         if(e)first_error=e;
@@ -574,10 +579,10 @@ static void cam_smmu_retire_timeout(struct x9_camera_smmu *m)
     int e=CAM_FAIL(ETIMEDOUT);
     if(!m->pending || m->last_errno!=ETIMEDOUT || m->close_attempted)return;
     m->close_attempted=true;
-    nanoseconds_to_absolutetime(10000000ull,&span);
+    nanoseconds_to_absolutetime(1000000000ull,&span);
     deadline=mach_absolute_time()+span;
     e=cam_smmu_storage(m);
-    for(unsigned poll=0;poll<10000 && !e;poll++) {
+    for(unsigned poll=0;poll<1000000 && !e;poll++) {
         if(mach_absolute_time()>=deadline){e=CAM_FAIL(ETIMEDOUT);break;}
         e=cam_smmu_batch_check(m);if(!e)e=cam_smmu_live(m);
         if(e)break;
@@ -641,9 +646,9 @@ static int cam_smmu_submit(struct x9_camera_smmu *m,const struct cam_smmu_cmd *c
     if(e)return cam_smmu_latch(m,e);
     m->wait_cons=m->cons;m->prod=(old+count+1)&mask;m->pending=true;
     cam_smmu_rw(m,0x98,m->prod);
-    nanoseconds_to_absolutetime(10000000ull,&interval);
+    nanoseconds_to_absolutetime(1000000000ull,&interval); /* ARM_SMMU_POLL_TIMEOUT_US */
     deadline=mach_absolute_time()+interval;
-    for(unsigned poll=0;poll<10000;poll++) {
+    for(unsigned poll=0;poll<1000000;poll++) {
         if(mach_absolute_time()>=deadline)break;
         e=cam_smmu_batch_check(m);if(!e)e=cam_smmu_live(m);
         if(e)return cam_smmu_latch(m,e);

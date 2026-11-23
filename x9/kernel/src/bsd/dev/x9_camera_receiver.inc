@@ -139,6 +139,11 @@ static uint32_t cam_rx_busy(const struct x9_camera_receiver_sample *s,unsigned p
     }
     return busy;
 }
+/* Defined in x9_camera_outmux.inc: true while the OUTMUX cfg_done is
+ * deferred to the first VSYNC or CAM_CFG_RDY was raised for stream-on
+ * (Android set_engines_mux_ready). Then the inner bank and outer
+ * 0x2c/0x38 legitimately move under the receiver snapshot. */
+static bool cam_out_rx_relaxed(void);
 static uint32_t cam_rx_changed(const struct x9_camera_receiver_sample *a,
     const struct x9_camera_receiver_sample *b,unsigned port)
 {
@@ -157,7 +162,8 @@ static uint32_t cam_rx_changed(const struct x9_camera_receiver_sample *a,
        ((a->async_split^b->async_split)&(3u<<(2*port))) ||
        ((a->afifo^b->afifo)&(3u<<(2*port))))changed|=2;
     for(unsigned bank=0;bank<2;bank++)for(unsigned word=0;word<X9_CAM_RX_OUT_WORDS;word++)
-        if(cam_source_compare_word(m->out[bank],cam_rx_out_offsets[word],a->out[bank][word])!=
+        if(cam_out_rx_relaxed() && (bank || word==8 || word==10))continue;
+        else if(cam_source_compare_word(m->out[bank],cam_rx_out_offsets[word],a->out[bank][word])!=
            cam_source_compare_word(m->out[bank],cam_rx_out_offsets[word],b->out[bank][word]))changed|=4;
     for(unsigned bank=0;bank<2;bank++)for(unsigned word=0;word<X9_CAM_RX_SV_WORDS;word++) {
         uint32_t av=a->sv[bank][word],bv=b->sv[bank][word];

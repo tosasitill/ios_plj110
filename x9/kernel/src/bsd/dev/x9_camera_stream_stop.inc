@@ -124,7 +124,9 @@ static int cam_stream_close_begin_locked(uint64_t epoch)
         if(!e && cam_stream_close.hold)e=CAM_FAIL(ESTALE);
         if(!e)e=cam_sensor_ap_read(&ap,0x0005,&cam_stream_close.frame_count);
         if(!e)cam_stream_close.sampled|=4;
-        if(!e && cam_stream_close.frame_count!=0xff)e=CAM_FAIL(ESTALE);
+        if(!e && cam_stream_close.frame_count!=0xff && !sample)
+            printf("X9 CAMERA STREAM STOP ADOPT: frame_count=%x after OFF (Android check_stream_off only logs)\n",
+                cam_stream_close.frame_count);
         if(!e)e=cam_stream_close_guard_locked(epoch);
         if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
         if(!e)cam_stream_close.samples++;

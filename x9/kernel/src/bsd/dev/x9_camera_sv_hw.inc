@@ -591,7 +591,12 @@ static int cam_sv_target_observe(void)
     int e;
     for(unsigned sample=0;sample<2;sample++) {
         e=cam_sv_environment();if(e)return e;
-        if(memcmp(cam_sv.expected[0],cam_sv.expected[1],cam_sv.count*sizeof(uint32_t)))return CAM_FAIL(EAGAIN);
+        /* CAM DB does not load TG SEN/VF/PATH (Android uses toggle_tg_db). */
+        for(unsigned n=0;n<cam_sv.count;n++) {
+            unsigned o=cam_sv.offset[n];
+            if(o==0x140 || o==0x148 || o==0x14c)continue;
+            if(cam_sv.expected[0][n]!=cam_sv.expected[1][n])return EAGAIN;
+        }
         if(!sample)delay(1);
     }
     return 0;
@@ -1005,7 +1010,8 @@ static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
         unsigned reg=cam_sv_find(cam_sv_receive_fields[i].offset);
         uint32_t expected=off?cam_sv_receive_fields[i].target:0;
         if(reg>=cam_sv.count || cam_sv.status.receive_before[i] ||
-           cam_sv.expected[0][reg]!=expected || cam_sv.expected[1][reg]!=expected)return CAM_FAIL(ESTALE);
+           cam_sv.expected[0][reg]!=expected ||
+           (cam_sv.expected[1][reg]!=expected && cam_sv.expected[1][reg]!=0))return CAM_FAIL(ESTALE);
     }
     nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
     cam_sv.receive_phase=off?X9_CAM_SV_RECEIVE_QUIESCING:X9_CAM_SV_RECEIVE_PENDING;
@@ -1032,7 +1038,9 @@ static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
             if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
             e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
             e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
-            for(unsigned bank=0;bank<2;bank++)
+            /* Outer only: Android writes these without readback and inner
+             * loads at the next CAM DB (SOF / toggle_db). */
+            for(unsigned bank=0;bank<1;bank++)
                 if(cam_sv.status.receive_after[bank][i]!=next)match=false;
             if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
             cam_sv.receive_samples=match?cam_sv.receive_samples+1:0;
@@ -1074,6 +1082,7 @@ static int cam_sv_close_locked(uint64_t epoch)
 {
     uint64_t span,deadline;
     uint32_t db;
+    unsigned inner_diff=0,inner_first=0;
     int e;
     if(!cam_sv.held)return 0;
     if(cam_sv.epoch!=epoch || cam_sv.close_attempted)return CAM_FAIL(ESTALE);
@@ -1129,8 +1138,13 @@ static int cam_sv_close_locked(uint64_t epoch)
              * retirement. Final normal reset owns their independent release;
              * ordinary config restoration must never replay saved SET words. */
             if(cam_sv_qos_index(cam_sv.offset[n])<CAM_SV_QOS_COUNT)continue;
-            if(cam_sv.expected[bank][n]!=cam_sv.before[bank][n])e=cam_sv_fault(CAM_FAIL(ESTALE));
+            if(cam_sv.expected[bank][n]!=cam_sv.before[bank][n]) {
+                if(!bank)e=cam_sv_fault(CAM_FAIL(ESTALE));
+                else if(!inner_diff++)inner_first=cam_sv.offset[n];
+            }
         }
+        if(inner_diff)printf("X9 CAMERA CAMSV CLOSE ADOPT: %u inner words differ from cold (first off=%x); outer restored\n",
+            inner_diff,inner_first);
     }
     if(!e) {
         cam_sv.held=false;cam_sv.dirty=0;cam_sv.db_phase=CAM_SV_DB_IDLE;cam_sv.db_issued=false;

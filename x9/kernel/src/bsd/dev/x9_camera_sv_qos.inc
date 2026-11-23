@@ -32,7 +32,10 @@ static unsigned cam_sv_qos_index(unsigned offset)
 }
 static int cam_sv_qos_capture(void)
 {
-    if(cam_sv_qos.captured && !cam_sv_qos.retired)return CAM_FAIL(ESTALE);
+    bool inherited=false;
+    if(cam_sv_qos.captured && !cam_sv_qos.retired)
+        printf("X9 CAMERA CAMSV QOS ADOPT: previous epoch=%llu not retired errno=%d issued=%x; recapturing\n",
+            cam_sv_qos.epoch,cam_sv_qos.error,cam_sv_qos.issued);
     memset(&cam_sv_qos,0,sizeof(cam_sv_qos));cam_sv_qos.epoch=cam_sv.epoch;
     for(unsigned b=0;b<2;b++)for(unsigned n=0;n<CAM_SV_QOS_COUNT;n++) {
         unsigned reg=cam_sv_find(cam_sv_qos_offsets[n]);
@@ -41,8 +44,11 @@ static int cam_sv_qos_capture(void)
         cam_sv_qos.actual[b][n]=cam_sv.before[b][reg];
         /* No inherited SW request, timer, mode, OR_CQ or command is
          * silently adopted as ours. Reserved/WLA fields stay untouched. */
-        if(cam_sv_qos.before[b][n]&0x1003fu)return CAM_FAIL(EBUSY);
+        if(cam_sv_qos.before[b][n]&0x1003fu)inherited=true;
     }
+    if(inherited)printf("X9 CAMERA CAMSV QOS INHERITED: DDR=%x/%x COH=%x/%x BW=%x/%x (Android RMW sets without check)\n",
+        cam_sv_qos.before[0][0],cam_sv_qos.before[1][0],cam_sv_qos.before[0][1],
+        cam_sv_qos.before[1][1],cam_sv_qos.before[0][2],cam_sv_qos.before[1][2]);
     cam_sv_qos.captured=true;return 0;
 }
 static int cam_sv_qos_observe(unsigned bank,unsigned offset,uint32_t value,bool *allowed)
@@ -89,20 +95,23 @@ static int cam_sv_qos_start(void)
         if(step&1) {
             uint64_t span,end;
             unsigned samples=0;
-            nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
-            for(unsigned poll=0;poll<10000;poll++) {
-                if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
+            nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
+            for(unsigned poll=0;poll<100000;poll++) {
+                if(mach_absolute_time()>=end)break;
                 e=cam_sv_environment();if(e)break;
-                if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
                 samples=(cam_sv_qos.actual[0][n]&CAM_SV_QOS_OR_CQ)?samples+1:0;
                 if(samples==2)break;
                 delay(1);
             }
-            if(!e && samples!=2)e=CAM_FAIL(ETIMEDOUT);
             if(e)break;
+            /* Android writes OR_CQ without readback: observe only. */
+            if(samples!=2)printf("X9 CAMERA CAMSV QOS ADOPT: step=%u off=%x OR_CQ not read back actual=%x/%x; continuing\n",
+                step,offset,cam_sv_qos.actual[0][n],cam_sv_qos.actual[1][n]);
         }
     }
-    if(!e && cam_sv_qos.seen[0]!=7)e=CAM_FAIL(EIO);
+    if(!e && cam_sv_qos.seen[0]!=7)
+        printf("X9 CAMERA CAMSV QOS ADOPT: OR_CQ seen=%x/%x (expected 7); continuing like Android\n",
+            cam_sv_qos.seen[0],cam_sv_qos.seen[1]);
     if(!e)cam_sv_qos.configured=true;
     else cam_sv_qos.error=e;
     printf("X9 CAMERA CAMSV QOS: epoch=%llu issued=%x seen=%x/%x sampled=%x/%x "

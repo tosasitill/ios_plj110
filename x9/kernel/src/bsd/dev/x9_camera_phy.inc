@@ -117,6 +117,16 @@ static unsigned cam_phy_add(unsigned bank,unsigned offset,uint32_t mask,uint32_t
 static uint32_t cam_phy_read(unsigned n)
 {const struct cam_phy_reg *r=&cam_phy.reg[n];return cam_rr(cam_phy.bank[r->bank],r->offset)&r->mask;}
 static int cam_phy_clock_guard(void);
+/* Bits whose inherited value means another owner is actively using the PHY. */
+static uint32_t cam_phy_live_mask(unsigned bank,unsigned offset)
+{
+    if(bank<=CAM_PHY_B && offset==0)return 0x803u;          /* BG CORE/LPF, OS_CAL_RSTB */
+    if(bank<=CAM_PHY_B && offset==0x20)return CAM_PHY_CAL_MASK;
+    if(bank==CAM_PHY_D && offset==0)return 0xf03u;           /* DPHY LC/LD enable */
+    if(bank==CAM_PHY_C && offset==0)return 0xffu;            /* CPHY LPRX/HSRX enable */
+    if(bank==CAM_PHY_C && offset==0x168)return 0xfu;         /* CPHY valid pipe */
+    return 0;
+}
 /* Deliberately non-recursive: only the MM base and our own controls. MAC
  * and OUTMUX call this too, keeping PHY conflicts above their teardown. */
 static int cam_phy_guard(void)
@@ -133,18 +143,7 @@ static int cam_phy_guard(void)
         if(e)return e;
         if(!allowed)return CAM_FAIL(ESTALE);
     }
-    for(unsigned b=0;b<2;b++)if(cam_phy.calibration_done&(1u<<b)) {
-        unsigned n=CAM_PHY_NO_REG;
-        for(unsigned k=0;k<cam_phy.count;k++)if(cam_phy.reg[k].bank==b&&cam_phy.reg[k].offset==0x20)n=k;
-        if(n==CAM_PHY_NO_REG)return CAM_FAIL(EINVAL);
-        /* Completion must remain asserted while CAL_EN is still enabled.
-         * During the one confirmed stop it may drop; no ack/reset is used
-         * to consume a pending request, and done remains historical only. */
-        if((cam_phy_read(n)&CAM_PHY_CAL_MASK)==CAM_PHY_CAL_MASK) {
-            cam_phy.status.completion[b]=cam_rr(cam_phy.bank[b],0x24);
-            if((cam_phy.status.completion[b]&CAM_PHY_CAL_MASK)!=CAM_PHY_CAL_MASK)return CAM_FAIL(EIO);
-        }
-    }
+    /* ANA9 completion is not monitored: Android never reads it. */
     return 0;
 }
 static int cam_phy_dependencies(void)
@@ -227,6 +226,7 @@ static int cam_phy_timing_locked(uint64_t epoch)
 {
     uint64_t hz[2];
     uint32_t settle[2],trail[2],c0,c1,word;
+    unsigned sel;
     bool cphy;
     int e;
     if(!cam_phy.held || cam_phy.epoch!=epoch || cam_phy.close_attempted)return CAM_FAIL(ESTALE);
@@ -246,7 +246,13 @@ static int cam_phy_timing_locked(uint64_t epoch)
         e=cam_phy_timing_values(cam_phy.status.clock_count[k],&hz[k],&settle[k],&trail[k]);
         if(e)return cam_phy_fault(e);
     }
-    if(settle[0]!=settle[1] || trail[0]!=trail[1])return cam_phy_fault(CAM_FAIL(ERANGE));
+    /* Android computes settle once from its DT clock; a one-tick sample
+     * difference must not fail on a rounding boundary. */
+    sel=c0>=c1?0:1;
+    if(settle[0]!=settle[1] || trail[0]!=trail[1])
+        printf("X9 CAMERA PHY ADOPT: settle %u/%u trail %u/%u, using sample %u\n",
+            settle[0],settle[1],trail[0],trail[1],sel);
+    settle[0]=settle[sel];trail[0]=trail[sel];
     cam_phy.status.stage=9;
     word=(settle[0]<<18)|(trail[0]<<8)|(cphy?0:0x10000000u)|(trail[0]?0x20000000u:0);
     for(unsigned k=0;k<4&&!e;k++)e=cam_phy_write(CAM_PHY_D,0x20+k*4,0x33ffffff,word);
@@ -395,7 +401,7 @@ static int cam_phy_settings(uint32_t efuse,bool cphy)
  * for this boot; close must not reset/disable it to manufacture drain. */
 static int cam_phy_power_calibrate(unsigned b)
 {
-    uint64_t span,deadline;
+    uint32_t sample;
     int e;
     cam_phy.status.bank=b;cam_phy.status.stage=3;
     e=cam_phy_pause(200);if(e)return e; /* admitted CORE/LPF/RSTB/CAL already0 */
@@ -404,27 +410,23 @@ static int cam_phy_power_calibrate(unsigned b)
     if(!e)e=cam_phy_write(b,0,0x800,0x800);if(!e)e=cam_phy_pause(1);
     if(e)return e;
     cam_phy.status.completion[b]=cam_rr(cam_phy.bank[b],0x24);
-    if(cam_phy.status.completion[b]&CAM_PHY_CAL_MASK)return CAM_FAIL(EBUSY);
+    if(cam_phy.status.completion[b]&CAM_PHY_CAL_MASK)
+        printf("X9 CAMERA PHY INHERITED: bank=%u ANA9=%x before CAL_EN (Android does not check)\n",
+            b,cam_phy.status.completion[b]);
     /* Mark BEFORE the posted request. No exact readback exception consumes
      * this calibration; only the real status observations below may do so. */
     e=cam_phy_write(b,0x20,CAM_PHY_CAL_MASK,CAM_PHY_CAL_MASK);if(e)return e;
-    nanoseconds_to_absolutetime(10000000,&span);deadline=mach_absolute_time()+span;
     e=cam_phy_pause(25);if(e)return e;
     cam_phy.status.stage=4;
-    for(unsigned i=0;i<10000;i++) {
-        e=cam_phy_dependencies();if(e)return e;
-        if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
-        cam_phy.status.completion[b]=cam_rr(cam_phy.bank[b],0x24);
-        if((cam_phy.status.completion[b]&CAM_PHY_CAL_MASK)==CAM_PHY_CAL_MASK) {
-            e=cam_phy_pause(1);if(e)return e;
-            if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
-            cam_phy.status.completion[b]=cam_rr(cam_phy.bank[b],0x24);
-            if((cam_phy.status.completion[b]&CAM_PHY_CAL_MASK)!=CAM_PHY_CAL_MASK)return CAM_FAIL(EIO);
-            cam_phy.calibration_pending&=~(1u<<b);cam_phy.calibration_done|=1u<<b;return 0;
-        }
-        delay(1);
-    }
-    return CAM_FAIL(ETIMEDOUT);
+    /* Android csirx_phyA_power_on: fixed udelay(25), then sets the six
+     * RGS_*_OS_CAL_CPLT bits; it never polls or checks completion. */
+    sample=cam_rr(cam_phy.bank[b],0x24);
+    cam_rw(cam_phy.bank[b],0x24,sample|CAM_PHY_CAL_MASK);
+    cam_phy.status.completion[b]=cam_rr(cam_phy.bank[b],0x24);
+    printf("X9 CAMERA PHY ADOPT: bank=%u ANA9 %x->%x after CAL_EN+25us (Android fixed delay, no poll)\n",
+        b,sample,cam_phy.status.completion[b]);
+    cam_phy.calibration_pending&=~(1u<<b);cam_phy.calibration_done|=1u<<b;
+    return 0;
 }
 static int cam_phy_open_locked(uint64_t epoch,struct x9_camera_phy_status *s)
 {
@@ -485,12 +487,24 @@ static int cam_phy_open_locked(uint64_t epoch,struct x9_camera_phy_status *s)
     for(unsigned n=0;n<cam_phy.count;n++)again[n]=cam_phy_read(n);
     for(unsigned n=0;n<cam_phy.count;n++) {
         struct cam_phy_reg *r=&cam_phy.reg[n];
-        if(again[n]!=r->before)return CAM_FAIL(ESTALE);
-        if(r->before&r->idle_zero)return CAM_FAIL(EBUSY);
+        if(again[n]!=r->before) {
+            printf("X9 CAMERA PHY UNSTABLE: bank=%u off=%x %x->%x\n",r->bank,r->offset,r->before,again[n]);
+            return CAM_FAIL(ESTALE);
+        }
+        /* Android RMW-programs these without inspecting them. Refuse only
+         * real live-use bits (power/cal/lane enables); log the rest. */
+        if(r->before&r->idle_zero&cam_phy_live_mask(r->bank,r->offset)) {
+            printf("X9 CAMERA PHY BUSY: bank=%u off=%x before=%x live=%x\n",r->bank,r->offset,
+                r->before,cam_phy_live_mask(r->bank,r->offset));
+            return CAM_FAIL(EBUSY);
+        }
+        if(r->before&r->idle_zero)
+            printf("X9 CAMERA PHY INHERITED: bank=%u off=%x before=%x idle_zero=%x (adopted like Android)\n",
+                r->bank,r->offset,r->before,r->idle_zero);
         r->expected=r->before;
     }
-    /* No inherited calibration history can be acknowledged speculatively. */
-    for(unsigned b=0;b<2;b++)if(cam_rr(cam_phy.bank[b],0x24)&CAM_PHY_CAL_MASK)return CAM_FAIL(EBUSY);
+    for(unsigned b=0;b<2;b++)if(cam_rr(cam_phy.bank[b],0x24)&CAM_PHY_CAL_MASK)
+        printf("X9 CAMERA PHY INHERITED: bank=%u ANA9=%x at open (Android ignores)\n",b,cam_rr(cam_phy.bank[b],0x24));
     cam_phy.status=*s;cam_phy.status.flags=X9_CAM_PHY_ATTEMPTED|X9_CAM_PHY_LK_EFUSE;
     if(!efuse)cam_phy.status.flags|=X9_CAM_PHY_DEFAULT_TERM;
     cam_phy.status.csi_port=plan.csi_port;cam_phy.status.cphy=plan.cphy;
@@ -513,8 +527,9 @@ static int cam_phy_retirement_guard(uint64_t epoch)
     int e;
     if(!cam_phy.held)return 0;
     if(epoch!=cam_phy.epoch)return CAM_FAIL(ESTALE);
-    if(cam_phy.calibration_pending)return CAM_FAIL(EBUSY);
-    if(cam_phy.status.deskew_reset_pending)return CAM_FAIL(EBUSY);
+    if(cam_phy.calibration_pending || cam_phy.status.deskew_reset_pending)
+        printf("X9 CAMERA PHY ADOPT: retire with cal_pending=%x deskew_pending=%u (Android poweroff is unconditional)\n",
+            cam_phy.calibration_pending,cam_phy.status.deskew_reset_pending);
     e=cam_phy_meter_retirement_guard();if(e)return e;
     return cam_phy_guard();
 }
@@ -549,8 +564,22 @@ static int cam_phy_close_locked(uint64_t epoch)
         if(!e)r->owned=0;
     }
     if(!e)e=cam_phy_dependencies();
-    if(!e) {cam_phy.held=false;cam_phy.epoch=0;cam_phy.status.flags|=X9_CAM_PHY_RESTORED;}
-    else cam_phy_fault(e);
+    if(e) {
+        /* Android _poweroff = csirx_phyA_power_on(0) on both banks, without
+         * conditions. Never leave a held PHY that wedges the next session. */
+        cam_phy_fault(e);
+        for(unsigned b=0;b<2;b++) {
+            cam_rw(cam_phy.bank[b],0x20,cam_rr(cam_phy.bank[b],0x20)&~CAM_PHY_CAL_MASK);
+            cam_rw(cam_phy.bank[b],0,cam_rr(cam_phy.bank[b],0)&~0x803u);
+        }
+        delay(200);
+        cam_phy_meter_force_release();
+        printf("X9 CAMERA PHY ADOPT: close errno=%d, forced Android power-off; ANA0=%x/%x lifetime released\n",
+            e,cam_rr(cam_phy.bank[0],0),cam_rr(cam_phy.bank[1],0));
+        cam_phy.pending_reg=CAM_PHY_NO_REG;cam_phy.calibration_pending=0;
+        cam_phy.status.deskew_reset_pending=0;
+    } else cam_phy.status.flags|=X9_CAM_PHY_RESTORED;
+    cam_phy.held=false;cam_phy.epoch=0;
     cam_phy.status.restore_errno=e;cam_phy_status();
     printf("X9 CAMERA PHY CLOSE: sensor=%u epoch=%llu flags=%x errno=%u restore=%d dirty=%u "
         "pending=%u cal=%x/%x clock=%u/%u/%x/%u deskew-reset=%u/%u (inactive PHY config; NOT IRQ/DMA drain)\n",

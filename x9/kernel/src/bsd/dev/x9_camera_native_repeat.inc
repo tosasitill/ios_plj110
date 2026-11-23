@@ -284,7 +284,8 @@ static bool cam_repeat_idle_irq_locked(unsigned role,struct cam_irq_parked_fault
         uint32_t done=cam_irq_rd(cam_irq.view[0],0x348);
         uint32_t cq=cam_irq_rd(cam_irq.view[0],0x201c);
         fault->err=err;fault->done=done;fault->cq=cq;fault->status_sampled=true;
-        if(err || done || (cq&~1u))e=CAM_FAIL(EIO);
+        if(err&~CAM_IRQ_ERR_FATAL){cam_irq_tolerated.count++;cam_irq_tolerated.err|=err&~CAM_IRQ_ERR_FATAL;}
+        if((err&CAM_IRQ_ERR_FATAL) || done || (cq&CAM_IRQ_CQ_ERR))e=CAM_FAIL(EIO);
     } else if(!e)e=CAM_FAIL(EIO);
     for(unsigned bank=0;bank<2 && !e;bank++) {
         uint32_t ctl=cam_irq_rd(cam_irq.view[bank],0x540);

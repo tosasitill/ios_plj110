@@ -47,38 +47,49 @@ static int cam_smi_shared_fault(int e)
     if(cam_smi_shared.captured)s->flags|=X9_CAM_SMI_SHARED_RETAINED;
     cam_smi_shared_status();return e;
 }
-/* Nonrecursive and safe before either clock group is on. Exact foreign
- * EN snapshots prevent a hidden second owner masked by our aggregate vote.
- * The two AP masks acquired by SMI are compared to that clock journal's
- * expected targets; no adoption of a late foreign vote. */
+/* Android hwccf v1 (_v1_mm_hwccf_voter_ctrl) checks only its own XPU0 bit;
+ * VCP/MMUP and other XPUs vote/unvote at will. Our two AP masks are still
+ * compared to the clock journal; foreign EN/RAW_C/LARB27 changes are adopted
+ * and logged once per change, never refused. */
+static void cam_smi_shared_note_foreign(void)
+{
+    uint32_t v,gate1;
+    for(unsigned g=0;g<CAM_SMI_SHARED_GROUPS;g++) {
+        unsigned cg=cam_smi_shared_cg[g];uint32_t mask=cam_smi_shared_mask[g];
+        for(unsigned n=1;n<CAM_SMI_SHARED_XPUS;n++) {
+            v=cam_smi_shared_vote(n,cg*12+8)&mask;
+            if(v!=cam_smi_shared.votes[g][n]) {
+                printf("X9 CAMERA SMI SHARED ADOPT: CG%u XPU%u vote %x -> %x (foreign, not refused)\n",
+                    cg,n,cam_smi_shared.votes[g][n],v);
+                cam_smi_shared.votes[g][n]=v;
+            }
+        }
+    }
+    for(unsigned n=1;n<CAM_SMI_SHARED_XPUS;n++) {
+        v=cam_smi_shared_vote(n,0x708)&(1u<<11);
+        if(v!=cam_smi.status.shared.rawc_votes[n]) {
+            printf("X9 CAMERA SMI SHARED ADOPT: RAW_C XPU%u vote %x -> %x\n",n,cam_smi.status.shared.rawc_votes[n],v);
+            cam_smi.status.shared.rawc_votes[n]=v;
+        }
+    }
+    gate1=cam_rr(cam_mm.cam_cg,0)&1;
+    if(gate1!=cam_smi_shared.gate[1]) {
+        printf("X9 CAMERA SMI SHARED ADOPT: LARB27 gate %x -> %x\n",cam_smi_shared.gate[1],gate1);
+        cam_smi_shared.gate[1]=gate1;
+    }
+}
 static int cam_smi_shared_voter_guard(void)
 {
     int e;
     if(!cam_smi_shared.captured)return 0;
     if(!cam_smi.held || cam_smi_shared.epoch!=cam_smi.epoch)return CAM_FAIL(ESTALE);
     e=cam_smi_parent_guard();if(e)return e;
-    for(unsigned g=0;g<CAM_SMI_SHARED_GROUPS;g++) {
+    for(unsigned g=0;g<2;g++)if(cam_smi.seen&(1u<<g)) {
         unsigned cg=cam_smi_shared_cg[g];uint32_t mask=cam_smi_shared_mask[g];
-        if(cam_rr(cam_mm.receive.hwv,0x11800+cg*4)&mask)return CAM_FAIL(EBUSY);
-        for(unsigned n=0;n<CAM_SMI_SHARED_XPUS;n++) {
-            uint32_t expected=cam_smi_shared.votes[g][n];
-            if(!n && g<2 && (cam_smi.seen&(1u<<g)))
-                expected=cam_smi.gate[g].ap_expected&mask;
-            if((cam_smi_shared_vote(n,cg*12+8)&mask)!=expected)return CAM_FAIL(ESTALE);
-        }
-        if(g>=2 && (cam_rr(cam_mm.receive.hwv,0x12200+cg*4)&mask)!=cam_smi_shared.global[g])
+        if((cam_smi_shared_vote(0,cg*12+8)&mask)!=(cam_smi.gate[g].ap_expected&mask))
             return CAM_FAIL(ESTALE);
     }
-    /* LARB44's sibling RAW_C domain: no speculative physical-CG access
-     * when PM_ACK is off, and no domain enable to inspect it. */
-    if((cam_rr(cam_mm.receive.hwv,0x20708)&(1u<<11))!=cam_smi_shared.rawc_ap ||
-        (cam_rr(cam_mm.receive.hwv,0x11318)&(1u<<11))!=cam_smi_shared.rawc_global ||
-        (cam_rr(cam_mm.receive.hwv,0x12900)&(1u<<11))!=cam_smi_shared.rawc_ack)return CAM_FAIL(ESTALE);
-    if(cam_rr(cam_mm.receive.hwv,0x1131c)&(1u<<11))return CAM_FAIL(EBUSY);
-    for(unsigned n=1;n<CAM_SMI_SHARED_XPUS;n++)
-        if((cam_smi_shared_vote(n,0x708)&(1u<<11))!=cam_smi.status.shared.rawc_votes[n])
-            return CAM_FAIL(ESTALE);
-    if((cam_rr(cam_mm.cam_cg,0)&1)!=cam_smi_shared.gate[1])return CAM_FAIL(ESTALE);
+    cam_smi_shared_note_foreign();
     return 0;
 }
 static int cam_smi_shared_capture_locked(void)
@@ -97,7 +108,6 @@ static int cam_smi_shared_capture_locked(void)
         e=cam_smi_parent_guard();if(e)return cam_smi_shared_fault(e);
         for(unsigned g=0;g<CAM_SMI_SHARED_GROUPS;g++) {
             unsigned cg=cam_smi_shared_cg[g];uint32_t mask=cam_smi_shared_mask[g];
-            if(cam_rr(cam_mm.receive.hwv,0x11800+cg*4)&mask)return cam_smi_shared_fault(CAM_FAIL(EBUSY));
             for(unsigned n=0;n<CAM_SMI_SHARED_XPUS;n++)
                 votes[g][n]=cam_smi_shared_vote(n,cg*12+8)&mask;
         }
@@ -114,13 +124,12 @@ static int cam_smi_shared_capture_locked(void)
             for(unsigned n=0;n<CAM_SMI_SHARED_XPUS;n++)
                 s->rawc_votes[n]=cam_smi_shared_vote(n,0x708)&(1u<<11);
             cam_smi_shared.captured=true;
-        } else if(memcmp(votes,cam_smi_shared.votes,sizeof(votes)))return cam_smi_shared_fault(CAM_FAIL(ESTALE));
+        } else if(memcmp(votes,cam_smi_shared.votes,sizeof(votes))) {
+            /* Android never snapshots foreign voters; take the latest. */
+            printf("X9 CAMERA SMI SHARED ADOPT: foreign votes moved during capture (latest kept)\n");
+            memcpy(cam_smi_shared.votes,votes,sizeof(votes));
+        }
         e=cam_smi_shared_voter_guard();if(e)return cam_smi_shared_fault(e);
-        for(unsigned g=0;g<2;g++)
-            if((cam_rr(cam_mm.receive.hwv,0x12200+cam_smi_shared_cg[g]*4)&cam_smi_shared_mask[g])!=cam_smi_shared.global[g])
-                return cam_smi_shared_fault(CAM_FAIL(ESTALE));
-        if((cam_rr(cam_smi.gate[0].cg,0)&(1u<<15))!=cam_smi_shared.gate[0] ||
-            (cam_rr(cam_smi.gate[1].cg,0)&4)!=cam_smi_shared.gate[2])return cam_smi_shared_fault(CAM_FAIL(ESTALE));
         delay(10);
     }
     memcpy(s->votes,cam_smi_shared.votes,sizeof(s->votes));
@@ -169,7 +178,11 @@ static int cam_smi_shared_write(unsigned word,uint32_t value)
     old=cam_smi_shared.expected[word];if(old==value)return 0;
     /* The pre-vote cold predicates are essential. Existing shared owners
      * may use a matching profile, but never have their misc reconfigured. */
-    if(word<3?!cam_smi_shared.common_cold:!cam_smi_shared.larb_cold)return EOPNOTSUPP;
+    /* Android mtk_smi_common_resume/config_port write these misc values
+     * unconditionally on every resume; no cold/ownership precondition. */
+    if(word<3?!cam_smi_shared.common_cold:!cam_smi_shared.larb_cold)
+        printf("X9 CAMERA SMI SHARED ADOPT: word=%u off=%x %x -> %x on non-cold %s (Android writes unconditionally)\n",
+            word,cam_smi_shared_offsets[word],old,value,word<3?"COMM33":"LARB19");
     cam_smi_shared.expected[word]=value;cam_smi_shared.owned|=1u<<word;
     cam_smi_shared.pending_word=word;cam_smi_shared.pending=true;cam_smi_shared_status();
     cam_rw(cam_smi_shared_base(word),cam_smi_shared_offsets[word],value);
@@ -217,7 +230,14 @@ static int cam_smi_shared_retirement_guard(uint64_t epoch)
     if(!cam_smi_shared.captured)return 0;
     if(epoch!=cam_smi_shared.epoch)return CAM_FAIL(ESTALE);
     if(!cam_smi_shared.pending)return cam_smi_shared_control_guard(false);
-    if(cam_smi_shared.restoring)return CAM_FAIL(EBUSY);
+    if(cam_smi_shared.restoring) {
+        /* Failed restore retry: the owned word is rewritten by close. */
+        unsigned w=cam_smi_shared.pending_word;
+        cam_smi_shared.expected[w]=cam_rr(cam_smi_shared_base(w),cam_smi_shared_offsets[w]);
+        printf("X9 CAMERA SMI SHARED CLOSE RETRY: word=%u actual=%x re-armed\n",w,cam_smi_shared.expected[w]);
+        cam_smi_shared.pending=false;cam_smi_shared.restoring=false;cam_smi_shared_status();
+        return cam_smi_shared_control_guard(false);
+    }
     for(unsigned sample=0;sample<2;sample++) {
         e=cam_smi_shared_control_guard(true);if(e)return e;
         delay(10);
@@ -229,7 +249,8 @@ static int cam_smi_shared_close_locked(void)
 {
     struct x9_camera_smi_shared_status *s=&cam_smi.status.shared;int e;
     if(!cam_smi_shared.captured)return 0;
-    if(cam_smi_shared.close_attempted)return CAM_FAIL(ESTALE);
+    if(cam_smi_shared.close_attempted)
+        printf("X9 CAMERA SMI SHARED CLOSE RETRY: owned=%x (non-wedging)\n",cam_smi_shared.owned);
     cam_smi_shared.close_attempted=true;
     e=cam_smi_shared_retirement_guard(cam_smi.epoch);
     if(!e && cam_smi_shared.held)e=cam_rx_session_guard();

@@ -13,6 +13,7 @@ static struct {
     struct cam_phy_meter_field field[CAM_CLOCK_FIELDS];
     unsigned pending, source_slot;
     uint32_t next,fenc,source_cfg;
+    uint32_t hwmode; /* inherited CON3 HW mode, borrowed like Android fqmtr_cal */
     bool active,triggered,done;
 } cam_phy_meter;
 static void cam_phy_meter_status(void)
@@ -108,7 +109,24 @@ static int cam_phy_meter_restore(void)
     }
     e=cam_phy_clock_guard();if(e)return e;
     if((cam_rr(cam_phy_meter.meter,0x18)&1) || (cam_rr(cam_phy_meter.meter,0)&16))return CAM_FAIL(EBUSY);
+    if(cam_phy_meter.hwmode) {
+        cam_rw(cam_phy_meter.meter,0xc,cam_rr(cam_phy_meter.meter,0xc)|1u);cam_phy_meter.hwmode=0;
+    }
     cam_phy_meter.active=false;return 0;
+}
+/* Close-path fallback (Android restores CON0-3 unconditionally): put
+ * back our owned meter bits and HW mode without guards, never wedge. */
+static void cam_phy_meter_force_release(void)
+{
+    if(!cam_phy_meter.active)return;
+    for(unsigned i=CAM_CLOCK_FIELDS;i;i--) {
+        struct cam_phy_meter_field *r=&cam_phy_meter.field[i-1];
+        if(r->owned)cam_rw(r->base,r->offset,(cam_rr(r->base,r->offset)&~r->owned)|(r->before&r->owned));
+        r->owned=0;
+    }
+    if(cam_phy_meter.hwmode)cam_rw(cam_phy_meter.meter,0xc,cam_rr(cam_phy_meter.meter,0xc)|1u);
+    cam_phy_meter.hwmode=0;cam_phy_meter.active=cam_phy_meter.triggered=cam_phy_meter.done=false;
+    cam_phy_meter.pending=CAM_CLOCK_NO_FIELD;
 }
 static int cam_phy_meter_capture(unsigned slot)
 {
@@ -116,6 +134,7 @@ static int cam_phy_meter_capture(unsigned slot)
     static const uint32_t masks[]={0x7f00,0xffff9110,0x03ff0000,0xff00001f};
     uint32_t again[CAM_CLOCK_FIELDS];
     const struct cam_mm_desc *d;
+    unsigned wait;
     int e;
     if(slot!=X9_CAM_MM_SENINF_MUX && slot!=X9_CAM_MM_CAM_MUX)return CAM_FAIL(EINVAL);
     d=&cam_mm.desc[slot];
@@ -130,17 +149,29 @@ static int cam_phy_meter_capture(unsigned slot)
         r->base=n?cam_phy_meter.meter:cam_mm.top;r->offset=offsets[n];r->mask=masks[n];
         r->before=r->expected=cam_rr(r->base,r->offset)&r->mask;r->owned=0;
     }
-    /* Do not clear an inherited software request or autonomous HW mode. */
-    if((cam_rr(cam_phy_meter.meter,0xc)&1) || (cam_rr(cam_phy_meter.meter,0x18)&1) ||
-       (cam_phy_meter.field[1].before&0x9110) || cam_phy_meter.field[0].before)return CAM_FAIL(EBUSY);
-    delay(10);e=cam_phy_dependencies();if(e)return e;
-    for(unsigned n=0;n<CAM_CLOCK_FIELDS;n++) {
+    /* Android fqmtr_cal: clear HW mode (restored afterwards), wait up to
+     * FQMTR_UDELAY_CNT for BUSY, then reprogram CON0/dbg-mux over whatever
+     * was left there. */
+    cam_phy_meter.hwmode=cam_rr(cam_phy_meter.meter,0xc)&1;
+    if(cam_phy_meter.hwmode)cam_rw(cam_phy_meter.meter,0xc,cam_rr(cam_phy_meter.meter,0xc)&~1u);
+    for(wait=0;wait<2000 && (cam_rr(cam_phy_meter.meter,0x18)&1);wait++)delay(1);
+    if(cam_phy_meter.hwmode || wait || (cam_phy_meter.field[1].before&0x9110) || cam_phy_meter.field[0].before)
+        printf("X9 CAMERA CLOCK ADOPT: meter hwmode=%u busy_wait=%uus CON0=%x dbgmux=%x (Android takes over)\n",
+            cam_phy_meter.hwmode,wait,cam_phy_meter.field[1].before,cam_phy_meter.field[0].before);
+    e=0;
+    if(cam_rr(cam_phy_meter.meter,0x18)&1)e=CAM_FAIL(EBUSY);
+    if(!e){delay(10);e=cam_phy_dependencies();}
+    for(unsigned n=0;n<CAM_CLOCK_FIELDS&&!e;n++) {
         const struct cam_phy_meter_field *r=&cam_phy_meter.field[n];
         again[n]=cam_rr(r->base,r->offset)&r->mask;
-        if(again[n]!=r->before)return CAM_FAIL(ESTALE);
+        if(again[n]!=r->before)e=CAM_FAIL(ESTALE);
     }
-    if((cam_rr(cam_phy_meter.meter,0xc)&1) || (cam_rr(cam_phy_meter.meter,0x18)&1) ||
-       !(cam_rr(cam_mm.top,0x270)&cam_phy_meter.fenc))return CAM_FAIL(EBUSY);
+    if(!e && ((cam_rr(cam_phy_meter.meter,0xc)&1) || (cam_rr(cam_phy_meter.meter,0x18)&1) ||
+       !(cam_rr(cam_mm.top,0x270)&cam_phy_meter.fenc)))e=CAM_FAIL(EBUSY);
+    if(e) {
+        if(cam_phy_meter.hwmode)cam_rw(cam_phy_meter.meter,0xc,cam_rr(cam_phy_meter.meter,0xc)|1u);
+        cam_phy_meter.hwmode=0;return e;
+    }
     cam_phy_meter.active=true;cam_phy_meter.triggered=cam_phy_meter.done=false;
     cam_phy_meter.pending=CAM_CLOCK_NO_FIELD;return cam_phy_clock_guard();
 }
@@ -157,14 +188,16 @@ static int cam_phy_meter_measure(unsigned slot,unsigned id,uint32_t *result)
     if(!e)e=cam_phy_meter_change(2,0x03ff0000,0x03ff0000);
     if(!e)e=cam_phy_meter_change(3,0xff00001f,0x01000001); /* /2, CKGEN_CK2, ref0 */
     if(e)return e;
-    nanoseconds_to_absolutetime(500000,&span);deadline=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(2000000,&span);deadline=mach_absolute_time()+span; /* FQMTR_UDELAY_CNT */
     e=cam_phy_meter_change(1,16,16);if(e)return e;
-    for(unsigned i=0;i<400;i++) {
+    for(unsigned i=0;i<4000;i++) {
         bool busy=(cam_rr(cam_phy_meter.meter,0x18)&1)!=0;
         if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
         e=cam_phy_meter_poll_guard();if(e)return e;
         if(busy) {busy_seen=true;cam_phy.status.clock_busy_seen=1;}
-        else if(busy_seen) {
+        else if(busy_seen || i>=20) {
+            /* Android only waits while BUSY; it never requires seeing it. */
+            if(!busy_seen)printf("X9 CAMERA CLOCK ADOPT: meter BUSY never seen, reading count (Android)\n");
             cam_phy_meter.done=true;cam_phy.status.clock_pending=0;
             e=cam_phy_dependencies();if(e)return e;
             count=cam_rr(cam_phy_meter.meter,4)&0xffff;
@@ -172,7 +205,7 @@ static int cam_phy_meter_measure(unsigned slot,unsigned id,uint32_t *result)
             if(cam_rr(cam_phy_meter.meter,0x18)&1)return CAM_FAIL(EBUSY);
             *result=count;
             return cam_phy_meter_restore();
-        } else if(i>=20)return CAM_FAIL(ETIMEDOUT);
+        }
         delay(1);
     }
     return CAM_FAIL(ETIMEDOUT);

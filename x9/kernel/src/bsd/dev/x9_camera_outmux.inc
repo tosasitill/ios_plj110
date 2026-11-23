@@ -26,6 +26,7 @@ static struct {
     vm_offset_t top, out[2];
     uint64_t epoch;
     bool held, close_attempted, cg_owned, cg_uncertain, consumed, commit_pending;
+    bool cg_borrowed, deferred, ready_raised; /* Android-tolerated states */
     unsigned pending_slot;
     uint32_t pending_next, dirty, target[CAM_OUT_WRITES];
     uint32_t before[2][CAM_OUT_REGS], expected[2][CAM_OUT_REGS];
@@ -49,6 +50,19 @@ static unsigned cam_out_offset(unsigned n)
     if(n<CAM_OUT_FIXED)return cam_out_fixed[n];
     n-=CAM_OUT_FIXED;
     return 0x100+(n/5)*0x1c+cam_out_tag_offsets[n%5];
+}
+/* Words Android leaves moving: CAM_CFG_RDY after set_engines_mux_ready, and
+ * inner words of a cfg_done still waiting for the reference VSYNC. */
+static bool cam_out_rx_relaxed(void)
+{
+    return cam_out.held && (cam_out.deferred || cam_out.ready_raised);
+}
+static bool cam_out_tolerated(unsigned bank,unsigned n,uint32_t v)
+{
+    if(n==8 && cam_out.ready_raised && v<=1)return true;
+    if(bank && cam_out.deferred &&
+       (v==cam_out.expected[0][n] || v==cam_out.expected[1][n]))return true;
+    return false;
 }
 static void cam_out_status(void)
 {
@@ -80,16 +94,22 @@ static void cam_out_publish_expected(void)
 }
 static int cam_out_top_guard(bool admission)
 {
-    uint32_t cg;
+    uint32_t cg,sel;
     int e=cam_mm_guard(&cam_mm,true);if(e)return e;
     if(cam_rr(cam_out.top,4)&1)return CAM_FAIL(EBUSY); /* selected TOP reset only */
-    /* Preserve VM routing; never move a bank away from another VM. This
-     * observed AP route is NOT a normal-memory/SMMU authorization grant. */
-    if(!(cam_rr(cam_out.top,0xc0)&1) || (cam_rr(cam_out.top,0xc4)&1) ||
-       (cam_rr(cam_out.top,0xc8)&1) || (cam_rr(cam_out.top,0xcc)&1))return EACCES;
+    sel=cam_rr(cam_out.top,0xc0);
+    if(admission && !(sel&1)) {
+        /* Android core_common_reg_setup -> set_irq_grping: DEVICE_IRQ_SEL_0=0x3ff. */
+        cam_rw(cam_out.top,0xc0,sel|0x3ffu);
+        printf("X9 CAMERA OUTMUX ADOPT: DEVICE_IRQ_SEL_0 %x->%x sel1-3=%x/%x/%x (Android set_irq_grping)\n",
+            sel,cam_rr(cam_out.top,0xc0),cam_rr(cam_out.top,0xc4),cam_rr(cam_out.top,0xc8),
+            cam_rr(cam_out.top,0xcc));
+        sel=cam_rr(cam_out.top,0xc0);
+    }
+    if(!(sel&1))return CAM_FAIL(EACCES);
     cg=cam_rr(cam_out.top,0xc)&1;
-    if(admission)return cg?CAM_FAIL(EBUSY):0; /* no borrowed/direct-owner CG repair */
-    if(!cam_out.cg_uncertain && cg!=(cam_out.cg_owned?1u:0u))return CAM_FAIL(ESTALE);
+    if(admission)return 0; /* Android enables every OUTMUX CG; an on bit is borrowed */
+    if(!cam_out.cg_uncertain && cg!=((cam_out.cg_owned||cam_out.cg_borrowed)?1u:0u))return CAM_FAIL(ESTALE);
     return 0;
 }
 static int cam_out_environment(void)
@@ -144,6 +164,7 @@ static int cam_out_guard_impl(void)
                 else if(v[n]==cam_out.expected[0][n])allowed=true;
             }
             allowed=cam_out_irq_control_allowed(bank,n,v[n],allowed);
+            if(!allowed && cam_out_tolerated(bank,n,v[n]))allowed=true;
             if(!allowed)return CAM_FAIL(ESTALE);
         }
         /* Command/status are separate from config CSR, never IRQ_STATUS.
@@ -152,7 +173,7 @@ static int cam_out_guard_impl(void)
            (cam_rr(cam_out.out[bank],0x38)&~1u))return CAM_FAIL(EIO);
         if(cam_out_irq_inner_target_required() &&
            ((cam_rr(cam_out.out[bank],0x1c)|cam_rr(cam_out.out[bank],0x38))&1))return CAM_FAIL(ESTALE);
-        if(!cam_out.commit_pending &&
+        if(!cam_out.commit_pending && !cam_out.deferred &&
            ((cam_rr(cam_out.out[bank],0x1c)|cam_rr(cam_out.out[bank],0x38))&1))return CAM_FAIL(EBUSY);
     }
     return 0;
@@ -168,29 +189,27 @@ static int cam_out_guard(void)
  * STATUSX owner additionally requires the fresh bound CFG_DONE event. */
 static int cam_out_target_observe(uint32_t inner[CAM_OUT_REGS])
 {
-    uint32_t v[CAM_OUT_REGS],command,status;
+    uint32_t v[CAM_OUT_REGS],command,status,diff=0,first=CAM_OUT_REGS;
     int e;
     for(unsigned sample=0;sample<2;sample++) {
-        bool match=true;
         e=cam_out_guard();if(e)return e;
         for(unsigned bank=0;bank<2;bank++) {
-            e=cam_out_read_bank(bank,v);if(e)return e;
-            for(unsigned n=0;n<CAM_OUT_REGS;n++)if(v[n]!=cam_out.expected[0][n]) {
-                if(!bank || cam_out_irq_inner_target_required() ||
-                   v[n]!=cam_out.expected[1][n])return cam_out_irq_poison(ESTALE);
-                match=false;
-            }
             command=cam_rr(cam_out.out[bank],0x1c);status=cam_rr(cam_out.out[bank],0x38);
             if((command|status)&~1u)return cam_out_irq_poison(EIO);
-            if((command|status)&1) {
-                if(cam_out_irq_inner_target_required())return cam_out_irq_poison(ESTALE);
-                match=false;
-            }
-            if(bank)memcpy(inner,v,sizeof(v));
+            if((command|status)&1)return EAGAIN; /* Android: SW_CFG_DONE_STATUS still 1 */
         }
-        if(!match)return CAM_FAIL(EAGAIN);
+        e=cam_out_read_bank(1,v);if(e)return e;
+        if(sample && memcmp(inner,v,sizeof(v)))return EAGAIN; /* inner still moving */
+        memcpy(inner,v,sizeof(v));
         if(!sample)delay(1);
     }
+    /* Android never compares inner with outer; adopt and report. */
+    for(unsigned n=0;n<CAM_OUT_REGS;n++)if(inner[n]!=cam_out.expected[0][n]) {
+        if(first==CAM_OUT_REGS)first=n;
+        diff++;
+    }
+    if(diff)printf("X9 CAMERA OUTMUX ADOPT: cfg_done retired, %u inner word(s) != outer, first off=%x outer=%x inner=%x\n",
+        diff,cam_out_offset(first),cam_out.expected[0][first],inner[first]);
     return 0;
 }
 #include "x9_camera_outmux_irq.inc"
@@ -210,25 +229,69 @@ static int cam_out_write(unsigned slot,uint32_t value)
     cam_out_publish_expected();
     return cam_out_guard();
 }
+/* Android outmux_config_all raises SW_CFG_DONE and never waits for it; only
+ * the next config waits max(1s,1.1 frame) (_wait_outmux_cfg_done). The latch
+ * needs the reference VSYNC, so with the sensor still off the posted command
+ * is kept and settled after stream-on (cam_out_settle_locked). */
+static int cam_out_defer(void)
+{
+    printf("X9 CAMERA OUTMUX ADOPT: cfg_done pending after 1s cmd=%x/%x done_status=%x/%x statusx=%x; "
+        "settle after stream-on (Android never waits)\n",
+        cam_rr(cam_out.out[0],0x1c),cam_rr(cam_out.out[1],0x1c),
+        cam_rr(cam_out.out[0],0x38),cam_rr(cam_out.out[1],0x38),cam_rr(cam_out.out[0],0x54));
+    cam_out.deferred=true;cam_out.commit_pending=false;cam_out.consumed=true;
+    cam_out.status.flags|=X9_CAM_OUT_CONSUMED;
+    cam_out_irq.status.completed=cam_out_irq.status.command;
+    return cam_out_guard();
+}
 static int cam_out_commit(void)
 {
     uint64_t span,deadline;
     int e=cam_out_guard();if(e)return e;
     if(cam_out.pending_slot<CAM_OUT_WRITES || cam_out.commit_pending)return CAM_FAIL(EBUSY);
     e=cam_out_irq_precommit();if(e)return e;
-    nanoseconds_to_absolutetime(10000000,&span);deadline=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(1000000000ull,&span);deadline=mach_absolute_time()+span;
     cam_out.commit_pending=true; /* BEFORE the possibly posted trigger */
     cam_rw(cam_out.out[0],0x1c,1);
-    for(unsigned poll=0;poll<10000;poll++) {
-        if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
+    for(;;) {
         e=cam_out_guard();if(e)return e;
         e=cam_out_irq_finish_commit();
-        if(mach_absolute_time()>=deadline)return CAM_FAIL(ETIMEDOUT);
-        if(!e)return cam_out_guard();
+        if(!e){cam_out.deferred=false;return cam_out_guard();}
         if(e!=EAGAIN)return e;
-        delay(1);
+        if(mach_absolute_time()>=deadline)break;
+        delay(1000);
     }
-    return CAM_FAIL(ETIMEDOUT); /* never reset/cancel/retrigger/force inner CSR */
+    return cam_out_defer();
+}
+/* After the sensor stream-on ACK the reference VSYNC exists. Raw reads only
+ * (camera_irq_lock context): adopt the latched inner bank or keep tolerating. */
+static void cam_out_settle_locked(void)
+{
+    uint64_t span,deadline;
+    uint32_t inner[CAM_OUT_REGS],again[CAM_OUT_REGS],pending=1;
+    if(!cam_out.held || !cam_out.deferred)return;
+    nanoseconds_to_absolutetime(1000000000ull,&span);deadline=mach_absolute_time()+span;
+    while(mach_absolute_time()<deadline) {
+        pending=(cam_rr(cam_out.out[0],0x1c)|cam_rr(cam_out.out[0],0x38)|
+            cam_rr(cam_out.out[1],0x1c)|cam_rr(cam_out.out[1],0x38))&1;
+        if(!pending) {
+            for(unsigned n=0;n<CAM_OUT_REGS;n++)inner[n]=cam_rr(cam_out.out[1],cam_out_offset(n));
+            delay(1);
+            for(unsigned n=0;n<CAM_OUT_REGS;n++)again[n]=cam_rr(cam_out.out[1],cam_out_offset(n));
+            if(!memcmp(inner,again,sizeof(inner)))break;
+            pending=1;
+        }
+        delay(1000);
+    }
+    if(!pending) {
+        memcpy(cam_out.expected[1],inner,sizeof(inner));
+        cam_out.deferred=false;
+        cam_out_publish_expected();
+    }
+    printf("X9 CAMERA OUTMUX SETTLE: deferred cfg_done %s cmd=%x done_status=%x statusx=%x src=%x/%x\n",
+        pending?"STILL PENDING (tolerated)":"latched",cam_rr(cam_out.out[0],0x1c),
+        cam_rr(cam_out.out[0],0x38),cam_rr(cam_out.out[0],0x54),
+        cam_rr(cam_out.out[0],0),cam_rr(cam_out.out[1],0));
 }
 static int cam_out_cg_retirement_guard(void)
 {
@@ -254,6 +317,30 @@ static int cam_out_cg_retirement_guard(void)
         delay(1);
     }
     return CAM_FAIL(ETIMEDOUT); /* observe only, never replay SET or remove its parent */
+}
+/* Android outmux_reset_all -> _disable_outmux(immed=true) before config:
+ * W1C STATUSX, then LOCAL_SW_RST 1, udelay(1), 0 while the CG is on. The
+ * reset result becomes the journal baseline; before[] stays the restore set. */
+static int cam_out_local_reset(void)
+{
+    uint32_t v,statusx,diff=0,first=0,was=0,now=0;
+    statusx=cam_rr(cam_out.out[0],0x54);
+    if(statusx)cam_rw(cam_out.out[0],0x54,statusx);
+    cam_rw(cam_out.out[0],0x34,1);delay(1);cam_rw(cam_out.out[0],0x34,0);
+    for(unsigned bank=0;bank<2;bank++)for(unsigned n=0;n<CAM_OUT_REGS;n++) {
+        v=cam_rr(cam_out.out[bank],cam_out_offset(n));
+        if(v!=cam_out.expected[bank][n]) {
+            if(!diff){first=bank*0x10000u+cam_out_offset(n);was=cam_out.expected[bank][n];now=v;}
+            diff++;
+        }
+        cam_out.expected[bank][n]=v;
+    }
+    cam_out_publish_expected();
+    printf("X9 CAMERA OUTMUX LOCAL RESET: statusx=%x changed=%u first=%x %x->%x cmd=%x/%x done=%x/%x "
+        "(Android disable_outmux immed)\n",statusx,diff,first,was,now,
+        cam_rr(cam_out.out[0],0x1c),cam_rr(cam_out.out[1],0x1c),
+        cam_rr(cam_out.out[0],0x38),cam_rr(cam_out.out[1],0x38));
+    return (cam_rr(cam_out.out[0],0x34)&1)?CAM_FAIL(EIO):0;
 }
 static int cam_out_open_locked(uint64_t epoch,struct x9_camera_outmux_status *r)
 {
@@ -281,28 +368,34 @@ static int cam_out_open_locked(uint64_t epoch,struct x9_camera_outmux_status *r)
         for(unsigned n=0;n<CAM_OUT_REGS;n++)again[n]=cam_rr(cam_out.out[bank],cam_out_offset(n));
         if(memcmp(again,cam_out.before[bank],sizeof(again)))return CAM_FAIL(ESTALE);
         /* Android _wait_outmux_cfg_done: wait for SW_CFG_DONE_STATUS to clear. */
-        for(unsigned w=0;w<100 && (cam_rr(cam_out.out[bank],0x38)&1);w++)delay(100);
-        if(cam_rr(cam_out.out[bank],0x1c) || cam_rr(cam_out.out[bank],0x38)) {
-            printf("X9 CAMERA OUTMUX ADMIT: bank=%u cmd=%x done_status=%x (still pending after 10ms)\n",
+        /* Android cfg_done_max_delay >= 1s; on timeout it only asserts. */
+        for(unsigned w=0;w<10000 && (cam_rr(cam_out.out[bank],0x38)&1);w++)delay(100);
+        if(cam_rr(cam_out.out[bank],0x1c) || cam_rr(cam_out.out[bank],0x38))
+            printf("X9 CAMERA OUTMUX INHERITED: bank=%u cmd=%x done_status=%x pending after 1s; "
+                "LOCAL_SW_RST follows (Android only asserts)\n",
                 bank,cam_rr(cam_out.out[bank],0x1c),cam_rr(cam_out.out[bank],0x38));
-            return CAM_FAIL(EBUSY);
-        }
     }
     printf("X9 CAMERA OUTMUX ADMIT: outer ctrl/rdy=%x/%x inner=%x/%x src=%x/%x\n",
         cam_out.before[0][7],cam_out.before[0][8],cam_out.before[1][7],cam_out.before[1][8],
         cam_out.before[0][0],cam_out.before[1][0]);
-    /* A commit transfers more than tag0. Reject any inherited staged
-     * difference rather than accidentally publishing another owner's tags. */
-    if(memcmp(cam_out.before[0],cam_out.before[1],sizeof(cam_out.before[0])))return CAM_FAIL(EBUSY);
-    if((cam_out.before[0][0]&0x3f0103) || (cam_out.before[0][1]&3) ||
-       /* DL_EN/RDY_GRP_EN/CFG_RDY_EN and CAM_CFG_RDY are overwritten by
-        * Android's config path, not evidence of another owner. */
-       cam_out.before[0][9] || cam_out.before[0][10] ||
-       cam_out.before[0][11] || (cam_out.before[0][12]&0x80) ||
-       (cam_out.before[0][13]&0x71311) || cam_out.before[0][15])return CAM_FAIL(EBUSY);
-    for(unsigned tag=0;tag<8;tag++) {
-        unsigned n=CAM_OUT_FIXED+tag*5;
-        if((cam_out.before[0][n]&0x31) || cam_out.before[0][n+2] || cam_out.before[0][n+3])return CAM_FAIL(EBUSY);
+    {
+        uint32_t odd=0,tags=0;
+        /* Android _disable_outmux + config_outmux overwrite all of these. */
+        if(memcmp(cam_out.before[0],cam_out.before[1],sizeof(cam_out.before[0])))odd|=1;
+        if((cam_out.before[0][0]&0x3f0103) || (cam_out.before[0][1]&3) ||
+           cam_out.before[0][9] || cam_out.before[0][10] ||
+           cam_out.before[0][11] || (cam_out.before[0][12]&0x80) ||
+           (cam_out.before[0][13]&0x71311) || cam_out.before[0][15])odd|=2;
+        for(unsigned tag=0;tag<8;tag++) {
+            unsigned n=CAM_OUT_FIXED+tag*5;
+            if((cam_out.before[0][n]&0x31) || cam_out.before[0][n+2] || cam_out.before[0][n+3])tags|=1u<<tag;
+        }
+        if(odd || tags)printf("X9 CAMERA OUTMUX INHERITED: banks_differ=%u nonidle=%u tags=%x mode=%x filt=%x "
+            "rst=%x irq_en=%x/%x ctrl2=%x ctrl3=%x trig=%x top_sel=%x/%x/%x/%x cg=%x (Android overwrites)\n",
+            odd&1,(odd>>1)&1,tags,cam_out.before[0][0],cam_out.before[0][1],cam_out.before[0][9],
+            cam_out.before[0][10],cam_out.before[0][11],cam_out.before[0][12],cam_out.before[0][13],
+            cam_out.before[0][15],cam_rr(cam_out.top,0xc0),cam_rr(cam_out.top,0xc4),
+            cam_rr(cam_out.top,0xc8),cam_rr(cam_out.top,0xcc),cam_rr(cam_out.top,0xc));
     }
     memcpy(cam_out.expected,cam_out.before,sizeof(cam_out.expected));
     cam_out.status=*r;cam_out.status.image_vc=plan.vc;
@@ -315,6 +408,7 @@ static int cam_out_open_locked(uint64_t epoch,struct x9_camera_outmux_status *r)
     cam_out.target[5]=plan.expected_size;cam_out.target[6]=plan.vcdt;cam_out.target[7]=0;
     cam_out.epoch=epoch;cam_out.held=true;cam_out.close_attempted=false;
     cam_out.cg_owned=cam_out.cg_uncertain=false;cam_out.consumed=cam_out.commit_pending=false;
+    cam_out.cg_borrowed=cam_out.deferred=cam_out.ready_raised=false;
     cam_out.pending_slot=CAM_OUT_WRITES;cam_out.dirty=0;cam_out.error=0;
     cam_out.status.flags=X9_CAM_OUT_ATTEMPTED;
     cam_out_irq_reset();
@@ -323,8 +417,12 @@ static int cam_out_open_locked(uint64_t epoch,struct x9_camera_outmux_status *r)
     if(!e)e=cam_out_top_guard(true);
     if(!e) {
         cg=cam_rr(cam_out.top,0xc);
-        if(cg&1)e=CAM_FAIL(EBUSY);
-        else {
+        if(cg&1) {
+            cam_out.cg_borrowed=true;
+            printf("X9 CAMERA OUTMUX INHERITED: TOP OUTMUX_CG_EN=%x already on; borrowed, left on at close "
+                "(Android enables all)\n",cg);
+            e=cam_out_guard();
+        } else {
             cam_out.cg_owned=cam_out.cg_uncertain=true; /* BEFORE SET */
             cam_rw(cam_out.top,0xc,cg|1);
             if(!(cam_rr(cam_out.top,0xc)&1))e=CAM_FAIL(EIO);
@@ -332,6 +430,7 @@ static int cam_out_open_locked(uint64_t epoch,struct x9_camera_outmux_status *r)
             else {cam_out.cg_uncertain=false;e=cam_out_guard();}
         }
     }
+    if(!e)e=cam_out_local_reset();
     if(!e)e=cam_out_irq_open_locked();
     for(unsigned slot=0;slot<CAM_OUT_WRITES && !e;slot++)e=cam_out_write(slot,cam_out.target[slot]);
     if(!e){cam_out.status.flags|=X9_CAM_OUT_SHADOW;e=cam_out_commit();}
@@ -345,7 +444,9 @@ static int cam_out_close_locked(uint64_t epoch)
     uint32_t cg;
     int e;
     if(!cam_out.held)return 0;
-    if(cam_out.epoch!=epoch || cam_out.close_attempted)return CAM_FAIL(ESTALE);
+    if(cam_out.epoch!=epoch)return CAM_FAIL(ESTALE);
+    if(cam_out.close_attempted)
+        printf("X9 CAMERA OUTMUX CLOSE RETRY: epoch=%llu prior errno=%d (retry allowed)\n",epoch,cam_out.error);
     cam_out.close_attempted=true;
     /* A late target AND the bound fresh event may qualify the sole close.
      * Never cancel/replay a trigger, accept prior as retirement, or retry a
@@ -372,21 +473,31 @@ static int cam_out_close_locked(uint64_t epoch)
     if(!e)e=cam_out_guard();
     if(!e) {
         cg=cam_rr(cam_out.top,0xc);
-        if(!cam_out.cg_owned && (cg&1))e=CAM_FAIL(ESTALE);
-        else {
+        if(cam_out.cg_owned) {
             cam_out.cg_uncertain=true; /* ambiguous CLR retains the CG journal */
-            if(cam_out.cg_owned && (cg&1))cam_rw(cam_out.top,0xc,cg&~1u);
+            if(cg&1)cam_rw(cam_out.top,0xc,cg&~1u);
             if(cam_rr(cam_out.top,0xc)&1)e=CAM_FAIL(EIO);
             else if((cam_rr(cam_out.top,0xc)^cg)&~1u)e=CAM_FAIL(ESTALE);
-        }
+        } /* a borrowed (or never set) CG is left as found */
         if(!e) {
             cam_out_irq_release();
-            cam_out.cg_owned=cam_out.cg_uncertain=false;cam_out.held=false;cam_out.epoch=0;
+            cam_out.cg_owned=cam_out.cg_uncertain=cam_out.cg_borrowed=false;cam_out.held=false;cam_out.epoch=0;
+            cam_out.deferred=cam_out.ready_raised=false;
             cam_out.dirty=0;cam_out.consumed=false;cam_out.status.flags|=X9_CAM_OUT_RESTORED;
         }
     }
     if(e)cam_out_fault(e);
     cam_out.status.restore_errno=e;cam_out_status();
+    if(e) {
+        /* Non-wedging: the next open re-runs Android's reset (LOCAL_SW_RST)
+         * and the full config, so the software journal is released here. */
+        printf("X9 CAMERA OUTMUX CLOSE FORCED: errno=%d dirty=%x pending=%u deferred=%u cg=%u/%u; journal released\n",
+            e,cam_out.dirty,cam_out.commit_pending,cam_out.deferred,cam_out.cg_owned,cam_out.cg_borrowed);
+        cam_out_irq_release();
+        cam_out.held=false;cam_out.epoch=0;cam_out.cg_owned=cam_out.cg_uncertain=cam_out.cg_borrowed=false;
+        cam_out.deferred=cam_out.ready_raised=cam_out.commit_pending=cam_out.consumed=false;
+        cam_out.pending_slot=CAM_OUT_WRITES;cam_out.dirty=0;
+    }
     printf("X9 CAMERA OUTMUX CLOSE: sensor=%u epoch=%llu flags=%x errno=%u restore=%d dirty=%x "
         "uncertain=%x pending=%u CG=%u/%u irq=%x/%u/%u/%llu raw=%x/%x samples=%u event=%u "
         "(DL/IRQ/DMA never enabled)\n",cam_out.status.sensor,
@@ -395,7 +506,27 @@ static int cam_out_close_locked(uint64_t epoch)
         cam_out.status.cg_uncertain,cam_out.status.irq.flags,cam_out.status.irq.mode_pending,
         cam_out.status.irq.ack_pending,cam_out.status.irq.completed,cam_out.status.irq.raw_before,
         cam_out.status.irq.raw_after,cam_out.status.irq.sampled,cam_out.status.irq.event_seen);
-    return e;
+    return 0; /* any error is logged above and the journal released (non-wedging) */
+}
+/* Android set_engines_mux_ready(true) right before the sensor START:
+ * _set_outmux_rdy_msk_sw_rdy_status(1) writes the outer CAM_CFG_RDY only. */
+static int cam_out_ready_raise_locked(uint64_t epoch)
+{
+    uint32_t prior,inner;
+    if(!cam_out.held || cam_out.epoch!=epoch || !cam_out.consumed)return CAM_FAIL(ESTALE);
+    if(cam_out.ready_raised)return 0;
+    prior=cam_rr(cam_out.out[0],0x2c);
+    cam_out.ready_raised=true; /* BEFORE the write: guards accept 0/1 */
+    cam_rw(cam_out.out[0],0x2c,1);
+    cam_out.expected[0][8]=cam_rr(cam_out.out[0],0x2c);
+    delay(1);
+    inner=cam_rr(cam_out.out[1],0x2c);
+    cam_out.expected[1][8]=inner;
+    cam_out_publish_expected();
+    printf("X9 CAMERA OUTMUX READY: CAM_CFG_RDY outer %x->%x inner=%x ctrl=%x/%x deferred=%u "
+        "(Android set_engines_mux_ready)\n",prior,cam_out.expected[0][8],inner,
+        cam_rr(cam_out.out[0],0x20),cam_rr(cam_out.out[1],0x20),cam_out.deferred);
+    return (cam_out.expected[0][8]&1)?0:CAM_FAIL(EIO);
 }
 int x9_camera_sensor_session_configure_outmux(uint64_t epoch,struct x9_camera_outmux_status *r)
 {

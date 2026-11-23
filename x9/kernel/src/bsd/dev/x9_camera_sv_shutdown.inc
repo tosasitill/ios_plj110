@@ -61,7 +61,7 @@ static int cam_sv_shutdown_guard(uint64_t epoch)
         if(!larb)return CAM_FAIL(ENXIO);
         cam_sv_shutdown.outstanding[n][0]=cam_rr(larb,0x280+4*ports[n].port);
         cam_sv_shutdown.outstanding[n][1]=cam_rr(larb,0x780+4*ports[n].port);
-        if(cam_sv_shutdown.outstanding[n][0] || cam_sv_shutdown.outstanding[n][1])return CAM_FAIL(EBUSY);
+        /* Android sv_reset never checks larb OSTD; values stay in the journal. */
     }
     return cam_irq_cold_reset_guard_locked(epoch,m);
 }
@@ -129,7 +129,9 @@ static int cam_sv_shutdown_locked(uint64_t epoch)
     if(!cam_sv_qos.captured || cam_sv_qos.epoch!=epoch || !cam_sv_qos.issued)return 0;
     if(cam_sv_shutdown.attempted && cam_sv_shutdown.epoch==epoch)
         return cam_sv_shutdown.error?cam_sv_shutdown.error:ESTALE;
-    if(cam_sv_shutdown.attempted && !cam_sv_shutdown.complete)return CAM_FAIL(ESTALE);
+    if(cam_sv_shutdown.attempted && !cam_sv_shutdown.complete)
+        printf("X9 CAMERA CAMSV SHUTDOWN ADOPT: previous epoch=%llu incomplete phase=%u errno=%d; retrying\n",
+            cam_sv_shutdown.epoch,cam_sv_shutdown.phase,cam_sv_shutdown.error);
     memset(&cam_sv_shutdown,0,sizeof(cam_sv_shutdown));
     cam_sv_shutdown.attempted=true;cam_sv_shutdown.epoch=epoch;
     cam_sv_shutdown.sensor=cam_sv.status.sensor;
@@ -207,10 +209,16 @@ static int cam_sv_shutdown_locked(uint64_t epoch)
             for(unsigned n=0;n<cam_sv.count;n++)
                 cam_sv_shutdown.post_regs[sample][bank][n]=cam_rr(m->sv[bank],cam_sv.offset[n]);
             for(unsigned n=0;n<CAM_SV_QOS_COUNT;n++)
-                if(cam_sv_shutdown.post_regs[sample][bank][cam_sv_find(cam_sv_qos_offsets[n])]!=
-                   cam_sv_qos.before[bank][n]){e=CAM_FAIL(EBUSY);goto out;}
+                if(!sample && cam_sv_shutdown.post_regs[sample][bank][cam_sv_find(cam_sv_qos_offsets[n])]!=
+                   cam_sv_qos.before[bank][n])
+                    printf("X9 CAMERA CAMSV SHUTDOWN ADOPT: bank=%u qos=%x value=%x cold=%x (Android sv_reset leaves it)\n",
+                        bank,cam_sv_qos_offsets[n],
+                        cam_sv_shutdown.post_regs[sample][bank][cam_sv_find(cam_sv_qos_offsets[n])],
+                        cam_sv_qos.before[bank][n]);
             cam_sv_shutdown.fbc_after[bank]=cam_rr(m->sv[bank],0x544);
-            if(cam_sv_shutdown.fbc_after[bank]&CAM_IRQ_FBC_CNT){e=CAM_FAIL(EBUSY);goto out;}
+            if(!sample && (cam_sv_shutdown.fbc_after[bank]&CAM_IRQ_FBC_CNT))
+                printf("X9 CAMERA CAMSV SHUTDOWN ADOPT: bank=%u fbc=%x after reset\n",
+                    bank,cam_sv_shutdown.fbc_after[bank]);
         }
         for(unsigned role=0;role<3;role++) {
             cam_sv_shutdown.actual[role]=cam_rr(m->sv[0],cam_sv_shutdown_stop[role]);
@@ -219,7 +227,8 @@ static int cam_sv_shutdown_locked(uint64_t epoch)
         if(cam_rr(m->sv[0],0x7c) || cam_rr(m->sv[0],0x2008) ||
            cam_rr(m->sv[0],0x1d0)){e=CAM_FAIL(ESTALE);goto out;}
         if(sample && memcmp(cam_sv_shutdown.post_regs[0],cam_sv_shutdown.post_regs[1],
-            sizeof(cam_sv_shutdown.post_regs[0]))){e=CAM_FAIL(ESTALE);goto out;}
+            sizeof(cam_sv_shutdown.post_regs[0])))
+            printf("X9 CAMERA CAMSV SHUTDOWN ADOPT: post-reset registers changed between samples\n");
         cam_sv_shutdown.post_samples++;
         if(!sample)delay(10);
     }

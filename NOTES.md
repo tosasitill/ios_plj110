@@ -160,6 +160,16 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 全链路按 Android 重审 + 镜像 x9-cam-android-audit-20261123
+
+- 用户要求「后面的一切都按安卓重新审核一遍」。分 5 组（SMI/MMQoS、CAMSV、SENINF MAC/PHY、OUTMUX/stream/capture/IRQ、相机 SMMU）逐条对照 Android 源码审计，并直接修改。原则：去掉 Android 没有的拒绝条件，补上 Android 有的步骤，超时放宽到 Android 的预算；凡是改成容忍的状态都打印一行 `ADOPT/INHERITED`；关闭路径不再卡死下一次运行。
+- **SMI/MMQoS**：MMINFRA 父时钟不再钉死（MMPC/VCP 会做 DVFS，只等 0x330 bit29 的 busy 清零）；只核对自己 XPU0 的投票，其他 XPU 和 RAW_C 的变化只记录；COMM33/L19 misc 不再要求 cold、无条件写入；MMPC 表不再要求全零，TOTAL_CURRENT 不再阻塞；已投票但仍 gated 时走 FSM retrigger；投票前等 CCF_STATUS 空闲（`cam_smi_ccf_idle`）；A0 只比较自己写的字段，FORCE_ULTRA 只记录；close 可重试，旧 epoch 残留的 SMI 会被接管（SMI STALE ADOPT）。
+- **CAMSV**：receive-arm/TG gate 只等外 bank（内 bank 要等 DB load/SOF）；cold reset 去掉所有预检/后检拒绝，未完成的 reset 可以重试；QoS 继承位只记录，OR_CQ 回读只记录；shutdown 和 dma-stop 去掉 larb 计数与 QoS 回读的拒绝；TG_MODE_OFF 允许；dma_stop.captured 跨 epoch 被清掉。未做：FBC credit 仍要求内 bank（Android 读 FBC1 也用内 bank）。
+- **MAC/PHY**：校准按 Android 等 25µs 后写 CPLT，不再轮询 ANA9；PHY 准入只对真正在用的位拒绝；时钟计量器借用 HW 模式，等 2ms，没看到 busy 也读数；SENINF top 的 CG/overrun 改为接管；新增 CSI top（0x138b0000）reset 和 IRQ status 清除（Android `_reset`）；settle 两次采样不一致时取计数大的那次；PHY close 失败时强制下电并释放。
+- **OUTMUX/stream/IRQ**：配置后先写 CAM_CFG_RDY=0，sensor START 之前写 1（`set_engines_mux_ready`，`X9 CAMERA OUTMUX READY`）；配置前 W1C STATUSX 并脉冲 LOCAL_SW_RST；cfg_done 预算 1 s，超时允许延迟到 VSYNC（`OUTMUX ADOPT`/`OUTMUX SETTLE`），完成判据改用 0x38；STATUSX 其他位做 W1C，不再 poison；TOP IRQ_SEL 为 0 时写 0x3ff；TOP CG 改为借用；receiver guard 在 deferred/ready 状态下跳过内 bank 和 0x2c/0x38；CAMSV 只把 GRAB/OVRUN 当致命错误，其他错误计数（`CAMSV TOLERATED`）；sensor 0x0005 帧计数不再阻塞。DL_EN 由 source 模块设置，未重复。
+- **SMMU**：wrapper 回读不一致时接管；EVTQ 事件和未知 GERROR 只记录（只有 SFM 才算错误）；ACK/SYNC 超时 10ms→1s；冷 GERROR 先 ack；非相机 STE 一律 bypass；CR1/S1CSH 改为 ISH。
+- 镜像 `x9/out/x9-cam-android-audit-20261123/boot.img`：15310848 B，sha256 `280fb03125c37a40848cec2d547a476d28f6d3a23c242cf23d9b997f65396d4c`，boot-arg `x9_mmup_smmu_init=1`，warning 2987。包含上一节的 SMI FSM retrigger。
+
 #### 2026-11-23 日志 372 + 镜像 x9-cam-smi-fsm-20261123（未上机，随后做全量 Android 审计）
 
 - **372**：receiver-open 通过（`RX OUTMUX STATE: ctrl/rdy/done=21000000/1/0` 两 bank 一致，busy=0）。新失败 `smi-clocks-open errno=60`，FAIL TRACE `cam_wait_bits:124`（约 0.55 s，即 smi_clocks 投票后等物理 CG 清零的 10000 次轮询）。

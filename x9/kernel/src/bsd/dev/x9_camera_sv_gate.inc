@@ -77,7 +77,10 @@ static int cam_sv_gate_admission_locked(uint64_t epoch)
     uint32_t path=cam_sv_gate.before[CAM_SV_GATE_PATH];
     if(!cam_sv.held || cam_sv.epoch!=epoch || !cam_sv_gate.captured || cam_sv_gate.epoch!=epoch ||
        cam_sv_gate.phase!=X9_CAM_SV_GATE_IDLE || cam_sv_gate.issued)return CAM_FAIL(ESTALE);
-    if(sen&((1u<<0)|(1u<<1)|(1u<<2)|(1u<<8)|(1u<<11)|(15u<<16)|(1u<<26)))return CAM_FAIL(ENOTSUP);
+    /* TG_MODE_OFF(bit11) is tolerated: Android common_disable leaves it set
+     * and common_enable never clears it. */
+    if(sen&(1u<<11))printf("X9 CAMERA TG GATE INHERITED: SEN_MODE=%x TG_MODE_OFF set (Android tolerates)\n",sen);
+    if(sen&((1u<<0)|(1u<<1)|(1u<<2)|(1u<<8)|(15u<<16)|(1u<<26)))return CAM_FAIL(ENOTSUP);
     if(vf&0x7773u)return CAM_FAIL(ENOTSUP); /* EN, SINGLE, FR_CON, delay/mux controls */
     if(path&0x80190u)return CAM_FAIL(ENOTSUP); /* JPG, JPG_LINEND, TG DB disable, EXP_ESC */
     for(unsigned i=0;i<X9_CAM_SV_GATE_FIELDS;i++) {
@@ -130,7 +133,8 @@ static int cam_sv_gate_note(unsigned bank,unsigned offset,uint32_t value,bool *a
        (cam_sv_gate.phase==X9_CAM_SV_GATE_RESTORING || cam_sv_gate.phase==X9_CAM_SV_GATE_RESTORED)) {
         if(bank>=2 || cam_sv_gate.epoch!=cam_sv.epoch || !cam_sv.credit_retired ||
            !cam_sv.close_attempted || (value!=cam_sv_gate.before[CAM_SV_GATE_SEN] &&
-            ((cam_sv_gate.restore_seen&(1u<<bank)) || value!=cam_sv_gate.restore_prior)))return CAM_FAIL(ESTALE);
+            ((cam_sv_gate.restore_seen&(1u<<bank)) || value!=cam_sv_gate.restore_prior) &&
+            !(bank==1 && value==cam_sv.expected[1][cam_sv_find(offset)])))return CAM_FAIL(ESTALE);
         if(value==cam_sv_gate.before[CAM_SV_GATE_SEN])cam_sv_gate.restore_seen|=1u<<bank;
         *allowed=true;return 0;
     }
@@ -140,7 +144,12 @@ static int cam_sv_gate_note(unsigned bank,unsigned offset,uint32_t value,bool *a
        (cam_sv_gate.phase!=X9_CAM_SV_GATE_PENDING && cam_sv_gate.phase!=X9_CAM_SV_GATE_STOPPING))return CAM_FAIL(ESTALE);
     bit=1u<<step;
     if(value!=cam_sv_gate.target[step] && ((cam_sv_gate.seen[bank]&bit) ||
-       value!=cam_sv_gate.prior[step]))return CAM_FAIL(ESTALE);
+       value!=cam_sv_gate.prior[step])) {
+        /* Inner TG words load only on TG DB/VSYNC (Android writes outer and
+         * never waits); an unchanged stale inner value is not a conflict. */
+        unsigned r=cam_sv_find(offset);
+        if(!(bank==1 && r<cam_sv.count && value==cam_sv.expected[1][r]))return CAM_FAIL(ESTALE);
+    }
     if(value==cam_sv_gate.target[step])cam_sv_gate.seen[bank]|=bit;
     *allowed=true;return 0;
 }
@@ -213,8 +222,7 @@ static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
         if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
         e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
         e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
-        if(cam_sv_gate.issued&bit || cam_sv.expected[0][reg]!=cam_sv_gate.prior[step] ||
-           cam_sv.expected[1][reg]!=cam_sv_gate.prior[step]){e=CAM_FAIL(ESTALE);break;}
+        if(cam_sv_gate.issued&bit || cam_sv.expected[0][reg]!=cam_sv_gate.prior[step]){e=CAM_FAIL(ESTALE);break;}
         cam_sv_gate.pending=step;cam_sv_gate.samples=0;
         if(next!=cam_sv_gate.prior[step]) {
             cam_sv_gate.issued|=bit;cam_sv_status();
@@ -225,7 +233,7 @@ static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
             if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
             e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
             e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
-            for(unsigned bank=0;bank<2;bank++) {
+            for(unsigned bank=0;bank<1;bank++) { /* outer only, as Android */
                 if(cam_sv.status.gate_after[bank][field]!=next)match=false;
                 else cam_sv_gate.seen[bank]|=bit; /* also records actual no-op observation */
             }
@@ -288,7 +296,7 @@ static int cam_sv_gate_restore_locked(uint64_t epoch)
     }
     e=cam_sv_environment();if(!e)e=cam_irq_credit_retired_guard(epoch);if(e)goto out;
     cam_sv_gate.restore_prior=cam_sv.expected[0][sen];
-    for(unsigned bank=0;bank<2;bank++) {
+    for(unsigned bank=0;bank<1;bank++) { /* inner TG words may be stale */
         if(cam_sv.expected[bank][sen]!=cam_sv_gate.restore_prior ||
            ((cam_sv_gate.restore_prior^target)&~(CAM_SV_GATE_TGOFF|CAM_SV_GATE_FLUSH)) ||
            (cam_sv.expected[bank][sen]&CAM_SV_GATE_CMOS) || (cam_sv.expected[bank][vf]&1) ||
@@ -308,7 +316,7 @@ static int cam_sv_gate_restore_locked(uint64_t epoch)
         bool match=true;
         if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
         e=cam_sv_environment();if(!e)e=cam_irq_credit_retired_guard(epoch);if(e)goto out;
-        for(unsigned bank=0;bank<2;bank++) {
+        for(unsigned bank=0;bank<1;bank++) {
             if(cam_sv.status.gate_after[bank][CAM_SV_GATE_SEN]!=target)match=false;
             else cam_sv_gate.restore_seen|=1u<<bank; /* actual no-op also recorded */
         }
@@ -317,7 +325,7 @@ static int cam_sv_gate_restore_locked(uint64_t epoch)
         if(cam_sv_gate.restore_samples==2)break;
         delay(1);
     }
-    if(cam_sv_gate.restore_samples!=2 || cam_sv_gate.restore_seen!=3){e=CAM_FAIL(ETIMEDOUT);goto out;}
+    if(cam_sv_gate.restore_samples!=2 || !(cam_sv_gate.restore_seen&1)){e=CAM_FAIL(ETIMEDOUT);goto out;}
     e=cam_sv_environment();if(!e)e=cam_irq_credit_retired_guard(epoch);
     if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
     if(!e)cam_sv_gate.phase=X9_CAM_SV_GATE_RESTORED;

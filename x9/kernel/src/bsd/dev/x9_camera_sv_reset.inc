@@ -13,6 +13,7 @@ static struct {
     uint32_t cq_before[2],cq_actual[2],cq_ack,top_before,top_actual;
     uint32_t outstanding[7][2];
     bool attempted,complete;
+    bool inherited_logged,outstanding_logged;
     int error;
     struct x9_camera_receiver_sample before,after,post[2];
 } cam_sv_reset;
@@ -57,7 +58,15 @@ static int cam_sv_cold_reset_guard(uint64_t epoch)
         /* No IRQ/R-C status reads. Source enables, DMA/STG stops and
          * CQ thread0 remain inactive. CQ stop is the sole live command. */
         for(unsigned n=0;n<sizeof(off)/sizeof(off[0]);n++)
-            if(cam_rr(m->sv[b],off[n]))return CAM_FAIL(EBUSY);
+            {
+                /* Android sv_reset_by_camsys_top has no pre-state check. */
+                uint32_t v=cam_rr(m->sv[b],off[n]);
+                if(v && !cam_sv_reset.inherited_logged) {
+                    cam_sv_reset.inherited_logged=true;
+                    printf("X9 CAMERA CAMSV RESET INHERITED: bank=%u off=%x value=%x (Android resets unconditionally)\n",
+                        b,off[n],v);
+                }
+            }
     }
     for(unsigned n=0;n<sizeof(ports)/sizeof(ports[0]);n++) {
         vm_offset_t larb=cam_smi.larb[ports[n].larb];
@@ -66,7 +75,12 @@ static int cam_sv_cold_reset_guard(uint64_t epoch)
         if(!larb)return CAM_FAIL(ENXIO);
         cam_sv_reset.outstanding[n][0]=cam_rr(larb,0x280+4*port);
         cam_sv_reset.outstanding[n][1]=cam_rr(larb,0x780+4*port);
-        if(cam_sv_reset.outstanding[n][0] || cam_sv_reset.outstanding[n][1])return CAM_FAIL(EBUSY);
+        if((cam_sv_reset.outstanding[n][0] || cam_sv_reset.outstanding[n][1]) &&
+           !cam_sv_reset.outstanding_logged) {
+            cam_sv_reset.outstanding_logged=true;
+            printf("X9 CAMERA CAMSV RESET INHERITED: larb=%u port=%u ostd=%x/%x (Android does not check)\n",
+                ports[n].larb,port,cam_sv_reset.outstanding[n][0],cam_sv_reset.outstanding[n][1]);
+        }
     }
     return cam_irq_cold_reset_guard_locked(epoch,m);
 }
@@ -77,7 +91,9 @@ static int cam_sv_cold_reset_locked(uint64_t epoch)
     int e;
     if(cam_sv_reset.attempted && cam_sv_reset.epoch==epoch)
         return cam_sv_reset.error?cam_sv_reset.error:EALREADY;
-    if(cam_sv_reset.attempted && !cam_sv_reset.complete)return CAM_FAIL(ESTALE);
+    if(cam_sv_reset.attempted && !cam_sv_reset.complete)
+        printf("X9 CAMERA CAMSV RESET ADOPT: previous epoch=%llu incomplete errno=%d issued=%x; retrying (Android resets every resume)\n",
+            cam_sv_reset.epoch,cam_sv_reset.error,cam_sv_reset.issued);
     memset(&cam_sv_reset,0,sizeof(cam_sv_reset));
     cam_sv_reset.attempted=true;cam_sv_reset.epoch=epoch;
     cam_sv_reset.sensor=cam_sensor_live.probe.sensor;
@@ -88,10 +104,11 @@ static int cam_sv_cold_reset_locked(uint64_t epoch)
     e=cam_sv_cold_reset_guard(epoch);if(e)goto out;
     for(unsigned b=0;b<2;b++) {
         cam_sv_reset.cq_before[b]=cam_rr(m->sv[b],0x2010);
-        if(cam_sv_reset.cq_before[b]){e=CAM_FAIL(EBUSY);goto out;}
     }
     cam_sv_reset.top_before=cam_rr(cam_mm.sv_cg,0xa4);
-    if(cam_sv_reset.top_before){e=CAM_FAIL(EBUSY);goto out;}
+    if(cam_sv_reset.cq_before[0] || cam_sv_reset.cq_before[1] || cam_sv_reset.top_before)
+        printf("X9 CAMERA CAMSV RESET INHERITED: cq=%x/%x mraw_rst=%x (Android overwrites)\n",
+            cam_sv_reset.cq_before[0],cam_sv_reset.cq_before[1],cam_sv_reset.top_before);
     nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
     /* Keep the upstream zero writes even with a zero prior. These are
      * command edges, not ordinary geometry fields or DB transactions.
@@ -106,7 +123,6 @@ static int cam_sv_cold_reset_locked(uint64_t epoch)
         e=cam_sv_cold_reset_guard(epoch);if(e)goto out;
         cam_sv_reset.cq_actual[0]=cam_rr(m->sv[0],0x2010);
         if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
-        if(cam_sv_reset.cq_actual[0]&~3u){e=CAM_FAIL(ESTALE);goto out;}
         cam_sv_reset.cq_samples=(cam_sv_reset.cq_actual[0]&2)?
             cam_sv_reset.cq_samples+1:0;
         if(cam_sv_reset.cq_samples==2) {
@@ -119,7 +135,6 @@ static int cam_sv_cold_reset_locked(uint64_t epoch)
     cam_sv_reset.issued|=1u<<2;cam_rw(m->sv[0],0x2010,0);
     e=cam_sv_cold_reset_guard(epoch);if(e)goto out;
     cam_sv_reset.top_actual=cam_rr(cam_mm.sv_cg,0xa4);
-    if(cam_sv_reset.top_actual){e=CAM_FAIL(ESTALE);goto out;}
     /* Keep the upstream pulse contiguous. In particular, do not perform
      * sensor I2C or read a CAMSV engine while its reset is asserted. */
     for(unsigned step=0;step<3;step++) {
@@ -136,15 +151,14 @@ static int cam_sv_cold_reset_locked(uint64_t epoch)
         cam_sv_reset.post[sample]=cam_sv_reset.after;
         for(unsigned b=0;b<2;b++) {
             cam_sv_reset.cq_actual[b]=cam_rr(m->sv[b],0x2010);
-            if(cam_sv_reset.cq_actual[b]){e=CAM_FAIL(ESTALE);goto out;}
         }
         cam_sv_reset.top_actual=cam_rr(cam_mm.sv_cg,0xa4);
-        if(cam_sv_reset.top_actual){e=CAM_FAIL(ESTALE);goto out;}
         /* First sample is after the pulse; stability is required between
          * the two post samples, not against a pre-reset default. */
         if(sample && memcmp(cam_sv_reset.post[0].sv,cam_sv_reset.post[1].sv,
             sizeof(cam_sv_reset.post[0].sv))) {
-            e=CAM_FAIL(ESTALE);goto out;
+            printf("X9 CAMERA CAMSV RESET ADOPT: post-reset SV sample changed; using second (cq=%x/%x top=%x)\n",
+                cam_sv_reset.cq_actual[0],cam_sv_reset.cq_actual[1],cam_sv_reset.top_actual);
         }
         cam_sv_reset.post_samples++;
         if(!sample)delay(10);
