@@ -108,7 +108,7 @@ static int cam_native_source_rate_guard_locked(uint64_t epoch)
     e=cam_native_bw_guard();if(e)return e;
     e=cam_smi_a0_guard();if(e)return e;
     if(!cam_native_bw.held || !cam_native_bw.complete || cam_native_bw.epoch!=epoch ||
-       cam_smi_a0.expected[CAM_SMI_A0_OSTD]!=cam_native_bw.ostd ||
+       (cam_smi_a0.expected[CAM_SMI_A0_OSTD]&0xffu)!=cam_native_bw.ostd || /* bit8 RO (373) */
        (cam_smi_a0.expected[CAM_SMI_A0_ULTRA]&1) ||
        (cam_smi_a0.expected[CAM_SMI_A0_NONSEC]&8))return CAM_FAIL(ESTALE);
     e=cam_native_source_voltage_locked();

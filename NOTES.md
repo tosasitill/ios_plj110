@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 373 + 镜像 x9-cam-smi-readback-20261123
+
+- **373 进展**：SMI 两个 HWV gate（CG35/CG34）通过，未出现 FSM RETRIGGER（PM_ACK 本来就是 1），smi_shared 的 misc 写入也通过。新失败点：`X9 CAMERA WAIT TIMEOUT: cam_smi_a0_write:131 off=200 mask=ffffffff want=1 last=101`，即 L19 OSTDL_PORT0 写 1，读回 0x101（bit8 写不进，或是只读/粘滞位）。
+- **Android 对照**：`mtk-smi.c __mtk_smi_larb_bw_set`（l.463）、config_port、common resume 都是直接 `writel`，不回读。
+- **改动**：新增 `cam_rw_adopt()`（x9_camera_mt6993.inc）：写入后最多等 200µs 读回一致，否则接管实际值并打印 `X9 CAMERA READBACK ADOPT: fn:line off wrote read`。SMI A0 write/close 和 SMI shared write/close 的精确回读等待共四处改用它。native_source 对 OSTD 只比较低 8 位。
+- `x9/out/x9-cam-smi-readback-20261123/boot.img` sha256 `04ba6312348bbd2c7eb69a058337d6a4aacc29c68074ebe4f77435e0bc11f77f`，warning 2987。
+
 #### 2026-11-23 全链路按 Android 重审 + 镜像 x9-cam-android-audit-20261123
 
 - 用户要求「后面的一切都按安卓重新审核一遍」。分 5 组（SMI/MMQoS、CAMSV、SENINF MAC/PHY、OUTMUX/stream/capture/IRQ、相机 SMMU）逐条对照 Android 源码审计，并直接修改。原则：去掉 Android 没有的拒绝条件，补上 Android 有的步骤，超时放宽到 Android 的预算；凡是改成容忍的状态都打印一行 `ADOPT/INHERITED`；关闭路径不再卡死下一次运行。

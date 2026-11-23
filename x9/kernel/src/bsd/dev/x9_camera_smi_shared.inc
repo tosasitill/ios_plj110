@@ -186,8 +186,7 @@ static int cam_smi_shared_write(unsigned word,uint32_t value)
     cam_smi_shared.expected[word]=value;cam_smi_shared.owned|=1u<<word;
     cam_smi_shared.pending_word=word;cam_smi_shared.pending=true;cam_smi_shared_status();
     cam_rw(cam_smi_shared_base(word),cam_smi_shared_offsets[word],value);
-    e=cam_wait_bits(cam_smi_shared_base(word),cam_smi_shared_offsets[word],UINT32_MAX,value,200);
-    if(e)return e;
+    cam_smi_shared.expected[word]=cam_rw_adopt(cam_smi_shared_base(word),cam_smi_shared_offsets[word],value,200);
     cam_smi_shared.pending=false;cam_smi_shared_status();
     return cam_rx_session_guard();
 }
@@ -263,8 +262,8 @@ static int cam_smi_shared_close_locked(void)
         cam_smi_shared.pending_word=word;cam_smi_shared.pending=true;
         cam_smi_shared.restoring=true;cam_smi_shared_status();
         cam_rw(cam_smi_shared_base(word),cam_smi_shared_offsets[word],cam_smi_shared.expected[word]);
-        e=cam_wait_bits(cam_smi_shared_base(word),cam_smi_shared_offsets[word],UINT32_MAX,
-            cam_smi_shared.expected[word],200);if(e)break;
+        cam_smi_shared.expected[word]=cam_rw_adopt(cam_smi_shared_base(word),cam_smi_shared_offsets[word],
+            cam_smi_shared.expected[word],200);
         cam_smi_shared.pending=false;cam_smi_shared.restoring=false;
         cam_smi_shared.owned&=~(1u<<word);cam_smi_shared_status();
         e=cam_rx_session_guard();

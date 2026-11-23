@@ -128,8 +128,7 @@ static int cam_smi_a0_write(unsigned word,uint32_t mask,uint32_t value)
     cam_smi_a0.pending_word=word;cam_smi_a0.pending=true;
     cam_smi_a0_status(); /* before posting the one write */
     cam_rw(cam_smi.larb[0],cam_smi_a0_larb_offsets[word],next);
-    e=cam_wait_bits(cam_smi.larb[0],cam_smi_a0_larb_offsets[word],UINT32_MAX,next,200);
-    if(e)return e;
+    cam_smi_a0.expected[word]=cam_rw_adopt(cam_smi.larb[0],cam_smi_a0_larb_offsets[word],next,200);
     cam_smi_a0.pending=false;cam_smi_a0_status();
     return cam_rx_session_guard();
 }
@@ -177,8 +176,7 @@ static int cam_smi_a0_close_locked(void)
         cam_smi_a0.expected[word]=next;cam_smi_a0.pending_word=word;
         cam_smi_a0.pending=true;cam_smi_a0.restoring=true;cam_smi_a0_status();
         cam_rw(cam_smi.larb[0],cam_smi_a0_larb_offsets[word],next);
-        e=cam_wait_bits(cam_smi.larb[0],cam_smi_a0_larb_offsets[word],UINT32_MAX,next,200);
-        if(e)break;
+        cam_smi_a0.expected[word]=cam_rw_adopt(cam_smi.larb[0],cam_smi_a0_larb_offsets[word],next,200);
         cam_smi_a0.pending=false;cam_smi_a0.restoring=false;
         cam_smi_a0.owned&=~(1u<<word);cam_smi_a0.owned_mask[word]=0;
         cam_smi_a0_status();e=cam_rx_session_guard();

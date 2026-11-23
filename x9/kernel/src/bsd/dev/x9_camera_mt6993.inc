@@ -128,6 +128,24 @@ static int cam_wait_bits_at(vm_offset_t base, unsigned off, uint32_t mask,
     return cam_fail_note(ETIMEDOUT,fn,line);
 }
 #define cam_wait_bits(b,o,m,v,l) cam_wait_bits_at((b),(o),(m),(v),(l),__func__,__LINE__)
+/* Android writes SMI/larb controls with plain writel() and never reads them
+ * back (mtk-smi.c __mtk_smi_larb_bw_set, config_port, common resume). Some
+ * fields are RO/sticky (log 373: L19 OSTDL_PORT0 wrote 1, read 0x101). Give
+ * the write a short settle, then ADOPT the actual value instead of failing. */
+static uint32_t cam_rw_adopt_at(vm_offset_t base,unsigned off,uint32_t value,
+    unsigned limit,const char *fn,unsigned line)
+{
+    uint32_t v=0;
+    for(unsigned i=0;i<limit;i++) {
+        v=cam_rr(base,off);
+        if(v==value)return v;
+        delay(1);
+    }
+    printf("X9 CAMERA READBACK ADOPT: %s:%u off=%x wrote=%x read=%x (Android writel, no readback)\n",
+        fn,line,off,value,v);
+    return v;
+}
+#define cam_rw_adopt(b,o,v,l) cam_rw_adopt_at((b),(o),(v),(l),__func__,__LINE__)
 static unsigned cam_vote_off(struct cam_probe_journal *j)
 { return 0x20000+j->board.clk_group*12; }
 static unsigned cam_done_off(struct cam_probe_journal *j)
