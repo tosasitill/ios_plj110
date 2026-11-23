@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 MMUP stage0 取指链（静态）：INIT 假设复活，且比之前更有依据；SID 0xa1 判断作废
+
+- **观察（mmup.dis + bin + 366 HDR）**：`tinysys-mmup-RV33_A.bin` 前 0x20 字节只有 `0x1a0b5`，其余为 0；366 实读 SRAM 头 `1a0b5 6c37001 2000 6c39001 48c00` = ATF（0x28f98）在偏移 4/8/0xc/0x10 写入的字段。stage0 的 `0x370-0x3bc`：`t0=4`，**src=[0xc]=0x6c39001（IOVA 0x1_06c39000，经 0x304 加 0xe0000000 窗）**，**dst=[8]=0x2000**，**len=[0x10]-[8]=0x46c00**，即把主镜像 0x46c00 字节从 DRAM IOVA 0x1_06c39000 逐字拷进 SRAM 0x2000。ATF 只用 0x28f98 里的循环把前 0x2000 字节 stub 拷进 SRAM。
+- **与日志吻合**：1ms 时 PC 仍在 0x3a8 拷贝循环（7 万次 DRAM 读）；结束时 PC 落在 stub 的异常入口 0x13f0 / lr=0x14e4 = `jal 0x1511a`，而 0x1511a、0x4a14 都在**主镜像区**（>0x2000）；PROG nest=0x3cab3 是 0x13f0 处每次异常的计数（约 24.8 万次）。TBUF 的随机 32 位 from→to 值与「跳进随机数据」一致。**推断**：拷贝回来的不是真镜像（读到垃圾/0）→ 执行主镜像区即非法指令 → 异常处理函数本身在主镜像区 → 递归异常。
+- **IOVA 谁翻译**：0x1_06c39000 在 ATF 域表条目 1（smmu0=MM，mode1=域1，base 0x1_06c00000，size 0xe00000，PA=LK 注册的 me_vcp_reserved 0xbd200000/0xe00000）里，由 ATF 写入 MM **域1 stage-2 表**；该表只被 INIT(0x33c54→0x47c9c) 建的 secure STE 引用。iOS 从不发 INIT，NS 组全 0，则 MMUP 的读要么 bypass 成物理地址 0x1_06c39000（落在 x9 的 RAM 映射里，是普通内核内存），要么被中止——两种都读不到真镜像。
+- **纠正上一条**：我把 MMUP 的 SID 当成 DT 的 0xa1/0xa0 是错的。DT 的 161/160 是 NS 侧给 VCP 用的 DRAM 组（vcp_io*），与 stage0 取指无关。MMUP 是 larb62 port0（`SMMU_L62_MMUP`），与 GCE_D/GCE_M/GCE_D2/GCE_M2 同属 larb62；GCE_D/M 的 SID 就是 INIT 表里的 0xc7/0xb7，故 MMUP 取指 SID 很可能就是 INIT 表 {0x8d,0x8e,0x94,0xad} 之一。**推断，未实证**（DT 无这几个 SID，没找到 larb62→SID 的明确映射）。
+- **结论**：「iOS 缺 SMMU_SECURE_INIT」重新成为最强假设，依据是 stage0 的取指路径而不是 SID 0xa1。未排除项：EL1 能否成功调用 0xC2000514（log350 PM_GET a0 原样返回，原因未明）；INIT 内部 PM_GET(MM) 需 MM 电源；INIT 之后 secure STE 是否让 GCE 等 secure 主设备行为改变。
+- **本轮代码改动（未提交、未编译）**：`x9_mm_power.c` 加了 opt-in 的 `x9_mmup_smmu_init=1` 启动参数：为 1 时在 VCP_OP_RESET_SET 之前发 `SMC 0xC2000514 x1=0x800` 并打印返回值；参数不在 boot-device.json 里，默认行为不变。构建请求被自动模式拒绝，未出镜像。
+
 #### 2026-11-23 SID 重映射（静态）：ATF 里没有重映射，SID 直接当 STE 下标
 
 - **观察**：`0x47c9c` 对 SID 表每个字节 sid：先检查 `sid>>[cfg+60]==0`（超范围报错），再 `STE = [cfg+168] + sid*64` 直接写入（`0x47f70`），随后用 `0x4775c` 发 CFGI_STE。中间没有任何查表/AID 转换。SID 表的编号即硬件 StreamID，与 Linux DT `iommus = <&mm_smmu N>` 同一编号空间。**上条的可能性 (a)「ATF 与 DT 编号空间不同」排除。**

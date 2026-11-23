@@ -17,6 +17,7 @@
 #include <vm/pmap.h>
 #include <vm/vm_kern.h>
 #include <kern/cpu_data.h>
+#include <pexpert/pexpert.h>
 #include "x9_mm_power.h"
 extern int sweet_early_is_x9(void);
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
@@ -141,6 +142,31 @@ static uint64_t vcp_smc(uint32_t op, uint32_t val)
     register uint64_t x0 __asm__("x0") = VCP_SIP_CONTROL;
     register uint64_t x1 __asm__("x1") = op;
     register uint64_t x2 __asm__("x2") = val;
+    register uint64_t x3 __asm__("x3") = 0;
+    register uint64_t x4 __asm__("x4") = 0;
+    register uint64_t x5 __asm__("x5") = 0;
+    register uint64_t x6 __asm__("x6") = 0;
+    register uint64_t x7 __asm__("x7") = 0;
+    __asm__ volatile("dsb sy\nsmc #0\ndsb sy\nisb"
+        : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3),
+          "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7)
+        : : "memory", "cc", "x8", "x9", "x10", "x11",
+            "x12", "x13", "x14", "x15", "x16", "x17");
+    return x0;
+}
+/* Opt-in only (boot-arg x9_mmup_smmu_init=1, absent from boot-device.json).
+ * Android arm-smmu-v3.c smmu_hw_sec_init(): MTK_IOMMU_SECURE_CONTROL
+ * (0xC2000514) cmd INIT(0), MM_SMMU, sec bit 11. ATF 0x33c54->0x47c9c builds
+ * the secure STEs whose stage-2 table (domain 1) holds the MMUP loader map at
+ * IOVA 0x1_06c00000; MMUP stage0 (mmup.dis 0x370-0x3bc) copies its 0x46c00
+ * byte main image from IOVA 0x1_06c39000 before running. */
+#define MM_SMMU_SIP_CONTROL 0xc2000514u
+#define MM_SMMU_SECURE_INIT_ARG 0x800u
+static uint64_t mm_smmu_secure_init_smc(void)
+{
+    register uint64_t x0 __asm__("x0") = MM_SMMU_SIP_CONTROL;
+    register uint64_t x1 __asm__("x1") = MM_SMMU_SECURE_INIT_ARG;
+    register uint64_t x2 __asm__("x2") = 0;
     register uint64_t x3 __asm__("x3") = 0;
     register uint64_t x4 __asm__("x4") = 0;
     register uint64_t x5 __asm__("x5") = 0;
@@ -482,6 +508,13 @@ static int vcp_boot_ensure(void)
     init_c0 = mm_read(vcp_cfg_core0, VCP_CORE_STATUS_OFF);
     init_c1 = mm_read(vcp_cfg_core1, VCP_CORE_STATUS_OFF);
     vcp_snap_core1(&snap_pre);
+    {
+        uint32_t want_smmu_init = 0;
+        if (PE_parse_boot_argn("x9_mmup_smmu_init", &want_smmu_init, sizeof(want_smmu_init)) && want_smmu_init) {
+            uint64_t ir = mm_smmu_secure_init_smc();
+            printf("X9 MM VCP SMMU INIT: smc=%llx (0xc2000514 x1=0x800; a0==0xc2000514 means not handled)\n", ir);
+        }
+    }
     e = vcp_smc_ok(VCP_OP_RESET_SET, 1, &smc_s0);
     if (!e) { stage = 2; e = vcp_smc_ok(MMUP_OP_RESET_SET, 1, &smc_s1); }
     if (!e) {
