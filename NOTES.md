@@ -160,6 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 378 + 镜像 x9-cam-mmqos-android-20261123
+
+- **378**：`SOURCE MUX: raw=89 sel=9`，`CAM PROCESSING CLOCK: parent=a RC=2 counts=8192/8192 Hz=416000000`。新失败点：`MMQOS TAKE ... units/current=43/104:0/0 OSTD=9 errno=5`，FAIL TRACE `cam_native_bw_write:79`，即 MMPC 写入后回读不等于写入值就返回 EIO。Android `mmqos-mtk.c write_register/start_write_bw/stop_write_bw` 只写不读。
+- **改动**：`cam_native_bw_write` 改用 `cam_rw_adopt`，不一致时打印 `X9 CAMERA MMQOS READBACK ADOPT: word off prior wrote read` 并接受实际值。`cam_native_bw_guard` 发现 mask/表项变化时打印 `MMQOS ADOPT` 并更新期望值，不再置 conflict。
+- `x9/out/x9-cam-mmqos-android-20261123/boot.img` sha256 `7e7731ed12f70b2a3f681bdf2d991110305e51fb815ca14fb7421a36257c8639`，warning 2987。
+
 #### 2026-11-23 日志 377 + 镜像 x9-cam-seninf-mux-20261123
 
 - **377**：mac-open、phy-open、phy-timing 全部通过（completed=3e，CSI=312000000，counts 6144/6144）。期间日志：PHY INHERITED 多条（ANA/AFIFO 默认值）；`PHY ADOPT ANA9 613f0000/621b0000`（CPLT 位不可写，与 Android 一致不检查）；`CLOCK ADOPT meter hwmode=1`（借用 fmeter）。新失败点：`source-rate errno=45`，FAIL TRACE `cam_native_source_rate_locked:172`，即 `parent&0xf0`。SENINF mux 原始字节是 0x89，Android `clk-mt6993.c mm_seninf3_sel` 定义为 lsb 0、width 4，sel=9（312MHz），bit7 不属于 mux 选择字段。

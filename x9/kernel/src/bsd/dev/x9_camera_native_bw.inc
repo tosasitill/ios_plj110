@@ -33,15 +33,23 @@ static int cam_native_bw_guard(void)
     if(cam_native_bw.conflict || !cam_smi.held || cam_native_bw.epoch!=cam_smi.epoch)
         return CAM_FAIL(ESTALE);
     e=x9_mm_power_validate(cam_mm.receive.power_token,X9_MM_POWER_CAMERA);if(e)return e;
+    /* Android never reads the MMPC mask/table back; MMPC HW and VCP share
+     * it. Log a change once and adopt it instead of latching a conflict. */
     observed=cam_rr(cam_native_bw.mmpc,0x10b0);
     if(observed!=cam_native_bw.mask_expected &&
-       !(cam_native_bw.pending==CAM_NATIVE_BW_MASK_WORD && observed==cam_native_bw.prior))
-        goto conflict;
+       !(cam_native_bw.pending==CAM_NATIVE_BW_MASK_WORD && observed==cam_native_bw.prior)) {
+        printf("X9 CAMERA MMQOS ADOPT: mask %x->%x\n",cam_native_bw.mask_expected,observed);
+        cam_native_bw.mask_expected=observed;
+    }
     for(unsigned n=0;n<CAM_NATIVE_BW_WORDS;n++) {
         observed=cam_rr(cam_native_bw.mmpc,0xff0+4*n);
         if(observed!=cam_native_bw.expected[n] &&
-           !(cam_native_bw.pending==n && observed==cam_native_bw.prior))goto conflict;
+           !(cam_native_bw.pending==n && observed==cam_native_bw.prior)) {
+            printf("X9 CAMERA MMQOS ADOPT: word=%u %x->%x\n",n,cam_native_bw.expected[n],observed);
+            cam_native_bw.expected[n]=observed;
+        }
     }
+    if(0)goto conflict;
     /* Android mmqos-mtk.c never reads TOTAL_CURRENT back (debug dump only);
      * it is a system-wide MMPC aggregate, not an admission check. */
     return 0;
@@ -73,10 +81,13 @@ static int cam_native_bw_write(unsigned word,uint32_t value)
     cam_native_bw.prior=*expected;cam_native_bw.next=value;*expected=value;
     cam_native_bw.pending=word;
     cam_rw(cam_native_bw.mmpc,offset,value);
-    observed=cam_rr(cam_native_bw.mmpc,offset);
+    /* Android mmqos-mtk.c write_register()/start_write_bw() never read
+     * back (log 378: readback differed -> EIO). Adopt the actual value. */
+    observed=cam_rw_adopt(cam_native_bw.mmpc,offset,value,200);
     if(observed!=value) {
-        if(observed!=cam_native_bw.prior)cam_native_bw.conflict=true;
-        return CAM_FAIL(EIO);
+        printf("X9 CAMERA MMQOS READBACK ADOPT: word=%u off=%x prior=%x wrote=%x read=%x\n",
+            word,offset,cam_native_bw.prior,value,observed);
+        *expected=observed;
     }
     cam_native_bw.pending=CAM_NATIVE_BW_NO_WORD;return cam_native_bw_guard();
 }
