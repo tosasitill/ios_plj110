@@ -113,21 +113,21 @@ static int cam_sv_cold_reset_locked(uint64_t epoch)
     /* Keep the upstream zero writes even with a zero prior. These are
      * command edges, not ordinary geometry fields or DB transactions.
      * Every store is journaled first and is issued once; no timeout retry. */
-    for(unsigned step=0;step<2;step++) {
-        e=cam_sv_cold_reset_guard(epoch);if(e)goto out;
-        cam_sv_reset.issued|=1u<<step;
-        cam_rw(m->sv[0],0x2010,step);
-    }
-    for(unsigned poll=0;poll<100000;poll++) {
-        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
-        e=cam_sv_cold_reset_guard(epoch);if(e)goto out;
+    /* Android sv_reset_by_camsys_top: writel 0, writel 1, then
+     * readx_poll_timeout(bit1, 1us, 100ms) on the register alone. Log 375:
+     * re-running the ~94 ms guard inside this window spent the whole budget
+     * before the first read although the ACK was set (dump cq_ctl=3). */
+    e=cam_sv_cold_reset_guard(epoch);if(e)goto out;
+    nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
+    cam_sv_reset.issued|=3u;
+    cam_rw(m->sv[0],0x2010,0);
+    cam_rw(m->sv[0],0x2010,1);
+    for(unsigned poll=0;poll<200000;poll++) {
         cam_sv_reset.cq_actual[0]=cam_rr(m->sv[0],0x2010);
-        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
-        cam_sv_reset.cq_samples=(cam_sv_reset.cq_actual[0]&2)?
-            cam_sv_reset.cq_samples+1:0;
-        if(cam_sv_reset.cq_samples==2) {
-            cam_sv_reset.cq_ack=cam_sv_reset.cq_actual[0];break;
+        if(cam_sv_reset.cq_actual[0]&2) {
+            cam_sv_reset.cq_samples=2;cam_sv_reset.cq_ack=cam_sv_reset.cq_actual[0];break;
         }
+        if(mach_absolute_time()>=end)break;
         delay(1);
     }
     if(cam_sv_reset.cq_samples!=2){e=CAM_FAIL(ETIMEDOUT);goto out;}

@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 日志 375 + 镜像 x9-cam-svreset-android-20261123
+
+- **375**：时钟补齐后 `CAMSV RESET DUMP: cq_ctl=3`，说明 CQ reset ack（bit1）其实已经置位。其余字段：gals_dbg=7，ppc_rdy=0/ffffffee，cam_m0=3fff01（bit1–7 已开），r1a0=c000000c（bit30/31 和 2/3 仍 gated），mraw CG=3f8fd9（larb/camtm/camsv_top/camsv_a 已开，cam_mr GALS0–5 gated）。超时是 x9 自己造成的：100ms 窗口内，写入前跑了 2 次 guard，进入轮询后又先跑 guard，一次 cold-reset guard 约 94ms（22.198→22.292），窗口在第一次读寄存器之前就耗尽了（cq_actual 停在 memset 后的 0）。
+- **同类风险**：约 70 个带 deadline 的轮询循环在每次迭代里都跑 guard（sv_gate、sv_hw、source、stream、outmux、dma_stop……）。smi-a0 到 cold reset 之间也花了约 480ms，guard 普遍慢，可能在几十毫秒级。
+- **改动**：
+  - cold reset 改为与 Android 一致：guard 一次 → 写 0 → 写 1 → 只读寄存器轮询 bit1（1µs 间隔，100ms）→ guard。
+  - 新增 `cam_slow_note`，给 12 个常用 guard 加计时包装（mm/smi_clock/rx_session/rx_sample/irq_cold_reset/native_source_standby/sensor_ap/irq/mac/phy/out/sv），超过 2ms 打印 `X9 CAMERA SLOW GUARD: name us=`，每个 guard 最多 3 次。下一轮据此一次性修掉慢的 guard 或调整轮询。
+- `x9/out/x9-cam-svreset-android-20261123/boot.img` sha256 `570af40b0b5cad49a7a78dbd98d74ca3c458fd14c0795b55d21b97a835f08897`，warning 2987。
+
 #### 2026-11-23 日志 374 + 镜像 x9-cam-camisp-clocks-b-20261123
 
 - **374 进展**：`READBACK ADOPT: cam_smi_a0_write:131 off=200 wrote=1 read=101`，smi-clocks-open 通过。新失败点：`camsv-cold-reset errno=60`，FAIL TRACE `cam_sv_cold_reset_locked:122`。CQ SW_RST_CTL 冷值是 2/2；按 Android 写 0、1 之后一直读到 0，bit1 ack 始终不出现。另有 INHERITED：sv+0x240 为 0x5f3700。

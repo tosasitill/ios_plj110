@@ -180,7 +180,7 @@ static int cam_mm_effect_on(struct cam_mm_journal *j,unsigned n)
  * first unvote. Checks are not an atomic lease/ABA detector. An incomplete
  * take may have an ambiguous final SET; only completed slots require the
  * consumed effect, but inherited references must still be present. */
-static int cam_mm_guard(struct cam_mm_journal *j,bool complete)
+static int cam_mm_guard_untimed(struct cam_mm_journal *j,bool complete)
 {
     int e;
     e=cam_sv_sibling_guard(j);if(e)return e;
@@ -212,6 +212,13 @@ static int cam_mm_guard(struct cam_mm_journal *j,bool complete)
     }
     if(cam_mm_fsm_stuck(&j->receive))return CAM_FAIL(EBUSY);
     return cam_sv_sibling_guard(j);
+}
+static int cam_mm_guard(struct cam_mm_journal *j,bool complete)
+{
+    static unsigned hits;uint64_t t0=mach_absolute_time();
+    int e=cam_mm_guard_untimed(j, complete);
+    cam_slow_note("cam_mm_guard",&hits,t0);
+    return e;
 }
 static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera_mm_status *r)
 {

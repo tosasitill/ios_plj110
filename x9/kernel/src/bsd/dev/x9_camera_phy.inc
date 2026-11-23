@@ -129,7 +129,7 @@ static uint32_t cam_phy_live_mask(unsigned bank,unsigned offset)
 }
 /* Deliberately non-recursive: only the MM base and our own controls. MAC
  * and OUTMUX call this too, keeping PHY conflicts above their teardown. */
-static int cam_phy_guard(void)
+static int cam_phy_guard_untimed(void)
 {
     int e;
     if(!cam_phy.held)return 0;
@@ -145,6 +145,13 @@ static int cam_phy_guard(void)
     }
     /* ANA9 completion is not monitored: Android never reads it. */
     return 0;
+}
+static int cam_phy_guard(void)
+{
+    static unsigned hits;uint64_t t0=mach_absolute_time();
+    int e=cam_phy_guard_untimed();
+    cam_slow_note("cam_phy_guard",&hits,t0);
+    return e;
 }
 static int cam_phy_dependencies(void)
 {

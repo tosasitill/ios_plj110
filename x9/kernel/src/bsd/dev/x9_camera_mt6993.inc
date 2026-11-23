@@ -146,6 +146,18 @@ static uint32_t cam_rw_adopt_at(vm_offset_t base,unsigned off,uint32_t value,
     return v;
 }
 #define cam_rw_adopt(b,o,v,l) cam_rw_adopt_at((b),(o),(v),(l),__func__,__LINE__)
+/* Guard cost probe (log 375: one CAMSV cold-reset guard took ~94 ms, which
+ * starved every deadline-bounded poll that re-runs guards per iteration).
+ * Prints the first 3 calls of each guard slower than 2 ms. No behavior change. */
+static void cam_slow_note(const char *name,unsigned *hits,uint64_t t0)
+{
+    uint64_t ns;
+    absolutetime_to_nanoseconds(mach_absolute_time()-t0,&ns);
+    if(ns>=2000000ull && *hits<3) {
+        (*hits)++;
+        printf("X9 CAMERA SLOW GUARD: %s us=%llu (#%u)\n",name,ns/1000,*hits);
+    }
+}
 static unsigned cam_vote_off(struct cam_probe_journal *j)
 { return 0x20000+j->board.clk_group*12; }
 static unsigned cam_done_off(struct cam_probe_journal *j)

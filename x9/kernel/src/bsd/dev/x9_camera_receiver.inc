@@ -79,7 +79,7 @@ static struct {
     struct x9_camera_receiver status;
     struct x9_camera_receiver_sample expected;
 } cam_rx_live;
-static int cam_rx_sample(const struct cam_rx_maps *m,struct x9_camera_receiver_sample *s)
+static int cam_rx_sample_untimed(const struct cam_rx_maps *m,struct x9_camera_receiver_sample *s)
 {
     static const unsigned mac_offsets[4]={0,4,0x40,0x70};
     /* Re-prove power/clock effects before EACH sample. No probe on a failed
@@ -110,6 +110,13 @@ static int cam_rx_sample(const struct cam_rx_maps *m,struct x9_camera_receiver_s
         }
     }
     return 0;
+}
+static int cam_rx_sample(const struct cam_rx_maps *m,struct x9_camera_receiver_sample *s)
+{
+    static unsigned hits;uint64_t t0=mach_absolute_time();
+    int e=cam_rx_sample_untimed(m, s);
+    cam_slow_note("cam_rx_sample",&hits,t0);
+    return e;
 }
 static uint32_t cam_rx_busy(const struct x9_camera_receiver_sample *s,unsigned port,uint32_t fbc0_mask,
     uint32_t dma0_mask,uint32_t cmos_mask,uint32_t vf_mask,uint32_t phy_mask,uint32_t dl_mask)
@@ -266,7 +273,7 @@ static int cam_rx_session_open(unsigned sensor,uint64_t sensor_epoch,struct x9_c
  * Never touch read-clear DONE/IRQ/fault banks.
  * Disabled/stable controls are only prerequisites for dropping this
  * unprogrammed lifetime; they do not prove bus/DMA/worker drain. */
-static int cam_rx_session_guard(void)
+static int cam_rx_session_guard_untimed(void)
 {
     struct x9_camera_receiver_sample a,b;
     struct x9_camera_receiver *r=&cam_rx_live.status;
@@ -297,6 +304,13 @@ static int cam_rx_session_guard(void)
     /* FBC1 is not part of the public receiver snapshot. Do not return from
      * this live comparison without rechecking the private counter evidence. */
     return cam_sv_guard();
+}
+static int cam_rx_session_guard(void)
+{
+    static unsigned hits;uint64_t t0=mach_absolute_time();
+    int e=cam_rx_session_guard_untimed();
+    cam_slow_note("cam_rx_session_guard",&hits,t0);
+    return e;
 }
 static int cam_rx_session_close(struct x9_camera_receiver *r)
 {

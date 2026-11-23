@@ -12,7 +12,7 @@ static struct {
     struct x9_camera_native_source_status status;
 } cam_native_source;
 
-static int cam_native_source_standby_locked(uint64_t epoch)
+static int cam_native_source_standby_locked_untimed(uint64_t epoch)
 {
     struct cam_sensor_ap ap;
     uint8_t byte;
@@ -26,6 +26,13 @@ static int cam_native_source_standby_locked(uint64_t epoch)
     e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e && byte)e=CAM_FAIL(EBUSY);
     if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=CAM_FAIL(EBUSY);
     return e?e:cam_sensor_ap_guard(&ap);
+}
+static int cam_native_source_standby_locked(uint64_t epoch)
+{
+    static unsigned hits;uint64_t t0=mach_absolute_time();
+    int e=cam_native_source_standby_locked_untimed(epoch);
+    cam_slow_note("cam_native_source_standby_locked",&hits,t0);
+    return e;
 }
 
 #include "x9_camera_sv_reset.inc"

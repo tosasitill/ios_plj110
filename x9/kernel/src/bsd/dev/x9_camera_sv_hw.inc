@@ -488,9 +488,16 @@ static int cam_sv_guard_impl(void)
     e=cam_sv_fbc_counters_guard();if(e)return e;
     cam_sv_publish();return cam_sv_power_guard();
 }
-static int cam_sv_guard(void)
+static int cam_sv_guard_untimed(void)
 {
     int e=cam_sv_guard_impl();return e?cam_sv_fault(e):0;
+}
+static int cam_sv_guard(void)
+{
+    static unsigned hits;uint64_t t0=mach_absolute_time();
+    int e=cam_sv_guard_untimed();
+    cam_slow_note("cam_sv_guard",&hits,t0);
+    return e;
 }
 /* Thread-only controller authority, kept separate from the hardware guard.
  * No owner callback under hardIRQ or camera_s1_lock; this callback cannot

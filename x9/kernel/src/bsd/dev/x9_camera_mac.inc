@@ -66,7 +66,7 @@ static void cam_mac_publish(void)
 }
 /* No OUTMUX/receiver recursive calls here. Every stored entry is a named
  * control CSR; no packet/fault/read-clear IRQ/debug-result registers. */
-static int cam_mac_guard(void)
+static int cam_mac_guard_untimed(void)
 {
     int e;
     if(!cam_mac.held)return 0;
@@ -84,6 +84,13 @@ static int cam_mac_guard(void)
         if(!allowed)return CAM_FAIL(ESTALE);
     }
     return 0;
+}
+static int cam_mac_guard(void)
+{
+    static unsigned hits;uint64_t t0=mach_absolute_time();
+    int e=cam_mac_guard_untimed();
+    cam_slow_note("cam_mac_guard",&hits,t0);
+    return e;
 }
 static int cam_mac_dependencies(void)
 {

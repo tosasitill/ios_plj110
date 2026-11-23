@@ -142,12 +142,19 @@ static int cam_smi_clock_only_guard(void)
     }
     return 0;
 }
-static int cam_smi_clock_guard(void)
+static int cam_smi_clock_guard_untimed(void)
 {
     int e=cam_smi_clock_only_guard();
     if(!e)e=cam_smi_shared_control_guard(false);
     if(!e)e=cam_smi_a0_guard();
     return e?e:cam_native_bw_guard();
+}
+static int cam_smi_clock_guard(void)
+{
+    static unsigned hits;uint64_t t0=mach_absolute_time();
+    int e=cam_smi_clock_guard_untimed();
+    cam_slow_note("cam_smi_clock_guard",&hits,t0);
+    return e;
 }
 /* Android hwccf_api.c _v1_mm_hwccf_mtcmos_fsm_err_handle(), called by
  * clk-gate.c mtk_cg_enable_generic_hwv() after the raw vote of every MM

@@ -178,12 +178,19 @@ static int cam_out_guard_impl(void)
     }
     return 0;
 }
-static int cam_out_guard(void)
+static int cam_out_guard_untimed(void)
 {
     int e=cam_out_guard_impl();
     /* Observed control/authority changes are terminal, unlike a consistent
      * posted write or event timeout. They cannot be adopted on sole close. */
     return e?cam_out_irq_poison(e):0;
+}
+static int cam_out_guard(void)
+{
+    static unsigned hits;uint64_t t0=mach_absolute_time();
+    int e=cam_out_guard_untimed();
+    cam_slow_note("cam_out_guard",&hits,t0);
+    return e;
 }
 /* This observation is NOT sufficient alone for command retirement. The
  * STATUSX owner additionally requires the fresh bound CFG_DONE event. */

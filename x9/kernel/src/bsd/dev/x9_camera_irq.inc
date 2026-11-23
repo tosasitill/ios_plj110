@@ -557,7 +557,7 @@ static int cam_irq_topology(void)
 /* Runtime-resume reset runs before the dormant worker/request is prepared.
  * Use the same DT/controller admission without publishing an IRQ owner,
  * changing a route or clearing pending history. camera_control_lock held. */
-static int cam_irq_cold_reset_guard_locked(uint64_t epoch,const struct cam_rx_maps *m)
+static int cam_irq_cold_reset_guard_locked_untimed(uint64_t epoch,const struct cam_rx_maps *m)
 {
     int e=0;
     if(!epoch || !m || epoch!=cam_rx_live.sensor_epoch)return CAM_FAIL(ESTALE);
@@ -572,6 +572,13 @@ static int cam_irq_cold_reset_guard_locked(uint64_t epoch,const struct cam_rx_ma
     if(!e)e=cam_irq_controller();
     if(!e)e=cam_irq_idle();
     lck_mtx_unlock(&camera_irq_lock);
+    return e;
+}
+static int cam_irq_cold_reset_guard_locked(uint64_t epoch,const struct cam_rx_maps *m)
+{
+    static unsigned hits;uint64_t t0=mach_absolute_time();
+    int e=cam_irq_cold_reset_guard_locked_untimed(epoch, m);
+    cam_slow_note("cam_irq_cold_reset_guard_locked",&hits,t0);
     return e;
 }
 /* Called by the actual inactive CAMSV geometry path. No enable, status-read,
@@ -620,13 +627,20 @@ static int cam_irq_prepare_locked(uint64_t epoch)
     }
     lck_mtx_unlock(&camera_irq_lock);return e;
 }
-static int cam_irq_guard_locked(uint64_t epoch)
+static int cam_irq_guard_locked_untimed(uint64_t epoch)
 {
     boolean_t old;
     int e;
     if(!cam_irq.prepared)return 0;
     if(epoch!=cam_irq.epoch)return CAM_FAIL(ESTALE);
     old=cam_irq_spin_take();e=cam_irq.error;cam_irq_spin_drop(old);
+    return e;
+}
+static int cam_irq_guard_locked(uint64_t epoch)
+{
+    static unsigned hits;uint64_t t0=mach_absolute_time();
+    int e=cam_irq_guard_locked_untimed(epoch);
+    cam_slow_note("cam_irq_guard_locked",&hits,t0);
     return e;
 }
 /* Actual normal controller must call before enabling a hardware source. The

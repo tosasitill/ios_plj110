@@ -56,10 +56,17 @@ static int cam_sensor_ap_local_guard(struct cam_sensor_ap *ap)
     if(!e)e=cam_pins_guard(j,false);
     return e;
 }
-static int cam_sensor_ap_guard(struct cam_sensor_ap *ap)
+static int cam_sensor_ap_guard_untimed(struct cam_sensor_ap *ap)
 {
     int e=cam_sensor_ap_local_guard(ap);
     return e?e:cam_rx_sensor_guard_locked(cam_sensor_live.epoch);
+}
+static int cam_sensor_ap_guard(struct cam_sensor_ap *ap)
+{
+    static unsigned hits;uint64_t t0=mach_absolute_time();
+    int e=cam_sensor_ap_guard_untimed(ap);
+    cam_slow_note("cam_sensor_ap_guard",&hits,t0);
+    return e;
 }
 
 /* Android VCM release uses the powered AF I2C client independently of MM_2.
