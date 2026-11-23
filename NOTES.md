@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 诊断镜像 x9-mmup-smmuinit-wpcfg-20261123（用户批准，未上机）
+
+- `x9/out/x9-mmup-smmuinit-wpcfg-20261123/boot.img` 15151104 B，sha256 `0a0b816524bf56891789238d3956330318bd018f56ce9bf25371d9f2eec701fd`，boot-arg `x9_mmup_smmu_init=1`，无 warning。
+- 顺序：HWV pre → PM_GET → HWV after-get → **NS 探测 after-get** → (PM_GET==0 时) **WPCFG(x1=0x80c)** 计时 → NS 探测 after-wpcfg → INIT 计时 → HWV/NS after-init → 汇总行（get/wpcfg/init）。
+- NS 探测（`X9 MM VCP SMMU NS <tag>`）：读 CR0/CR0ACK/GBPA/IRQ_CTRL/ACK/GERROR/GERRORN 和 secure 字 +0x8004/8020/8024/803c/8044；SMMUEN=0 时把 GBPA 原值带 UPDATE(bit31) 写回，最多轮询 20000 次×1µs，打印 final/iters/us 和 `cleared`/`UPDATE STUCK`。
+- **判据**：NS 的 UPDATE STUCK → SMMU 核心不处理寄存器更新（时钟/复位，与 secure 无关）；cleared → 核心正常，问题限定在 secure 组/secure CMDQ。WPCFG ret=0 且 INIT 变成 0 且耗时短 → 缺 WPCFG 是根因，再看 MMUP BOOT 是否过 stage4；INIT 仍 2 且 ~3.5 s → WPCFG 不是根因。
+
 #### 2026-11-23 日志 368（诊断镜像 x9-mmup-smmuinit-diag-20261123）：PM_GET 成功，INIT 卡 3.55 秒后返回 2
 
 - **实测**：`PM_GET ret=0 elapsed_us=13`；`INIT ret=2 elapsed_us=3546868`；三次 HWV 快照完全相同（en=0 glob=0 sta=0 done=ffffffff int=0 fsm=1 all=0 ack=c2f10152 infra=e3fc0000）。BOOT 与 366/367 一致（stage=4 errno=60，nest=0x3be37，TBUF 0x19c→0x4a14 后随机）。

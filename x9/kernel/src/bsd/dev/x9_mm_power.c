@@ -190,6 +190,37 @@ static void mm_smmu_hwv_snap(const char *tag)
         mm_read(hwv, MM_POWER_ALL_STA), mm_read(power_ack, MM_POWER_ACK),
         mm_read(hwv, 0x12900));
 }
+/* NS MM SMMU (0x30800000) state + no-op GBPA.UPDATE handshake (rewrite the
+ * same GBPA value with UPDATE=bit31, time until hardware clears it). With
+ * SMMUEN=0 this changes nothing; it only shows whether the SMMU core processes
+ * register updates at all. Secure-bank words (+0x80xx) are read for info. */
+static void mm_smmu_ns_probe(const char *tag)
+{
+    static vm_offset_t nsm;
+    uint32_t gbpa, after = 0, cr0, ack, i;
+    uint64_t t0, ns = 0;
+    if (!nsm) nsm = ml_io_map(0x30800000, 0x20000);
+    if (!nsm) { printf("X9 MM VCP SMMU NS %s: map failed\n", tag); return; }
+    cr0 = mm_read(nsm, 0x20); ack = mm_read(nsm, 0x24);
+    printf("X9 MM VCP SMMU NS %s: cr0=%x ack=%x gbpa=%x irq=%x/%x gerr=%x/%x s_idr0=%x s_cr0=%x s_ack=%x s_init=%x s_gbpa=%x\n",
+        tag, cr0, ack, mm_read(nsm, 0x44), mm_read(nsm, 0x50), mm_read(nsm, 0x54),
+        mm_read(nsm, 0x60), mm_read(nsm, 0x64), mm_read(nsm, 0x8004),
+        mm_read(nsm, 0x8020), mm_read(nsm, 0x8024), mm_read(nsm, 0x803c),
+        mm_read(nsm, 0x8044));
+    if (cr0 & 1u) { printf("X9 MM VCP SMMU NS %s: SMMUEN set, skip GBPA test\n", tag); return; }
+    gbpa = mm_read(nsm, 0x44) & 0x7fffffffu;
+    t0 = mach_absolute_time();
+    mm_write_reg(nsm, 0x44, gbpa | 0x80000000u);
+    for (i = 0; i < 20000; i++) {
+        after = mm_read(nsm, 0x44);
+        if (!(after & 0x80000000u)) break;
+        delay(1);
+    }
+    absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+    printf("X9 MM VCP SMMU NS %s: gbpa_update wrote=%x final=%x iters=%u us=%llu (%s)\n",
+        tag, gbpa | 0x80000000u, after, i, ns / 1000ull,
+        (after & 0x80000000u) ? "UPDATE STUCK" : "cleared");
+}
 static uint64_t mm_smmu_smc_timed(const char *name, uint32_t arg)
 {
     uint64_t t0 = mach_absolute_time(), t1, ns = 0, r;
@@ -535,14 +566,20 @@ static int vcp_boot_ensure(void)
          * No PM_PUT: a successful PM_GET reference is kept so MM stays up. */
         uint32_t want_smmu_init = 0;
         if (PE_parse_boot_argn("x9_mmup_smmu_init", &want_smmu_init, sizeof(want_smmu_init)) && want_smmu_init) {
-            uint64_t rg, ri;
+            uint64_t rg, ri, rw = ~0ull;
             mm_smmu_hwv_snap("pre");
             rg = mm_smmu_smc_timed("PM_GET", 0x803u);
             mm_smmu_hwv_snap("after-get");
+            mm_smmu_ns_probe("after-get");
+            if (rg == 0) {
+                rw = mm_smmu_smc_timed("WPCFG", 0x80cu);
+                mm_smmu_ns_probe("after-wpcfg");
+            }
             ri = mm_smmu_smc_timed("INIT", MM_SMMU_SECURE_INIT_ARG);
             mm_smmu_hwv_snap("after-init");
-            printf("X9 MM VCP SMMU INIT: get=%llx init=%llx (0=ok, 2=fail, c2000514=not handled; ref %s)\n",
-                rg, ri, rg == 0 ? "held" : "not taken");
+            mm_smmu_ns_probe("after-init");
+            printf("X9 MM VCP SMMU INIT: get=%llx wpcfg=%llx init=%llx (0=ok, 2=fail, c2000514=not handled; ref %s)\n",
+                rg, rw, ri, rg == 0 ? "held" : "not taken");
         }
     }
     e = vcp_smc_ok(VCP_OP_RESET_SET, 1, &smc_s0);
