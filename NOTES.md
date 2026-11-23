@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-23 验证镜像 x9-mmup-smmuinit-verify-20261123（用户批准）
+
+- 命令：`build.py all --boot-config x9/build/boot-device.json --boot-arg x9_mmup_smmu_init=1 --name x9-mmup-smmuinit-verify-20261123`，exit 0；`x9/out/x9-mmup-smmuinit-verify-20261123/boot.img` 15147008 B，sha256 `e8ba6aec810a7e19c68b163fad1f729d8da46ef948c1b71e437518f0478306f5`。未上机，`not hardware-verified`。
+- 用途：验证「iOS 缺 SMMU_SECURE_INIT」。boot 参数含 `x9_mmup_smmu_init=1`，在 MMUP 释放前发 SMC 0xC2000514 x1=0x800。
+- **看日志的判据**：(1) `X9 MM VCP SMMU INIT: smc=…`：0 = INIT 成功；等于 0xc2000514 = ATF 原样返回（与 log350 相同，说明 EL1 调不通，假设无法靠此修复）；其他非零 = 状态码（1 MM 未使能 / 2 PM_GET 失败 / 3 参数错 / 5 其他）。(2) `X9 MM VCP BOOT: stage=…`：stage=4 通过（mmup= 非 0/ready）= 因果链成立；仍 stage=4 errno=60 = INIT 不足或 SID/表假设有误。(3) `X9 MMUP HDR/TBUF/PROG/nest`：nest 是否仍 0x3cab3 量级、TBUF 是否还有随机值。
+- 回滚：上一张可进 XNU 的镜像 `x9/out/x9-revert-hevc-20261123/boot.img`。
+
 #### 2026-11-23 INIT 前置条件复核（静态）：EL1 可达性、GCE 影响
 
 - **EL1 可达性（观察）**：mtk_smc_handler(`0x2f45c`) 对 NS 调用先看 FID bits[15:14]（0xC2000514 与 VCP 的 0xC200052C 同为 0），闸门 `0x2296c` = `~[0x8a5e8]&1`、`0x22954` 均不看具体 FID；VCP FID 已在 iOS 上正常返回（smc=0、rstn 变化），故两者过闸结果相同。0xC2000514 在 FID 决策树（`0x31a78/0x31aac`）内，经索引变量 `[0x79000+178]`（描述符 +24 指向 0x888790b2）进入 `0x33aac`。**静态上没有 FID 级别的 EL1 拦截。**
