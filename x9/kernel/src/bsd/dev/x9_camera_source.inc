@@ -254,7 +254,7 @@ static int cam_source_transition_locked(uint64_t epoch,bool off)
     if(!cam_source.captured || cam_source.epoch!=epoch || cam_source.pending<CAM_SOURCE_STEPS ||
        cam_source.phase!=(off?CAM_SOURCE_ARMED:CAM_SOURCE_IDLE))return CAM_FAIL(ESTALE);
     e=cam_source_guard_locked(epoch);if(e)return e;
-    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(CAM_GUARD_BUDGET_NS,&span);end=mach_absolute_time()+span;
     cam_source.phase=off?CAM_SOURCE_STOPPING:CAM_SOURCE_STARTING;
     for(unsigned p=first;p<last;p++) {
         struct cam_source_step *s=&cam_source.step[p];

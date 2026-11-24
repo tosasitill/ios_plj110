@@ -189,7 +189,7 @@ static int cam_native_ae_next_locked(uint64_t epoch,struct x9_camera_completed_f
     uint8_t values[6],byte=0,previous=0;
     int e;
     if(!f)return CAM_FAIL(EINVAL);
-    nanoseconds_to_absolutetime(2000000000ull,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(CAM_GUARD_BUDGET_NS,&span);end=mach_absolute_time()+span;
     e=cam_native_ae_boundary(epoch,end);
     if(!e)e=cam_native_ae_read_stable(&ap,&observed,1);
     if(!e && memcmp(&observed,&cam_native_ae.applied,sizeof(observed)))e=CAM_FAIL(ESTALE);

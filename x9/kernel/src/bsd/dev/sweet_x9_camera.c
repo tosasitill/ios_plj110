@@ -230,6 +230,11 @@ static void cam_watchdog_start(void)
     if(cam_watchdog_started)return;
     if(kernel_thread_start(cam_watchdog,NULL,&t)==KERN_SUCCESS){thread_deallocate(t);cam_watchdog_started=true;}
 }
+/* Budget for acceptance loops that re-run guards each poll. The old 1 s
+ * assumed 3-90 ms guards (log 376); 390-393 measured 0.1-0.65 s per sweep,
+ * so every capture-arm stage expired after 2-3 polls with HW already at
+ * target. Hardware-paced waits (SMMU CMDQ, I2C) keep their own limits. */
+#define CAM_GUARD_BUDGET_NS 10000000000ull
 #include "x9_camera_pipeline.inc"
 #include "x9_camera_s1.inc"
 #include "x9_camera_smmu.inc"

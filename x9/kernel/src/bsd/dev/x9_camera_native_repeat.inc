@@ -436,7 +436,7 @@ static int cam_repeat_post_guard(unsigned slot,uint32_t next,bool *handled)
  * never ICPENDR/ICACTIVER or a blind R-C sweep. Control + IRQ mutex held. */
 static int cam_repeat_stopped_irqs_locked(uint64_t epoch)
 {
-    uint64_t wait_span;nanoseconds_to_absolutetime(500000000,&wait_span);
+    uint64_t wait_span;nanoseconds_to_absolutetime(CAM_GUARD_BUDGET_NS,&wait_span); /* worker DONE path runs ~0.1 s lease checks per poll */
     uint64_t wait_end=mach_absolute_time()+wait_span;
     boolean_t admit_old=cam_irq_spin_take();
     int admit_error=0;
@@ -488,7 +488,7 @@ static int cam_repeat_stopped_irqs_locked(uint64_t epoch)
        cam_irq.accepting || cam_irq.count || cam_irq.busy || !cam_irq.owns))e=CAM_FAIL(ESTALE);
     if(!e)for(unsigned role=0;role<3;role++)cam_irq_wr(cam_irq_bank(role,0x100),cam_irq_bit(role));
     cam_irq_spin_drop(old);if(e)return e;
-    uint64_t span;nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);
+    uint64_t span;nanoseconds_to_absolutetime(CAM_GUARD_BUDGET_NS,&span);
     uint64_t end=mach_absolute_time()+span;unsigned samples=0;
     for(unsigned poll=0;poll<5000;poll++) {
         e=cam_irq_power();if(!e)e=cam_irq_config(false);if(e)break;

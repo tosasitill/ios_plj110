@@ -20,6 +20,7 @@ static struct {
     int error;
 } cam_sv_qos;
 static int cam_sv_environment(void);
+static int cam_sv_environment_fresh(void);
 static int cam_sv_qos_release_guard(uint64_t epoch)
 {
     if(!cam_sv_qos.captured || cam_sv_qos.epoch!=epoch || !cam_sv_qos.issued)return 0;
@@ -95,10 +96,10 @@ static int cam_sv_qos_start(void)
         if(step&1) {
             uint64_t span,end;
             unsigned samples=0;
-            nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
+            nanoseconds_to_absolutetime(CAM_GUARD_BUDGET_NS,&span);end=mach_absolute_time()+span;
             for(unsigned poll=0;poll<100000;poll++) {
                 if(mach_absolute_time()>=end)break;
-                e=cam_sv_environment();if(e)break;
+                e=cam_sv_environment_fresh();if(e)break;
                 samples=(cam_sv_qos.actual[0][n]&CAM_SV_QOS_OR_CQ)?samples+1:0;
                 if(samples==2)break;
                 delay(1);

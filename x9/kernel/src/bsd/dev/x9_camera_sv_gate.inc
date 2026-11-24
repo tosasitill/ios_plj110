@@ -212,7 +212,7 @@ static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
     e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)return e;
     e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)return e;
     e=cam_irq_slot_guard_locked(off && session.stream);if(e)return e;
-    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(CAM_GUARD_BUDGET_NS,&span);end=mach_absolute_time()+span;
     cam_sv_gate.phase=off?X9_CAM_SV_GATE_STOPPING:X9_CAM_SV_GATE_PENDING;
     for(unsigned step=first;step<last;step++) {
         unsigned field=cam_sv_gate_step_fields[step],offset=cam_sv_gate_offsets[field];
@@ -290,7 +290,7 @@ static int cam_sv_gate_restore_locked(uint64_t epoch)
     int e=0;
     if(cam_sv_gate.restore_attempted)return cam_sv_gate.error?cam_sv_gate.error:ESTALE;
     cam_sv_gate.restore_attempted=true;
-    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(CAM_GUARD_BUDGET_NS,&span);end=mach_absolute_time()+span;
     if(!cam_sv.credit_retired || !cam_sv.close_attempted || cam_sv.epoch!=epoch ||
        !cam_sv_gate.captured || cam_sv_gate.epoch!=epoch || cam_sv_gate.error ||
        cam_sv_gate.phase!=X9_CAM_SV_GATE_STOPPED || cam_sv_gate.pending!=X9_CAM_SV_GATE_STEPS ||
@@ -319,13 +319,12 @@ static int cam_sv_gate_restore_locked(uint64_t epoch)
     }
     for(unsigned poll=0;poll<10000;poll++) {
         bool match=true;
-        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
-        e=cam_sv_environment();if(!e)e=cam_irq_credit_retired_guard(epoch);if(e)goto out;
+        if(mach_absolute_time()>=end && !cam_sv_gate.restore_samples){e=CAM_FAIL(ETIMEDOUT);goto out;}
+        e=cam_sv_environment_fresh();if(!e)e=cam_irq_credit_retired_guard(epoch);if(e)goto out;
         for(unsigned bank=0;bank<1;bank++) {
             if(cam_sv.status.gate_after[bank][CAM_SV_GATE_SEN]!=target)match=false;
             else cam_sv_gate.restore_seen|=1u<<bank; /* actual no-op also recorded */
         }
-        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
         cam_sv_gate.restore_samples=match?cam_sv_gate.restore_samples+1:0;
         if(cam_sv_gate.restore_samples==2)break;
         delay(1);

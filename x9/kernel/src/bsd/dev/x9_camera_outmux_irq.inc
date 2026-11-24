@@ -195,7 +195,7 @@ static int cam_out_irq_wait(int (*step)(void))
 {
     uint64_t span,deadline;
     int e;
-    nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);deadline=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(CAM_GUARD_BUDGET_NS,&span);deadline=mach_absolute_time()+span;
     for(unsigned n=0;n<10000;n++) {
         if(mach_absolute_time()>=deadline)return cam_out_irq_error(ETIMEDOUT);
         e=step();

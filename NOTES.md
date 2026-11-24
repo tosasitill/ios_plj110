@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 镜像 x9-cam-budget-20261124（一次性修完后续 guard 类超时）
+
+- sha256 734c09affe03d46b786545033b08052083c2edea40845b995143ef5614d6a1f8，叠加在 x9-cam-src 之上（包含 source transition 的修复）。
+- 统一新增 `CAM_GUARD_BUDGET_NS` = 10 s（sweet_x9_camera.c）：所有标注 "log 376: guards cost 3-90 ms per poll" 的 1 s 预算（22 处：credit retire、DMA stop/restore、DONE FBC、repeat、outmux irq wait/CG、smmu attach/irq、source、gate/restore、sv commit/close/credit/receive、qos、cold reset、shutdown）全部换成它。另外 native AE 的 2 s、repeat 等 worker 的 500 ms、cam_out_commit 的 1 s 也换成它。原因：1 s 是按 3–90 ms 一次 guard 定的，390–393 实测一次完整检查 0.1–0.65 s。
+- 硬件本身决定快慢的等待（SMMU CMDQ、I2C sensor_open/vcm、outmux settle）没动。
+- 缓存过期问题：TG restore 和 QoS OR_CQ 轮询的证据只在完整检查里刷新，改用 `cam_sv_environment_fresh()`（作废 20 ms 缓存后重新跑完整检查）；TG restore 也加了确认采样。
+- 代价：真出故障时要等最多 10 s 才报错（原来 1 s）。
+
 #### 2026-11-24 393 结果 + 镜像 x9-cam-src-20261124
 
 - 393（x9-cam-gate）：SMMU 第五次没卡。TG GATE 通过（`issued=7 samples=2 errno=0`，SEN=2001 VF=1），FBC BIND 通过。下一步 RX PATH（source transition，cam_source_wait_locked:236）：`fields=5 pending=1 issued=3 samples=0 errno=60`，同样是所有步骤共用 1 s 预算。另外 cam_source_observe 只靠 MAC/PHY/OUT 的完整检查刷新，检查结果被缓存时轮询看不到新值。

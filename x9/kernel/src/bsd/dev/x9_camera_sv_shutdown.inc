@@ -173,7 +173,7 @@ static int cam_sv_shutdown_locked(uint64_t epoch)
     }
     for(unsigned role=0;role<3;role++) {
         uint64_t span,end;
-        nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
+        nanoseconds_to_absolutetime(CAM_GUARD_BUDGET_NS,&span);end=mach_absolute_time()+span;
         for(unsigned poll=0;poll<100000;poll++) {
             if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);goto out;}
             e=cam_sv_shutdown_guard(epoch);if(e)goto out;
