@@ -319,6 +319,20 @@ static bool cam_repeat_idle_irq_locked(unsigned role,struct cam_irq_parked_fault
          * Source ON history is unchanged; only the next request changes. */
         cam_repeat.empty[0]=cam_repeat.after[0];cam_repeat.empty[1]=cam_repeat.after[1];
         cam_repeat.phase=CAM_REPEAT_POSTED;cam_repeat.ack=cam_repeat.seen=0;
+        /* diag25: keep this actual SOF observation (same reads as a normal
+         * SOF sample) in case the CAMSV uses the credit for this frame. */
+        bzero(&cam_irq.post_sof,sizeof(cam_irq.post_sof));
+        cam_irq.post_sof.version=X9_CAMERA_CAMSV_VERSION;
+        cam_irq.post_sof.generation=cam_irq.request.frame.generation;
+        cam_irq.post_sof.capture_id=cam_irq.request.frame.capture_id;
+        cam_irq.post_sof.first_tag=cam_irq_rd(cam_irq.view[1],0x1cc);
+        cam_irq.post_sof.last_tag=cam_irq_rd(cam_irq.view[1],0x1c8);
+        for(unsigned i=0;i<4;i++)cam_irq.post_sof.group_tags[i]=cam_irq_rd(cam_irq.view[1],0x1b8+4*i);
+        cam_irq.post_sof.inner_sequence=cam_irq.post_sof.outer_sequence=cam_irq.request.inner_sequence;
+        cam_irq.post_sof.time=cam_irq.post_sof.sof_time=mach_absolute_time();
+        cam_irq.post_sof_valid=cam_irq.post_sof.first_tag==1 && cam_irq.post_sof.last_tag==1 &&
+            cam_irq.post_sof.group_tags[0]==1 && !cam_irq.post_sof.group_tags[1] &&
+            !cam_irq.post_sof.group_tags[2] && !cam_irq.post_sof.group_tags[3];
         cam_repeat.prior_done=false;cam_repeat.dma_done_seen=false;
         cam_irq.accepting=true;cam_irq.sof_seen=false;
         bzero(&cam_irq.sof_frame,sizeof(cam_irq.sof_frame));

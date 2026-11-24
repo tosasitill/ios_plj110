@@ -59,6 +59,10 @@ static struct {
      * access to slot/PTE/RAW, owner callbacks, power APIs or sleeping locks. */
     struct x9_camera_camsv_request request;
     struct x9_camera_camsv_irq sof_frame;
+    /* diag25: the empty SOF that posted the repeat RCNT. The CAMSV may take
+     * the credit for that very frame (DONE ~22 ms later, no second SOF). */
+    struct x9_camera_camsv_irq post_sof;
+    bool post_sof_valid;
     struct cam_irq_event queue[CAM_IRQ_RING];
     struct cam_irq_parked_fault parked_fault;
     unsigned head,count;
@@ -271,6 +275,7 @@ static void cam_smmu_irq_notify_fault(int e)
 }
 /* Under spin, after actual IAR and only while accepting. Ordinary FIRST/FH
  * reads select exactly the vendor bank. No multi-tag fallback or status sweep. */
+static unsigned cam_irq_post_sof_adopted; /* diag25 statistic */
 static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
 {
     struct x9_camera_camsv_irq *f=&ev->frame;
@@ -295,7 +300,7 @@ static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
            f->group_tags[1]||f->group_tags[2]||f->group_tags[3])ev->error=EIO;
         if(!ev->error)ev->error=cam_repeat_channel_seen_locked(ev->channel);
         f->time=mach_absolute_time();f->sof_time=f->time;
-        if(!ev->error){cam_irq.sof_frame=*f;cam_irq.sof_seen=true;}
+        if(!ev->error){cam_irq.sof_frame=*f;cam_irq.sof_seen=true;cam_irq.post_sof_valid=false;}
     } else if(role==X9_CAM_IRQ_HYBRID) {
         f->err_status=cam_irq_rd(cam_irq.view[1],0x350);
         f->done_status=cam_irq_rd(cam_irq.view[0],0x348);
@@ -306,6 +311,16 @@ static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
             f->err_status&=CAM_IRQ_ERR_FATAL;f->cq_status&=1u|CAM_IRQ_CQ_ERR;
         }
         f->time=mach_absolute_time();
+        /* diag25: DONE of the posting SOF's own frame. Bind that actual SOF
+         * observation only for this request's FH (inner and outer). */
+        if(!cam_irq.sof_seen && (f->done_status&0x000f0000u) && cam_irq.post_sof_valid &&
+           cam_repeat.phase==CAM_REPEAT_POSTED && f->first_tag==1 &&
+           f->inner_sequence==cam_irq.request.inner_sequence &&
+           f->outer_sequence==cam_irq.request.inner_sequence &&
+           cam_irq.post_sof.capture_id==f->capture_id && cam_irq.post_sof.generation==f->generation) {
+            cam_irq.sof_frame=cam_irq.post_sof;cam_irq.sof_seen=true;cam_irq.post_sof_valid=false;
+            cam_irq_post_sof_adopted++;
+        }
         /* Group/last are ONLY the prior SOF binding, not late live reads. */
         if(cam_irq.sof_seen) {
             f->sof_time=cam_irq.sof_frame.sof_time;
@@ -509,10 +524,10 @@ static void __attribute__((noreturn)) cam_irq_worker(void *arg,wait_result_t res
                 cam_repeat_completed_locked();
                 cam_irq_spin_drop(old);
                 printf("X9 CAMERA REPEAT COMPLETE: why=%d completed=%llu phase=%u enabled=%u epoch=%llu/%llu/%llu "
-                    "after=%x/%x target=%x/%x repeat_err=%d (0=parked;1 identity 2 err 3 done 4 count 5 state 7/8 target)\n",
+                    "after=%x/%x target=%x/%x repeat_err=%d post_sof_adopted=%u (0=parked;1 identity 2 err 3 done 4 count 5 state 7/8 target)\n",
                     cam_repeat_completed_why,cam_repeat.completed,cam_repeat.phase,cam_repeat.enabled,
                     cam_repeat.epoch,cam_irq.epoch,cam_sv.epoch,cam_repeat.after[0],cam_repeat.after[1],
-                    cam_irq_fbc.target[0],cam_irq_fbc.target[1],cam_repeat.error);
+                    cam_irq_fbc.target[0],cam_irq_fbc.target[1],cam_repeat.error,cam_irq_post_sof_adopted);
                 if(e==EBUSY||e==ESTALE)e=0; /* qualified drop/stop; never replay or FBC/RCNT */
             }
         }
