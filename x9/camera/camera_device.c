@@ -2749,7 +2749,12 @@ device_request_streams(CMBaseObjectRef o, CFArrayRef streams, CFDictionaryRef op
 			if (st != NULL) {
 				struct device *d = derived_storage(o);
                 if (!CFArrayContainsValue(d->streams, CFRangeMake(0, CFArrayGetCount(d->streams)), st)) return ERR_PARAM;
-                OSStatus error = stream_begin(st, false); if (error) return error;
+                /* Android's CameraService never streams a sensor for enumeration;
+                 * only an opened, configured session does. mediaserverd reserves
+                 * streams at boot (no app; logs 407-421 never saw graph=1) and
+                 * swaps reservations immediately, so a reservation is bookkeeping
+                 * only. Hardware starts from the graph's FigCaptureStream Start. */
+                say("stream reserved: camera=%u (no hardware until graph Start)", stream_of(st)->camera->sensor);
 			}
 		}
 	}
@@ -2770,6 +2775,11 @@ device_relinquish_streams(CMBaseObjectRef o, CFArrayRef streams, CFDictionaryRef
     if (streams != NULL) for (CFIndex i=0; i<CFArrayGetCount(streams); i++) {
         CMBaseObjectRef st = (CMBaseObjectRef)CFArrayGetValueAtIndex(streams,i);
         if (!CFArrayContainsValue(d->streams,CFRangeMake(0,CFArrayGetCount(d->streams)),st)) return ERR_PARAM;
+        struct stream *rs = stream_of(st);
+        if (!rs->worker_started && !rs->running && !rs->shadow) {
+            say("stream reservation released: camera=%u (never started, no hardware)", rs->camera->sensor);
+            continue;
+        }
         OSStatus error = stream_stop_reason(st, "device-relinquish-streams"); if (error) return error;
     }
 	return 0;
