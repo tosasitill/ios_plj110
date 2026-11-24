@@ -512,6 +512,13 @@ static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m
     for(unsigned i=0;i<sizeof(fields)/sizeof(fields[0]) && !e;i++) {
         {cam_native_match_step=field_steps[i];cam_drain_mark(cam_native_match_step);}
         e=cam_native_producer_guard_locked(epoch,m);
+        /* diag16: split guard / pre-match / store / post-match (diag15 reset
+         * twice right after the retire:cmdq-prod mark). */
+        printf("X9 CAMERA RETIRE FIELD: %s guard=%d snapshot=%x prior=%x\n",field_steps[i],e,
+            now.word[fields[i]],prior.word[fields[i]]);
+        delay(20000);
+        if(!e)x9_mm_power_smmu_dump(field_steps[i]);
+        delay(20000);
         /* CMDQ cursors are restored ONLY AFTER full-target real SYNC
          * consumption AND CR0/ACK CMDQEN=0. OPPO device_reset writes both
          * PROD/CONS. This is own disabled-queue restoration, not a fake
@@ -520,7 +527,16 @@ static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m
             uint32_t host_value=fields[i]==CAM_N_CFG?m->view.strtab_cfg:
                 fields[i]==CAM_N_CR1?m->view.cr1:m->view.cr2;
             e=cam_native_restore_config(m,&now,fields[i],prior.word[fields[i]],host_value);
-        } else if(!e)e=cam_native_write32(m,&now,fields[i],prior.word[fields[i]]);
+        } else if(!e) {
+            e=cam_native_match(m,&now);
+            printf("X9 CAMERA RETIRE FIELD: %s pre-match=%d\n",field_steps[i],e);delay(20000);
+            if(!e) {
+                cam_smmu_rw(m,cam_native_off[fields[i]],prior.word[fields[i]]);now.word[fields[i]]=prior.word[fields[i]];
+                printf("X9 CAMERA RETIRE FIELD: %s stored %x\n",field_steps[i],prior.word[fields[i]]);delay(20000);
+                e=cam_native_match(m,&now);
+                printf("X9 CAMERA RETIRE FIELD: %s post-match=%d\n",field_steps[i],e);delay(20000);
+            }
+        }
         if(!e && (fields[i]==CAM_N_CFG || fields[i]==CAM_N_CR1 || fields[i]==CAM_N_CR2) &&
            now.word[fields[i]]!=prior.word[fields[i]])prior.word[fields[i]]=now.word[fields[i]];
     }
