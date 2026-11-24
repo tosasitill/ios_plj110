@@ -58,23 +58,35 @@ static void reboot_watchdog_reset(void)
  }
 }
 
+/* OPPO MT6993 Android (mt6993.dts reboot-mode on toprgu 0x24, mask 0xf;
+ * aee/hangdet.c WDT_NONRST_REG2=0x24: stage bits 29-31, KERNEL=3, reboot
+ * flag bit 11 cleared by the restart notifier before every orderly reset).
+ * Android then resets through PSCI SYSTEM_RESET (priority 129 > mtk_wdt 128);
+ * a TOPRGU SWRST is the abnormal-reset path LK classifies via these bits. */
+static uint32_t reboot_mode_value(uint32_t before)
+{
+ return (before & ~(0xfu | (1u << 11) | (7u << 29))) |
+     X9_BOOTLOADER_MAGIC | (3u << 29);
+}
+
 static int reboot_halt_restart(unsigned int type)
 {
  if (type == kPERestartCPU && __atomic_load_n(&reboot_bootloader_armed,
      __ATOMIC_ACQUIRE)) {
   uint32_t before = reboot_mode_read();
-  uint32_t wanted = (before & ~0xfu) | X9_BOOTLOADER_MAGIC;
+  uint32_t wanted = reboot_mode_value(before);
   reboot_mode_write(wanted);
   uint32_t actual = reboot_mode_read();
-  if ((actual & ~0xfu) != (before & ~0xfu) ||
-      (actual & 0xfu) != X9_BOOTLOADER_MAGIC) {
-   printf("X9 BOOTLOADER: watchdog mode write rejected before=%08x wanted=%08x actual=%08x\n",
-       before, wanted, actual);
-   for (;;) {
-    __asm__ volatile("wfe");
-   }
+  printf("X9 BOOTLOADER: 1c010024 %08x -> %08x (read %08x); PSCI SYSTEM_RESET\n",
+      before, wanted, actual);
+  __asm__ volatile("dsb sy" ::: "memory");
+  {
+   register uint64_t x0 __asm__("x0") = 0x84000009u;
+   __asm__ volatile("smc #0" : "+r"(x0) ::
+       "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9",
+       "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
   }
-  printf("X9 BOOTLOADER: watchdog 1c010024=%08x; requesting watchdog reset\n", actual);
+  printf("X9 BOOTLOADER: PSCI SYSTEM_RESET returned; watchdog fallback\n");
   reboot_watchdog_reset();
  }
  return prior_halt_restart ? prior_halt_restart(type) : -1;
@@ -107,7 +119,11 @@ int sweet_x9_reboot_bootloader_request(void)
  if (__atomic_exchange_n(&reboot_bootloader_armed,1,__ATOMIC_ACQ_REL)) {
   return EBUSY;
  }
- printf("X9 BOOTLOADER: armed; syncing and shutting down\n");
+ {
+  uint32_t now=reboot_mode_read();
+  printf("X9 BOOTLOADER: armed; 1c010024=%08x (mode=%u flag11=%u stage=%u) will write %08x; syncing and shutting down\n",
+      now, now & 0xfu, (now >> 11) & 1u, now >> 29, reboot_mode_value(now));
+ }
  thread_t t;
  if(kernel_thread_start(reboot_request_worker,NULL,&t)!=KERN_SUCCESS) {
   __atomic_store_n(&reboot_bootloader_armed,0,__ATOMIC_RELEASE);
