@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 镜像 x9-cam-wpinit-20261124（修复候选 + 卡死诊断）
+
+- boot.img sha256 381fb0a4ff6d6d3699c20c3a06bfeae55f3db1dff1ddad014165bb98d98bdd26，boot-args 额外加了 `x9_mmup_smmu_init=1 x9_cam_defer=0`。
+- 修复：`mm_smmu_wp_init()` 在 WPCFG 之后、INIT 之前，按 Android `smmu_init_wpcfg` 写 NS wrapper 0x309e0000（Android wp_base = DT reg[1]，arm-smmu-v3.c:4209），打印 `X9 MM SMMU WP INIT`（写前写后的值）。
+- 诊断：相机 watchdog 前 3 次 STALL 改调 `x9_mm_power_stall_dump()`，按风险从低到高读：AO/MMPC 电源 → topckgen mm_mminfra_sel → MMUP core1 的 PC/LR/SP → MMUP SRAM 日志环（16 行）。不读 0x30800000，也不读 wrapper。
+- 为什么关掉 defer：387 里开机那次启动被拒之后，mediaserverd 再没发过 sensor start，所以诊断根本没机会跑。关掉 defer 后，开机约 11 s 那次启动一定会走到 vcp_boot_ensure → WP INIT → INIT。代价：如果没修好，开机仍会停在 logo（和 384/386 一样），但 STALL 诊断一定会打出来。
+
 #### 2026-11-24 ATF INIT（0x33c54）审计（未出镜像）
 
 - 流程：查"已 init"标志（[+292]，置位后再发 INIT 直接返回 2）→ 内部 PM_GET(1) → `0x46048` 清 S_CR0 并等 ACK → 校验 S_IDR0.bit31 / S_IDR1 → 写 S_CR1=0xc30（表和队列 ISH、non-cacheable）、S_CR2=2 → 分配 S_CMDQ(0x8090)/S_EVTQ(0x80a0)/S_STRTAB(0x8080/0x8088) → `0x46498`：S_CR0 依次开 CMDQEN、EVTQEN，S_INIT(0x803c)=1 全失效，发 CFGI 命令，注册 EL3 中断处理函数 `0x46820`，S_CR0|=0xd（SMMUEN）→ `0x47c9c` 建 secure STE（含 MMUP loader 的 stage-2 域）→ PM_PUT(1)。

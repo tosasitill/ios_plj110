@@ -181,6 +181,7 @@ static volatile unsigned cam_mmio_region,cam_mmio_off,cam_mmio_reads;
 #include <pexpert/pexpert.h>
 static volatile bool cam_start_busy;
 extern void x9_mm_power_smmu_dump(const char *tag);
+extern void x9_mm_power_stall_dump(void);
 /* Logs 383-386: a sensor start issued by mediaserverd at ~11s ends in an
  * MM SMMU read that never returns, and boot stays on the logo. Refuse
  * starts until uptime >= x9_cam_defer seconds (default 90, 0 = off) so boot
@@ -214,7 +215,7 @@ static void __attribute__((noreturn)) cam_watchdog(void *arg,wait_result_t resul
         if(step!=last){last=step;reports=0;}
         if(ns>=2000000000ull && reports<30) {
             reports++;
-            if(reports<=3)x9_mm_power_smmu_dump("stall");
+            if(reports<=3)x9_mm_power_stall_dump();
             printf("X9 CAMERA STALL: step=%s age_ms=%llu (#%u) mmio=%s+%x reads=%u\n",step,ns/1000000ull,reports,
                 cam_mmio_region==1?"smmu30800000":cam_mmio_region==2?"wp309e0000":cam_mmio_region==3?"smmu64":"-",
                 cam_mmio_off,cam_mmio_reads);

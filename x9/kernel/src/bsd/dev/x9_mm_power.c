@@ -462,6 +462,97 @@ static void vcp_smmu_snapshot(void)
         }
     }
 }
+
+/* Android mtk-smmu-v3.c smmu_init_wpcfg() for MM_SMMU (mt6993_data_mm:
+ * EXTRA_DCM_EN; DT mediatek,axslc, mtk,slc-gid=8, mtk,tcu-qos=5,
+ * mtk,stash-mode=3). Android runs it from mtk_smmu_hw_init() right after the
+ * secure WPCFG SMC, before arm_smmu_device_reset() and smmu_hw_sec_init()
+ * (INIT), i.e. before any master traffic reaches the TCU. wp_base is DT
+ * reg[1] = 0x309e0000 (arm-smmu-v3.c:4209). x9 used to leave these at reset
+ * value while MMUP fetched through the secure STEs. Same values as
+ * cam_native_wp_init (whose RMW then becomes a no-op). */
+static vm_offset_t mm_smmu_wp;
+static void mm_smmu_wp_init(void)
+{
+    static const struct { uint16_t off; uint32_t mask, val; } st[] = {
+        { 0x000, 1u << 2, 1u << 2 },             /* DCM_EN */
+        { 0x000, 1u << 11, 1u << 11 },           /* CFG_TAB_DCM_EN */
+        { 0x000, 7u << 18, 7u << 18 },           /* TCU2SLC/APB/DVM DCM */
+        { 0x000, 1u, 1u },                       /* STD_AXI_MODE_DIS (MM read overtaking) */
+        { 0x204, 0x1f0u, 0xe0u },                /* TCU_CTL1 AXSLC */
+        { 0x204, 2u, 2u },                       /* SLC_SB_ONLY_EN */
+        { 0x228, 0x7fu, 8u },                    /* TCU_CTL10 SLC gid */
+        { 0x200, 0xfu, 5u },                     /* TCU_CTL0 QoS ultra */
+        { 0x000, (1u << 10) | (1u << 13), (1u << 10) | (1u << 13) }, /* stash mode 3 */
+    };
+    static const unsigned shown[4] = { 0x000, 0x200, 0x204, 0x228 };
+    uint32_t before[4], after[4];
+    unsigned writes = 0;
+    if (!mm_smmu_wp) mm_smmu_wp = ml_io_map(0x309e0000, 0x1000);
+    if (!mm_smmu_wp || !mm_smmu_domains_on(NULL)) {
+        printf("X9 MM SMMU WP INIT: skipped (map=%d power)\n", mm_smmu_wp != 0);
+        return;
+    }
+    for (unsigned i = 0; i < 4; i++) before[i] = mm_read(mm_smmu_wp, shown[i]);
+    for (unsigned i = 0; i < sizeof(st) / sizeof(st[0]); i++) {
+        uint32_t v = mm_read(mm_smmu_wp, st[i].off), n = (v & ~st[i].mask) | st[i].val;
+        if (n != v) { mm_write_reg(mm_smmu_wp, st[i].off, n); writes++; }
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    for (unsigned i = 0; i < 4; i++) after[i] = mm_read(mm_smmu_wp, shown[i]);
+    printf("X9 MM SMMU WP INIT: glb0 %x->%x tcu0 %x->%x tcu1 %x->%x tcu10 %x->%x writes=%u (Android smmu_init_wpcfg, pre-INIT)\n",
+        before[0], after[0], before[1], after[1], before[2], after[2], before[3], after[3], writes);
+}
+
+/* Camera watchdog stall dump, run from the watchdog thread while the camera
+ * thread is stuck on an MM SMMU read. Ordered by risk: AO/MMPC power first,
+ * then topckgen mm_mminfra_sel, then MMUP core regs and its SRAM log ring
+ * (MM-side, may themselves stall; done last). Never touches 0x30800000 or
+ * the wrapper. */
+void x9_mm_power_stall_dump(void);
+void x9_mm_power_stall_dump(void)
+{
+    static vm_offset_t topck;
+    x9_mm_power_smmu_dump("stall");
+    if (!topck) topck = ml_io_map(0x10040000, 0x1000);
+    if (topck) {
+        uint32_t c = mm_read(topck, 0x10);
+        printf("X9 MM STALL CLK: top+10=%x mm_mminfra_sel=%x\n", c, (c >> 16) & 0xffu);
+    }
+    if (!(vcp_booted || vcp_fault) || !vcp_cfg_core1) {
+        printf("X9 MM STALL MMUP: not released\n");
+        return;
+    }
+    {
+        struct vcp_core_snap s;
+        vcp_snap_core1(&s);
+        printf("X9 MM STALL MMUP: status=%x pc=%x lr=%x sp=%x latch pc=%x lr=%x sp=%x\n",
+            s.status, s.pc, s.lr, s.sp, s.pc_latch, s.lr_latch, s.sp_latch);
+    }
+    if (!vcp_diag_sram) vcp_diag_sram = ml_io_map(0x31800000, 0x80000);
+    if (vcp_diag_sram) {
+        const unsigned ring_off = 0x37000u + 0x44314u, ring_len = 0x3000u;
+        uint32_t wpos = mm_read(vcp_diag_sram, 0x37000u + 0x4430cu);
+        unsigned end = (wpos > 0 && wpos <= ring_len) ? wpos : ring_len;
+        unsigned start = (end > 1024u ? end - 1024u : 0u) & ~3u;
+        char line[97];
+        unsigned col = 0, emitted = 0;
+        printf("X9 MM STALL MMUP LOG: wpos=%x\n", wpos);
+        for (unsigned off = start; off < end && emitted < 16u; off += 4u) {
+            uint32_t word = mm_read(vcp_diag_sram, ring_off + off);
+            for (unsigned b = 0; b < 4u && off + b < end; b++) {
+                unsigned char ch = (unsigned char)(word >> (b * 8u));
+                if (ch == '\r' || ch == '\0') continue;
+                if (ch == '\n' || col == 96u) {
+                    if (col) { line[col] = '\0'; printf("X9 MM STALL MMUP LOG: %s\n", line); col = 0; emitted++; }
+                    if (ch == '\n') continue;
+                }
+                line[col++] = (ch >= 0x20u && ch <= 0x7eu) ? (char)ch : '.';
+            }
+        }
+        if (col && emitted < 16u) { line[col] = '\0'; printf("X9 MM STALL MMUP LOG: %s\n", line); }
+    }
+}
 static void vcp_boot_diag_log(const struct vcp_core_snap *pre, const struct vcp_core_snap *rst,
                               const struct vcp_core_snap *early, bool early_taken)
 {
@@ -642,6 +733,7 @@ static int vcp_boot_ensure(void)
             if (rg == 0) {
                 rw = mm_smmu_smc_timed("WPCFG", 0x80cu);
                 mm_smmu_ns_probe("after-wpcfg");
+                mm_smmu_wp_init();
             }
             ri = mm_smmu_smc_timed("INIT", MM_SMMU_SECURE_INIT_ARG);
             mm_smmu_hwv_snap("after-init");
