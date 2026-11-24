@@ -157,7 +157,12 @@ static int cam_repeat_note_locked(unsigned bank,uint32_t control,uint32_t counte
         /* Baseline at the actual first post-completion sample: with ~0.1-0.6 s
          * guards before acceptance DROP can already exceed the modulo-128
          * window measured from the target (397: 19 drops before acceptance). */
-        if(!cam_repeat.after[bank])cam_repeat.after[bank]=counter;
+        /* diag24: a repeat's LIVE phase still holds the SOF-time sample
+         * (CNT1, old WCNT). counter equals target modulo DROP (checked above),
+         * so rebaseline then too, not only from zero (first completion). */
+        if(!cam_repeat.after[bank] ||
+           ((cam_repeat.after[bank]^cam_irq_fbc.target[bank])&~CAM_REPEAT_DROP))
+            cam_repeat.after[bank]=counter;
         return cam_repeat_empty_note(bank,counter);
     }
     if(cam_repeat.phase==CAM_REPEAT_PARKED || cam_repeat.phase==CAM_REPEAT_PREPARING ||
