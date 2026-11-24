@@ -70,6 +70,28 @@ static const struct x9_haptic_stock_wave *stock_wave;
 static struct x9_haptic_packet packet;
 static uint64_t now_ns(void)
 {uint64_t t,ns;clock_get_uptime(&t);absolutetime_to_nanoseconds(t,&ns);return ns;}
+/* diag33 breadcrumb: a SoC hang at camera prepare:smmu resets the board and
+ * the USB console loses its last ~1 s. TOPRGU NONRST (0x1c010020, printed by
+ * the shim as "x9 prior reset TOPRGU NONRST" on the next boot) receives
+ * 0xC5 | camera step FNV16 <<8 | haptic state. State: 0 idle, 0x1n hidle
+ * scanning I2C bank n, 0x2c htransfer setup, 0x3c htransfer START/poll. */
+static vm_offset_t x9_crumb_rgu;
+static volatile uint32_t x9_crumb_cam,x9_crumb_hap,x9_crumb_xfers;
+static volatile uint64_t x9_crumb_cam_ns;
+static void x9_crumb_write(void)
+{
+    if(!x9_crumb_rgu)return;
+    *(volatile uint32_t *)(x9_crumb_rgu+0x20)=0xC5000000u|((x9_crumb_cam&0xffffu)<<8)|(x9_crumb_hap&0xffu);
+    __asm__ volatile("dsb sy":::"memory");
+}
+void x9_crumb_cam_step(const char *step);
+void x9_crumb_cam_step(const char *step)
+{
+    uint32_t h=2166136261u;
+    for(const char *p=step;p && *p;p++)h=(h^(uint8_t)*p)*16777619u;
+    x9_crumb_cam=(h^(h>>16))&0xffffu;x9_crumb_cam_ns=now_ns();x9_crumb_write();
+}
+#define x9_crumb_hap_set(v) do{x9_crumb_hap=(v);x9_crumb_write();}while(0)
 #include "x9_haptic_aw8693xs.inc"
 _Static_assert(offsetof(struct x9_haptic_packet,samples)==24,"haptic packet ABI");
 _Static_assert(sizeof(struct x9_haptic_status)==120,"haptic status ABI");
@@ -397,6 +419,9 @@ void sweet_x9_haptic_init(void)
         if(mode==3)printf("X9 HAPTIC: stock waves tap=%u notify=%u buzz=%u samples @12k\n",
             x9_stock_wave_tap.len,x9_stock_wave_notify.len,x9_stock_wave_buzz.len);
     }
+    x9_crumb_rgu=ml_io_map(0x1c010000,0x1000);
+    if(x9_crumb_rgu)*(volatile uint32_t *)(x9_crumb_rgu+0x20)=0;
+    printf("X9 HAPTIC: crumb TOPRGU NONRST mapped=%d (cleared)\n",x9_crumb_rgu!=0);
     printf("X9 HAPTIC: mode=%u flags=%x errno=%u devfs ready; playback validation separate\n",
         hs.mode,hs.flags,hs.last_errno);
 }

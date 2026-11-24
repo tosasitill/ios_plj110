@@ -80,7 +80,7 @@ static int hcontrols(void)
 static uint32_t hbusy_bank,hbusy_reg,hbusy_val;
 static int hbusy(unsigned bank,unsigned reg,uint32_t v)
 {hbusy_bank=bank;hbusy_reg=reg;hbusy_val=v;return EBUSY;}
-static int hidle(bool own)
+static int hidle_inner(bool own)
 {
     hbusy_bank=hbusy_reg=UINT32_MAX;hbusy_val=0; /* EBUSY from clocks/pins */
     int e=hcontrols();if(e)return e;
@@ -88,6 +88,7 @@ static int hidle(bool own)
     for(unsigned i=0;i<8;i++) {
         vm_offset_t b=hb.bus+i*0x10000;uint32_t v;
         if(i==0 && own)continue;
+        x9_crumb_hap_set(0x10u|i);
         if((v=hrr(b,H_START)))return hbusy(i,H_START,v);
         if((v=hrr(b,H_MASK)))return hbusy(i,H_MASK,v);
         if((v=hrr(b,H_STAT)))return hbusy(i,H_STAT,v);
@@ -102,6 +103,8 @@ static int hidle(bool own)
     if(!(hrr(hb.perao,0x14)&(1u<<26)) && (hrr(hb.dma,8)&1))return EBUSY;
     return 0;
 }
+static int hidle(bool own)
+{uint32_t was=x9_crumb_hap;int e=hidle_inner(own);x9_crumb_hap_set(was);return e;}
 static int hput(unsigned reg,uint32_t v)
 {
     int e=hcontrols();if(e)return e;
@@ -157,7 +160,7 @@ static int htiming(uint64_t hz)
     }
     return 0;
 }
-static int htransfer(const uint8_t *tx,unsigned n,uint8_t *rx)
+static int htransfer_inner(const uint8_t *tx,unsigned n,uint8_t *rx)
 {
     if(!tx || !n || n>16)return EINVAL;
     int e=hidle(false);if(e)return e;
@@ -173,6 +176,7 @@ static int htransfer(const uint8_t *tx,unsigned n,uint8_t *rx)
        hrr(hb.bus,H_START) || hrr(hb.bus,H_STAT) || (hrr(hb.bus,H_FIFO)&31)!=n)
         {hb.stuck=true;return e?e:EBUSY;}
     uint64_t end=now_ns()+3000000;uint32_t status=0;
+    x9_crumb_hap_set(0x30u|(x9_crumb_xfers&15u));
     hwr(hb.bus,H_START,(1u<<14)|1u);
     for(unsigned i=0;i<1000 && now_ns()<end;i++) {
         status=hrr(hb.bus,H_STAT);if(status)break;delay(3);
@@ -191,6 +195,18 @@ static int htransfer(const uint8_t *tx,unsigned n,uint8_t *rx)
     if(hrr(hb.bus,H_STAT) || hrr(hb.bus,H_START) || (hrr(hb.bus,H_FIFO)&31))
         {hb.stuck=true;return EIO;}
     if(!result && rx)*rx=byte;return result;
+}
+static int htransfer(const uint8_t *tx,unsigned n,uint8_t *rx)
+{
+    x9_crumb_xfers++;x9_crumb_hap_set(0x20u|(x9_crumb_xfers&15u));
+    uint64_t t0=now_ns();int e=htransfer_inner(tx,n,rx);
+    x9_crumb_hap_set(0);
+    static unsigned logs;
+    if(x9_crumb_cam_ns && t0-x9_crumb_cam_ns<2000000000ULL && logs<200) {
+        logs++;printf("X9 HAPTIC XFER: #%u reg=%02x n=%u rx=%d errno=%d us=%llu cam_step=%04x\n",
+            x9_crumb_xfers,tx?tx[0]:0,n,rx!=NULL,e,(now_ns()-t0)/1000,x9_crumb_cam);
+    }
+    return e;
 }
 static int hget(uint8_t reg,uint8_t *out){return htransfer(&reg,1,out);}
 static int hset(uint8_t reg,uint8_t value)

@@ -204,8 +204,10 @@ static bool cam_boot_deferred(void)
     return true;
 }
 static void cam_slow_summary(const char *step);
+extern void x9_crumb_cam_step(const char *step);
 static void cam_progress(const char *step)
 {
+    x9_crumb_cam_step(step);
     if(!strncmp(step,"configure:",10) || !strncmp(step,"start:",6) || !strncmp(step,"prepare:smmu-start",18))cam_slow_summary(step);
     cam_progress_t0=mach_absolute_time();cam_progress_step=step;
     printf("X9 CAMERA PROGRESS: %s\n",step);
@@ -215,6 +217,7 @@ static void cam_progress(const char *step)
  * then the step that hung (diag8/diag9 resets in close). */
 static void cam_drain_mark(const char *step)
 {
+    x9_crumb_cam_step(step);
     printf("X9 CAMERA STOP MARK: %s\n",step);
     delay(20000);
 }
