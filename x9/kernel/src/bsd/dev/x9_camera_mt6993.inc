@@ -115,7 +115,7 @@ static uint32_t cam_rr(vm_offset_t base, unsigned off)
  * SMI guard 1437 calls/18.5 s before stream-on, ~55 s start). Failures are
  * never cached; external changes are still caught within the window. */
 static uint64_t cam_rw_count;
-#define CAM_GUARD_REUSE_NS 20000000ull
+#define CAM_GUARD_REUSE_NS 0ull /* diag15: off, as logs 400-402 */
 static void cam_rw(vm_offset_t base, unsigned off, uint32_t value)
 {
     cam_rw_count++;
