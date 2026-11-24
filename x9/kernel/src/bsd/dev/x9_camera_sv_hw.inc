@@ -534,7 +534,27 @@ static int cam_sv_request_authority(void)
     if(!d->context || !d->lease || !d->backing || !d->check)return CAM_FAIL(ESTALE);
     return d->check(d->context,d->lease,&cam_sv.request);
 }
+/* 390: one full environment sweep (sv/out/rx/mac/phy + nested mm/smi
+ * guards) costs 0.1-0.5 s, and every acceptance poll re-ran it: 72 s of guard
+ * time in a 20 s source-prepare, and the 1 s FBC/receive deadlines expired
+ * after 2-3 polls. Reuse a successful sweep for 20 ms within the same epoch;
+ * any failure is never cached, and request_authority still runs every call. */
+static uint64_t cam_sv_env_ok_at,cam_sv_env_ok_epoch;
+static int cam_sv_environment_sweep(void);
 static int cam_sv_environment(void)
+{
+    uint64_t now=mach_absolute_time(),age=0;
+    int e=cam_sv_request_authority();if(e)return cam_sv_fault(e);
+    if(cam_sv_env_ok_at && cam_sv_env_ok_epoch==cam_sv.epoch && !cam_sv.terminal) {
+        absolutetime_to_nanoseconds(now-cam_sv_env_ok_at,&age);
+        if(age<20000000ull)return 0;
+    }
+    cam_sv_env_ok_at=0;
+    e=cam_sv_environment_sweep();
+    if(!e){cam_sv_env_ok_at=mach_absolute_time();cam_sv_env_ok_epoch=cam_sv.epoch;}
+    return e;
+}
+static int cam_sv_environment_sweep(void)
 {
     int e=cam_sv_request_authority();if(e)return cam_sv_fault(e);
     if(cam_sv.credit_retired) {
@@ -1097,16 +1117,20 @@ static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
         cam_rw(cam_sv.view[0],cam_sv_receive_fields[i].offset,next);
         for(unsigned poll=0;poll<10000;poll++) {
             bool match=true;
-            if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
+            if(mach_absolute_time()>=end && !cam_sv.receive_samples){e=CAM_FAIL(ETIMEDOUT);break;}
             e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
             e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
             /* Outer only: Android writes these without readback and inner
              * loads at the next CAM DB (SOF / toggle_db). */
+            /* Fresh outer read each poll: the environment sweep that used to
+             * refresh receive_after may now be reused for 20 ms. */
+            e=cam_sv_power_guard();if(e)break;
+            cam_sv.status.receive_after[0][i]=cam_rr(cam_sv.view[0],cam_sv_receive_fields[i].offset);
             for(unsigned bank=0;bank<1;bank++)
                 if(cam_sv.status.receive_after[bank][i]!=next)match=false;
-            if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
             cam_sv.receive_samples=match?cam_sv.receive_samples+1:0;
             if(cam_sv.receive_samples==2){complete=true;break;}
+            if(mach_absolute_time()>=end && !cam_sv.receive_samples){e=CAM_FAIL(ETIMEDOUT);break;}
             delay(1);
         }
         if(e)break;

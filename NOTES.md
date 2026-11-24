@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 390 结果 + 镜像 x9-cam-memo-20261124
+
+- 390（x9-cam-dsb）：MM SMMU 第二次全程没卡（读已全部加屏障）。FBC credit 修复生效：`samples=2 errno=0`。下一步 camsv-receive 失败：`RECEIVE ARM off=0 seen=1/1 samples=0 errno=60`，字段 0 已经写入（outer=10000），模式和 389 的 FBC 一样：1 s 期限只够跑 2–3 次轮询。
+- GUARD COST（source-prepare，20.4 s 墙钟时间，嵌套重复计数后 guard 合计 71.8 s）：cam_mm_guard 30748 次/19.5 s，cam_smi_clock_guard 1496 次/18.2 s（单次约 12 ms），cam_rx_session_guard 10.8 s，cam_rx_sample 10.4 s，cam_sv_guard 5.7 s，cam_out_guard 3.0 s。start:configure → source-prepare 的 8.5 s 里，cam_sensor_ap_guard 2141 次/7.2 s。capture-arm 阶段：credit:sv_request_guard 单次最长 0.54 s（每次都完整跑一遍 cam_sv_environment）。
+- 新镜像 sha256 1080046bbdc970439ed0164fcdfedc000fb4bbafba1656bdc6e5ced91f7ca48e：
+  - cam_sv_environment：同一 epoch 内，成功的完整检查结果复用 20 ms；失败从不缓存；request_authority 每次都跑。
+  - receive transition：每次轮询直接读 outer 字段（不再依赖被缓存的检查结果来刷新），并且已经通过的第一次采样过了期限也必须拿到确认采样。
+- 还没动：cam_sensor_ap_guard 的 2141 次调用（start:configure 的 8 s）和 mm/smi guard 本身的单次开销。
+
 #### 2026-11-24 镜像 x9-cam-dsb-20261124（MM SMMU 读加屏障 + 20 s/采集失败定位）
 
 - boot.img sha256 9af0aab73e71dbb269ad0b9f0eefac9857831e6ddc95024fe480f68d0b518f90，boot-args 同 389。
