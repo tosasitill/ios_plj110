@@ -294,8 +294,13 @@ static int cam_source_transition_locked(uint64_t epoch,bool off)
             /* Fresh WCLR-qualified event and actual full inner target;
              * use the existing engine, never force inner DL/tag/route. */
             e=cam_out_commit();if(e)break;
+            end=mach_absolute_time()+span;
         }
-        e=cam_source_wait_locked(epoch,end,false);if(e)break;
+        /* 395: with the sensor off, OUTMUX cfg_done latches only on VSYNC, so
+         * the commit defers and the inner bank keeps the prior until
+         * cam_out_settle_locked after stream-on (Android never waits). Accept
+         * the confirmed outer only in exactly that deferred case. */
+        e=cam_source_wait_locked(epoch,end,f->kind==CAM_SOURCE_OUT && cam_out.deferred);if(e)break;
         cam_source.pending=CAM_SOURCE_STEPS;
     }
     if(!e) {

@@ -267,7 +267,9 @@ static int cam_out_commit(void)
     int e=cam_out_guard();if(e)return e;
     if(cam_out.pending_slot<CAM_OUT_WRITES || cam_out.commit_pending)return CAM_FAIL(EBUSY);
     e=cam_out_irq_precommit();if(e)return e;
-    nanoseconds_to_absolutetime(CAM_GUARD_BUDGET_NS,&span);deadline=mach_absolute_time()+span;
+    /* Android _wait_outmux_cfg_done: max(1 s, 1.1 frame). With the sensor
+     * off the latch needs VSYNC and always defers (395 spent 10 s here). */
+    nanoseconds_to_absolutetime(1000000000ull,&span);deadline=mach_absolute_time()+span;
     cam_out.commit_pending=true; /* BEFORE the possibly posted trigger */
     cam_rw(cam_out.out[0],0x1c,1);
     for(;;) {

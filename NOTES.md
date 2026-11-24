@@ -160,6 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 395 结果 + 镜像 x9-cam-defer-20261124
+
+- 395（x9-cam-route）：route guard 修复生效，OUT 步不再 ESTALE。新失败：RX PATH `pending=4 issued=1f samples=0 errno=60`（cam_source_wait_locked:241）。cam_out_commit 等了 10 s（上一版把它的期限也改成了 10 s），然后 `OUTMUX ADOPT: cfg_done pending ... settle after stream-on` 延后处理；之后的完整等待要求 inner bank 也到 target，但 sensor 没开就没有 VSYNC，inner 不会加载，所以超时。
+- 修复：cam_out_commit 恢复成 1 s（Android _wait_outmux_cfg_done 是 max(1 s, 1.1 帧)，sensor 关着时一定会延后）。source 的 OUT 步只有在 commit 确实延后（cam_out.deferred）时才只要求 outer，inner 由 stream-on 后的 cam_out_settle_locked（stream.inc:173）收敛；commit 之后预算重新计时。
+- sha256 8b66cbeb8dea0e36201f2e28d2b699feb2e958b21e6462fcfffb790629399ed2。
+
 #### 2026-11-24 394 结果 + 镜像 x9-cam-route-20261124
 
 - 394（x9-cam-budget）：SMMU 第六次没卡。credit/receive/gate/bind 通过。RX PATH 5 步全部发出（`issued=1f pending=4 samples=2`），OUT 步（OUTMUX 0x20 bit12）的 outer 已经确认，随后 ESTALE(70)：FAIL TRACE `cam_native_capture_route_guard:87`。
