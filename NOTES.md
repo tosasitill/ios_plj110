@@ -160,6 +160,18 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 镜像 x9-cam-smmu-power-20261124（补 MM SMMU 访问前上电 + 相机失败不拖开机）
+
+- **Android 对照**：mt6993 MM SMMU 没有 SMMU_CLK_AO_EN，访问前走 arm_smmu_rpm_get → mtk_smi_mminfra_get_if_in_use。MT6993 的 SMI common 全是 skip-rpm-cb，真正的电来自 MM_2（DT `mminfra-all-on-pwr-idx=3`）。mtk-pd-chk-mt6993：mmpc 0x9c/0xa0/0xa4/0xa8 = MM_INFRA0/1/AO/2（mask c0000000）。x9 之前只查 INFRA2 和 0x12900 bit31/29，从没查过 INFRA1，AP 侧也没人投 INFRA1(bank0 bit30)/INFRA2(bank1 bit0)。
+- **改动**：
+  - `x9_mm_power_smmu_get/put`：MM_2 live → 按 hwccf v1 顺序 AP 投 mm_infra1/mm_infra2 → 要求四个域 ACK 全亮；put 只清自己加的位。
+  - 相机两条路径（receive-resources snapshot、native SMMU start）在第一次读 SMMU 前 get；MM_2 释放前 put。
+  - 所有 SMMU 访问（cam_smmu_rr/rr64/rw/rw64、wrapper、64 位 base、GERROR、resources snapshot、VCP 侧 ns_probe/snapshot）先查 ACK；掉电则 `X9 CAMERA SMMU POWER LOST` 并屏蔽后续 SMMU MMIO，相机报错而不是挂总线。
+  - start 进行中，cam_open / cam_write 直接 EBUSY，不再等 camera_control_lock。
+  - STALL 前 3 次附 `X9 MM SMMU POWER stall:`。
+- **存疑**：384 中 MM_2 在挂住前几 ms 刚验证过，且 56s 时 100% 负载从 cluster0 迁到 cluster1（总线挂死的 CPU 不会迁移），不一定是掉电；若仍卡，看 stall 行。
+- `x9/out/x9-cam-smmu-power-20261124/boot.img` sha256 `2d63037e8371b3f43374f9dacfdd628398b48617c6a0ec9b7af8e3de6e2c0ef9`。
+
 #### 2026-11-23 日志 384 + 镜像 x9-cam-smmu-mmio-probe-20261123
 
 - **384**：source-prepare 从 29s 降到 19.7s（19.6→39.3s），CAMSV CONFIG errno=0。full_table 全部子步骤正常，`SMMU FULL TABLE: errno=0`，2ms 内完成。**卡在 `smmu:entry-match`**，且 STALL 显示的是外层步骤名（不是 `match:mm-power-validate`），说明 x9_mm_power_validate 已经返回，卡在 cam_native_read 的 SMMU MMIO 读上。同样的读 9ms 前（first-mmio-read、ENTRY）成功过，因此推断是读的时候总线挂死（CPU 一直 100%）。

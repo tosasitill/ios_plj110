@@ -139,6 +139,51 @@ static int mm_wait(vm_offset_t base, unsigned off, uint32_t mask,
     }
     return ETIMEDOUT;
 }
+/* MM SMMU power domains (clk-mt6993-pd.c + mtk-pd-chk-mt6993.c). */
+#define MM_DOM_SET0 0x20700u /* CLR +4, EN +8 */
+#define MM_DOM_GLOBAL0 0x11318u
+#define MM_DOM_STA0 0x1131cu
+#define MM_DOM_ACK0 0x12900u
+#define MM_DOM_SET1 0x2070cu
+#define MM_DOM_GLOBAL1 0x11330u
+#define MM_DOM_STA1 0x11334u
+#define MM_DOM_ACK1 0x12904u
+#define MM_DOM_INFRA1 (1u << 30)
+#define MM_DOM_INFRA2 (1u << 0)
+#define MM_DOM_ACK0_ALL ((1u << 31) | (1u << 30) | (1u << 29))
+static const unsigned mm_dom_pmack[4] = { 0xa4, 0x9c, 0xa0, 0xa8 }; /* AO, INFRA0, INFRA1, INFRA2 */
+static uint32_t smmu_refs, smmu_owned0, smmu_owned1;
+static bool smmu_fault;
+static bool mm_smmu_domains_on(uint32_t v[6])
+{
+    uint32_t t[6];
+    if (!v) v = t;
+    if (!hwv || !power_ack) return false;
+    for (unsigned pass = 0; pass < 2; pass++) {
+        for (unsigned i = 0; i < 4; i++) v[i] = mm_read(power_ack, mm_dom_pmack[i]);
+        v[4] = mm_read(hwv, MM_DOM_ACK0);
+        v[5] = mm_read(hwv, MM_DOM_ACK1);
+        for (unsigned i = 0; i < 4; i++)
+            if ((v[i] & MM_POWER_ACK_MASK) != MM_POWER_ACK_MASK) return false;
+        if ((v[4] & MM_DOM_ACK0_ALL) != MM_DOM_ACK0_ALL || !(v[5] & MM_DOM_INFRA2)) return false;
+    }
+    return true;
+}
+bool x9_mm_power_smmu_live(void)
+{
+    return vote_held && !power_fault && mm_smmu_domains_on(NULL);
+}
+void x9_mm_power_smmu_dump(const char *tag)
+{
+    uint32_t v[6] = {0};
+    bool on = mm_smmu_domains_on(v);
+    printf("X9 MM SMMU POWER %s: on=%u ao=%x infra0=%x infra1=%x infra2=%x ack0=%x ack1=%x "
+        "mm2_en=%x mm2_sta=%x ap_en0=%x ap_en1=%x refs=%u owned=%x/%x held=%u fault=%u/%u\n",
+        tag, on, v[0], v[1], v[2], v[3], v[4], v[5],
+        hwv ? mm_read(hwv, MM_POWER_EN) : 0, hwv ? mm_read(hwv, MM_POWER_STA) : 0,
+        hwv ? mm_read(hwv, MM_DOM_SET0 + 8) : 0, hwv ? mm_read(hwv, MM_DOM_SET1 + 8) : 0,
+        smmu_refs, smmu_owned0, smmu_owned1, vote_held, power_fault, smmu_fault);
+}
 static uint64_t vcp_smc(uint32_t op, uint32_t val)
 {
     register uint64_t x0 __asm__("x0") = VCP_SIP_CONTROL;
@@ -203,6 +248,7 @@ static void mm_smmu_ns_probe(const char *tag)
     uint64_t t0, ns = 0;
     if (!nsm) nsm = ml_io_map(0x30800000, 0x20000);
     if (!nsm) { printf("X9 MM VCP SMMU NS %s: map failed\n", tag); return; }
+    if (!mm_smmu_domains_on(NULL)) { x9_mm_power_smmu_dump(tag); return; }
     cr0 = mm_read(nsm, 0x20); ack = mm_read(nsm, 0x24);
     printf("X9 MM VCP SMMU NS %s: cr0=%x ack=%x gbpa=%x irq=%x/%x gerr=%x/%x s_idr0=%x s_cr0=%x s_ack=%x s_init=%x s_gbpa=%x\n",
         tag, cr0, ack, mm_read(nsm, 0x44), mm_read(nsm, 0x50), mm_read(nsm, 0x54),
@@ -343,6 +389,7 @@ static void vcp_smmu_snapshot(void)
 {
     static vm_offset_t smmu_mmio, smmu_stb, smmu_l2;
     if (!smmu_mmio) smmu_mmio = ml_io_map(0x30800000, 0x20000);
+    if (smmu_mmio && !mm_smmu_domains_on(NULL)) { x9_mm_power_smmu_dump("vcp-snapshot"); return; }
     if (smmu_mmio) {
         uint32_t idr0 = mm_read(smmu_mmio, 0x00);
         uint32_t idr1 = mm_read(smmu_mmio, 0x04);
@@ -889,6 +936,69 @@ int x9_mm_power_acquire(uint32_t client, uint64_t *token, uint32_t *a0)
     *token = parents[slot].token;
 out:
     lck_mtx_unlock(&mm_power_lock);
+    return e;
+}
+/* hwccf_api.c v1 order for one MM domain bit: MMUP dummy read, STA idle,
+ * AP SET + EN readback, global, STA idle, PM ACK. Never clears others' votes. */
+static int mm_dom_vote(unsigned set, unsigned global, unsigned sta, unsigned ack,
+                       uint32_t bit, uint32_t *owned)
+{
+    int e;
+    (void)mm_read(mmup, 0x1ec);
+    if (!(mm_read(hwv, set + 8) & bit)) {
+        e = mm_wait(hwv, sta, bit, 0, 10000, 1);
+        if (e) return e;
+        if (!(mm_read(hwv, set + 8) & bit)) {
+            *owned |= bit; /* before the one ambiguous SET */
+            mm_write_reg(hwv, set, bit);
+            e = mm_wait(hwv, set + 8, bit, bit, 1250, 1);
+            if (e) return e;
+        }
+    }
+    e = mm_wait(hwv, global, bit, bit, 10000, 1);
+    if (!e) e = mm_wait(hwv, sta, bit, 0, 10000, 1);
+    if (!e) e = mm_wait(hwv, ack, bit, bit, 10000, 1);
+    return e;
+}
+int x9_mm_power_smmu_get(uint64_t token, uint32_t client)
+{
+    unsigned i = 0;
+    int e;
+    lck_mtx_lock(&mm_power_lock);
+    e = mm_live(token, client, &i);
+    if (!e && smmu_fault) e = EIO;
+    if (!e && !smmu_refs) {
+        e = mm_dom_vote(MM_DOM_SET0, MM_DOM_GLOBAL0, MM_DOM_STA0, MM_DOM_ACK0,
+                        MM_DOM_INFRA1, &smmu_owned0);
+        if (!e) e = mm_dom_vote(MM_DOM_SET1, MM_DOM_GLOBAL1, MM_DOM_STA1, MM_DOM_ACK1,
+                                MM_DOM_INFRA2, &smmu_owned1);
+        if (e) smmu_fault = true; /* journaled; no replay */
+    }
+    if (!e) {
+        for (unsigned n = 0; n < 10000 && !mm_smmu_domains_on(NULL); n++) delay(1);
+        if (!mm_smmu_domains_on(NULL)) e = ENXIO;
+    }
+    if (!e) smmu_refs++;
+    lck_mtx_unlock(&mm_power_lock);
+    x9_mm_power_smmu_dump(e ? "GET-FAIL" : "GET");
+    if (e) printf("X9 MM SMMU POWER GET: client=%u errno=%d\n", client, e);
+    return e;
+}
+int x9_mm_power_smmu_put(uint64_t token, uint32_t client)
+{
+    unsigned i = 0;
+    int e;
+    lck_mtx_lock(&mm_power_lock);
+    e = mm_parent(token, client, &i);
+    if (!e && !smmu_refs) e = EINVAL;
+    if (!e && --smmu_refs == 0) {
+        /* Only our added AP bits; other voters keep their domains. */
+        if (smmu_owned1) mm_write_reg(hwv, MM_DOM_SET1 + 4, smmu_owned1);
+        if (smmu_owned0) mm_write_reg(hwv, MM_DOM_SET0 + 4, smmu_owned0);
+        smmu_owned0 = smmu_owned1 = 0;
+    }
+    lck_mtx_unlock(&mm_power_lock);
+    x9_mm_power_smmu_dump("PUT");
     return e;
 }
 int x9_mm_power_validate(uint64_t token, uint32_t client)

@@ -102,13 +102,58 @@ static bool cam_smmu_capable(uint32_t idr0,uint32_t idr1,uint32_t idr5)
         cmd>=2 && evt>=2 && (idr5&(1u<<5)) && (idr5&7u)<6;
 }
 
+/* Android arm_smmu_rpm_get: MM SMMU registers are touched only while the
+ * MM_2 + MM_INFRA AO/0/1/2 power ACKs are live. A lost domain latches and
+ * suppresses ALL later SMMU MMIO (reads return ~0, writes are dropped), so
+ * callers fail with ESTALE instead of hanging the bus. */
+static bool cam_smmu_power_lost;
+static uint64_t cam_smmu_power_token;
+static bool cam_smmu_mmio_ok(unsigned off)
+{
+    if(cam_smmu_power_lost)return false;
+    if(x9_mm_power_smmu_live())return true;
+    cam_smmu_power_lost=true;
+    printf("X9 CAMERA SMMU POWER LOST: off=%x; all further MM SMMU MMIO suppressed\n",off);
+    x9_mm_power_smmu_dump("camera-lost");
+    return false;
+}
+static int cam_smmu_power_up(uint64_t token)
+{
+    if(cam_smmu_power_token==token && !cam_smmu_power_lost)return 0;
+    if(cam_smmu_power_token)return CAM_FAIL(EBUSY); /* old token still journaled */
+    int e=x9_mm_power_smmu_get(token,X9_MM_POWER_CAMERA);
+    if(e)return CAM_FAIL(e);
+    cam_smmu_power_token=token;cam_smmu_power_lost=false;
+    return 0;
+}
+static void cam_smmu_power_down(uint64_t token)
+{
+    if(!token || cam_smmu_power_token!=token)return;
+    (void)x9_mm_power_smmu_put(token,X9_MM_POWER_CAMERA);
+    cam_smmu_power_token=0;
+}
 static uint32_t cam_smmu_rr(struct x9_camera_smmu *m,unsigned off)
-{ return *(volatile uint32_t *)(m->mmio+off); }
+{ return cam_smmu_mmio_ok(off)?*(volatile uint32_t *)(m->mmio+off):~0u; }
 static uint64_t cam_smmu_rr64(struct x9_camera_smmu *m,unsigned off)
-{ return *(volatile uint64_t *)(m->mmio+off); }
+{ return cam_smmu_mmio_ok(off)?*(volatile uint64_t *)(m->mmio+off):~0ull; }
 static void cam_smmu_rw(struct x9_camera_smmu *m,unsigned off,uint32_t v)
 {
+    if(!cam_smmu_mmio_ok(off))return;
     *(volatile uint32_t *)(m->mmio+off)=v;
+    __asm__ volatile("dsb sy":::"memory");
+}
+static void cam_smmu_rw64(struct x9_camera_smmu *m,unsigned off,uint64_t v)
+{
+    if(!cam_smmu_mmio_ok(off))return;
+    *(volatile uint64_t *)(m->mmio+off)=v;
+    __asm__ volatile("dsb sy":::"memory");
+}
+static uint32_t cam_smmu_wp_rr(struct x9_camera_smmu *m,unsigned off)
+{ return cam_smmu_mmio_ok(0x1e0000+off)?*(volatile uint32_t *)(m->native_wp+off):~0u; }
+static void cam_smmu_wp_rw(struct x9_camera_smmu *m,unsigned off,uint32_t v)
+{
+    if(!cam_smmu_mmio_ok(0x1e0000+off))return;
+    *(volatile uint32_t *)(m->native_wp+off)=v;
     __asm__ volatile("dsb sy":::"memory");
 }
 

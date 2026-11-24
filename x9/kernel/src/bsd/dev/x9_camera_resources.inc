@@ -177,6 +177,8 @@ fail:
 static void cam_smmu_snapshot(struct cam_receive_power *p,struct x9_camera_resources *r)
 {
     vm_offset_t b=p->smmu;
+    /* Same ACK gate as cam_smmu_rr: never read an unpowered MM SMMU. */
+    if(!cam_smmu_mmio_ok(0)){r->idr[0]=r->cr0=r->gbpa=~0u;return;}
     /* IDR2/4 are reserved in this architecture; do not read them. */
     r->idr[0]=cam_rr(b,0);r->idr[1]=cam_rr(b,4);
     r->idr[3]=cam_rr(b,0xc);r->idr[5]=cam_rr(b,0x14);
@@ -257,6 +259,7 @@ static int cam_receive_power_restore(struct cam_receive_power *p,struct x9_camer
         p->csi_borrowed=false;
     }
     if(p->smmu_owned) {
+        cam_smmu_power_down(p->power_token); /* SMMU domains before MM_2 */
         int e=x9_mm_power_release(&p->power_token,X9_MM_POWER_CAMERA,&r->smc_put);
         if(e)return e;
         p->smmu_owned=false;
@@ -291,6 +294,8 @@ static int cam_receive_power_take(struct cam_receive_power *p,struct x9_camera_r
     if((r->mm_ack_active&CAM_RES_MM_INFRA)!=CAM_RES_MM_INFRA ||
        (cam_rr(p->hwv,0x1131c)&CAM_RES_MM_INFRA))return CAM_FAIL(ENXIO);
     r->blockers&=~X9_CAM_RES_NEED_MM_INFRA;
+    /* Android arm_smmu_rpm_get before the first MM SMMU register read. */
+    {int pe=cam_smmu_power_up(p->power_token);if(pe)return pe;}
     r->stage=X9_CAM_RES_STAGE_CSI;
     int e=cam_csi_power_take(p,r);if(e)return e;
     r->stage=X9_CAM_RES_STAGE_SMMU_SNAPSHOT;

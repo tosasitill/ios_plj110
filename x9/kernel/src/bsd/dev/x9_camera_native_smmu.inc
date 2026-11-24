@@ -52,7 +52,7 @@ static void cam_native_read(struct x9_camera_smmu *m,struct cam_native_snapshot 
     cam_mmio_region=1;
     for(unsigned i=0;i<CAM_N_WORDS;i++){cam_mmio_off=cam_native_off[i];s->word[i]=cam_smmu_rr(m,cam_native_off[i]);cam_mmio_reads++;}
     cam_mmio_region=2;
-    for(unsigned i=0;i<4;i++){cam_mmio_off=cam_native_wp_off[i];s->wp[i]=*(volatile uint32_t *)(m->native_wp+cam_native_wp_off[i]);cam_mmio_reads++;}
+    for(unsigned i=0;i<4;i++){cam_mmio_off=cam_native_wp_off[i];s->wp[i]=cam_smmu_wp_rr(m,cam_native_wp_off[i]);cam_mmio_reads++;}
     cam_mmio_region=3;
     for(unsigned i=0;i<3;i++){cam_mmio_off=cam_native_base_off[i];s->base[i]=cam_smmu_rr64(m,cam_native_base_off[i]);cam_mmio_reads++;}
     cam_mmio_region=0;
@@ -60,6 +60,7 @@ static void cam_native_read(struct x9_camera_smmu *m,struct cam_native_snapshot 
 }
 static int cam_native_match(struct x9_camera_smmu *m,const struct cam_native_snapshot *s)
 {
+    if(cam_smmu_power_lost)return CAM_FAIL(ENXIO);
     struct cam_native_snapshot now;
     const char *outer=cam_progress_step;
     cam_progress_step="match:mm-power-validate (mm_power_lock)";cam_progress_t0=mach_absolute_time();
@@ -75,7 +76,7 @@ static int cam_native_wp_write(struct x9_camera_smmu *m,struct cam_native_snapsh
     unsigned field,uint32_t mask,uint32_t value)
 {
     int e=cam_native_match(m,s);if(e)return e;
-    uint32_t cur=*(volatile uint32_t *)(m->native_wp+cam_native_wp_off[field]);
+    uint32_t cur=cam_smmu_wp_rr(m,cam_native_wp_off[field]);
     uint32_t next=(cur&~mask)|(value&mask),got;
     s->wp[field]=cur;
     if(next==cur)return 0;
@@ -83,9 +84,8 @@ static int cam_native_wp_write(struct x9_camera_smmu *m,struct cam_native_snapsh
      * normal startup cannot use the never-hardware-exposed retirement path. */
     m->native_wp_issued|=1u<<field;
     m->native_wp_expected[field]=s->wp[field]=next;
-    *(volatile uint32_t *)(m->native_wp+cam_native_wp_off[field])=next;
-    __asm__ volatile("dsb sy":::"memory");
-    got=*(volatile uint32_t *)(m->native_wp+cam_native_wp_off[field]);
+    cam_smmu_wp_rw(m,cam_native_wp_off[field],next);
+    got=cam_smmu_wp_rr(m,cam_native_wp_off[field]);
     if(got!=next)printf("X9 CAMERA SMMU WRAPPER ADOPT: field=%u off=%x before=%x wrote=%x read=%x "
         "(smmu_write_field has no readback check)\n",field,cam_native_wp_off[field],cur,next,got);
     m->native_wp_expected[field]=s->wp[field]=got;
@@ -125,8 +125,7 @@ static int cam_native_write64(struct x9_camera_smmu *m,struct cam_native_snapsho
     unsigned field,uint64_t value)
 {
     int e=cam_native_match(m,s);if(e)return e;
-    *(volatile uint64_t *)(m->mmio+cam_native_base_off[field])=value;
-    __asm__ volatile("dsb sy":::"memory");s->base[field]=value;
+    cam_smmu_rw64(m,cam_native_base_off[field],value);s->base[field]=value;
     return cam_native_match(m,s);
 }
 static int cam_native_enable(struct x9_camera_smmu *m,struct cam_native_snapshot *s,
@@ -199,6 +198,10 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     e=cam_smmu_policy_read(&policy);if(e)return e;
     cam_progress("smmu:power-validate");
     e=x9_mm_power_validate(token,X9_MM_POWER_CAMERA);if(e)return e;
+    /* Android: arm_smmu_rpm_get (SMI common / mminfra in use) BEFORE the
+     * first SMMU register access of a delayed hw_init. */
+    cam_progress("smmu:power-up (mminfra AO/0/1/2)");
+    e=cam_smmu_power_up(token);if(e)return e;
     cam_progress("smmu:io-map");
     lck_mtx_lock(&camera_smmu_lock);
     if(!cam_native_mmio)cam_native_mmio=ml_io_map(0x30800000,0x20000);
@@ -229,8 +232,7 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     if(entry.word[CAM_N_GE]^entry.word[CAM_N_GEN]) {
         printf("X9 CAMERA SMMU GERROR ADOPT: cold GERROR=%x GERRORN=%x acked before reset "
             "(Android device_reset does not refuse)\n",entry.word[CAM_N_GE],entry.word[CAM_N_GEN]);
-        *(volatile uint32_t *)(mmio+0x64)=entry.word[CAM_N_GE];
-        __asm__ volatile("dsb sy":::"memory");
+        cam_smmu_rw(&probe,0x64,entry.word[CAM_N_GE]);
         cam_native_read(&probe,&entry);
         if(entry.word[CAM_N_GE]^entry.word[CAM_N_GEN])return CAM_FAIL(EIO);
     }

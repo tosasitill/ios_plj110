@@ -176,6 +176,10 @@ static bool cam_watchdog_started;
 /* Log 384: hang inside cam_native_match's SMMU register read. The current
  * MMIO region/offset is published before each read so STALL can name it. */
 static volatile unsigned cam_mmio_region,cam_mmio_off,cam_mmio_reads;
+/* A long or stuck sensor start must not park mediaserverd's other opens /
+ * writes on camera_control_lock during boot: they get EBUSY at once. */
+static volatile bool cam_start_busy;
+extern void x9_mm_power_smmu_dump(const char *tag);
 static void cam_progress(const char *step)
 {
     cam_progress_t0=mach_absolute_time();cam_progress_step=step;
@@ -194,6 +198,7 @@ static void __attribute__((noreturn)) cam_watchdog(void *arg,wait_result_t resul
         if(step!=last){last=step;reports=0;}
         if(ns>=2000000000ull && reports<30) {
             reports++;
+            if(reports<=3)x9_mm_power_smmu_dump("stall");
             printf("X9 CAMERA STALL: step=%s age_ms=%llu (#%u) mmio=%s+%x reads=%u\n",step,ns/1000000ull,reports,
                 cam_mmio_region==1?"smmu30800000":cam_mmio_region==2?"wp309e0000":cam_mmio_region==3?"smmu64":"-",
                 cam_mmio_off,cam_mmio_reads);
@@ -373,6 +378,7 @@ static int start(uint32_t which, uint32_t mode)
      * Keep control serialization, but never hold the worker's frame lock
      * across power/I2C/capture callbacks. */
     cam_fail_reset();
+    cam_start_busy=true;
     lck_mtx_unlock(&camera_lock);
     cam_watchdog_start();
     cam_progress("start:sensor-power");
@@ -398,6 +404,7 @@ static int start(uint32_t which, uint32_t mode)
     }
     cam_progress_step=NULL;
     lck_mtx_lock(&camera_lock);
+    cam_start_busy=false;
     if(e) {
         st.flags|=X9_CAMERA_FAULT;st.last_errno=e;
         int cleanup=stop();st.last_errno=e;
@@ -548,6 +555,7 @@ static int cam_open(dev_t d,int f,__unused int t,struct proc *p)
         if(st.mode==3) { if(uid)return CAM_FAIL(EPERM); }
         else if(st.mode!=2 || (uid && (uid!=501 || strcmp(name,"mediaserverd"))))return CAM_FAIL(EPERM);
     }
+    if(cam_start_busy)return CAM_FAIL(EBUSY);
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
     /* An asynchronous real platform registration needs opened=false while
      * it admits/probes/restores. Reject an early mode2 controller open
@@ -751,6 +759,7 @@ static int cam_write(dev_t d,struct uio *uio,__unused int flags)
     if(st.mode!=2)return CAM_FAIL(EPERM); /* mode3 has only fixed standby table ioctl, no raw writer */
     struct hakios_camera_command c;if(uio_resid(uio)!=sizeof(c))return CAM_FAIL(EINVAL);
     int e=uiomove((char*)&c,sizeof(c),uio);if(e)return e;if(c.bytes)return CAM_FAIL(ENOTSUP);
+    if(cam_start_busy)return CAM_FAIL(EBUSY);
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
     if(!opened)e=CAM_FAIL(ENXIO);
     else if(control_stop_issued)e=ESHUTDOWN;
