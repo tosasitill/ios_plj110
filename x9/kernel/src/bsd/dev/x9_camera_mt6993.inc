@@ -163,16 +163,18 @@ static struct { const char *name; unsigned calls; uint64_t total_ns, max_ns; } c
 static uint64_t cam_slow_phase_t0;
 static void cam_slow_summary(const char *step)
 {
+    static int enabled=-1;
+    if(enabled<0){int value=1;if(!PE_parse_boot_argn("x9_cam_guard_summary",&value,sizeof(value)))value=1;enabled=value;}
     uint64_t now=mach_absolute_time(),wall=0,sum=0;
     if(cam_slow_phase_t0)absolutetime_to_nanoseconds(now-cam_slow_phase_t0,&wall);
     for(unsigned i=0;i<32 && cam_slow_acc[i].name;i++) {
         if(!cam_slow_acc[i].calls)continue;
         sum+=cam_slow_acc[i].total_ns;
-        printf("X9 CAMERA GUARD COST: before=%s %s calls=%u total_ms=%llu max_us=%llu\n",step,cam_slow_acc[i].name,
+        if(enabled)printf("X9 CAMERA GUARD COST: before=%s %s calls=%u total_ms=%llu max_us=%llu\n",step,cam_slow_acc[i].name,
             cam_slow_acc[i].calls,cam_slow_acc[i].total_ns/1000000ull,cam_slow_acc[i].max_ns/1000ull);
         cam_slow_acc[i].calls=0;cam_slow_acc[i].total_ns=cam_slow_acc[i].max_ns=0;
     }
-    if(cam_slow_phase_t0)printf("X9 CAMERA GUARD COST: before=%s phase_wall_ms=%llu guards_ms=%llu (nested guards counted twice)\n",
+    if(enabled && cam_slow_phase_t0)printf("X9 CAMERA GUARD COST: before=%s phase_wall_ms=%llu guards_ms=%llu (nested guards counted twice)\n",
         step,wall/1000000ull,sum/1000000ull);
     cam_slow_phase_t0=now;
 }

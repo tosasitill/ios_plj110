@@ -160,6 +160,29 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 log 419–420 → fix/camera-preview-diagnostics（候选 6 越过早期复位；stream-on 后 USB 消失；仍未出帧）
+
+- **构建与上机**：候选 6 `x9-cam-preview-diag6-summaryoff-20261124`，显式带 `x9_mmup_smmu_init=1 x9_cam_defer=0 x9_cam_guard_summary=0`，build exit 0。`boot.img` 15,335,424 B，sha256 `76558e10ba3f61e8e0f13471ebf64df5a31e7f0511362af13e04768f4097ce5c`；直接写 `boot_b` 并重启成功，未改其它分区。
+- **观察（419/420）**：419 只抓到 shim 初始日志，logger 被中止，不能用于判断内核。420 从 epoch 2 抓到完整内核启动；候选 6 没有候选 5 在 `configure:engine-prepare` 附近的早期复位，且没有任何 `X9 CAMERA GUARD COST`，证明 summary 抑制参数生效。是否因此避免复位仍只是相关性，尚未证明因果。
+- **观察（420，主摄）**：15.719 s SMMU entry 为 `cr0=0 cr1=0 cr2=4 cfg=0 bases=0/0/0`；15.903 s `NATIVE SMMU step=started ... errno=0`，15.906 s `NATIVE PREPARE ... exported=1 errno=0`。16.291 s TG gate off 通过，17.625 s first arm，17.663 s `SENSOR STREAM ... errno=0`。
+- **观察（420 截断）**：日志在 17.663 s sensor stream-on 行后结束，随后 USB 完全断开；没有 request 2、RAW publish、完整 read、retire、panic 文本或 reset reason。421 未再枚举到 `1209:0001`，`system_profiler SPUSBDataType` 也无输出。当前不能区分 stream-on 返回前卡死、内核异常、设备复位或 USB 链路问题。
+- **下一步（候选 7 已构建）**：在 `start()` 的 `write8(0x0100,1)` 返回后新增 `X9 CAMERA STREAM-ON RETURN`，候选 7 `x9-cam-preview-diag7-streamreturn-20261124` build exit 0；`boot.img` 15,335,424 B，sha256 `25b4dc1e6a0273c4e37df3f084dfa3a37af096ae6b5cbf99e42ae8b02d423fa2`，尚未刷入。设备重新可用后单 logger 抓取，先确认该标记是否出现。**以上均不是 Camera.app 界面出帧成功。**
+
+#### 2026-11-24 log 410–412 → fix/camera-preview-diagnostics（CR1 惰性恢复与候选 5 复位；仍未出帧）
+
+- **观察（410，候选 4）**：主摄冷启动 SMMU 返回 `EBUSY`，未进入完整 map/export；候选 4 对 CR1/CR2 的冷启动准入过严，已确认是本次回归原因。候选 5 恢复 CR1/CR2 原先的 inherited-prior 准入语义，仅保留 disabled 状态下的严格惰性恢复，并在 entry 打印 CR1/CR2。
+- **观察（411，候选 5）**：两次启动都在 request 1 的 native source configure 完成后、`configure:engine-prepare` 的 guard 统计附近被截断，随后重新进入 shim；均没有 `X9 CAMERA SMMU ENTRY`、panic 文本或 reset reason。候选 5 `boot.img` 15,335,424 B，sha256 `c1656f42d474fff26d6facd19fabfacd9ac6302ca71517fb87b70f2987c6aaf6`。两次复位是观察，候选 5 代码是否直接导致仍是未证实推断。
+- **观察（412，候选 3 对照）**：重新刷回候选 3 后一次启动稳定完成 request 1：15.571 s SMMU entry 为全零 cold prior，15.730 s SMMU start/export `errno=0`，17.301 s sensor stream-on `errno=0`，17.303 s request 2 切到前置摄。18.775 s 采纳 `STRTAB_BASE_CFG=8`，18.785 s 在 `retire:cr1` 精确失败：expected=0、actual=`c30`、errno=70。该对照证明候选 3 本次没有 candidate 5 的早期复位，但没有验证 CR1/CR2 新恢复路径。
+- **下一步**：先拆分验证候选 5 的惰性恢复改动与可能的构建/时序差异，再加入 source configure 后、SMMU map/entry 前的即时 stage 标记；不得把 black RAW publish、SMMU export 或 sensor stream-on 称为界面出帧。候选 4/5/对照日志和当前诊断改动尚未提交。
+
+#### 2026-11-24 log 407–409 → fix/camera-preview-diagnostics（stop 来源与 SMMU 惰性恢复；仍未出帧）
+
+- **观察（407）**：12.019 s 后相机链路启动；source prepare 中 `outmux-open` 单独耗时 **1267 ms**，native prepare 19.343 s 完成，TG gate 19.579 s，first arm 21.558 s，sensor stream-on 21.603 s（`wall_ms=44`）。主摄 RAW 在黑电平（MSB 15–16）。桥停止调用者已由新增 reason 日志确定为 `stream-begin:replace-active`，不是客户端超时或同流重复预约。
+- **观察（408）**：第二次请求明确是 `camera=2 physical_sensor=2`（前置摄），替换 `camera=1 physical_sensor=1`（主摄），`ready_mask=6`。因此 402/406 的“同一 physical stream reservation thrash”推断被否定。主摄退役时 CMDQ_BASE 清零无效；候选 2 对 STRTAB/CMDQ/EVTQ 三个 base 增加严格的惰性值采纳：只接受 CR0/ACK=0、值未变且由本机观察过，Android reset 会在 enable 前重写。408 证明三个 base 均成功采纳，失败精确前移到 `STRTAB_BASE_CFG(0x88)`：期望 0、实际 8。
+- **观察（409，候选 3）**：12.066 s 请求，16.960 s 主摄 worker 启动；第二次请求仍在 16.962 s 切到前置摄，首帧仍为黑电平且只 peek。新增 `STRTAB_BASE_CFG=8` 惰性恢复生效，随后失败精确前移到 `CR1(0x28)`：期望 0、实际本机写入的 `0xc30`。Android `arm_smmu_device_reset()` 每次 reset 都会重写 CR1/CR2/STRTAB_CFG，且在 SMMUEN=0 时这些配置不取指；候选 4 将同一严格约束扩展到这三项，并保留每个字段的独立失败 step。
+- **构建与上机**：候选 3 `x9-cam-preview-diag3-20261124`，boot.img 15,335,424 B，sha256 `6bd1fc286eab10cc5b359f185c00be77a4985a84c616167a677746cec91ad4ee`，直接写 `boot_b` 成功。候选 4 `x9-cam-preview-diag4-20261124`，sha256 `56dd36879a55d557286f965c86bc5f605aba750842eeabfa0bc64e705f96a436`，构建 exit 0，已写 `boot_b` 并重启，log 410 正在抓取。**以上均不是 Camera.app 界面出帧成功。**
+- **下一步**：先确认 410 的完整 SMMU retire 是否通过并允许前置摄真正启动；若通过，继续看前置摄多帧/非黑数据、完整 RAW read、graph admission 和 PixelBufferHandler。若仍失败，按新的独立 step 继续定位。启动延迟仍有 `outmux-open` 约 1.2 s 和 TG gate 到 first arm 的空档，暂未改动。
+
 #### 2026-11-24 log 406 → x9-cam-start-latency-20261124（sensor supply guard 优化，仍未出帧）
 
 - **观察**：`boot_b` 刷入并重启成功。12.025 s 请求 stream，16.919 s `WRITE CALL command=3 errno=0`，start 约 **4.894 s**（405 为 12.029 s）。TG gate on/off、native configure、SMMU start/export、first arm、sensor stream-on、DONE/credit、RAW publish 全部 `errno=0`。16.921 s 桥打印 `stream stop requested`，16.932 s 首帧仍为黑电平（MSB 15–16），只发生 `READ CALL peek=1`，没有完整 RAW read、graph admission 或 PixelBufferHandler delivery。18.370 s SMMU retire 仍为 `retire:final-prior errno=70`，无 `NATIVE MATCH DIFF`。

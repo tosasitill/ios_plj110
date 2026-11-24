@@ -2268,13 +2268,14 @@ worker(void *context)
 static int capture_join_errno; /* protected by capture_control; a failed join is never blindly retried */
 
 static OSStatus
-stream_stop_locked(CMBaseObjectRef o, CMBaseObjectRef *release)
+stream_stop_locked(CMBaseObjectRef o, CMBaseObjectRef *release, const char *reason)
 {
 	struct stream *s = stream_of(o);
 
 	if (capture_join_errno) return ERR_NOT_AVAILABLE;
-	say("stream stop requested: worker_started=%d frames=%llu running=%d graph=%d",
-	    s->worker_started, (unsigned long long)s->frames, s->running, s->graph_running);
+	say("stream stop requested: reason=%s self=%p camera=%u physical_sensor=%u worker_started=%d frames=%llu running=%d graph=%d",
+	    reason, (void *)o, s->camera->sensor, s->physical_sensor, s->worker_started,
+	    (unsigned long long)s->frames, s->running, s->graph_running);
 	pthread_mutex_lock(&s->lock);
 	s->stopping = true;
 	s->running = false;
@@ -2345,6 +2346,8 @@ stream_begin(CMBaseObjectRef o, bool graph)
 	CMBaseObjectRef release = NULL;
 	OSStatus result = ERR_NOT_AVAILABLE;
 
+	say("stream begin requested: graph=%u self=%p camera=%u physical_sensor=%u ready_mask=%x running=%u worker_started=%u",
+	    graph, (void *)o, s->camera->sensor, s->physical_sensor, s->ready_mask, s->running, s->worker_started);
 	if (camera_worker_thread || pthread_mutex_trylock(&capture_control) != 0) return ERR_NOT_AVAILABLE;
 	if (capture_join_errno || atomic_load(&capture_retire_errno) || atomic_load(&s->first_errno)) goto done;
 	pthread_mutex_lock(&s->lock);
@@ -2354,7 +2357,10 @@ stream_begin(CMBaseObjectRef o, bool graph)
 	if (epoch_exhausted) goto done;
 	/* Reap even a worker that already exited: running=false is not retirement or permission to open another sensor. */
 	if (active_stream != NULL && active_stream != o) {
-		result = stream_stop_locked(active_stream, &release);
+		struct stream *active = stream_of(active_stream);
+		say("stream replace requested: next_camera=%u next_physical_sensor=%u active_camera=%u active_physical_sensor=%u active_running=%u",
+		    s->camera->sensor, s->physical_sensor, active->camera->sensor, active->physical_sensor, active->running);
+		result = stream_stop_locked(active_stream, &release, "stream-begin:replace-active");
 		if (result) goto done;
 	}
 	if (s->running) {
@@ -2363,12 +2369,13 @@ stream_begin(CMBaseObjectRef o, bool graph)
 			pthread_mutex_lock(&s->lock);
 			s->graph_running = true;
 			pthread_mutex_unlock(&s->lock);
+			say("stream graph start: running=%d worker_started=%d graph=1", s->running, s->worker_started);
 		}
 		result = 0;
 		goto done;
 	}
 	if (s->worker_started) {
-		result = stream_stop_locked(o, &release);
+		result = stream_stop_locked(o, &release, "stream-begin:reap-exited");
 		if (result) goto done;
 	}
 	int fd = open(HAKIOS_CAMERA_DEVICE, O_RDWR | O_CLOEXEC);
@@ -2436,7 +2443,7 @@ stream_start(CMBaseObjectRef o)
 }
 
 static OSStatus
-stream_stop(CMBaseObjectRef o)
+stream_stop_reason(CMBaseObjectRef o, const char *reason)
 {
 	CMBaseObjectRef release = NULL;
 
@@ -2449,15 +2456,22 @@ stream_stop(CMBaseObjectRef o)
 			s->graph_running = false;
 			s->running = false;
 			pthread_mutex_unlock(&s->lock);
+			say("stream stop requested from worker: reason=%s", reason);
 		}
 		return ERR_NOT_AVAILABLE; /* close requested, but this thread cannot join itself or attest retirement */
 	}
 	if (pthread_mutex_trylock(&capture_control) != 0) return ERR_NOT_AVAILABLE;
-	OSStatus result = stream_stop_locked(o, &release);
+	OSStatus result = stream_stop_locked(o, &release, reason);
 
 	pthread_mutex_unlock(&capture_control);
 	if (release != NULL) CFRelease(release);
 	return result;
+}
+
+static OSStatus
+stream_stop(CMBaseObjectRef o)
+{
+	return stream_stop_reason(o, "stream-stop:vtable");
 }
 
 static void
@@ -2530,7 +2544,7 @@ stream_add_attachments(CMBaseObjectRef o, CMSampleBufferRef sbuf, CFDictionaryRe
 static OSStatus
 stream_invalidate(CMBaseObjectRef o)
 {
-	return stream_stop(o);
+	return stream_stop_reason(o, "stream-invalidate");
 }
 
 static void
@@ -2538,7 +2552,7 @@ stream_finalize(CMBaseObjectRef o)
 {
 	struct stream *s = stream_of(o);
 
-	if (stream_stop(o)) say("stream finalize: stop status was not successful");
+	if (stream_stop_reason(o, "stream-finalize")) say("stream finalize: stop status was not successful");
 	stills_release(s->stills_head); /* unfulfilled requests are discarded, never counted as photographs */
 	for (int i = 0; i < OUTPUTS; i++) {
 		let_go(&s->out[i]);
@@ -2682,7 +2696,8 @@ device_request_streams(CMBaseObjectRef o, CFArrayRef streams, CFDictionaryRef op
        !CFArrayContainsValue(owner->streams,CFRangeMake(0,CFArrayGetCount(owner->streams)),
            CFArrayGetValueAtIndex(streams,0)))return ERR_PARAM;
 	if (requests++ < 3) {
-		say("device: streams asked for (%ld)%s", streams ? (long)CFArrayGetCount(streams) : 0L, options ? ", with options" : "");
+		say("device: streams asked for (%ld) request=%u%s", streams ? (long)CFArrayGetCount(streams) : 0L,
+		    requests, options ? ", with options" : "");
 		if (options != NULL) {
 			say_once("device: the request's options", CFSTR("RequestStreams"), options);
 		}
@@ -2724,7 +2739,7 @@ device_relinquish_streams(CMBaseObjectRef o, CFArrayRef streams, CFDictionaryRef
     if (streams != NULL) for (CFIndex i=0; i<CFArrayGetCount(streams); i++) {
         CMBaseObjectRef st = (CMBaseObjectRef)CFArrayGetValueAtIndex(streams,i);
         if (!CFArrayContainsValue(d->streams,CFRangeMake(0,CFArrayGetCount(d->streams)),st)) return ERR_PARAM;
-        OSStatus error = stream_stop(st); if (error) return error;
+        OSStatus error = stream_stop_reason(st, "device-relinquish-streams"); if (error) return error;
     }
 	return 0;
 }
@@ -2736,7 +2751,7 @@ device_invalidate(CMBaseObjectRef o)
 	OSStatus first = 0;
 
 	for (CFIndex i = 0; d->streams != NULL && i < CFArrayGetCount(d->streams); i++) {
-		OSStatus error = stream_stop((CMBaseObjectRef)CFArrayGetValueAtIndex(d->streams, i));
+		OSStatus error = stream_stop_reason((CMBaseObjectRef)CFArrayGetValueAtIndex(d->streams, i), "device-invalidate");
 
 		if (!first) first = error;
 	}

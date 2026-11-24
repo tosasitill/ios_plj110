@@ -425,6 +425,7 @@ static int start(uint32_t which, uint32_t mode)
         step="sensor-stream-on";cam_progress("start:stream-on");
         session.stream=true;
         e=write8(s,0x0100,1);
+        printf("X9 CAMERA STREAM-ON RETURN: sensor=%u errno=%d\n",which,e);
     }
     cam_progress_step=NULL;
     lck_mtx_lock(&camera_lock);

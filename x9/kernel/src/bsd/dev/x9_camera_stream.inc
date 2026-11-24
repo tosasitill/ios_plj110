@@ -60,7 +60,7 @@ static int cam_stream_set_locked(const struct x9_camera_sensor *s,uint8_t value)
     const bool off=value==0;
     const uint32_t bit=off?CAM_STREAM_OFF:CAM_STREAM_ON;
     struct cam_sensor_ap ap;
-    uint64_t span,end=0;
+    uint64_t span,end=0,started=mach_absolute_time();
     boolean_t old;
     uint8_t byte=0,control=0,frame_count=0,prior_control=0;
     uint32_t issued=0,ack=0,seen=0,samples=0,phase=0,idle_samples=0,sampled=0,fc_polls=0;
@@ -184,10 +184,12 @@ out:
     /* Failure cannot be repaired with an unissued opposite command. Keep
      * the original stream attempt, RAW slot, credit, map and power pinned. */
     if(e && command)e=cam_irq_fault(e);
+    uint64_t elapsed_ns;absolutetime_to_nanoseconds(mach_absolute_time()-started,&elapsed_ns);
     printf("X9 CAMERA SENSOR STREAM: epoch=%llu sensor=%u off=%u phase=%u issued=%x ack=%x "
-        "seen=%x prior_control=%x control=%x frame_count=%x sampled=%x samples=%u idle_samples=%u errno=%d "
+        "seen=%x prior_control=%x control=%x frame_count=%x sampled=%x samples=%u idle_samples=%u wall_ms=%llu errno=%d "
         "(real AP 0100; NOT RAW/AXI/IRQ/worker/map drain)\n",
-        cam_source.epoch,s->sensor,off,phase,issued,ack,seen,prior_control,control,frame_count,sampled,samples,idle_samples,e);
+        cam_source.epoch,s->sensor,off,phase,issued,ack,seen,prior_control,control,frame_count,sampled,samples,idle_samples,
+        elapsed_ns/1000000ull,e);
     if(e)printf("X9 CAMERA FBC NOTE LAST: bank=%u control=%x counter=%x prior=%x want=%x fbc_err=%d src_err=%d irq_err=%d\n",
         cam_irq_fbc_diag.bank,cam_irq_fbc_diag.control,cam_irq_fbc_diag.counter,cam_irq_fbc_diag.prior,
         cam_irq_fbc_diag.want,cam_irq_fbc.error,cam_irq_fbc.source_error,cam_irq.error);
