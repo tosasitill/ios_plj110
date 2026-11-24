@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 静态分析（387 之后，未出镜像）
+
+- **开机卡 logo 与 SMMU 挂死无关**：384/386 的 presents 在约 16s 后就是 0，而 384 的 SMMU 读一直正常到 40.55s。卡开机的原因是 mediaserverd 阻塞在相机 start 里；387 用延迟启动后开机正常，证实了这一点。
+- **更正 e36**：live DT 的 smi-dbg 节点有 `hwccf-support`，mtk-smi-dbg.c:1534 因此**不注册** SMI pm_ops。Android 这台机器上 MM SMMU 的 `mtk_smmu_power_get` 实际是 wakelock + ATF SMC PM_GET(0x803)，不是 `mtk_smi_mminfra_get_if_in_use`。x9 在 VCP 启动时已经发过 PM_GET 并一直持有引用，等效。
+- **MMUP 固件（tinysys-mmup-RV33_A.bin）**：`mminfra_mm2_mtcmos_setting(on,user)`（0xa06a）按 user 计数：user1 是 init（只有显示驱动发 GIPC MM_INFRA_OFF 时才释放），user2 是 AP 的 hwccf 投票（`mminfra_hwccf_handler`），user3 是 VCP suspend/resume。计数归零时走关断路径（0xabec）：等 SMMU CR0ACK/IRQ_CTRLACK，置 0x309f0014 bit0 让 SMMU 进 LP，再写 MM0 软件总线保护 0x300004e8=0x7ff。x9 从不发 GIPC，也一直持有投票，所以这条路径在 x9 上不会走到，**排除**。
+- **mm_mminfra_sel**：DT 里没有任何 consumer，Android 也不投它，与 x9 没有差异。
+- **mm_power_lock**：只有相机用，排除。
+- **仍未找到根因**；不出镜像。
+
 #### 2026-11-24 日志 387
 
 - 开机完成（62s presents=73，63.7s 熄屏）。mediaserverd 在 11.9s 发起的两次 sensor start 被 `start deferred` 拒绝（当时 mach uptime 已是 71.4s：串口时间戳比 mach 晚约 59.5s 起算，所以 90s 门限实际对应日志约 30.5s），之后 mediaserverd 没有重试，相机路径完全没跑，`X9 MM SRC` 一行都没有。**本轮没有拿到任何 SMMU 数据，这是镜像设计错误：延迟启动把诊断所在的代码路径挡掉了。**
