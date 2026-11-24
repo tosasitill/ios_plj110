@@ -231,7 +231,9 @@ static int cam_irq_fbc_done_locked(const struct cam_irq_event *ev)
     nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
     for(unsigned poll=0;poll<10000;poll++) {
         bool match=true;
-        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
+        /* 393: d->check is ~0.1 s and runs twice per poll; a passing first
+         * sample always gets its confirming sample (same as credit/receive). */
+        if(mach_absolute_time()>=end && !cam_irq_fbc.samples){e=CAM_FAIL(ETIMEDOUT);break;}
         e=d->check(d->context,d->lease,&cam_irq.slot->request);if(e)break; /* never under spin */
         if(!e)e=cam_irq_mapping();if(!e)e=cam_irq_power();
         if(!e)e=cam_irq_config(false);if(e)break;
@@ -250,8 +252,8 @@ static int cam_irq_fbc_done_locked(const struct cam_irq_event *ev)
         samples=cam_irq_fbc.samples;
         cam_irq_spin_drop(old);if(e)break;
         e=d->check(d->context,d->lease,&cam_irq.slot->request);if(e)break;
-        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
         if(samples==2){accepted=true;break;}
+        if(mach_absolute_time()>=end && !samples){e=CAM_FAIL(ETIMEDOUT);break;}
         delay(1);
     }
     if(!e && !accepted)e=CAM_FAIL(ETIMEDOUT);
@@ -268,7 +270,6 @@ static int cam_irq_fbc_done_locked(const struct cam_irq_event *ev)
         e=cam_irq_fbc_note_locked(bank,control,counter);
         if(!e && !cam_repeat_done_target_locked(bank,counter))e=CAM_FAIL(ESTALE);
     }
-    if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
     if(e)e=cam_irq_fbc_fault_locked(e);
     else cam_irq_fbc.count_accepted=true;
     memcpy(actual,cam_irq_fbc.after,sizeof(actual));memcpy(seen,cam_irq_fbc.seen,sizeof(seen));

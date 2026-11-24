@@ -229,13 +229,19 @@ static int cam_source_wait_locked(uint64_t epoch,uint64_t end,bool outer_only)
     for(unsigned poll=0;poll<10000;poll++) {
         bool match=true;
         int e;
-        if(mach_absolute_time()>=end)return CAM_FAIL(ETIMEDOUT);
-        e=cam_source_guard_locked(epoch);if(e)return e;
+        if(mach_absolute_time()>=end && !cam_source.samples)return CAM_FAIL(ETIMEDOUT);
+        e=CAM_SV_TIMED("source:guard",cam_source_guard_locked(epoch));if(e)return e;
+        /* 393: the MAC/PHY/OUT sweeps that feed cam_source_observe may be
+         * reused for 20 ms; read the field itself through the same observer. */
+        for(unsigned b=0;b<(outer_only?1:f->banks);b++) {
+            bool allowed=false;
+            e=cam_source_observe(f->view[b],f->offset,cam_rr(f->view[b],f->offset),&allowed);if(e)return e;
+        }
         for(unsigned b=0;b<(outer_only?1:f->banks);b++)
             if(cam_source_expected(f,b)!=s->target[b] || !(s->seen&(1u<<b)))match=false;
-        if(mach_absolute_time()>=end)return CAM_FAIL(ETIMEDOUT);
         cam_source.samples=match?cam_source.samples+1:0;
         if(cam_source.samples==2)return 0;
+        if(mach_absolute_time()>=end && !cam_source.samples)return CAM_FAIL(ETIMEDOUT);
         delay(1);
     }
     return CAM_FAIL(ETIMEDOUT);
@@ -254,7 +260,9 @@ static int cam_source_transition_locked(uint64_t epoch,bool off)
         struct cam_source_step *s=&cam_source.step[p];
         const struct cam_source_field *f=&cam_source.field[s->field];
         uint32_t raw,next;
-        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
+        /* 393: steps 0-1 issued, step 1 at samples=0 when the single 1 s
+         * budget for all steps ran out (guards). Each step gets its own. */
+        if(p!=first)end=mach_absolute_time()+span;
         e=cam_source_guard_locked(epoch);if(e)break;
         if(cam_source.issued&(1u<<p)){e=CAM_FAIL(ESTALE);break;}
         for(unsigned b=0;b<f->banks;b++)if(cam_source_expected(f,b)!=s->prior[b])e=CAM_FAIL(ESTALE);
@@ -283,7 +291,6 @@ static int cam_source_transition_locked(uint64_t epoch,bool off)
     }
     if(!e) {
         e=cam_source_guard_locked(epoch);
-        if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
     }
     if(e)cam_source_fault(e);
     else cam_source.phase=off?CAM_SOURCE_STOPPED:CAM_SOURCE_ARMED;

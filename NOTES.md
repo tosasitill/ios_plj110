@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 393 结果 + 镜像 x9-cam-src-20261124
+
+- 393（x9-cam-gate）：SMMU 第五次没卡。TG GATE 通过（`issued=7 samples=2 errno=0`，SEN=2001 VF=1），FBC BIND 通过。下一步 RX PATH（source transition，cam_source_wait_locked:236）：`fields=5 pending=1 issued=3 samples=0 errno=60`，同样是所有步骤共用 1 s 预算。另外 cam_source_observe 只靠 MAC/PHY/OUT 的完整检查刷新，检查结果被缓存时轮询看不到新值。
+- sv_request_authority 54 次/5.45 s（单次约 0.1 s）；gate/receive 的 request guard 合计降到 1.0–1.6 s。
+- 新镜像 sha256 ff1677d3220113dba499a05aaf4c92b897c12b123e414be68ee915d4e3c97a16：
+  - source transition：每步单独 1 s 预算；wait 每次轮询直接读字段并经 cam_source_observe（和完整检查同一个观察函数）；已通过的第一次采样过期后仍做确认采样；去掉结束时的总期限检查；guard 计时（source:guard）。
+  - DONE FBC worker（出帧后才会走到）：同样的确认采样规则，去掉结束时的总期限检查（每次轮询跑两次 d->check，约 0.2 s）。
+
 #### 2026-11-24 392 结果 + 镜像 x9-cam-gate-20261124
 
 - 392（x9-cam-rcv）：SMMU 第四次没卡。receive 4 个字段全过（`issued=f/0 seen=f/f errno=0`，outer=10000/701/4/1）。下一个失败点是 TG GATE：`issued=1 seen=1/1 samples=1 errno=60`（sv_gate.inc:240），8 个步骤共用 1 s 预算，同一个模式。
