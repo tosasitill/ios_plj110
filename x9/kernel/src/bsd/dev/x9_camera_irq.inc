@@ -817,16 +817,24 @@ static int cam_irq_close_locked(uint64_t epoch)
      * OFF/DONE/CPU/worker/GIC is necessary for the latter, not AXI drain.
      * No credit revocation/map release or repair of uncertain/foreign input. */
     if(session.stream)e=cam_repeat_stopped_irqs_locked(epoch);
+    cam_drain_mark("close:repeat-stopped");
     if(!e && session.stream)e=cam_stream_close_begin_locked(epoch);
+    cam_drain_mark("close:stream-begin");
     if(!e)e=cam_source_quiesce_locked(epoch);
+    cam_drain_mark("close:source-quiesce");
     if(!e)e=cam_sv_gate_quiesce_locked(epoch);
+    cam_drain_mark("close:gate-quiesce");
     if(!e)e=cam_sv_receive_quiesce_locked(epoch);
+    cam_drain_mark("close:receive-quiesce");
     if(!e && session.stream)e=cam_stream_close_controls_locked(epoch);
+    cam_drain_mark("close:controls");
     /* Sole normal DMA stop request, then restore only OUR stop/DCM after
      * the actual owned OFF/DONE/CPU/worker/GIC+ACK boundary. ACK/SMI zeros
      * do not authorize credit/map/supplier release; backing stays pinned. */
     if(!e && session.stream)e=cam_sv_dma_stop_locked(epoch);
+    cam_drain_mark("close:dma-stop");
     if(!e && session.stream)e=cam_sv_dma_stop_restore_locked(epoch);
+    cam_drain_mark("close:dma-restore");
     cam_irq.close_attempted=true;
     old=cam_irq_spin_take();cam_irq.accepting=false;owns=cam_irq.owns;
     if(owns)cam_irq_mask_all();cam_irq_spin_drop(old);
@@ -842,15 +850,19 @@ static int cam_irq_close_locked(uint64_t epoch)
     }
     lck_mtx_lock(&camera_irq_lock);
     if(!e)e=cam_irq_mapping();if(!e)e=cam_irq_wait_rwp();
+    cam_drain_mark("close:gic-rwp");
     if(!e)e=cam_irq_controller();
     /* EOI is performed by sleh AFTER filter return; don't infer it from a
      * queued callback. Two actual idle samples include PENDING/ACTIVE. Never
      * ICPENDR/ICACTIVER/EOI a source to erase unconsumed history here. */
     if(!e)e=cam_irq_wait_idle();
+    cam_drain_mark("close:gic-idle");
     if(!e)e=cam_repeat_cancel_complete_locked(epoch);
+    cam_drain_mark("close:cancel-complete");
     if(!e&&cam_irq.slot->state!=X9_CAMSV_EMPTY&&cam_irq.slot->state!=X9_CAMSV_RETIRED&&
        cam_irq.slot->state!=X9_CAMSV_CANCELLED)e=CAM_FAIL(EBUSY);
     if(!e)e=cam_sv_environment();
+    cam_drain_mark("close:environment");
     for(unsigned k=3;k&&!e;k--) {
         unsigned i=k-1;uint32_t bit=1u<<i;
         if(owns)e=cam_irq_mutation_guard();

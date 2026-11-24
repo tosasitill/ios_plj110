@@ -33,6 +33,11 @@ static unsigned key_down;
 static vm_offset_t reboot_mode_mmio;
 static int reboot_bootloader_armed;
 static int (*prior_halt_restart)(unsigned int);
+/* x9_fb_on_reset=1 (debug): every reset of this boot lands in fastboot.
+ * 0x24 is pre-armed at init, so a silent TOPRGU watchdog reset carries the
+ * bootloader mode too, and a panic restart takes the same PSCI path as an
+ * orderly bootloader reboot instead of the plain watchdog reset. */
+static int reboot_fb_on_reset;
 
 static uint32_t reboot_mode_read(void)
 {
@@ -71,14 +76,16 @@ static uint32_t reboot_mode_value(uint32_t before)
 
 static int reboot_halt_restart(unsigned int type)
 {
- if (type == kPERestartCPU && __atomic_load_n(&reboot_bootloader_armed,
-     __ATOMIC_ACQUIRE)) {
+ bool panic_restart = type == kPEPanicRestartCPU ||
+     type == kPEPanicRestartCPUNoCallouts;
+ if ((type == kPERestartCPU && __atomic_load_n(&reboot_bootloader_armed,
+     __ATOMIC_ACQUIRE)) || (panic_restart && reboot_fb_on_reset)) {
   uint32_t before = reboot_mode_read();
   uint32_t wanted = reboot_mode_value(before);
   reboot_mode_write(wanted);
   uint32_t actual = reboot_mode_read();
-  printf("X9 BOOTLOADER: 1c010024 %08x -> %08x (read %08x); PSCI SYSTEM_RESET\n",
-      before, wanted, actual);
+  printf("X9 BOOTLOADER: 1c010024 %08x -> %08x (read %08x); PSCI SYSTEM_RESET type=%u\n",
+      before, wanted, actual, type);
   __asm__ volatile("dsb sy" ::: "memory");
   {
    register uint64_t x0 __asm__("x0") = 0x84000009u;
@@ -241,6 +248,13 @@ void sweet_x9_keys_init(void) {
   reboot_install_hook();
   printf("X9 BOOTLOADER: watchdog mode mapped at %lx; root sysctl debug.x9_reboot_bootloader ready\n",
       (unsigned long)reboot_mode_mmio);
+  if(sweet_x9_arg("x9_fb_on_reset",0)==1) {
+   uint32_t before=reboot_mode_read(),wanted=reboot_mode_value(before);
+   reboot_mode_write(wanted);
+   reboot_fb_on_reset=1;
+   printf("X9 BOOTLOADER: x9_fb_on_reset: 1c010024 %08x -> %08x (read %08x); panic/WDT reset goes to fastboot\n",
+       before,wanted,reboot_mode_read());
+  }
  } else printf("X9 BOOTLOADER: watchdog mapping failed; sysctl unavailable\n");
  if(sweet_x9_arg("x9_pmic_keys",1)!=1)return;
  thread_t t;
