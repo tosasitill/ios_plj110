@@ -25,6 +25,38 @@ extern int sweet_x9_arg(const char *,int);
 LCK_GRP_DECLARE(haptic_group,"x9-haptic");
 LCK_MTX_DECLARE(haptic_lock,&haptic_group);
 LCK_MTX_DECLARE(haptic_write_lock,&haptic_group);
+/* diag30: who holds the haptic locks. Camera's audio session restart of the
+ * Actuator stalled mediaserverd for 9 s (AQMEIO timeout) before any open
+ * reached this driver; record the last acquirer of each lock and log a busy
+ * lock or a long wait (state=haptic_lock, write=haptic_write_lock). */
+static const char *x9h_holder[2];
+static uint64_t x9h_since[2];
+static uint64_t x9h_now(void)
+{uint64_t t,ns;clock_get_uptime(&t);absolutetime_to_nanoseconds(t,&ns);return ns;}
+static void x9h_lock(lck_mtx_t *m,unsigned w,const char *fn)
+{
+    if(lck_mtx_try_lock(m)){x9h_holder[w]=fn;x9h_since[w]=x9h_now();return;}
+    uint64_t t0=x9h_now(),held=t0-x9h_since[w];const char *h=x9h_holder[w];
+    char name[32]={0};proc_selfname(name,sizeof(name));
+    bool media=!strncmp(name,"mediaserverd",12);
+    static unsigned busy_logs;
+    if((media || held>=50000000ULL) && busy_logs<60){busy_logs++;
+        printf("X9 HAPTIC LOCK BUSY: lock=%s caller=%s in %s holder=%s held_ms=%llu\n",
+            w?"write":"state",name,fn,h?h:"?",held/1000000);}
+    lck_mtx_lock(m);
+    uint64_t now=x9h_now(),waited=now-t0;x9h_holder[w]=fn;x9h_since[w]=now;
+    static unsigned wait_logs;
+    if(waited>=200000000ULL && wait_logs<40){wait_logs++;
+        printf("X9 HAPTIC LOCK WAIT: lock=%s caller=%s in %s waited_ms=%llu previous holder=%s\n",
+            w?"write":"state",name,fn,waited/1000000,h?h:"?");}
+}
+static void x9h_call(const char *what,dev_t d,unsigned long cmd)
+{
+    char name[32]={0};proc_selfname(name,sizeof(name));
+    static unsigned logs;
+    if(strncmp(name,"mediaserverd",12) || logs>=120)return;
+    logs++;printf("X9 HAPTIC CALL: %s minor=%d cmd=%lx by %s\n",what,minor(d),cmd,name);
+}
 static struct x9_haptic_status hs={.version=X9_HAPTIC_VERSION,
     .input_rate=X9_HAPTIC_INPUT_RATE,.rtp_rate=X9_HAPTIC_RTP_RATE,.f0_millihz=173000};
 static int8_t ring[X9_HAPTIC_RING];
@@ -91,9 +123,10 @@ static int start_locked(struct x9_haptic_start *s)
 }
 static int haptic_open(dev_t d,int f,__unused int t,struct proc *p)
 {
+    x9h_call("open",d,(unsigned long)f);
     if(minor(d)==0)return f&FWRITE?EACCES:0;
     if(minor(d)!=1 || !(f&FWRITE) || !allowed(p))return EPERM;
-    lck_mtx_lock(&haptic_lock);int e=hs.mode<2?EPERM:writer?EBUSY:0;
+    x9h_lock(&haptic_lock,0,__func__);int e=hs.mode<2?EPERM:writer?EBUSY:0;
     if(!e)writer=true;
     static unsigned opens;
     if(++opens<=8 || e){char name[32]={0};proc_name(proc_pid(p),name,sizeof(name));
@@ -103,7 +136,7 @@ static int haptic_open(dev_t d,int f,__unused int t,struct proc *p)
 static int haptic_close(dev_t d,__unused int f,__unused int t,__unused struct proc *p)
 {
     if(minor(d)!=1)return 0;
-    lck_mtx_lock(&haptic_write_lock);lck_mtx_lock(&haptic_lock);
+    x9h_lock(&haptic_write_lock,1,__func__);x9h_lock(&haptic_lock,0,__func__);
     int e=stop_locked();writer=false;
     bzero(&packet,sizeof(packet));lck_mtx_unlock(&haptic_lock);lck_mtx_unlock(&haptic_write_lock);return e;
 }
@@ -111,7 +144,7 @@ static int haptic_read(dev_t d,struct uio *u,__unused int flags)
 {
     if(minor(d)!=0 || uio_offset(u) || uio_resid(u)<sizeof(hs))return EINVAL;
     struct x9_haptic_status s;
-    lck_mtx_lock(&haptic_lock);s=hs;s.queued_frames=count;lck_mtx_unlock(&haptic_lock);
+    x9h_lock(&haptic_lock,0,__func__);s=hs;s.queued_frames=count;lck_mtx_unlock(&haptic_lock);
     return uiomove((char *)&s,sizeof(s),u);
 }
 static void stock_start_locked(const struct x9_haptic_stock_wave *w,uint32_t intensity)
@@ -121,6 +154,7 @@ static int haptic_write(dev_t d,struct uio *u,__unused int flags)
     if(minor(d)!=1 || !uio_isuserspace(u) || uio_iovcnt(u)!=1 ||
        uio_resid(u)<24 || uio_resid(u)>sizeof(packet))return EINVAL;
     if(!lck_mtx_try_lock(&haptic_write_lock))return EAGAIN;
+    x9h_holder[1]=__func__;x9h_since[1]=x9h_now();
     size_t bytes=(size_t)uio_resid(u);
     user_addr_t address=0;user_size_t length=0;
     int e=uio_getiov(u,0,&address,&length)?EINVAL:0;
@@ -174,6 +208,7 @@ static int haptic_write(dev_t d,struct uio *u,__unused int flags)
 }
 static int haptic_ioctl(dev_t d,u_long cmd,caddr_t data,__unused int f,struct proc *p)
 {
+    if(cmd!=X9_HAPTIC_GET_STATUS_NOWAIT)x9h_call("ioctl",d,cmd);
     if(cmd==X9_HAPTIC_GET_STATUS_NOWAIT) {
         if(!lck_mtx_try_lock(&haptic_lock))return EAGAIN;
         hs.queued_frames=count;memcpy(data,&hs,sizeof(hs));lck_mtx_unlock(&haptic_lock);return 0;
@@ -181,7 +216,7 @@ static int haptic_ioctl(dev_t d,u_long cmd,caddr_t data,__unused int f,struct pr
     if(cmd!=X9_HAPTIC_GET_STATUS && (minor(d)!=1 || !allowed(p)))return EPERM;
     /* Control and PCM copyin use one order. STOP cannot retire a session
      * midway through conversion; no worker ever takes write_lock. */
-    lck_mtx_lock(&haptic_write_lock);lck_mtx_lock(&haptic_lock);int e=0;
+    x9h_lock(&haptic_write_lock,1,__func__);x9h_lock(&haptic_lock,0,__func__);int e=0;
     if(cmd==X9_HAPTIC_GET_STATUS){hs.queued_frames=count;memcpy(data,&hs,sizeof(hs));}
     else if(!writer)e=EPERM;
     else if(cmd==X9_HAPTIC_START) {
@@ -236,7 +271,7 @@ static int haptic_ioctl(dev_t d,u_long cmd,caddr_t data,__unused int f,struct pr
 static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
 {
     for(;;) {
-        lck_mtx_lock(&haptic_lock);
+        x9h_lock(&haptic_lock,0,__func__);
         uint64_t now=now_ns();
         if(hs.flags&X9_HAPTIC_RUNNING) {
             /* An explicit client must not hold the chip running forever.

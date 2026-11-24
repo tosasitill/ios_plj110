@@ -52,8 +52,14 @@ static int cam_sv_shutdown_guard(uint64_t epoch)
         return CAM_FAIL(ESTALE);
     for(unsigned bank=0;bank<2;bank++) {
         e=cam_sv_power_guard();if(e)return e;
-        for(unsigned n=0;n<sizeof(disabled)/sizeof(disabled[0]);n++)
-            if(cam_rr(m->sv[bank],disabled[n]))return CAM_FAIL(EBUSY);
+        /* diag30: Android sv_reset never checks these. After a reset STG
+         * 0x240/0x244/0x248 keep 0x5f3700/0x105f3700/0x205f3700 (start logs
+         * them as CAMSV INHERITED); refusing made every close EBUSY. Log only. */
+        for(unsigned n=0;n<sizeof(disabled)/sizeof(disabled[0]);n++) {
+            uint32_t v=cam_rr(m->sv[bank],disabled[n]);
+            static unsigned logs;
+            if(v && logs<16){logs++;printf("X9 CAMERA CAMSV SHUTDOWN INHERITED: bank=%u off=%x value=%x (Android does not check)\n",bank,disabled[n],v);}
+        }
     }
     for(unsigned n=0;n<sizeof(ports)/sizeof(ports[0]);n++) {
         vm_offset_t larb=cam_smi.larb[ports[n].larb];
@@ -143,7 +149,14 @@ static int cam_sv_shutdown_locked(uint64_t epoch)
     e=cam_sv_shutdown_guard(epoch);if(e)goto out;
     for(unsigned b=0;b<2;b++) {
         for(unsigned n=0;n<3;n++)
-            if(cam_rr(m->sv[b],cam_sv_shutdown_stop[n])){e=CAM_FAIL(EBUSY);goto out;}
+        {
+            /* diag30: a previous reset leaves its ACK (2) in SW_RST_CTL; the
+             * sequence below writes 0 before issuing the reset, as sv_reset does.
+             * Only a reset still in progress (any other bit) refuses. */
+            uint32_t v=cam_rr(m->sv[b],cam_sv_shutdown_stop[n]);
+            if(v&~2u){e=CAM_FAIL(EBUSY);goto out;}
+            if(v)printf("X9 CAMERA CAMSV SHUTDOWN INHERITED: bank=%u stop=%x value=%x (prior reset ACK)\n",b,cam_sv_shutdown_stop[n],v);
+        }
         for(unsigned n=0;n<CAM_SV_QOS_COUNT;n++) {
             bool allowed=false;
             e=cam_sv_power_guard();if(e)goto out;
