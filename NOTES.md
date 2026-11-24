@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 日志 386 + 镜像 x9-cam-defer-mmsrc-20261124
+
+- **386**：不投票后 `X9 MM SMMU POWER GET: on=1`（AP 没有新增位），`res:csi-power` 完成，**卡在 `res:smmu-snapshot`**，即第一次读 SMMU 就挂。四个 mminfra 域 ACK 一直亮着，MM_2 en=8 sta=0。仍卡 logo，cluster0 100%。
+- **结论**：已排除"域没上电"，投票也不是原因（无投票照样挂）。384 里同一快照能过，可能只是时机碰巧：同样是在 VCP/MMUP 启动之后、相机读 SMMU 的时候挂。怀疑 mminfra 的时钟或总线 source 被 MMUP 收掉了，而 MTCMOS ACK 仍亮（mm_mminfra_sel 由 MMPC XPU12 / VCP XPU3 做 DVFS）。尚未证实。
+- **本镜像**：
+  - `X9 MM SRC <tag>`：GET 和 stall 时打印 MMPC src-ctrl（0x31b51000，fsm/hw 各 9 项：DDRSRC/EMI/BUSPLL/INFRA/CK26M/PMIC/VCORE/…）和 mm_proc MTCMOS（0x1c00d04c），与 Android mminfra_power_mon 读的是同一组寄存器；只读不判。
+  - **开机不再被相机拖住**：uptime 未到 `x9_cam_defer` 秒（默认 90，0 关闭）前拒绝 HAKIOS_CAMERA_SENSOR，返回 EBUSY，日志打印 `start deferred`。开机后再开相机照常启动。
+- `x9/out/x9-cam-defer-mmsrc-20261124/boot.img` sha256 `5adf8b376b04b8325df96d8824a474063f1ddacbf02bccd1f7d907e9e14e1b46`。
+
 #### 2026-11-24 日志 385 + 镜像 x9-cam-smmu-novote-20261124
 
 - **385**：`X9 MM SMMU POWER GET: on=1`，四个 mminfra 域 ACK 全亮，AP 新投了 infra1(0x40000000)/infra2(bank1 bit0)。随后 CSI 投票完成（bank1 EN=ec01、ACK=ee01），但相机再无输出，停在 `configure:source-prepare`；384 里同一位置 3ms 后就有 `CAM RATE ENTRY`。CSI 之后的下一步就是 resources 的 SMMU 寄存器快照（384 中这一步正常）。依然卡 logo，CPU 100/100。

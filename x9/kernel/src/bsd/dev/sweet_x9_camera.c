@@ -178,8 +178,24 @@ static bool cam_watchdog_started;
 static volatile unsigned cam_mmio_region,cam_mmio_off,cam_mmio_reads;
 /* A long or stuck sensor start must not park mediaserverd's other opens /
  * writes on camera_control_lock during boot: they get EBUSY at once. */
+#include <pexpert/pexpert.h>
 static volatile bool cam_start_busy;
 extern void x9_mm_power_smmu_dump(const char *tag);
+/* Logs 383-386: a sensor start issued by mediaserverd at ~11s ends in an
+ * MM SMMU read that never returns, and boot stays on the logo. Refuse
+ * starts until uptime >= x9_cam_defer seconds (default 90, 0 = off) so boot
+ * completes first; a later Camera open starts normally. */
+static bool cam_boot_deferred(void)
+{
+    static int defer_s=-1;
+    if(defer_s<0){int v=90;if(!PE_parse_boot_argn("x9_cam_defer",&v,sizeof(v)))v=90;defer_s=v<0?0:v;}
+    if(!defer_s)return false;
+    uint64_t ns;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+    if(ns>=(uint64_t)defer_s*NSEC_PER_SEC)return false;
+    static unsigned said;
+    if(said++<4)printf("X9 CAMERA: start deferred until %ds uptime (now %llums, x9_cam_defer)\n",defer_s,ns/1000000ull);
+    return true;
+}
 static void cam_progress(const char *step)
 {
     cam_progress_t0=mach_absolute_time();cam_progress_step=step;
@@ -760,6 +776,7 @@ static int cam_write(dev_t d,struct uio *uio,__unused int flags)
     struct hakios_camera_command c;if(uio_resid(uio)!=sizeof(c))return CAM_FAIL(EINVAL);
     int e=uiomove((char*)&c,sizeof(c),uio);if(e)return e;if(c.bytes)return CAM_FAIL(ENOTSUP);
     if(cam_start_busy)return CAM_FAIL(EBUSY);
+    if(c.command==HAKIOS_CAMERA_SENSOR && cam_boot_deferred())return CAM_FAIL(EBUSY);
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
     if(!opened)e=CAM_FAIL(ENXIO);
     else if(control_stop_issued)e=ESHUTDOWN;

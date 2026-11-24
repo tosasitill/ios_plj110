@@ -173,10 +173,29 @@ bool x9_mm_power_smmu_live(void)
 {
     return vote_held && !power_fault && mm_smmu_domains_on(NULL);
 }
+/* live DT mminfra-debug: mmpc-src-ctrl-v2 base 31b51000, fsm/hw per
+ * resource (DDRSRC, EMI, BUSPLL, INFRA, CK26M, PMIC, VCORE, +2), and
+ * mm-proc-mtcmos 1c00d04c bit31. Android mminfra_power_mon reads the same
+ * words. AO/MMPC pages only; observation, never a gate or a write. */
+static const unsigned mmpc_src_fsm[9] = {0x18,0x38,0x58,0x78,0x98,0xb8,0xd8,0x1d8,0x1f8};
+static const unsigned mmpc_src_hw[9] = {0x1c,0x3c,0x5c,0x7c,0x9c,0xbc,0xdc,0x1dc,0x1fc};
+static void mm_mmpc_src_dump(const char *tag)
+{
+    static vm_offset_t src, proc;
+    uint32_t f[9], h[9];
+    if (!src) src = ml_io_map(0x31b51000, 0x1000);
+    if (!proc) proc = ml_io_map(0x1c00d000, 0x1000);
+    if (!src || !proc) return;
+    for (unsigned i = 0; i < 9; i++) { f[i] = mm_read(src, mmpc_src_fsm[i]); h[i] = mm_read(src, mmpc_src_hw[i]); }
+    printf("X9 MM SRC %s: fsm=%x/%x/%x/%x/%x/%x/%x/%x/%x hw=%x/%x/%x/%x/%x/%x/%x/%x/%x mm_proc=%x\n",
+        tag, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8],
+        h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8], mm_read(proc, 0x4c));
+}
 void x9_mm_power_smmu_dump(const char *tag)
 {
     uint32_t v[6] = {0};
     bool on = mm_smmu_domains_on(v);
+    mm_mmpc_src_dump(tag);
     printf("X9 MM SMMU POWER %s: on=%u ao=%x infra0=%x infra1=%x infra2=%x ack0=%x ack1=%x "
         "mm2_en=%x mm2_sta=%x ap_en0=%x ap_en1=%x refs=%u owned=%x/%x held=%u fault=%u/%u\n",
         tag, on, v[0], v[1], v[2], v[3], v[4], v[5],
