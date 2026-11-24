@@ -824,7 +824,17 @@ static int cam_write(dev_t d,struct uio *uio,__unused int flags)
     struct hakios_camera_command c;if(uio_resid(uio)!=sizeof(c))return CAM_FAIL(EINVAL);
     int e=uiomove((char*)&c,sizeof(c),uio);if(e)return e;if(c.bytes)return CAM_FAIL(ENOTSUP);
     if(cam_start_busy)return CAM_FAIL(EBUSY);
-    if(c.command==HAKIOS_CAMERA_SENSOR && cam_boot_deferred())return CAM_FAIL(EBUSY);
+    /* Log 404: returning EBUSY lost the start (mediaserverd never retried).
+     * Wait, holding no lock, so the open/close lands outside the 17-24 s
+     * early-boot window where diag8-11 reset (logs 383-386, 420, 421). */
+    if(c.command==HAKIOS_CAMERA_SENSOR && cam_boot_deferred()) {
+        printf("X9 CAMERA: start waits for x9_cam_defer before touching hardware\n");
+        while(cam_boot_deferred()) {
+            assert_wait_timeout((event_t)&cam_start_busy,THREAD_UNINT,500,NSEC_PER_MSEC);
+            thread_block(THREAD_CONTINUE_NULL);
+        }
+        printf("X9 CAMERA: deferred start proceeds\n");
+    }
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
     if(!opened)e=CAM_FAIL(ENXIO);
     else if(control_stop_issued)e=ESHUTDOWN;
