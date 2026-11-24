@@ -357,11 +357,44 @@ sweet_surface_insert_locked(SweetSurface *s)
  * longer in the table (held by mappings/GPU imports only), and the top
  * creators. Observation only; no purge, no limit change.
  */
+static uint32_t sweet_surface_refused;     /* budget refusals since boot */
+static uint32_t sweet_surface_zombie_drops; /* diag26: zombie views that let their surface go */
+
+/*
+ * diag26: every 30 s (checked on create) say how the wired budget is spent,
+ * so a leak outside the table is visible before anything is refused.
+ */
+static void
+sweet_surface_periodic(void)
+{
+	static uint64_t next;
+	uint64_t now = mach_absolute_time(), ns;
+	absolutetime_to_nanoseconds(now, &ns);
+	if (ns < next || sweet_surface_lock == NULL) {
+		return;
+	}
+	next = ns + 30ull * NSEC_PER_SEC;
+	uint64_t table = 0;
+	uint32_t live = 0;
+	IOLockLock(sweet_surface_lock);
+	for (uint32_t id = 1; id < SWEET_SURFACE_MAX_ID; id++) {
+		SweetSurface *t = sweet_surface_table[id];
+		if (t != NULL && OSDynamicCast(IOBufferMemoryDescriptor, t->memory) != NULL) {
+			live++;
+			table += t->allocSize;
+		}
+	}
+	IOLockUnlock(sweet_surface_lock);
+	uint64_t wired = sweet_surface_wired;
+	IOLog("SWEET SURF WIRED: up %llu s wired %llu MiB of %llu; table %u surfaces %llu MiB; outside table %lld MiB; refused %u; zombie drops %u\n",
+	    ns / NSEC_PER_SEC, wired >> 20, SWEET_SURFACE_WIRED_MAX >> 20, live, table >> 20,
+	    ((long long)wired - (long long)table) / (1 << 20), sweet_surface_refused, sweet_surface_zombie_drops);
+}
+
 static void
 sweet_surface_budget_audit(uint32_t want)
 {
-	static uint32_t refused;
-	uint32_t n = ++refused;
+	uint32_t n = ++sweet_surface_refused;
 	if (n > 4 && n % 64) {
 		return;
 	}
@@ -997,6 +1030,8 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
 	uint32_t len = args->structureInputSize;
 	char *copy = NULL;
 	IOReturn ret;
+
+	sweet_surface_periodic();
 
 	if (args->structureInputDescriptor != NULL) {
 		len = (uint32_t)args->structureInputDescriptor->getLength();
@@ -1695,6 +1730,16 @@ IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, v
 		sweet_surface_map_remove(ref->data);
 		OSSafeReleaseNULL(ref->data);
 		sweet_surface_put(ref->surface);
+		/*
+		 * diag26: the zombie keeps only its state page mapping (the map holds
+		 * the state descriptor). Holding the surface too kept every released
+		 * surface's pixels wired: ~1.46 GiB outside the table by uptime 30 s,
+		 * after which all creates (camera preview pool included) failed.
+		 * Only fRefs is searched by id; zombies are never looked at again.
+		 */
+		ref->surface->release();
+		ref->surface = NULL;
+		sweet_surface_zombie_drops++;
 		ref->released = true;
 		ref->detached = false;
 		if (fZombies != NULL && fZombies->setObject(ref)) {
