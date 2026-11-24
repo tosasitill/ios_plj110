@@ -148,7 +148,14 @@ static int cam_sv_dma_stop_locked(uint64_t epoch)
     if(dcm_reg>=cam_sv.count || stop_reg>=cam_sv.count)return CAM_FAIL(ESTALE);
     for(unsigned bank=0;bank<2;bank++) {
         if(cam_sv.expected[bank][dcm_reg]>1)return CAM_FAIL(EBUSY);
-        if(cam_sv.expected[bank][stop_reg])return CAM_FAIL(EBUSY);
+        /* 399: open logs "CAMSV INHERITED: off=1020 value=2": the ACK bit of
+         * the previous (cold) reset stays set with the command bit clear.
+         * Android sv_reset writes 0,1 and polls bit1 without checking prior.
+         * Only a pending command (bit0) or unknown bits still refuse. */
+        if(cam_sv.expected[bank][stop_reg]&~2u)return CAM_FAIL(EBUSY);
+        if(cam_sv.expected[bank][stop_reg] && !bank)
+            printf("X9 CAMERA DMA STOP ADOPT: inherited SW_RST=%x (stale ACK, Android does not check)\n",
+                cam_sv.expected[bank][stop_reg]);
         cam_dma_stop.dcm_prior[bank]=cam_sv.expected[bank][dcm_reg];
         cam_dma_stop.prior[bank]=cam_sv.expected[bank][stop_reg];
     }

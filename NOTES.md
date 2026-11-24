@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 399 结果 + 镜像 x9-cam-dma-20261124
+
+- 399（x9-cam-stop）：第二次拿到 RAW（RAW PUBLISH 4096x3072，DONE FBC accepted）。关闭流程 STREAM STOP admitted=1 → RX PATH off（issued=3ff）→ TG GATE off → RECEIVE off → STREAM CONTROLS stopped=1，全部 errno=0。然后 IRQ CLOSE `restore=16`（EBUSY），而且没有打印 `DMA STOP` 行。
+- 根因（静态 + 日志）：cam_sv_dma_stop_locked 在 capture 之前就因为 `expected[bank][0x1020]!=0` 返回 EBUSY；open 时日志有 `CAMSV INHERITED: off=1020 value=2`，也就是上一次复位留下的 ACK 位（bit1）还在，命令位 bit0 是 0。Android sv_reset 写 0、写 1 再轮询 bit1，不检查之前的值。
+- 修复：只有 bit0 或未知位非零才拒绝；只有 ACK 位残留时打印 ADOPT 后继续。restore 写回原值 2（bit0=0），observe 规则不变。注意：残留 ACK 意味着这次的 "stop ACK" 没有证明力，只能当作 Android 等价行为。
+- 关闭流程耗时 76→119 s（43 s），仍然是 guard 造成的。
+- sha256 66db84539e69277f89fb29267afac45a82b2ec832d1f012d4bd84d7c53215d9a。
+
 #### 2026-11-24 398：第一张真实 RAW 帧 + 镜像 x9-cam-stop-20261124
 
 - 398（x9-cam-done）：`DONE FBC count_accepted=1 samples=2 errno=0`（actual=e2000101），`X9 CAMERA RAW PUBLISH: sensor=1 capture_id=1 seq=1 width=4096 height=3072 stride=5120 bytes=15728640`，SOF→DONE 间隔约 13.7 ms（tick 差 13722240）。这是 x9 第一张通过原生 MM SMMU/CAMSV DMA 拿到的相机 RAW 帧。内容（是否是有效图像）还没有检查。
