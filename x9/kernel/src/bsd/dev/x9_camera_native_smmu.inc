@@ -416,17 +416,17 @@ static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m
 {
     struct cam_native_snapshot prior,now;
     int e;
-    cam_native_match_step="retire:entry";
+    {cam_native_match_step="retire:entry";cam_drain_mark(cam_native_match_step);}
     lck_mtx_lock(&camera_smmu_lock);
     e=cam_smmu_identity(m);
     if(!e && (!m->native || !m->native_started || m->native_retire_attempted ||
        m->native_restored || m->pending || m->shared_attempted ||
        m->native_cr0!=CAM_SMMU_CR0))e=CAM_FAIL(ESTALE);
-    cam_native_match_step="retire:storage";
+    {cam_native_match_step="retire:storage";cam_drain_mark(cam_native_match_step);}
     if(!e)e=cam_smmu_storage(m);
-    cam_native_match_step="retire:live";
+    {cam_native_match_step="retire:live";cam_drain_mark(cam_native_match_step);}
     if(!e)e=cam_smmu_live(m);
-    cam_native_match_step="retire:admit";
+    {cam_native_match_step="retire:admit";cam_drain_mark(cam_native_match_step);}
     if(!e)e=cam_native_producer_guard_locked(epoch,m);
     if(e)goto out;
     m->native_retire_attempted=true;m->native_retire_epoch=epoch;
@@ -434,58 +434,58 @@ static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m
     volatile uint64_t *ste=(volatile uint64_t *)m->ste.va+CAM_SMMU_SID*8;
     /* Actual BBM first breaks ONLY SID80. Non-camera STE policy is intact.
      * Record the intended phase before any uncertain cache publication. */
-    cam_native_match_step="retire:bbm";
+    {cam_native_match_step="retire:bbm";cam_drain_mark(cam_native_match_step);}
     m->native_ste_phase=1;ste[0]=0;__asm__ volatile("dsb sy":::"memory");
-    cam_native_match_step="retire:bbm-cache";
+    {cam_native_match_step="retire:bbm-cache";cam_drain_mark(cam_native_match_step);}
     e=cam_cache_range(m->ste.va+CAM_SMMU_SID*64,64,CAM_CACHE_CLEAN);
-    cam_native_match_step="retire:bbm-guard";
+    {cam_native_match_step="retire:bbm-guard";cam_drain_mark(cam_native_match_step);}
     if(!e)e=cam_native_producer_guard_locked(epoch,m);
-    cam_native_match_step="retire:cfgi-cd";
+    {cam_native_match_step="retire:cfgi-cd";cam_drain_mark(cam_native_match_step);}
     if(!e) {
         const struct cam_smmu_cmd cfg[2]={
             {{CAM_SMMU_CFGI_STE|((uint64_t)CAM_SMMU_SID<<32),1}},
             {{CAM_SMMU_CFGI_CD|((uint64_t)CAM_SMMU_SID<<32),1}}};
         e=cam_smmu_submit(m,cfg,2); /* actual CFGI80/CD80 plus trailing SYNC */
     }
-    cam_native_match_step="retire:cfgi-guard";
+    {cam_native_match_step="retire:cfgi-guard";cam_drain_mark(cam_native_match_step);}
     if(!e)e=cam_native_producer_guard_locked(epoch,m);
-    cam_native_match_step="retire:tlbi";
+    {cam_native_match_step="retire:tlbi";cam_drain_mark(cam_native_match_step);}
     if(!e) {
         const struct cam_smmu_cmd tlbi={{CAM_SMMU_TLBI_NH_ASID|((uint64_t)CAM_SMMU_ASID<<48),0}};
         e=cam_smmu_submit(m,&tlbi,1); /* actual ASID1 invalidation + SYNC */
     }
-    cam_native_match_step="retire:tlbi-guard";
+    {cam_native_match_step="retire:tlbi-guard";cam_drain_mark(cam_native_match_step);}
     if(!e)e=cam_native_producer_guard_locked(epoch,m);
-    cam_native_match_step="retire:ste-bypass";
+    {cam_native_match_step="retire:ste-bypass";cam_drain_mark(cam_native_match_step);}
     if(!e) {
         m->native_ste_phase=2;
         for(unsigned w=1;w<8;w++)ste[w]=w==1 && m->native_bypass && (m->idr1&(1u<<27))?1ull<<44:0;
         __asm__ volatile("dsb sy":::"memory");
-        cam_native_match_step="retire:ste-bypass-cache";
+        {cam_native_match_step="retire:ste-bypass-cache";cam_drain_mark(cam_native_match_step);}
         e=cam_cache_range(m->ste.va+CAM_SMMU_SID*64,64,CAM_CACHE_CLEAN);
     }
-    cam_native_match_step="retire:ste-bypass-guard";
+    {cam_native_match_step="retire:ste-bypass-guard";cam_drain_mark(cam_native_match_step);}
     if(!e)e=cam_native_producer_guard_locked(epoch,m);
-    cam_native_match_step="retire:ste-stream";
+    {cam_native_match_step="retire:ste-stream";cam_drain_mark(cam_native_match_step);}
     if(!e) {
         m->native_ste_phase=3;ste[0]=m->native_bypass?1ull|(4ull<<1):1ull;
         __asm__ volatile("dsb sy":::"memory");
-        cam_native_match_step="retire:ste-stream-cache";
+        {cam_native_match_step="retire:ste-stream-cache";cam_drain_mark(cam_native_match_step);}
         e=cam_cache_range(m->ste.va+CAM_SMMU_SID*64,64,CAM_CACHE_CLEAN);
     }
-    cam_native_match_step="retire:ste-stream-cfgi";
+    {cam_native_match_step="retire:ste-stream-cfgi";cam_drain_mark(cam_native_match_step);}
     if(!e) {
         const struct cam_smmu_cmd cfg={{CAM_SMMU_CFGI_STE|((uint64_t)CAM_SMMU_SID<<32),1}};
         e=cam_smmu_submit(m,&cfg,1);
     }
-    cam_native_match_step="retire:ste-stream-guard";
+    {cam_native_match_step="retire:ste-stream-guard";cam_drain_mark(cam_native_match_step);}
     if(!e)e=cam_native_producer_guard_locked(epoch,m);
-    cam_native_match_step="retire:ste-live";
+    {cam_native_match_step="retire:ste-live";cam_drain_mark(cam_native_match_step);}
     if(!e)e=cam_smmu_storage(m);if(!e)e=cam_smmu_live(m);
     if(!e) {
         /* The IRQ worker takes camera_smmu_lock. Drop it while disabling and
          * draining the source, then revalidate the original producer proof. */
-        cam_native_match_step="retire:irq-shutdown";
+        {cam_native_match_step="retire:irq-shutdown";cam_drain_mark(cam_native_match_step);}
         lck_mtx_unlock(&camera_smmu_lock);
         e=cam_smmu_irq_shutdown(m);
         lck_mtx_lock(&camera_smmu_lock);
@@ -497,11 +497,11 @@ static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m
         cam_native_read(m,&now);
         /* No untranslated source is left: exact OFF/gates and bus idle
          * precede SMMU/queue disable. GBPA is NEVER changed to hide traffic. */
-        cam_native_match_step="retire:disable";
+        {cam_native_match_step="retire:disable";cam_drain_mark(cam_native_match_step);}
         e=cam_native_enable(m,&now,0);
     }
     for(unsigned i=0;i<3 && !e;i++) {
-        cam_native_match_step="retire:base";
+        {cam_native_match_step="retire:base";cam_drain_mark(cam_native_match_step);}
         e=cam_native_producer_guard_locked(epoch,m);
         if(!e)e=cam_native_restore_base(m,&now,i,prior.base[i]);
         if(!e && now.base[i]!=prior.base[i])prior.base[i]=now.base[i]; /* observed inert base */
@@ -510,7 +510,7 @@ static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m
     const char *const field_steps[]={"retire:strtab-cfg","retire:cr1","retire:cr2",
         "retire:cmdq-prod","retire:cmdq-cons"};
     for(unsigned i=0;i<sizeof(fields)/sizeof(fields[0]) && !e;i++) {
-        cam_native_match_step=field_steps[i];
+        {cam_native_match_step=field_steps[i];cam_drain_mark(cam_native_match_step);}
         e=cam_native_producer_guard_locked(epoch,m);
         /* CMDQ cursors are restored ONLY AFTER full-target real SYNC
          * consumption AND CR0/ACK CMDQEN=0. OPPO device_reset writes both
@@ -528,11 +528,11 @@ static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m
      * wrapper words changed by this host, keeping inherited bits exact.
      * A partial/failed store stays terminal with MM and all backing held. */
     for(unsigned i=4;i && !e;i--)if(m->native_wp_issued&(1u<<(i-1))) {
-        cam_native_match_step="retire:wrapper";
+        {cam_native_match_step="retire:wrapper";cam_drain_mark(cam_native_match_step);}
         e=cam_native_producer_guard_locked(epoch,m);
         if(!e)e=cam_native_wp_write(m,&now,i-1,UINT32_MAX,prior.wp[i-1]);
     }
-    if(!e)cam_native_match_step="retire:final-prior";
+    if(!e){cam_native_match_step="retire:final-prior";cam_drain_mark(cam_native_match_step);}
     if(!e)e=cam_native_producer_guard_locked(epoch,m);
     if(!e)e=cam_native_match(m,&prior);
     if(!e) {

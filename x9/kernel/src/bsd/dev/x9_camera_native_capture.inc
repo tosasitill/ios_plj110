@@ -530,6 +530,7 @@ static int cam_native_capture_power_guard_locked(uint64_t epoch)
          * RAW_PRIVATE, no request/credit/source and exact fresh cold priors.
          * The original prepare/cache error remains terminal and pinned. */
         e=cam_native_unstarted_retire_locked(epoch,m);
+        cam_drain_mark("fault:retirement-check");
         if(!e)e=x9_camera_native_smmu_retirement_check(epoch,m);
         if(!e) {
             lck_mtx_lock(&camera_native_capture_lock);
@@ -623,6 +624,7 @@ static int cam_native_capture_off_locked(struct cam_native_capture_context *c,ui
      * yet complete DMA/translation retirement. Unstarted startup failures
      * need a distinct never-issued proof; do not route them through streamed
      * receipts or simply return success because prepared/stream is false. */
+    cam_drain_mark("off:irq-stop-or-unstarted");
     e=!m?ESTALE:!session.stream?cam_native_unstarted_retire_locked(epoch,m):cam_irq_stop_locked(epoch);
     if(!e && session.stream) {
         if(cam_irq.slot && cam_irq.slot->state==X9_CAMSV_CANCELLED) {
@@ -634,8 +636,10 @@ static int cam_native_capture_off_locked(struct cam_native_capture_context *c,ui
         lck_mtx_lock(&camera_native_capture_lock);
         c->phase=cancelled?CAM_CAPTURE_LOCAL_CANCELLED_STOPPED:CAM_CAPTURE_LOCAL_STOPPED;
         lck_mtx_unlock(&camera_native_capture_lock);
+        cam_drain_mark("off:retire");
         e=cam_native_retire_locked(epoch,m); /* does NOT repeat IRQ stop */
     }
+    cam_drain_mark("off:retirement-check");
     if(!e)e=x9_camera_native_smmu_retirement_check(epoch,m);
     lck_mtx_lock(&camera_native_capture_lock);
     c->off_error=e;

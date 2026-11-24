@@ -204,6 +204,14 @@ static void cam_progress(const char *step)
     cam_progress_t0=mach_absolute_time();cam_progress_step=step;
     printf("X9 CAMERA PROGRESS: %s\n",step);
 }
+/* Stop-path step mark: the USB console loses ~1 KiB at a SoC reset, so wait
+ * 20 ms after each mark for the host to drain it; the last visible mark is
+ * then the step that hung (diag8/diag9 resets in close). */
+static void cam_drain_mark(const char *step)
+{
+    printf("X9 CAMERA STOP MARK: %s\n",step);
+    delay(20000);
+}
 static void __attribute__((noreturn)) cam_watchdog(void *arg,wait_result_t result)
 {
     const char *last=NULL;unsigned reports=0;
@@ -298,12 +306,13 @@ static int stop(void)
     wakeup(&frame_bytes);
     if(session.power || session.capture || session.stream) {
         lck_mtx_unlock(&camera_lock);
+        cam_drain_mark("stop:stream-off");
         if(session.stream)e=write8(s,0x0100,0);
         /* An uncertain source-off is not permission for a later callback
          * to report capture retired or remove power. Retain the same
          * attempted capture/source even if no SOF has reached the worker. */
         if(e)a=e;
-        else if(session.capture)a=hw.capture(s,0,session.generation);
+        else if(session.capture){cam_drain_mark("stop:capture-off");a=hw.capture(s,0,session.generation);}
         /* Publish confirmed capture retirement before power(false). Native
          * sensor unwind must still see capture=true after failed/partial
          * drain; it cannot rely on a caller-supplied "drained" boolean. */
@@ -312,7 +321,7 @@ static int stop(void)
         lck_mtx_unlock(&camera_lock);
         /* Never remove sensor/MM/translation dependencies below a DMA
          * engine whose stop/drain failed. Provider retains its own journal. */
-        if(!a && session.power)b=hw.power(s,0);
+        if(!a && session.power){cam_drain_mark("stop:power-off");b=hw.power(s,0);cam_drain_mark("stop:power-off-returned");}
         lck_mtx_lock(&camera_lock);
         if(!a && !b){session.power=false;session.stream=false;}
         if(a || b) {
@@ -323,6 +332,7 @@ static int stop(void)
             "retained=%u/%u/%u latched=%u\n",s->sensor,session.generation,e,a,b,
             session.power,session.capture,session.stream,session.latched);
     }
+    cam_drain_mark("stop:drain-readers");
     int copy=cam_drain_readers();
     if(copy) {
         session.latched=true;if(!session.last_errno)session.last_errno=copy;
