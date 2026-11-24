@@ -65,14 +65,14 @@ def main():
             print("USB: bootloader request control transfer completed")
         except Exception as error:
             print(f"USB: request completion uncertain ({error}); checking fastboot once")
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             if fastboot_ready():
                 print("PASS: fastboot device observed; do not reconnect manually")
                 return 0
             time.sleep(0.25)
         if sent:
-            print("USB: request was accepted, but fastboot was not observed within 30s", file=sys.stderr)
+            print("USB: request was accepted, but fastboot was not observed within 120s", file=sys.stderr)
         else:
             print("USB: fastboot was not observed; request delivery is unconfirmed", file=sys.stderr)
         return 1
