@@ -160,6 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 日志 387
+
+- 开机完成（62s presents=73，63.7s 熄屏）。mediaserverd 在 11.9s 发起的两次 sensor start 被 `start deferred` 拒绝（当时 mach uptime 已是 71.4s：串口时间戳比 mach 晚约 59.5s 起算，所以 90s 门限实际对应日志约 30.5s），之后 mediaserverd 没有重试，相机路径完全没跑，`X9 MM SRC` 一行都没有。**本轮没有拿到任何 SMMU 数据，这是镜像设计错误：延迟启动把诊断所在的代码路径挡掉了。**
+- 386/384 静态复核结论：(1) 不是上电问题（386 stall 期间四域 ACK、MM_2 一直有效）；(2) 不是 mm_power_lock（只有相机用这把锁，watchdog dump 正常输出）；(3) 挂在 0x30800000 的 MM SMMU MMIO 读。384 里同一寄存器在 19.63s 和 40.54s 读成功，9ms 后才挂；386 在 MMUP 释放后同一 ms 内就挂。时机和我们的代码不同步，说明 SMMU 是否可访问被另一个异步主体改变了，MMUP 固件嫌疑最大（每次失败前几 ms 才启动），但还没证实。
+- 下一步：静态分析，不出镜像。
+
 #### 2026-11-24 日志 386 + 镜像 x9-cam-defer-mmsrc-20261124
 
 - **386**：不投票后 `X9 MM SMMU POWER GET: on=1`（AP 没有新增位），`res:csi-power` 完成，**卡在 `res:smmu-snapshot`**，即第一次读 SMMU 就挂。四个 mminfra 域 ACK 一直亮着，MM_2 en=8 sta=0。仍卡 logo，cluster0 100%。
