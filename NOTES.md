@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 391 结果 + 镜像 x9-cam-rcv-20261124
+
+- 391（x9-cam-memo）：SMMU 第三次没卡。FBC credit 仍然 `samples=2 errno=0`。receive 字段 0 现在通过了（`samples=2`），但 `issued=1/0`：4 个字段共用的 1 s 预算在发字段 1 之前就用完了（sv_hw.inc:1106 的字段开头期限检查）。FBC→RECEIVE 结果之间 1.54 s。
+- 环境检查缓存 20 ms 对 source-prepare 基本没帮助（17.2 s，guard 合计 60 s）：那些 guard 是从 cam_sv_environment 以外的循环调用的。
+- 新镜像 sha256 a114fbb931ef96802dac61ea06432f02b16d89a5238eb4c44fd218874e7c33f0：receive 每个字段单独 1 s 预算，去掉循环结束后的总期限检查；receive 里的 request/irq_control guard 加计时（receive:*）。
+- 失败后 `STALL step=arm:admission` 一直增长，只是 watchdog 看的是最后一个 progress 步骤，不是卡死。
+
 #### 2026-11-24 390 结果 + 镜像 x9-cam-memo-20261124
 
 - 390（x9-cam-dsb）：MM SMMU 第二次全程没卡（读已全部加屏障）。FBC credit 修复生效：`samples=2 errno=0`。下一步 camsv-receive 失败：`RECEIVE ARM off=0 seen=1/1 samples=0 errno=60`，字段 0 已经写入（outer=10000），模式和 389 的 FBC 一样：1 s 期限只够跑 2–3 次轮询。

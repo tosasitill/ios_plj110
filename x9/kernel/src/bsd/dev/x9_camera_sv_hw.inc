@@ -1103,8 +1103,11 @@ static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
     for(unsigned i=0;i<X9_CAM_SV_RECEIVE_FIELDS;i++) {
         uint32_t bit=1u<<i,next=off?0:cam_sv_receive_fields[i].target;
         bool complete=false;
-        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
-        e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
+        /* 391: field 0 was accepted (samples=2) but the single 1 s budget for
+         * all four fields was gone before field 1 was issued: the guards, not
+         * the hardware, spend it. Each field gets its own 1 s budget. */
+        if(i)end=mach_absolute_time()+span;
+        e=CAM_SV_TIMED("receive:sv_request_guard",cam_sv_request_guard_locked(epoch,cam_sv.request_slot));if(e)break;
         e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
         if(off) {
             if(cam_sv.receive_off_issued&bit){e=CAM_FAIL(ESTALE);break;}
@@ -1118,8 +1121,8 @@ static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
         for(unsigned poll=0;poll<10000;poll++) {
             bool match=true;
             if(mach_absolute_time()>=end && !cam_sv.receive_samples){e=CAM_FAIL(ETIMEDOUT);break;}
-            e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
-            e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
+            e=CAM_SV_TIMED("receive:sv_request_guard",cam_sv_request_guard_locked(epoch,cam_sv.request_slot));if(e)break;
+            e=CAM_SV_TIMED("receive:irq_control_guard",cam_irq_control_guard_locked(epoch,off && session.stream));if(e)break;
             /* Outer only: Android writes these without readback and inner
              * loads at the next CAM DB (SOF / toggle_db). */
             /* Fresh outer read each poll: the environment sweep that used to
@@ -1140,7 +1143,6 @@ static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
         cam_sv.receive_phase=off?X9_CAM_SV_RECEIVE_QUIESCENT:X9_CAM_SV_RECEIVE_ARMED;
         e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);
         if(!e)e=cam_irq_control_guard_locked(epoch,off && session.stream);
-        if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
     }
     if(e){cam_sv.terminal=true;cam_sv_fault(e);}
     cam_sv_status();
