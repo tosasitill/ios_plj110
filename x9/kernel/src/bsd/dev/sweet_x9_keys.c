@@ -248,7 +248,7 @@ void sweet_x9_keys_init(void) {
   reboot_install_hook();
   printf("X9 BOOTLOADER: watchdog mode mapped at %lx; root sysctl debug.x9_reboot_bootloader ready\n",
       (unsigned long)reboot_mode_mmio);
-  if(sweet_x9_arg("x9_fb_on_reset",0)==1) {
+  if(sweet_x9_arg("x9_fb_on_reset",1)==1) { /* debug default on; =0 disables */
    uint32_t before=reboot_mode_read(),wanted=reboot_mode_value(before);
    reboot_mode_write(wanted);
    reboot_fb_on_reset=1;
