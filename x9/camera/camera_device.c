@@ -2360,6 +2360,17 @@ stream_begin(CMBaseObjectRef o, bool graph)
 		struct stream *active = stream_of(active_stream);
 		say("stream replace requested: next_camera=%u next_physical_sensor=%u active_camera=%u active_physical_sensor=%u active_running=%u",
 		    s->camera->sensor, s->physical_sensor, active->camera->sensor, active->physical_sensor, active->running);
+		/* The device advertises wide+front as two streams, so mediaserverd
+		 * starts stream 2 right after stream 1's first frame (logs 407-421).
+		 * Replacing a live stream forced the SMMU retire every time and the
+		 * phone reset in it. A real flip stops the active stream first, so only
+		 * refuse a concurrent start and keep the live sensor streaming. */
+		if (active->running && active->worker_started) {
+			say("stream replace refused: active camera=%u still streaming; concurrent start of camera=%u returns not-available",
+			    active->camera->sensor, s->camera->sensor);
+			result = ERR_NOT_AVAILABLE;
+			goto done;
+		}
 		result = stream_stop_locked(active_stream, &release, "stream-begin:replace-active");
 		if (result) goto done;
 	}

@@ -120,7 +120,8 @@ void plog_previous_boot(void)
 	plog_hex("x9 prior reset TOPRGU STA", rgu[0x0c / 4]);
 	plog_hex("x9 prior reset TOPRGU NONRST", rgu[0x20 / 4]);
 	plog_hex("x9 prior reset TOPRGU NONRST2", rgu[0x24 / 4]);
-#if X9_CONSOLE_BASE
+#if 0 /* log diag8: the zone header did not change across two boots (shim and
+       kernel writes not observed), so its tail is stale data, not the prior boot */
 	plog_hex("x9 previous boot ring sig", prev_sig);
 	plog_hex("x9 previous boot ring start", prev_start);
 	plog_hex("x9 previous boot ring size", prev_size);
