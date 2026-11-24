@@ -46,6 +46,7 @@ struct cam_native_capture_receipt {
 };
 static struct cam_native_capture_receipt *cam_native_capture_history;
 static int cam_native_capture_next_locked(uint64_t);
+static const char *cam_native_next_stage;
 static int cam_native_capture_dma_check(void *,uint64_t,const struct x9_camera_camsv_request *);
 static void cam_native_capture_controller(void *,wait_result_t);
 
@@ -288,6 +289,17 @@ static void __attribute__((noreturn)) cam_native_capture_controller(void *arg,wa
             }
         }
         if(ready)clear_wait(current_thread(),THREAD_AWAKENED);
+        { /* Black-preview triage: why no second frame (no REPEAT line in 398-400). */
+            static unsigned wake_logs;
+            if(!ready && cam_native_capture.repeat_admission && wake_logs<12) {
+                wake_logs++;
+                printf("X9 CAMERA CONTROLLER WAKE: not-ready phase=%u enabled=%u admission=%u epoch=%llu/%llu "
+                    "busy=%u count=%u completed=%llu observed=%llu irq_err=%d repeat_err=%d\n",
+                    cam_repeat.phase,cam_repeat.enabled,cam_repeat.admission,cam_repeat.epoch,
+                    cam_native_capture.epoch,cam_irq.busy,cam_irq.count,cam_repeat.completed,
+                    cam_native_capture.observed_completed,cam_irq.error,cam_repeat.error);
+            }
+        }
         lck_mtx_unlock(&camera_native_capture_lock);
         if(!ready){thread_block(THREAD_CONTINUE_NULL);continue;}
 
@@ -298,9 +310,15 @@ static void __attribute__((noreturn)) cam_native_capture_controller(void *arg,wa
         lck_mtx_unlock(&camera_native_capture_lock);
         int e=CAM_FAIL(ECANCELED);
         if(admitted) {
+            uint64_t t0=mach_absolute_time(),ns;
+            static unsigned next_logs;
             lck_mtx_lock(&camera_irq_lock);
             e=cam_native_capture_next_locked(epoch);
             lck_mtx_unlock(&camera_irq_lock);
+            absolutetime_to_nanoseconds(mach_absolute_time()-t0,&ns);
+            if(next_logs<12){next_logs++;
+                printf("X9 CAMERA NATIVE NEXT: epoch=%llu completed=%llu errno=%d stage=%s ms=%llu\n",
+                    epoch,completed,e,cam_native_next_stage,ns/1000000ull);}
         }
         /* next work has really returned and its IRQ mutex is released.
          * Mark only that thread work complete BEFORE invoking STOP; otherwise
@@ -754,6 +772,7 @@ static int cam_native_capture_publish_next(void *context,
  * stays authoritative throughout genuine no-credit parking and AE settling.
  * AE next performs actual group hold/readback + vendor delayed 0005 samples;
  * this function never marks READY until those controls really apply. */
+static const char *cam_native_next_stage="-";
 static int cam_native_capture_next_locked(uint64_t epoch)
 {
     struct cam_native_capture_context *c=&cam_native_capture;
@@ -772,9 +791,12 @@ static int cam_native_capture_next_locked(uint64_t epoch)
     bool current=(st.flags&X9_CAMERA_STREAMING) && !(st.flags&X9_CAMERA_FAULT) &&
         st.sensor==r.frame.sensor && st.generation==r.frame.generation &&
         session.capture && session.stream && !session.stopping && !session.latched;
-    lck_mtx_unlock(&camera_lock);if(!current)return CAM_FAIL(ECANCELED);
+    lck_mtx_unlock(&camera_lock);cam_native_next_stage="current";if(!current)return CAM_FAIL(ECANCELED);
+    cam_native_next_stage="cpu-boundary";
     e=cam_repeat_cpu_boundary_locked(epoch);if(e)return e;
+    cam_native_next_stage="ae-next";
     e=cam_native_ae_next_locked(epoch,&r.frame);if(e)return e;
+    cam_native_next_stage="publish";
     /* next() may spend up to the real settling deadline. Preserve/check
      * old authority again before the wrapper's final old-to-new handoff. */
     e=cam_repeat_cpu_boundary_locked(epoch);if(e)return e;

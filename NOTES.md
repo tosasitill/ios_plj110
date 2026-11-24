@@ -160,6 +160,16 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 黑屏排查（桥）+ 诊断镜像 x9-cam-black-20261124
+
+- 桥本身确实加载了：mediaserverd 的 DYLD 键由 torch 安装，日志 `X9 TORCH: mediaserverd bridge environment appended (camera included in the same DYLD key)`。之后那行 `X9 CAMERA: existing injection chain preserved` 只是相机自己的追加被跳过，因为键已经存在、里面已经包含相机库。桥的日志（hakios_camera_say）写到 mediaserverd 的 stderr（fd 2），串口看不到，所以桥这边没有证据。
+- 内核这边看，黑屏首先不是桥的问题：
+  1. 398–400 每次会话只发布过 1 帧（RAW PUBLISH 只出现一次），之后没有任何 `X9 CAMERA REPEAT` 行，第二帧从来没有准备过。
+  2. 首帧延迟：start:sensor-power 14.3 s → RAW PUBLISH 70.6 s，约 56 s，几乎全部是 guard 开销。
+  3. 首帧后 70.7–79.2 s 内，lease check（st:s1-validate）每 0.4–0.6 s 跑一次，直到 stream off。推测 repeat controller 卡在 next 路径（cpu boundary / AE settle）里没有完成，没有证据。
+- 诊断（不改行为）：`X9 CAMERA RAW STATS`（前 6 帧，64×64 个 RAW10 组的 MSB 均值/最小/最大/0/饱和，判断画面本身是不是黑的）；`X9 CAMERA RAW READ: by=…`（前 6 次成功读取和读取进程，证明桥有没有拿到帧）；`X9 CAMERA CONTROLLER WAKE: not-ready …` 和 `X9 CAMERA NATIVE NEXT: errno stage ms`（第二帧为什么没准备）。
+- sha256 cf0e4a00831d9a174f1642513c6ef546a70762cd892201d85a6c2138a6a9ee2c。包含 x9-cam-retire 的 SMMU 诊断。
+
 #### 2026-11-24 400 结果 + 诊断镜像 x9-cam-retire-20261124
 
 - 400（x9-cam-dma）：第三次拿到 RAW。关闭流程一路通过：DMA STOP（ADOPT 残留 SW_RST=2，actual=3/3，samples=2）→ DMA RESTORE（stop=2/2）→ CREDIT SPENT（spent=1，count=aa000101）→ `IRQ CLOSE restore=0`。

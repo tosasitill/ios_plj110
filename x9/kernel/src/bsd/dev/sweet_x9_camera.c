@@ -547,6 +547,24 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
         head.frame_lines=f.frame_lines;head.frame_lines_min=s->frame_lines;head.frame_lines_max=s->frame_max;
         head.margin=s->margin;head.sensor=f.sensor;head.focus=HAKIOS_CAMERA_NO_FOCUS;
         memcpy(frame,f.raw,f.bytes);frame_bytes=f.bytes;wakeup(&frame_bytes);
+        { /* Black-preview triage: is the RAW itself dark/empty? RAW10 packed,
+           * bytes 0..3 of each 5-byte group are the pixel MSBs (black=64/4). */
+            static unsigned stats_logs;
+            if(stats_logs<6 && f.stride>=5 && s->height) {
+                uint64_t sum=0;uint32_t n=0,lo=255,hi=0,zero=0,sat=0;
+                for(unsigned r=0;r<64;r++) {
+                    const uint8_t *row=frame+(size_t)((r*2+1)*s->height/128)*f.stride;
+                    for(unsigned g=0;g<64;g++) {
+                        const uint8_t *p=row+(size_t)((g*2+1)*(f.stride/5)/128)*5;
+                        for(unsigned k=0;k<4;k++){uint8_t v=p[k];sum+=v;n++;if(v<lo)lo=v;if(v>hi)hi=v;if(!v)zero++;if(v==255)sat++;}
+                    }
+                }
+                stats_logs++;
+                printf("X9 CAMERA RAW STATS: seq=%llu samples=%u msb_mean=%llu.%02llu min=%u max=%u zero=%u sat=%u "
+                    "(10-bit ~= msb*4, black=64) exp_lines=%u gain_code=%u frame_lines=%u\n",
+                    head.sequence,n,sum/n,(sum*100/n)%100,lo,hi,zero,sat,f.exposure_lines,f.gain_code,f.frame_lines);
+            }
+        }
         if(first_frame)
             printf("X9 CAMERA RAW PUBLISH: sensor=%u generation=%llu capture_id=%llu "
                 "seq=%llu width=%u height=%u stride=%u bytes=%u sof=%llu done=%llu\n",
@@ -857,6 +875,9 @@ static int cam_read(dev_t d,struct uio *uio,__unused int flags)
         lck_mtx_lock(&camera_lock);
         if(!e && generation!=st.generation)e=CAM_FAIL(ESTALE);
         if(!e)consumed=snapshot.sequence; /* not a later st.frames */
+        { static unsigned read_logs;
+          if(read_logs<6){char name[32]={0};read_logs++;proc_selfname(name,sizeof(name));
+            printf("X9 CAMERA RAW READ: by=%s seq=%llu bytes=%u errno=%d\n",name,snapshot.sequence,bytes,e);} }
         frame_readers--;wakeup(&frame_readers);wakeup(&frame_bytes);
         lck_mtx_unlock(&camera_lock);
     }
