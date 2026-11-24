@@ -321,6 +321,7 @@ struct prop {
 
 static const struct prop stream_props[] = {
 	{ "PortType", "String", "ReadOnly" }, { "UniqueID", "String", "ReadOnly" }, { "NonLocalizedName", "String", "ReadOnly" },
+	{ "ModuleInfo", "Collection", "ReadOnly" },
 	{ "SupportedFormatsArray", "Collection", "ReadOnly" }, { "FocalLength", "Number", "ReadOnly" },
 	{ "LensFNumber", "Number", "ReadOnly" }, { "PixelSize", "Number", "ReadOnly" },
 	{ "MaxZoomFactor", "Number", "ReadOnly" }, { "SupportedColorSpaces", "Collection", "ReadOnly" },
@@ -847,6 +848,20 @@ stream_copy_property(CMBaseObjectRef o, CFStringRef key, CFAllocatorRef allocato
 		value = CFStringCreateWithCString(NULL, s->camera->name, kCFStringEncodingUTF8);
 	} else if (key_is(key, "Manufacturer")) {
 		value = CFRetain(CFSTR("Sony / OPPO"));
+	} else if (key_is(key, "ModuleInfo")) {
+		/*
+		 * kFigCaptureStreamProperty_ModuleInfo. FigCaptureCameraParameters formats its SensorID as
+		 * "0x%04x" and looks it up in CMCapture.framework/D22/CameraSetup.plist
+		 * TuningParameters/<PortType>/<id>. Without it the per-sensor dictionary is nil, BWVISNode
+		 * (Live Photo stabilisation, D22 12MP: IrisVideoStabilizationSupported) returns nil and the
+		 * graph fails with -12780 (diag19). Same role as the Android HAL's module ID -> tuning lookup.
+		 * D22 ids: PortTypeBack 0x0343, PortTypeFront 0x0354.
+		 */
+		CFMutableDictionaryRef info = (CFMutableDictionaryRef)new_dict();
+		bool front = CFEqual(s->port, CFSTR("PortTypeFront"));
+		put(info, "SensorID", number_i(front ? 0x0354 : 0x0343));
+		value = info;
+		say_once("stream: ModuleInfo given", key, value);
 	} else if (key_is(key, "SupportedFormatsArray")) {
 		value = CFRetain(s->formats);
 	} else if (key_is(key, "FormatIndex")) {
