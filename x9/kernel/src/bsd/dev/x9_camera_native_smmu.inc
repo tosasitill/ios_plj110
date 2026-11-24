@@ -298,7 +298,9 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     if((entry.word[CAM_N_CFG] && entry.word[CAM_N_CFG]!=cam_native_inert_config[CAM_N_CFG]) ||
        entry.word[CAM_N_CR0] || entry.word[CAM_N_ACK] ||
        entry.word[CAM_N_IRQ] || entry.word[CAM_N_IRQACK] ||
-       entry.word[CAM_N_CP] || entry.word[CAM_N_CC] ||
+       /* diag27: equal CMDQ cursors with CR0=ACK=0 are an empty, inert queue
+        * (kept by our own retire); start rewrites both to 0 like device_reset. */
+       entry.word[CAM_N_CP]!=entry.word[CAM_N_CC] ||
        entry.word[CAM_N_EP] || entry.word[CAM_N_EC] ||
        (entry.word[CAM_N_GBPA]&(1u<<31)))return CAM_FAIL(EBUSY);
     if(entry.word[CAM_N_GE]^entry.word[CAM_N_GEN]) {
@@ -567,7 +569,18 @@ static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m
         delay(1);e=cam_native_producer_guard_locked(epoch,m);
         if(!e)e=cam_native_match(m,&prior);
     }
-    if(!e){m->native_restored=true;m->native_started=false;}
+    if(!e) {
+        m->native_restored=true;m->native_started=false;
+        /* diag27: retire matched the bank against its observed-inert priors
+         * (adopted bases, CR1/CR2/STRTAB_CFG, equal CMDQ cursors). Make that the
+         * baseline for the retirement check and the next reopen; the boot-time
+         * zeros it replaced failed both with ESTALE (MATCH DIFF word 5/6/12/13/14). */
+        memcpy(m->native_prior_word,prior.word,sizeof(prior.word));
+        memcpy(m->native_prior_base,prior.base,sizeof(prior.base));
+        printf("X9 CAMERA NATIVE PRIOR UPDATE: cr1=%x cr2=%x cfg=%x cmdq=%x/%x bases=%llx/%llx/%llx\n",
+            prior.word[CAM_N_CR1],prior.word[CAM_N_CR2],prior.word[CAM_N_CFG],
+            prior.word[CAM_N_CP],prior.word[CAM_N_CC],prior.base[0],prior.base[1],prior.base[2]);
+    }
 out:
     if(e && m==cam_smmu_namespace && m && m->exported) {
         if(!m->native_retire_error)m->native_retire_error=e;
