@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 389 结果（x9-cam-snapoff）：SMMU 没卡，native SMMU 启动成功
+
+- snapshot 21 次读全部完成（20.955，reads=21，最后一个是 0x100ac），紧接着 res:done。随后在 res:done 和 configure:engine-prepare 之间等了约 20 s（20.955 → 41.144）。384 也有同样约 20 s 的等待（19.59 → 40.016），说明这里有个约 20 s 的超时，不是挂死。
+- 之后 native SMMU 全部步骤通过：wrapper（issued=0，388 的 WP INIT 已经写好）、CR1/CR2/STRTAB/CMDQ/CFGI/TLBI/EVTQ/IRQ 511/SMMUEN → `NATIVE SMMU step=started cr0=d`；NATIVE PREPARE 成功（iova 40000000，15 MiB）。
+- capture-arm 失败（60.037）：`FBC CREDIT errno=60`（一次 RCNT，没有源/DMA/帧），前面还有 `cam_bus_timing_profile:27 errno=45`、`cam_sv_credit_issue_locked` errno=35。启动干净地失败退出，60.04 s 之后 UI 开始出帧，**开机完成**。之后的 "STALL step=arm:admission" 只是失败后进度步骤没清掉，不是挂死。
+- 和 388 的唯一代码差别：snapshot 每次读之前 `dsb sy`（加上写计数），也就是一次只有一个未完成的读。旁证：x9_mm_power 的 `mm_read` 每次读之后都有 dsb，从没卡过；cam_rr/cam_smmu_rr 不带屏障，384/386/388 都卡在它们上面。但反例是 389 的 native 路径同样不带屏障却全部通过，而 384 在 entry-match 卡住，所以现在只有 1 个成功样本，**没有证实**。
+
 #### 2026-11-24 镜像 x9-cam-snapoff-20261124（诊断：snapshot 逐读偏移）
 
 - boot.img sha256 8a5a76d8036d134adc5cb53a89782767b39dd0d3b4c6a16776a3fceb445fbbd2；boot-args 同 388（`x9_mmup_smmu_init=1 x9_cam_defer=0`），包含 388 的 WP INIT 和 stall dump。
