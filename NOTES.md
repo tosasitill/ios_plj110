@@ -160,6 +160,17 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 388 结果（x9-cam-wpinit）
+
+- WP INIT 写入生效（glb0 0->1c2c05，tcu1 2810000->28100e2，tcu10 0->8，tcu0 本来就是 QoS 5），**但仍然在 res:smmu-snapshot 卡住** → "缺 wrapper 初始化"这个假设被否定。
+- 卡住时（25.3 s，同一个 watchdog 线程读，都正常返回）：
+  - MM 电源 ACK 全开，refs=1 held=1。
+  - MMUP 正常：status=f，lr=0x146e4 是 idle 循环里 wfi 之前的位置，日志停在初始化完成（"3 tasks to run!"、VDVFS 表）。MMUP SRAM、VCP cfg、hwv 都能读 → MM 侧 AO 总线是好的，只有 0x30800000 卡住。
+  - mm_mminfra_sel 0x8a（相机启动前）→ 0x81；MMPC 的 DDRSRC 和第 9 路资源请求，在 GET（22.629）时是 10102，卡住时掉回 10002（MMUP 进 idle 后释放）。
+  - HWCCF MM_2：384/386/388 都是 en=8、STA=0，MMUP 从没 ack 过 x9 的投票；fsm 在 384 是 4000000，386/388 是 1。
+- 时间线：22.591 NS 探测（0x20..0x64、0x80xx）正常 → 22.628 MMUP 释放 → 22.629 投票 → 22.629 snapshot 第一批读（IDR0 起）就卡住。384 是在 MMUP 释放 20 s 后读 IDR 成功（idr0=80f363f），9 ms 后在 entry-match 卡住 → 不是"一直读不了"，更像某个瞬时窗口里的读请求永久丢失。
+- 诊断缺口：cam_smmu_snapshot 不更新 cam_mmio_off/reads，所以不知道卡在哪个偏移上（STALL 显示 mmio=-+0 reads=0）。
+
 #### 2026-11-24 镜像 x9-cam-wpinit-20261124（修复候选 + 卡死诊断）
 
 - boot.img sha256 381fb0a4ff6d6d3699c20c3a06bfeae55f3db1dff1ddad014165bb98d98bdd26，boot-args 额外加了 `x9_mmup_smmu_init=1 x9_cam_defer=0`。
