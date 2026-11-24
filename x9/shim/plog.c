@@ -86,8 +86,59 @@ static void put(char c)
 #endif
 }
 
+#if X9_CONSOLE_BASE
+/* The kernel continues this zone as a wrapping ramoops ring (sweet_early.c:
+ * hdr[1]=start/next write, hdr[2]=valid size). A warm reset (TOPRGU timeout,
+ * PSCI) keeps DRAM, so before this boot discards it, keep the newest bytes:
+ * the USB console loses roughly the last KiB of a boot that hangs. */
+#define PREV_TAIL 6144u
+static char prev_tail[PREV_TAIL];
+static uint32_t prev_len, prev_size, prev_start, prev_sig;
+static void keep_previous_tail(void)
+{
+	prev_sig = con[0]; prev_start = con[1]; prev_size = con[2]; prev_len = 0;
+	if (prev_sig != PRZ_SIG || prev_size > CON_CAP || prev_start > CON_CAP)
+		return;
+	uint32_t end = prev_size < CON_CAP ? prev_size : prev_start;
+	uint32_t n = prev_size < PREV_TAIL ? prev_size : PREV_TAIL;
+	uint32_t at = (end + CON_CAP - n) % CON_CAP;
+	for (uint32_t i = 0; i < n; i++) {
+		char c = *(volatile char *)(X9_CONSOLE_BASE + PRZ_HDR + at);
+		prev_tail[i] = (c == '\n' || c == '\t' || (c >= 0x20 && c < 0x7f)) ? c : '.';
+		if (++at == CON_CAP) at = 0;
+	}
+	prev_len = n;
+}
+#endif
+void plog_previous_boot(void)
+{
+	/* MT6993 TOPRGU (mt6993.dts watchdog@1c010000; hangdet.c NONRST_REG2
+	 * 0x24 = boot mode[3:0], reboot flag[11], stage[31:29]). */
+	volatile uint32_t *rgu = (volatile uint32_t *)0x1c010000UL;
+	plog_hex("x9 prior reset TOPRGU MODE", rgu[0x00 / 4]);
+	plog_hex("x9 prior reset TOPRGU LENGTH", rgu[0x04 / 4]);
+	plog_hex("x9 prior reset TOPRGU STA", rgu[0x0c / 4]);
+	plog_hex("x9 prior reset TOPRGU NONRST", rgu[0x20 / 4]);
+	plog_hex("x9 prior reset TOPRGU NONRST2", rgu[0x24 / 4]);
+#if X9_CONSOLE_BASE
+	plog_hex("x9 previous boot ring sig", prev_sig);
+	plog_hex("x9 previous boot ring start", prev_start);
+	plog_hex("x9 previous boot ring size", prev_size);
+	if (!prev_len) {
+		plog_str("x9 previous boot tail: none (cold reset or no record)\n");
+		return;
+	}
+	plog_str("x9 previous boot tail BEGIN (DRAM kept across warm reset; lines are from the PREVIOUS boot)\n");
+	for (uint32_t i = 0; i < prev_len; i++) put(prev_tail[i]);
+	plog_str("\nx9 previous boot tail END\n");
+#endif
+}
+
 void plog_init(void)
 {
+#if X9_CONSOLE_BASE
+	keep_previous_tail();
+#endif
 	screen_put = 0; screen_flush = 0; screen_hidden = 0;
 	pos = 0; usb_total = 0;
 	logbuf[0] = 0;

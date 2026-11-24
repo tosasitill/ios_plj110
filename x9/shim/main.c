@@ -25,6 +25,7 @@ void shim_main(uint64_t dtb, uint64_t boot_el)
 	plog_init();
 	x9_shim_usb_start();
 	plog_str("x9 shim: direct XNU loader\n");
+	plog_previous_boot();
 	plog_hex("boot EL", boot_el);
 	plog_hex("load", (uintptr_t)_head);
 	plog_hex("dtb", dtb);
