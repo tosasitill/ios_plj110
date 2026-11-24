@@ -74,15 +74,22 @@ static int cam_native_capture_sensor(uint64_t epoch,const struct x9_camera_senso
  * -> this check. Only our exact pending/source transition journal may span
  * previous/target; unrelated controls/unused tags remain strict in both banks.
  * No read-clear status, sensor transfer, RAW read or hardware write here. */
+static bool cam_source_out_window(void);
 static int cam_native_capture_route_guard(uint64_t epoch)
 {
     uint32_t v[CAM_OUT_REGS];
+    /* 394: the RX source transition's OUT step clears cam_out.consumed BEFORE
+     * its store and only cam_out_commit sets it again; every lease check in
+     * between (source guard, cam_out_commit's own guard) failed here with
+     * ESTALE. Inside exactly that journaled window, an unconsumed/in-flight
+     * OUTMUX commit is the expected state, not a foreign change. */
+    bool window=cam_source_out_window();
     int e;
     if(!cam_rx_sensor_held_locked(epoch) || cam_rx_live.close_attempted || cam_rx_live.error ||
        !cam_mac.held || cam_mac.epoch!=epoch || cam_mac.close_attempted || cam_mac.error ||
        !cam_phy.held || cam_phy.epoch!=epoch || cam_phy.close_attempted || cam_phy.error ||
        !cam_out.held || cam_out.epoch!=epoch || cam_out.close_attempted || cam_out.error ||
-       !cam_out.consumed || cam_out_irq.poison || !cam_out_irq.mode_ready ||
+       (!cam_out.consumed && !window) || cam_out_irq.poison || !cam_out_irq.mode_ready ||
        !cam_smi.held || cam_smi.epoch!=epoch || cam_smi.close_attempted || cam_smi.error ||
        !cam_sv.held || cam_sv.epoch!=epoch || cam_sv.close_attempted || cam_sv.error)return CAM_FAIL(ESTALE);
     e=cam_out_top_guard(false);if(e)return e;
@@ -99,7 +106,8 @@ static int cam_native_capture_route_guard(uint64_t epoch)
             if(!bank && cam_out.pending_slot<CAM_OUT_WRITES &&
                n==cam_out_fields[cam_out.pending_slot].reg && v[n]==cam_out.pending_next)allowed=true;
             if(bank && cam_out.commit_pending) {
-                if(cam_out_irq_inner_target_required())allowed=v[n]==cam_out.expected[0][n];
+                if(cam_out_irq_inner_target_required())allowed=v[n]==cam_out.expected[0][n] ||
+                    (window && v[n]==cam_out.expected[1][n]); /* inner not loaded yet */
                 else if(v[n]==cam_out.expected[0][n])allowed=true;
             }
             allowed=cam_out_irq_control_allowed(bank,n,v[n],allowed);
@@ -109,7 +117,7 @@ static int cam_native_capture_route_guard(uint64_t epoch)
         uint32_t pending=cam_rr(cam_out.out[bank],0x1c)|cam_rr(cam_out.out[bank],0x38);
         if(pending&~1u)return CAM_FAIL(EIO);
         if(!cam_out.deferred && (!cam_out.commit_pending || cam_out_irq_inner_target_required()) &&
-           (pending&1))return CAM_FAIL(EBUSY);
+           !(window && cam_out.commit_pending) && (pending&1))return CAM_FAIL(EBUSY);
     }
     return 0;
 }

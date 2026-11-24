@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 394 结果 + 镜像 x9-cam-route-20261124
+
+- 394（x9-cam-budget）：SMMU 第六次没卡。credit/receive/gate/bind 通过。RX PATH 5 步全部发出（`issued=1f pending=4 samples=2`），OUT 步（OUTMUX 0x20 bit12）的 outer 已经确认，随后 ESTALE(70)：FAIL TRACE `cam_native_capture_route_guard:87`。
+- 根因（静态）：source transition 在 OUT 写之前把 `cam_out.consumed` 清成 false，只有 cam_out_commit 完成后才会置回 true。中间每一次 lease check（d->check → route guard）都要求 consumed=true，所以必然 ESTALE。392 之前 authority 每次都跑，这个窗口里的第一次轮询就会失败，只是被前面的超时挡住，一直没走到这里。
+- 修复：新增 `cam_source_out_window()`（source 处于 STARTING/STOPPING、pending 步骤已发出、并且是 OUT 字段时才为真）。route guard 在这个窗口内：允许 consumed=false；commit_pending 时 inner 允许是旧值；允许 cfg_done pending 位。
+- sha256 dc7057ab401d9b3710e4001763166b6f3552ef43ae3ff928dc5e2feba80c52e2。
+
 #### 2026-11-24 镜像 x9-cam-budget-20261124（一次性修完后续 guard 类超时）
 
 - sha256 734c09affe03d46b786545033b08052083c2edea40845b995143ef5614d6a1f8，叠加在 x9-cam-src 之上（包含 source transition 的修复）。

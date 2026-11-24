@@ -209,6 +209,15 @@ static int cam_source_admission_locked(uint64_t epoch)
     }
     cam_source.captured=true;return cam_sv_environment();
 }
+/* True only while OUR issued OUT step of a source transition is pending. */
+static bool cam_source_out_window(void)
+{
+    unsigned p=cam_source.pending;
+    if(!cam_source.captured || cam_source.error ||
+       (cam_source.phase!=CAM_SOURCE_STARTING && cam_source.phase!=CAM_SOURCE_STOPPING) ||
+       p>=2*cam_source.count || !(cam_source.issued&(1u<<p)))return false;
+    return cam_source.field[cam_source.step[p].field].kind==CAM_SOURCE_OUT;
+}
 static int cam_source_guard_locked(uint64_t epoch)
 {
     int e;
