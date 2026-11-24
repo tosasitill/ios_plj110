@@ -1105,7 +1105,18 @@ AppleCLCD::start(IOService *provider)
 
 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
 	setProperty("external", false);
-	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+	/* VideoToolbox FigGetAlignmentForIOSurfaceOutputToDisplayService and
+	 * QuartzCore read this as a dictionary {PlaneBaseAlignmentLinear: n}.
+	 * A bare number made mediaserverd throw -[__NSCFNumber objectForKey:]
+	 * while building the camera preview sink (diag18, every session). */
+	{
+		OSDictionary *align = OSDictionary::withCapacity(1);
+		OSNumber *linear = OSNumber::withNumber(64ULL, 32);
+		if (align && linear && align->setObject("PlaneBaseAlignmentLinear", linear))
+			setProperty("DisplayPipePlaneBaseAlignment", align);
+		OSSafeReleaseNULL(linear);
+		OSSafeReleaseNULL(align);
+	}
 	registerService();
 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
