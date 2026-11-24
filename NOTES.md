@@ -160,6 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 更正：MM_2 投票 STA=0 是"已完成"，不是"没被 ack"
+
+- Android clkchk-mt6993.c:2644-2648 / 4055-4056：mm_hwv 0x1135c = BACKUP0_SET_STA / MM_HW_CCF_BACKUP1_STATUS（挂起中的请求位），0x1136c = DONE。x9 的 mm_vote_take 第 4 步本来就是等 0x1135c 变成 0（`mm_irq_poll(MM_POWER_STA, 0, ...)`），三次都 errno=0 通过。
+- 所以 en=8、STA=0、DONE=ffffffff = 投票已处理完。e44/e45 里"MMUP 从没 ack 过 x9 的投票、user2 不计数"是**我读错了**，应作废。
+- 推论：user2 被计数，MM_2 总引用数至少是 user1+user2 = 2，MMUP 睡眠路径关 mm2 的可能性更低。
+
 #### 2026-11-24 MMUP 空转/睡眠路径静态审计（388 后，未出镜像）
 
 - 388 卡住时 MMUP 的 lr=0x146e4，所在函数 **不是普通 idle**，而是深睡（核心断电）路径：0xd1fe（睡眠入口：等忙完 → 0xc69a → 置 [0x47b30] 状态 3）→ 0x141b8（整套 GPR/FPR/CSR 存到 0x2973c）→ ce38(0,3)（vcp_switch_core_state off）→ 自定义睡眠指令 → wfi；复位向量 0x23c → 0x146fa 是唤醒恢复。status=f、pc=0 = 核心已断电。MMUP 初始化完没事做就进深睡，MMPC 的 DDRSRC 请求随之释放（与 388 观测一致，属正常行为）。
