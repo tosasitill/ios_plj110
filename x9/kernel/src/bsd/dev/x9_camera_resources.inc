@@ -174,25 +174,34 @@ static int cam_csi_power_take(struct cam_receive_power *p,struct x9_camera_resou
 fail:
     return cam_csi_error("GET",step,p,timeout,e);
 }
+/* 388: the camera thread hung inside this snapshot with no offset recorded.
+ * Record region/offset BEFORE every access so the watchdog STALL line names
+ * the exact register (region 1 = 32-bit, 3 = 64-bit access). */
+static uint32_t cam_snap_rr(vm_offset_t b,unsigned off)
+{ uint32_t v;cam_mmio_region=1;cam_mmio_off=off;__asm__ volatile("dsb sy":::"memory");v=cam_rr(b,off);cam_mmio_reads++;return v; }
+static uint64_t cam_snap_rr64(vm_offset_t b,unsigned off)
+{ uint64_t v;cam_mmio_region=3;cam_mmio_off=off;__asm__ volatile("dsb sy":::"memory");v=cam_res_read64(b,off);cam_mmio_reads++;return v; }
 static void cam_smmu_snapshot(struct cam_receive_power *p,struct x9_camera_resources *r)
 {
     vm_offset_t b=p->smmu;
     /* Same ACK gate as cam_smmu_rr: never read an unpowered MM SMMU. */
     if(!cam_smmu_mmio_ok(0)){r->idr[0]=r->cr0=r->gbpa=~0u;return;}
+    cam_mmio_reads=0;
     /* IDR2/4 are reserved in this architecture; do not read them. */
-    r->idr[0]=cam_rr(b,0);r->idr[1]=cam_rr(b,4);
-    r->idr[3]=cam_rr(b,0xc);r->idr[5]=cam_rr(b,0x14);
-    r->cr0=cam_rr(b,0x20);r->cr0ack=cam_rr(b,0x24);
-    r->cr1=cam_rr(b,0x28);r->cr2=cam_rr(b,0x2c);r->gbpa=cam_rr(b,0x44);
-    r->irq_ctrl=cam_rr(b,0x50);r->irq_ack=cam_rr(b,0x54);
-    r->gerror=cam_rr(b,0x60);r->gerrorn=cam_rr(b,0x64);
-    r->strtab_base=cam_res_read64(b,0x80);r->strtab_cfg=cam_rr(b,0x88);
-    r->cmdq_base=cam_res_read64(b,0x90);
-    r->cmdq_prod=cam_rr(b,0x98);r->cmdq_cons=cam_rr(b,0x9c);
-    r->evtq_base=cam_res_read64(b,0xa0);
+    r->idr[0]=cam_snap_rr(b,0);r->idr[1]=cam_snap_rr(b,4);
+    r->idr[3]=cam_snap_rr(b,0xc);r->idr[5]=cam_snap_rr(b,0x14);
+    r->cr0=cam_snap_rr(b,0x20);r->cr0ack=cam_snap_rr(b,0x24);
+    r->cr1=cam_snap_rr(b,0x28);r->cr2=cam_snap_rr(b,0x2c);r->gbpa=cam_snap_rr(b,0x44);
+    r->irq_ctrl=cam_snap_rr(b,0x50);r->irq_ack=cam_snap_rr(b,0x54);
+    r->gerror=cam_snap_rr(b,0x60);r->gerrorn=cam_snap_rr(b,0x64);
+    r->strtab_base=cam_snap_rr64(b,0x80);r->strtab_cfg=cam_snap_rr(b,0x88);
+    r->cmdq_base=cam_snap_rr64(b,0x90);
+    r->cmdq_prod=cam_snap_rr(b,0x98);r->cmdq_cons=cam_snap_rr(b,0x9c);
+    r->evtq_base=cam_snap_rr64(b,0xa0);
     /* EVTQ prod/cons use architected page1 (+0x10000), unlike CMDQ.
      * MT6993 does not advertise ARM_SMMU_OPT_PAGE0_REGS_ONLY in its DT. */
-    r->evtq_prod=cam_rr(b,0x100a8);r->evtq_cons=cam_rr(b,0x100ac);
+    r->evtq_prod=cam_snap_rr(b,0x100a8);r->evtq_cons=cam_snap_rr(b,0x100ac);
+    cam_mmio_region=0;
     __asm__ volatile("dsb sy":::"memory");
 }
 static bool cam_smmu_config_same(const struct x9_camera_resources *a,

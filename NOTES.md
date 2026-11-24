@@ -160,6 +160,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 镜像 x9-cam-snapoff-20261124（诊断：snapshot 逐读偏移）
+
+- boot.img sha256 8a5a76d8036d134adc5cb53a89782767b39dd0d3b4c6a16776a3fceb445fbbd2；boot-args 同 388（`x9_mmup_smmu_init=1 x9_cam_defer=0`），包含 388 的 WP INIT 和 stall dump。
+- cam_smmu_snapshot 的 18 次 32 位读和 3 次 64 位读（0x80/0x90/0xa0），每次读之前都先记下 region/偏移，开头把 reads 清零。STALL 行格式：`mmio=smmu30800000+<off>`（32 位）或 `smmu64+<off>`（64 位），reads = 已完成的读数。
+- 路径和 388 一模一样（开机 11 s 启动 → res:smmu-snapshot），一定会执行。注意：0x80/0x90/0xa0 用的是 64 位读，22.591 那次 NS 探测从没做过 64 位访问。
+
 #### 2026-11-24 更正：MM_2 投票 STA=0 是"已完成"，不是"没被 ack"
 
 - Android clkchk-mt6993.c:2644-2648 / 4055-4056：mm_hwv 0x1135c = BACKUP0_SET_STA / MM_HW_CCF_BACKUP1_STATUS（挂起中的请求位），0x1136c = DONE。x9 的 mm_vote_take 第 4 步本来就是等 0x1135c 变成 0（`mm_irq_poll(MM_POWER_STA, 0, ...)`），三次都 errno=0 通过。
