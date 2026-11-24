@@ -938,28 +938,6 @@ out:
     lck_mtx_unlock(&mm_power_lock);
     return e;
 }
-/* hwccf_api.c v1 order for one MM domain bit: MMUP dummy read, STA idle,
- * AP SET + EN readback, global, STA idle, PM ACK. Never clears others' votes. */
-static int mm_dom_vote(unsigned set, unsigned global, unsigned sta, unsigned ack,
-                       uint32_t bit, uint32_t *owned)
-{
-    int e;
-    (void)mm_read(mmup, 0x1ec);
-    if (!(mm_read(hwv, set + 8) & bit)) {
-        e = mm_wait(hwv, sta, bit, 0, 10000, 1);
-        if (e) return e;
-        if (!(mm_read(hwv, set + 8) & bit)) {
-            *owned |= bit; /* before the one ambiguous SET */
-            mm_write_reg(hwv, set, bit);
-            e = mm_wait(hwv, set + 8, bit, bit, 1250, 1);
-            if (e) return e;
-        }
-    }
-    e = mm_wait(hwv, global, bit, bit, 10000, 1);
-    if (!e) e = mm_wait(hwv, sta, bit, 0, 10000, 1);
-    if (!e) e = mm_wait(hwv, ack, bit, bit, 10000, 1);
-    return e;
-}
 int x9_mm_power_smmu_get(uint64_t token, uint32_t client)
 {
     unsigned i = 0;
@@ -967,13 +945,10 @@ int x9_mm_power_smmu_get(uint64_t token, uint32_t client)
     lck_mtx_lock(&mm_power_lock);
     e = mm_live(token, client, &i);
     if (!e && smmu_fault) e = EIO;
-    if (!e && !smmu_refs) {
-        e = mm_dom_vote(MM_DOM_SET0, MM_DOM_GLOBAL0, MM_DOM_STA0, MM_DOM_ACK0,
-                        MM_DOM_INFRA1, &smmu_owned0);
-        if (!e) e = mm_dom_vote(MM_DOM_SET1, MM_DOM_GLOBAL1, MM_DOM_STA1, MM_DOM_ACK1,
-                                MM_DOM_INFRA2, &smmu_owned1);
-        if (e) smmu_fault = true; /* journaled; no replay */
-    }
+    /* Log 385: adding AP votes for mm_infra1/mm_infra2 was followed by a
+     * hang on the very first SMMU read (which passed in 384 without them).
+     * Android never AP-votes these domains (mtk_smi_mminfra_get_if_in_use
+     * only checks): MM_2 is the all-on vote, so only verify the ACKs. */
     if (!e) {
         for (unsigned n = 0; n < 10000 && !mm_smmu_domains_on(NULL); n++) delay(1);
         if (!mm_smmu_domains_on(NULL)) e = ENXIO;

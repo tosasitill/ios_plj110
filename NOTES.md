@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 日志 385 + 镜像 x9-cam-smmu-novote-20261124
+
+- **385**：`X9 MM SMMU POWER GET: on=1`，四个 mminfra 域 ACK 全亮，AP 新投了 infra1(0x40000000)/infra2(bank1 bit0)。随后 CSI 投票完成（bank1 EN=ec01、ACK=ee01），但相机再无输出，停在 `configure:source-prepare`；384 里同一位置 3ms 后就有 `CAM RATE ENTRY`。CSI 之后的下一步就是 resources 的 SMMU 寄存器快照（384 中这一步正常）。依然卡 logo，CPU 100/100。
+- **结论**：唯一新增的是 AP 对 mm_infra1/mm_infra2 的投票，随后第一次读 SMMU 就挂住；而 Android 从不在 AP 侧投这两个域（get_if_in_use 只检查），所以回退投票。
+- **本镜像**：x9_mm_power_smmu_get 只检查 MM_2 live + 四域 ACK，不再投票；ACK 门控、cam_start_busy 保留。resources 路径新增 `res:smmu-power-up / res:csi-power / res:smmu-snapshot / res:done`。
+- `x9/out/x9-cam-smmu-novote-20261124/boot.img` sha256 `0dbc8b00a74b620a06706979e4d0a6cad00ae1e36a0291e65d78bf99b797206d`。
+
 #### 2026-11-24 镜像 x9-cam-smmu-power-20261124（补 MM SMMU 访问前上电 + 相机失败不拖开机）
 
 - **Android 对照**：mt6993 MM SMMU 没有 SMMU_CLK_AO_EN，访问前走 arm_smmu_rpm_get → mtk_smi_mminfra_get_if_in_use。MT6993 的 SMI common 全是 skip-rpm-cb，真正的电来自 MM_2（DT `mminfra-all-on-pwr-idx=3`）。mtk-pd-chk-mt6993：mmpc 0x9c/0xa0/0xa4/0xa8 = MM_INFRA0/1/AO/2（mask c0000000）。x9 之前只查 INFRA2 和 0x12900 bit31/29，从没查过 INFRA1，AP 侧也没人投 INFRA1(bank0 bit30)/INFRA2(bank1 bit0)。

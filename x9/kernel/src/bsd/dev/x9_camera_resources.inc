@@ -295,11 +295,15 @@ static int cam_receive_power_take(struct cam_receive_power *p,struct x9_camera_r
        (cam_rr(p->hwv,0x1131c)&CAM_RES_MM_INFRA))return CAM_FAIL(ENXIO);
     r->blockers&=~X9_CAM_RES_NEED_MM_INFRA;
     /* Android arm_smmu_rpm_get before the first MM SMMU register read. */
+    cam_progress("res:smmu-power-up");
     {int pe=cam_smmu_power_up(p->power_token);if(pe)return pe;}
     r->stage=X9_CAM_RES_STAGE_CSI;
+    cam_progress("res:csi-power");
     int e=cam_csi_power_take(p,r);if(e)return e;
     r->stage=X9_CAM_RES_STAGE_SMMU_SNAPSHOT;
+    cam_progress("res:smmu-snapshot");
     e=cam_smmu_observe(p,r);if(e)return e;
+    cam_progress("res:done");
     p->active=true;return 0;
 }
 static int cam_resources_probe(struct x9_camera_resources *r)

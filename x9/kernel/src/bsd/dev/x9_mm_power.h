@@ -38,9 +38,8 @@ int x9_mm_power_unpin(uint64_t parent, uint64_t *child, uint32_t client);
 int x9_mm_power_release(uint64_t *token, uint32_t client, uint32_t *smc_a0);
 /* Android mtk_smmu_power_get -> mtk_smi_mminfra_get_if_in_use equivalent for
  * the MM SMMU (mt6993_data_mm has no SMMU_CLK_AO_EN). MM_2 is the DT
- * mminfra-all-on-pwr-idx; additionally AP-votes mm_infra1 (bank0 bit30) and
- * mm_infra2 (bank1 bit0), which nothing else on the AP votes, then requires
- * all four MM_INFRA PM ACKs (mtk-pd-chk-mt6993 mmpc 9c/a0/a4/a8). */
+ * mminfra-all-on-pwr-idx; requires it live plus all four MM_INFRA PM ACKs
+ * (mtk-pd-chk-mt6993 mmpc 9c/a0/a4/a8). Adds no domain votes (log 385). */
 int x9_mm_power_smmu_get(uint64_t token, uint32_t client);
 int x9_mm_power_smmu_put(uint64_t token, uint32_t client);
 /* Lock-free ACK gate for every MM SMMU MMIO access (AO pages only). */
