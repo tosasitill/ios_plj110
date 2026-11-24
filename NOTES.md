@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 397 结果（stream-on 成功）+ 镜像 x9-cam-done-20261124
+
+- 397（x9-cam-stream）：`SENSOR STREAM ack=1 control=1 samples=3 errno=0`，OUTMUX SETTLE latched，`X9 CAMERA: start ... (waiting for physical DMA)`，start 成功返回。SOF 被 worker 接受（errno=0）。
+- 新失败：DONE FBC worker `actual=26000101/26000101 seen=3/3 samples=0 errno=60`。RCNT/WCNT/CNT 都已经到 target（101），只有 DROP=0x13（19 帧）不同。cam_repeat_done_target_locked 只有在 repeat identity（第一帧完成之后）才接受 DROP，第一帧验收时要求严格相等，所以 10 s 内一直不匹配。FBC NOTE LAST 证实是这个值（bank1 counter=26000101 want=101）。
+- 修复：done_target 在 done_seen 并且 source ON 已发出时，接受只有 DROP 不同（和 note_locked 同一规则）；repeat 第一次完成后的 DROP 基线改为实际采样值（原来从 target 算，模 128 窗口可能已经被超过）。
+- RAW WAIT errno=35 是读者 1 s 的 EAGAIN，只记录一次，不致命。
+- sha256 47fd90f4ff766f7d27e4d01822ba8b974895c465a5ef8efcb727b4d3699f8378。
+
 #### 2026-11-24 396 结果（第一帧真的写出来了）+ 镜像 x9-cam-stream-20261124
 
 - 396（x9-cam-defer）：RX PATH `errno=0`，arm 全部完成，`NATIVE FIRST ARM ... iova=40000000`。stream-on 时 OUTMUX READY 成功，sensor 0100=1 已写。IRQ 记录：role1 SOF `sof=4`；role0 DONE `done=10000 fbc=101/101`（FBC 从 10001 变成 101，WCNT+1、CNT 0，说明第一帧确实已经 DMA 写完）。

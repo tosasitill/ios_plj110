@@ -121,6 +121,12 @@ static int cam_repeat_empty_note(unsigned bank,uint32_t counter)
 static bool cam_repeat_done_target_locked(unsigned bank,uint32_t counter)
 {
     if(counter==cam_irq_fbc.target[bank])return true;
+    /* 397: first DONE accepted by the filter (fbc 101) but by the time the
+     * worker sampled, frames after the spent credit had moved DROP
+     * (26000101): RCNT/WCNT/CNT/reserved were exactly at target. Same rule
+     * as cam_irq_fbc_note_locked: DROP only, only after an actual DONE. */
+    if(cam_irq_fbc.done_seen && (cam_irq_fbc.source_issued&CAM_STREAM_ON) &&
+       !((counter^cam_irq_fbc.target[bank])&~CAM_REPEAT_DROP))return true;
     return (cam_repeat_identity() || cam_repeat_stopped_identity()) &&
         !cam_repeat.error && cam_repeat_retirement_receipt_locked() &&
         !((counter^cam_irq_fbc.target[bank])&~CAM_REPEAT_DROP) &&
@@ -146,7 +152,10 @@ static int cam_repeat_note_locked(unsigned bank,uint32_t control,uint32_t counte
         if(control!=expected || ((counter^cam_irq_fbc.target[bank])&~CAM_REPEAT_DROP))return CAM_FAIL(ESTALE);
         /* First completion's DROP may start before the CPU copy ends. Only
          * this actual accepted no-credit target permits that movement. */
-        if(!cam_repeat.after[bank])cam_repeat.after[bank]=cam_irq_fbc.target[bank];
+        /* Baseline at the actual first post-completion sample: with ~0.1-0.6 s
+         * guards before acceptance DROP can already exceed the modulo-128
+         * window measured from the target (397: 19 drops before acceptance). */
+        if(!cam_repeat.after[bank])cam_repeat.after[bank]=counter;
         return cam_repeat_empty_note(bank,counter);
     }
     if(cam_repeat.phase==CAM_REPEAT_PARKED || cam_repeat.phase==CAM_REPEAT_PREPARING ||
