@@ -633,7 +633,16 @@ static int cam_ioctl(dev_t d,u_long cmd,caddr_t data,int f,__unused struct proc 
 {
     if(minor(d)>1)return CAM_FAIL(ENXIO);
     if(minor(d)==1 && cmd!=X9_CAMERA_GET_STATUS && cmd!=X9_CAMERA_GET_STOP &&
-        cmd!=X9_CAMERA_GET_LENSES && cmd!=X9_CAMERA_GET_SWITCH_CAPACITY)return CAM_FAIL(EPERM);
+        cmd!=X9_CAMERA_GET_LENSES && cmd!=X9_CAMERA_GET_SWITCH_CAPACITY && cmd!=X9_CAMERA_SAY)return CAM_FAIL(EPERM);
+    if(cmd==X9_CAMERA_SAY) {
+        static unsigned say_lines;
+        struct x9_camera_say *m=(struct x9_camera_say *)data;
+        size_t n;
+        m->text[sizeof(m->text)-1]=0;n=strlen(m->text);
+        while(n && (m->text[n-1]=='\n' || m->text[n-1]=='\r'))m->text[--n]=0;
+        if(say_lines<400){say_lines++;printf("X9 CAMERA BRIDGE: %s\n",m->text);}
+        return 0;
+    }
     if(cmd==X9_CAMERA_GET_STATUS) {
         lck_mtx_lock(&camera_lock);memcpy(data,&st,sizeof(st));lck_mtx_unlock(&camera_lock);return 0;
     }
@@ -829,7 +838,11 @@ static int cam_write(dev_t d,struct uio *uio,__unused int flags)
             if(e){st.flags|=X9_CAMERA_FAULT;st.last_errno=e;(void)stop();}
         }
     } else e=CAM_FAIL(ENOTSUP); /* no fake focus, KEEP host export or arbitrary writes */
-    lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);return e;
+    lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);
+    { static unsigned write_logs;
+      if(write_logs<24){write_logs++;
+        printf("X9 CAMERA WRITE CALL: command=%u a=%u b=%u c=%u errno=%d\n",c.command,c.a,c.b,c.c,e);} }
+    return e;
 }
 static int cam_read(dev_t d,struct uio *uio,__unused int flags)
 {
@@ -881,6 +894,10 @@ static int cam_read(dev_t d,struct uio *uio,__unused int flags)
         frame_readers--;wakeup(&frame_readers);wakeup(&frame_bytes);
         lck_mtx_unlock(&camera_lock);
     }
+    { static unsigned call_logs;
+      if(call_logs<24){char name[32]={0};call_logs++;proc_selfname(name,sizeof(name));
+        printf("X9 CAMERA READ CALL: by=%s peek=%d bytes=%u seq=%llu errno=%d\n",
+            name,peek,bytes,e?0ull:snapshot.sequence,e);} }
     return e;
 }
 static const struct cdevsw cam_cdev={.d_open=cam_open,.d_close=cam_close,.d_read=cam_read,

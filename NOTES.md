@@ -160,6 +160,19 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 log 401 → 诊断镜像 x9-cam-say-20261124
+
+- 401（x9-cam-black）首帧：`RAW STATS: seq=1 samples=16384 msb_mean=15.85 min=15 max=16 zero=0 sat=0 exp_lines=1000 gain_code=0 frame_lines=7546`。RAW10 MSB 恒为 15–16，也就是 10-bit 60–67，正好是 black=64 加读噪声，16384 个采样里没有一个有信号。首帧本身就是纯黑电平，不是桥把画面弄黑的。曝光 1000 行 × 4415 ns ≈ 4.4 ms、1x 增益，室内也不该完全平。可能的原因：sensor 出流后第一帧无效，或曝光/模拟链路没有真正生效。要看后续帧才能判断。
+- 桥没有读到帧：全程没有 `RAW READ`，也没有 RAW WAIT。头部字段逐项对照了 valid_frame（bayer 3、line_ns 4415、frame_lines_min 7546、max 65532、margin 48、gain 1024、曝光行数为偶数），都应能通过。没有桥的 stderr，原因不明。
+- 第二帧仍未准备：CONTROLLER WAKE 只有 59.8 s 和 65.7 s 两条（phase=0、completed=0），DONE 和 IRQ 完成（66.5 s，state=2 RETIRED）之后再无 WAKE，也没有 NATIVE NEXT。不知道是 completed_locked 静默返回，还是 controller 卡在 camera_control_lock 上。
+- 75.09 s stream off，距 start 约 9 s，与 398–400 相同。SMMU retire：`NATIVE MATCH DIFF: step=retire:base base=0 off=80 expected=0 actual=34b62c000`，last=retire:final-prior，下一步再修。
+- 本镜像只加诊断：
+  - `X9 CAMERA BRIDGE: …`：新增 X9_CAMERA_SAY ioctl（status minor），桥的 hakios_camera_say 和 media_bridge/media_profile 的 dprintf(2) 同时转发到内核日志，上限 400 行。
+  - `READ CALL`（含 peek）、`WRITE CALL`：前 24 次。
+  - `REPEAT COMPLETE why=`：completed_locked 的返回原因。
+  - `CONTROLLER WAKE ready=`，以及 `CONTROLLER LOCK control_wait_ms`。
+- sha256 fc1425ff142d022dbb0c4e846e580b78678d896f01a47c186f5fc70dab9c690b。
+
 #### 2026-11-24 黑屏排查（桥）+ 诊断镜像 x9-cam-black-20261124
 
 - 桥本身确实加载了：mediaserverd 的 DYLD 键由 torch 安装，日志 `X9 TORCH: mediaserverd bridge environment appended (camera included in the same DYLD key)`。之后那行 `X9 CAMERA: existing injection chain preserved` 只是相机自己的追加被跳过，因为键已经存在、里面已经包含相机库。桥的日志（hakios_camera_say）写到 mediaserverd 的 stderr（fd 2），串口看不到，所以桥这边没有证据。

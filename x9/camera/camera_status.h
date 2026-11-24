@@ -9,6 +9,22 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include "../kernel/src/bsd/dev/x9_camera.h"
+#include <stdio.h>
+#include <string.h>
+/* stderr of mediaserverd is not on the serial console; relay the same text
+ * through the read-only status minor (kernel prints "X9 CAMERA BRIDGE:"). */
+static inline void x9_camera_kernel_say(const char *text)
+{
+    static int fd = -2;
+    if (fd == -2) fd = open(X9_CAMERA_STATUS_DEVICE, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    struct x9_camera_say m;
+    memset(&m, 0, sizeof(m));
+    strlcpy(m.text, text, sizeof(m.text));
+    (void)ioctl(fd, X9_CAMERA_SAY, &m);
+}
+#define x9_dprintf2(...) do { char x9_line_[256]; int x9_n_ = snprintf(x9_line_, sizeof(x9_line_), __VA_ARGS__); \
+    if (x9_n_ > 0) { (void)write(2, x9_line_, strnlen(x9_line_, sizeof(x9_line_))); x9_camera_kernel_say(x9_line_); } } while (0)
 static uint32_t x9_camera_backend_mask(void)
 {
     int fd = open(X9_CAMERA_STATUS_DEVICE, O_RDONLY | O_CLOEXEC);

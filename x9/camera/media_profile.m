@@ -25,7 +25,7 @@ static int (*original_hevc_create)(void *, void *, void **);
 static int create_hevc(void *a, void *b, void **out)
 {
     int result = original_hevc_create(a, b, out);
-    dprintf(2, "X9 CAMERA VIDEO: real HEVC factory result=%d object=%u; not a recording receipt\n",
+    x9_dprintf2( "X9 CAMERA VIDEO: real HEVC factory result=%d object=%u; not a recording receipt\n",
             result, out && *out != NULL);
     return result;
 }
@@ -75,7 +75,7 @@ static void register_hevc(void)
         }
     }
     if (!valid) {
-        dprintf(2, "X9 CAMERA VIDEO: unsupported 20H392 HEVC/VT UUID or symbols; Photo only\n");
+        x9_dprintf2( "X9 CAMERA VIDEO: unsupported 20H392 HEVC/VT UUID or symbols; Photo only\n");
         return;
     }
     const void *value[] = {CFSTR("com.x9.videotoolbox.videoencoder.hevc.software"),
@@ -87,7 +87,7 @@ static void register_hevc(void)
     int result = reg(0x68766331u /* hvc1, never avc1 */, info, (void *)create_hevc);
     CFRelease(info);
     hevc_registered = result == 0;
-    dprintf(2, "X9 CAMERA VIDEO: software HEVC registration=%d; no hardware/encode/save claim\n", result);
+    x9_dprintf2( "X9 CAMERA VIDEO: software HEVC registration=%d; no hardware/encode/save claim\n", result);
 }
 
 bool x9_camera_software_hevc_ready(void)
@@ -197,7 +197,7 @@ static id capture_plist(id self, SEL selector, NSURL *url)
     }
     id result = [[copy copy] autorelease];
     [copy release];
-    dprintf(2, "X9 CAMERA PROFILE: D22 physical-only mask=%x Photo%s; original audio retained\n",
+    x9_dprintf2( "X9 CAMERA PROFILE: D22 physical-only mask=%x Photo%s; original audio retained\n",
             mask, video ? "+1080p30 HEVC (software)" : " only");
     return result;
 }
@@ -208,10 +208,10 @@ void x9_camera_install_profile(uintptr_t slide)
                                           sel_registerName("flatPlistWithContentsOfURL:"));
     if (!method || method_getNumberOfArguments(method) != 3 ||
         (uintptr_t)method_getImplementation(method) != 0x1a208b90cull + slide) {
-        dprintf(2, "X9 CAMERA PROFILE: unsupported 20H392 plist loader; unchanged\n");
+        x9_dprintf2( "X9 CAMERA PROFILE: unsupported 20H392 plist loader; unchanged\n");
         return;
     }
     /* Caller has already qualified the CMCapture image UUID. */
     original_plist = method_setImplementation(method, (IMP)capture_plist);
-    dprintf(2, "X9 CAMERA PROFILE: exact D22 URL-loader hook; requires physical backend\n");
+    x9_dprintf2( "X9 CAMERA PROFILE: exact D22 URL-loader hook; requires physical backend\n");
 }

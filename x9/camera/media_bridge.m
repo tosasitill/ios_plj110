@@ -44,7 +44,7 @@ id x9_camera_media_vendor_with_caller(id self,SEL selector,uintptr_t returnAddre
                 id made=((id(*)(id,SEL))objc_msgSend)(self,sel_registerName("alloc"));
                 ours=((id(*)(id,SEL,void*))objc_msgSend)(made,sel_registerName("initWithDeviceCreateFunction:"),
                                                        (void*)x9_camera_device_create);
-                dprintf(2,"X9 CAMERA MEDIA: physical backend ready; physical-stream vendor %s\n",ours?"created":"failed");
+                x9_dprintf2("X9 CAMERA MEDIA: physical backend ready; physical-stream vendor %s\n",ours?"created":"failed");
             }
             /* Recheck after init too: construction is not a hardware lease. */
             if(ours && x9_camera_backend_ready())result=ours;
@@ -91,12 +91,12 @@ static void imageAdded(const struct mach_header *mh,__unused intptr_t imageSlide
         hookImage.dli_fbase && hookImage.dli_fbase==forwardImage.dli_fbase;
     if(!m || !init || method_getNumberOfArguments(m)!=2 || method_getNumberOfArguments(init)!=3 ||
        ((uintptr_t)current!=0x1a1f40c84+slide && !torchChain)) {
-        dprintf(2,"X9 CAMERA MEDIA: unsupported vendor ABI/IMP; not hooking\n");return;
+        x9_dprintf2("X9 CAMERA MEDIA: unsupported vendor ABI/IMP; not hooking\n");return;
     }
     torchVendorWithCaller=torchChain ? forward : NULL;
     originalVendor=method_setImplementation(m,(IMP)x9_camera_media_shared_vendor);hooked=true;
     x9_camera_install_profile(slide);
-    dprintf(2,"X9 CAMERA MEDIA: exact 20H392 vendor hook%s; no vendor until physical backend ready\n",
+    x9_dprintf2("X9 CAMERA MEDIA: exact 20H392 vendor hook%s; no vendor until physical backend ready\n",
         torchChain ? " (retaining torch caller gate)" : "");
 }
 __attribute__((constructor)) static void initCamera(void)

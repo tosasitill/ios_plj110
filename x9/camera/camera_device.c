@@ -81,6 +81,8 @@ hakios_camera_say(const char *format, ...)
 	}
 	line[n++] = '\n';
 	write(2, line, (size_t)n);
+	line[n - 1] = 0;
+	x9_camera_kernel_say(line);
 }
 #define say hakios_camera_say
 

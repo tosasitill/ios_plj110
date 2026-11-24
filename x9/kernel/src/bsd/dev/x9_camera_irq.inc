@@ -505,6 +505,11 @@ static void __attribute__((noreturn)) cam_irq_worker(void *arg,wait_result_t res
                 old=cam_irq_spin_take();cam_irq.accepting=false;cam_irq_mask_all();
                 cam_repeat_completed_locked();
                 cam_irq_spin_drop(old);
+                printf("X9 CAMERA REPEAT COMPLETE: why=%d completed=%llu phase=%u enabled=%u epoch=%llu/%llu/%llu "
+                    "after=%x/%x target=%x/%x repeat_err=%d (0=parked;1 identity 2 err 3 done 4 count 5 state 7/8 target)\n",
+                    cam_repeat_completed_why,cam_repeat.completed,cam_repeat.phase,cam_repeat.enabled,
+                    cam_repeat.epoch,cam_irq.epoch,cam_sv.epoch,cam_repeat.after[0],cam_repeat.after[1],
+                    cam_irq_fbc.target[0],cam_irq_fbc.target[1],cam_repeat.error);
                 if(e==EBUSY||e==ESTALE)e=0; /* qualified drop/stop; never replay or FBC/RCNT */
             }
         }

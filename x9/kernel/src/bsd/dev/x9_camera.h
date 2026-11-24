@@ -67,6 +67,10 @@ struct x9_camera_switch_capacity {
     uint32_t version, flags, limit, retired, remaining, reserved[3];
 };
 #define X9_CAMERA_GET_SWITCH_CAPACITY _IOR('C', 0x9f, struct x9_camera_switch_capacity)
+/* Bridge stderr is invisible on the serial console: the status minor relays
+ * bounded diagnostic text lines to the kernel log (rate limited). */
+struct x9_camera_say { char text[200]; };
+#define X9_CAMERA_SAY _IOW('C', 0xa0, struct x9_camera_say)
 /* Explicit stop receipt; close(2)==0 is not proof that cdev d_close ran.
  * Requests contain version/sensor/generation_before only, all else zero.
  * owned_* journal ATTEMPTED callbacks, not DMA leases or hardware grants.

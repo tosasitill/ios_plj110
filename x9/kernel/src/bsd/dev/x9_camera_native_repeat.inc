@@ -232,15 +232,17 @@ static uint32_t cam_repeat_fbc_compare(unsigned bank,uint32_t value)
 }
 /* The existing worker calls this only for a actually RETIRED slot after
  * RAW CPU→IDLE. Busy remains set until its real unlock/wakeup afterwards. */
+static int cam_repeat_completed_why=-1;
 static void cam_repeat_completed_locked(void)
 {
-    if(!cam_repeat_identity() || cam_repeat.error || !cam_irq_fbc.done_seen ||
-       !cam_irq_fbc.count_accepted || cam_irq.slot->state!=X9_CAMSV_RETIRED)return;
-    if(cam_repeat.completed==UINT64_MAX){cam_repeat_fault_locked(EOVERFLOW);return;}
+    cam_repeat_completed_why=!cam_repeat_identity()?1:cam_repeat.error?2:!cam_irq_fbc.done_seen?3:
+        !cam_irq_fbc.count_accepted?4:cam_irq.slot->state!=X9_CAMSV_RETIRED?5:0;
+    if(cam_repeat_completed_why)return;
+    if(cam_repeat.completed==UINT64_MAX){cam_repeat_completed_why=6;cam_repeat_fault_locked(EOVERFLOW);return;}
     for(unsigned b=0;b<2;b++) {
         cam_repeat.empty[b]=cam_repeat.after[b]=cam_irq_fbc.after[b];
         if(!cam_repeat_done_target_locked(b,cam_repeat.after[b])) {
-            cam_repeat_fault_locked(ESTALE);return;
+            cam_repeat_completed_why=7+(int)b;cam_repeat_fault_locked(ESTALE);return;
         }
     }
     cam_repeat.completed++;cam_repeat.prior_done=true;cam_repeat.phase=CAM_REPEAT_PARKED;

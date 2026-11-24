@@ -291,11 +291,11 @@ static void __attribute__((noreturn)) cam_native_capture_controller(void *arg,wa
         if(ready)clear_wait(current_thread(),THREAD_AWAKENED);
         { /* Black-preview triage: why no second frame (no REPEAT line in 398-400). */
             static unsigned wake_logs;
-            if(!ready && cam_native_capture.repeat_admission && wake_logs<12) {
+            if(wake_logs<24) {
                 wake_logs++;
-                printf("X9 CAMERA CONTROLLER WAKE: not-ready phase=%u enabled=%u admission=%u epoch=%llu/%llu "
+                printf("X9 CAMERA CONTROLLER WAKE: ready=%u repeat_admission=%u phase=%u enabled=%u admission=%u epoch=%llu/%llu "
                     "busy=%u count=%u completed=%llu observed=%llu irq_err=%d repeat_err=%d\n",
-                    cam_repeat.phase,cam_repeat.enabled,cam_repeat.admission,cam_repeat.epoch,
+                    ready,cam_native_capture.repeat_admission,cam_repeat.phase,cam_repeat.enabled,cam_repeat.admission,cam_repeat.epoch,
                     cam_native_capture.epoch,cam_irq.busy,cam_irq.count,cam_repeat.completed,
                     cam_native_capture.observed_completed,cam_irq.error,cam_repeat.error);
             }
@@ -303,9 +303,13 @@ static void __attribute__((noreturn)) cam_native_capture_controller(void *arg,wa
         lck_mtx_unlock(&camera_native_capture_lock);
         if(!ready){thread_block(THREAD_CONTINUE_NULL);continue;}
 
+        uint64_t lock_t0=mach_absolute_time(),lock_ns;
         lck_mtx_lock(&camera_control_lock);
+        absolutetime_to_nanoseconds(mach_absolute_time()-lock_t0,&lock_ns);
         lck_mtx_lock(&camera_native_capture_lock);
         bool admitted=cam_native_capture.repeat_admission && cam_native_capture.epoch==epoch;
+        printf("X9 CAMERA CONTROLLER LOCK: epoch=%llu completed=%llu control_wait_ms=%llu admitted=%u\n",
+            epoch,completed,lock_ns/1000000ull,admitted);
         if(admitted)cam_native_capture.controller_busy=true;
         lck_mtx_unlock(&camera_native_capture_lock);
         int e=CAM_FAIL(ECANCELED);
