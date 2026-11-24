@@ -337,6 +337,8 @@ static int stop(void)
         printf("X9 CAMERA DRAIN: sensor=%u generation=%llu stream=%d drain=%d restore=%d "
             "retained=%u/%u/%u latched=%u\n",s->sensor,session.generation,e,a,b,
             session.power,session.capture,session.stream,session.latched);
+        /* diag28: name the exact CAM_FAIL site (func:line) behind a failed close. */
+        if(a || b)cam_fail_dump("drain");
     }
     cam_drain_mark("stop:drain-readers");
     int copy=cam_drain_readers();
