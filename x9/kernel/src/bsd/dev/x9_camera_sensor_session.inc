@@ -38,6 +38,54 @@ static int cam_sensor_session_fault(int e)
     cam_sensor_live.probe.last_errno=cam_sensor_live.error;
     return e;
 }
+struct cam_sensor_supply_key {
+    uint64_t epoch;
+    uint32_t sensor,phase;
+    int error;
+    bool close_attempted;
+    struct cam_probe_board board;
+    struct cam_probe_bus ldo;
+    uint8_t wl_enable,wl_voltage[3],wl_programmed,wl_enabled;
+    uint8_t wl_enable_expected,wl_enable_prior,wl_enable_uncertain;
+    bool wl_tracking,wl_conflict,pmif_fault;
+    vm_offset_t pmif_pending;
+    struct cam_probe_rail dovdd,afvdd,dvdd;
+};
+static void cam_sensor_supply_snapshot(struct cam_sensor_supply_key *k)
+{
+    const struct cam_probe_journal *j=&cam_journal;
+    bzero(k,sizeof(*k));
+    k->epoch=cam_sensor_live.epoch;k->sensor=cam_sensor_live.probe.sensor;
+    k->phase=cam_sensor_live.phase;k->error=cam_sensor_live.error;
+    k->close_attempted=cam_sensor_live.close_attempted;
+    k->board=j->board;k->ldo=j->ldo;
+    k->wl_enable=j->wl_enable;memcpy(k->wl_voltage,j->wl_voltage,sizeof(k->wl_voltage));
+    k->wl_programmed=j->wl_programmed;k->wl_enabled=j->wl_enabled;
+    k->wl_enable_expected=j->wl_enable_expected;k->wl_enable_prior=j->wl_enable_prior;
+    k->wl_enable_uncertain=j->wl_enable_uncertain;
+    k->wl_tracking=j->wl_tracking;k->wl_conflict=j->wl_conflict;
+    k->pmif_fault=j->pmif_fault;k->pmif_pending=j->pmif_pending;
+    k->dovdd=j->dovdd;k->afvdd=j->afvdd;k->dvdd=j->dvdd;
+}
+/* Calibration issues hundreds of back-to-back 16-byte FIFO writes. Reuse
+ * only the expensive WL/PMIC observation for the same 20 ms guard window;
+ * clocks, pins, receiver state and every AP FIFO transaction remain live. */
+static int cam_sensor_supply_guard(uint8_t *enable)
+{
+    static struct { bool valid; uint64_t at; struct cam_sensor_supply_key key; uint8_t enable; } ok;
+    struct cam_sensor_supply_key key;
+    uint64_t t0=mach_absolute_time(),span;
+    int e;
+    nanoseconds_to_absolutetime(CAM_GUARD_REUSE_NS,&span);
+    cam_sensor_supply_snapshot(&key);
+    if(ok.valid && t0-ok.at<span && !memcmp(&ok.key,&key,sizeof(key))) {
+        *enable=ok.enable;return 0;
+    }
+    ok.valid=false;
+    e=cam_wl_guard(&cam_journal,false,enable);if(e)return e;
+    cam_sensor_supply_snapshot(&ok.key);ok.at=mach_absolute_time();ok.enable=*enable;ok.valid=true;
+    return 0;
+}
 /* Each sensor request checks consumed WL channels AND interleaved shared
  * PMIC rails, not just the snapshot taken before the table loop. Clock, pin,
  * FIFO and AP configuration guards still run in the transfer. These are
@@ -50,7 +98,7 @@ static int cam_sensor_ap_local_guard(struct cam_sensor_ap *ap)
     if(ap->bus!=&j->sensor || !cam_sensor_live.epoch || cam_sensor_live.close_attempted)
         return CAM_FAIL(ESTALE);
     if(ap->slave!=(cam_sensor_slave(cam_sensor_live.probe.sensor)))return CAM_FAIL(EINVAL);
-    e=cam_wl_guard(j,false,&enable);
+    e=cam_sensor_supply_guard(&enable);
     if(!e && (enable&j->board.wl_mask)!=j->board.wl_mask)e=CAM_FAIL(EBUSY);
     if(!e)e=cam_clock_check(j,false,true);
     if(!e)e=cam_pins_guard(j,false);

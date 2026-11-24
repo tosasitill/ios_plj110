@@ -10,7 +10,7 @@
 - 在 **OPPO Find X9（PLJ110 / OP5E17L1，MT6993，12 GiB RAM，面板 1256x2760，Mali v14）** 上由 MediaTek LK 直接启动自编译
   XNU（xnu-8796.141.3 + SWEET/X9 补丁），运行**未修改的 iOS 16.7.16（20H392，iPhone X / D22 身份）**用户态。
 - 启动链：LK → Android boot.img v4（legacy LZ4 arm64 Image）→ x9 裸机 shim → 内嵌 SWEETXNU payload → XNU。
-  每次由**用户手动** `fastboot boot x9/out/<name>/boot.img`；不 flash、不 `fastboot getvar`、不写分区。
+  设备不支持 `fastboot boot`；用户明确授权时直接 `fastboot flash boot_b x9/out/<name>/boot.img` 后重启。只写 `boot_b`，不动其它分区。
 - 根盘：`userdata` 内 pin+immutable 的 extent 文件（HFSX，base 16 GiB + extension 16 GiB = 32 GiB），内核原生
   `ufsroot0` 挂载（`rd=ufsroot0 rootrw=1 ufsrw=1`）。extent 表/序列号在 `root-manifest.json`（只在 `.local`）。
 - 显示：ADT canvas 1242x2760（414x920 pt @3x，左右各 7 px 黑边）；物理面板 1256x2760 stride 5120，fb 0xfc910000。
@@ -159,6 +159,25 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - 交接写在本文件 §5，标明提交、run ID、确切构建/启动结果和观察 vs 推断。push 到 `origin`（GitHub tosasitill/ios_plj110）。
 
 ## 5. 当前状态与交接
+
+#### 2026-11-24 log 406 → x9-cam-start-latency-20261124（sensor supply guard 优化，仍未出帧）
+
+- **观察**：`boot_b` 刷入并重启成功。12.025 s 请求 stream，16.919 s `WRITE CALL command=3 errno=0`，start 约 **4.894 s**（405 为 12.029 s）。TG gate on/off、native configure、SMMU start/export、first arm、sensor stream-on、DONE/credit、RAW publish 全部 `errno=0`。16.921 s 桥打印 `stream stop requested`，16.932 s 首帧仍为黑电平（MSB 15–16），只发生 `READ CALL peek=1`，没有完整 RAW read、graph admission 或 PixelBufferHandler delivery。18.370 s SMMU retire 仍为 `retire:final-prior errno=70`，无 `NATIVE MATCH DIFF`。
+- **优化（已上机验证）**：`cam_sensor_ap_local_guard()` 不再每次直接做 WL/PMIC 供电观测，改为 20 ms 内、同一 epoch/sensor/phase/error/close 与完整供电 journal 快照不变时复用成功结果；失败不缓存。clock、pins、receiver、AP FIFO START/STAT/terminal 检查仍逐次执行。405 的 2141 次 sensor AP guard 共 7154 ms，406 降至 **243 ms**；configure:source-prepare phase wall 从 8541 ms 降至 1536 ms。
+- **推断（尚未证明）**：406 的 stop 仍在 start 返回后约 2 ms 到达，可能还有约 5 s 的客户端/框架期限，而不是 405 的约 12 s；需要下一份日志确认 stop 来源并把 start 再压低。首帧纯黑与只 peek 也仍不能归因于启动延迟。
+- **构建与上机**：`python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --boot-arg x9_mmup_smmu_init=1 --boot-arg x9_cam_defer=0 --name x9-cam-start-latency-20261124` exit 0；104/104 overlay 对象（3 prebuilt）、链接、shim/boot 打包成功。`boot.img` 15,331,328 B，sha256 `9305a8db86c9a5cdadcb45beb1e634582daa2a4bbe4451feb514b4efff3b0d35`。按用户指令直接写 `boot_b`，未改其它分区；log 406 已抓取。**这不是界面出帧成功。**
+
+#### 2026-11-24 log 405 → x9-cam-gate-cache-defer0-20261124（TG gate 修复验证，启动基线）
+
+- **观察**：TG gate on/off 均 `errno=0`，72d776f7 的 journal 提交修复有效。12.412 s 请求 stream，24.441 s start 返回，约 **12.029 s**；其中 calibration/table 阶段 8541 ms，2141 次 `cam_sensor_ap_guard` 占 7154 ms。24.442 s stop，24.452 s 唯一 RAW 发布且为黑电平；桥只 peek 后因 `running=0` 退出。26.052 s SMMU retire `final-prior errno=70`，无 match diff。
+- **日志解释修正**：retire 后重复的 `STALL step=st:ste-compare` 是 watchdog 仍持有最后 `cam_progress_step` 的过期报告；`reads=1389` 不变，不能据此声称 STE scan 卡死或重复退役。
+- **结论**：gate 已不是 blocker；下一项是降低 calibration 的重复供电 guard 开销，并单独定位 SMMU producer guard 的 `ESTALE`。
+
+#### 2026-11-24 log 404 → x9-cam-gate-cache-defer0-20261124（补齐已验证 boot-args；log 405 已分析，见上）
+
+- **观察**：`c0d68d3d…f20b4fb9` 已写入 `boot_b` 并重启。11.188 s 请求 stream，11.189 s 打印 `start deferred until 90s uptime (now 70628ms, x9_cam_defer)`，随后两次 start 均返回 `EBUSY(16)`；没有 TG gate、sensor stream-on 或 RAW。90 s 后没有自动重发 `streams asked for`；110.076 s 只重新创建空 stream 对象，115.078 s 以 `worker_started=0 frames=0` 停止。因此 404 没有检验 72d776f7 的 TG gate 修复。
+- **原因（观察 + 源码）**：404 的实际 boot-args 既无 `x9_cam_defer=0`，也无 `x9_mmup_smmu_init=1`；`cam_boot_deferred()` 在参数缺失时默认 90 s。403/402 的成功启动路径使用 `x9_cam_defer=0`，且当时设备构建显式带 `x9_mmup_smmu_init=1`。新候选不改内核源码，只显式补齐这两个参数。
+- **构建与上机**：`python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --boot-arg x9_mmup_smmu_init=1 --boot-arg x9_cam_defer=0 --name x9-cam-gate-cache-defer0-20261124` exit 0；104/104 overlay 对象编译（3 prebuilt）、链接、shim/boot 打包成功。`boot.img` 15,331,328 B，sha256 `9c982fbafb75383992466ac270caded342e0413d719f4c2062a2fb1380c96651`。设备不支持 `fastboot boot`（`unknown command`），已按用户明确指令写入 `boot_b` 并重启；log 405 结果见上，不能把构建或启动称为出帧成功。
 
 #### 2026-11-24 log 403 → x9-cam-gate-cache-20261124（TG gate journal 修复，待上机）
 
