@@ -86,6 +86,39 @@ hakios_camera_say(const char *format, ...)
 }
 #define say hakios_camera_say
 
+/* diag29: worker stage watchdog. Globals only (never the stream, which may be
+ * gone); a generation ends the watchdog when its worker exits. */
+static _Atomic(const char *) wd_stage = "start";
+static _Atomic uint64_t wd_since, wd_frames, wd_gen;
+static inline void
+wd_mark(const char *stage)
+{
+	atomic_store(&wd_since, mach_absolute_time());
+	atomic_store(&wd_stage, stage);
+}
+static void *
+wd_thread(void *context)
+{
+	uint64_t gen = (uint64_t)(uintptr_t)context, seen_since = 0;
+	mach_timebase_info_data_t tb;
+
+	mach_timebase_info(&tb);
+	pthread_setname_np("hakios-camera-wd");
+	while (atomic_load(&wd_gen) == gen) {
+		usleep(500000);
+		uint64_t since = atomic_load(&wd_since);
+		uint64_t ms = (mach_absolute_time() - since) * tb.numer / tb.denom / 1000000;
+		if (atomic_load(&wd_gen) == gen && ms >= 1500 && since != seen_since) {
+			seen_since = since;
+			say("worker stuck: stage=%s for %llu ms (frames delivered %llu)", atomic_load(&wd_stage),
+			    (unsigned long long)ms, (unsigned long long)atomic_load(&wd_frames));
+		} else if (since == seen_since && ms >= 5000 && ms % 5000 < 500) {
+			say("worker still stuck: stage=%s for %llu ms", atomic_load(&wd_stage), (unsigned long long)ms);
+		}
+	}
+	return NULL;
+}
+
 /* ---- CoreMedia's derived objects, as Darwin userland 16.5 lays them out ---------------------------------------- */
 
 typedef struct OpaqueCMBaseObject *CMBaseObjectRef;
@@ -1541,6 +1574,7 @@ deliver(struct stream *s, const struct output_snapshot *snapshot, const struct i
 	if (!metadata_time(metadata, s->port, &pts) ||
 	    CMTimeCompare(pts, CMClockMakeHostTimeFromSystemUnits(sof_time)) != 0)
 		return report_delivery_fault(reported, snapshot, f, DELIVERY_METADATA_TIME, "metadata-time", 0);
+	wd_mark("deliver:buffer");
 	pb = output_buffer(s, snapshot);
 	if (pb == NULL) {
 		return false;
@@ -1559,6 +1593,7 @@ deliver(struct stream *s, const struct output_snapshot *snapshot, const struct i
 	uint64_t began = mach_absolute_time();
 
 	atomic_init(&job.failed, false);
+	wd_mark("deliver:render");
 	dispatch_apply_f(job.pieces, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), &job, render_piece);
 	CVReturn unlocked = CVPixelBufferUnlockBaseAddress(pb, 0);
 
@@ -1615,7 +1650,10 @@ deliver(struct stream *s, const struct output_snapshot *snapshot, const struct i
 	s->callback_active = true;
 	s->out[snapshot->slot].last_pts_units = sof_time;
 	pthread_mutex_unlock(&s->lock);
+	wd_mark("deliver:handler");
 	((pixel_buffer_handler)snapshot->handler)(pb, pts);
+	wd_mark("deliver:after-handler");
+	atomic_fetch_add(&wd_frames, 1);
 
 	CVPixelBufferRef release = NULL;
 	bool keep = false, first = false;
@@ -1993,8 +2031,15 @@ worker(void *context)
 		return NULL;
 	}
 	isp_init(&isp);
+	{
+		pthread_t wd;
+		uint64_t gen = atomic_fetch_add(&wd_gen, 1) + 1;
+		wd_mark("start");
+		if (pthread_create(&wd, NULL, wd_thread, (void *)(uintptr_t)gen) == 0) pthread_detach(wd);
+	}
 	while (s->running) {
 		ssize_t n;
+		wd_mark("loop");
 
         struct lens_choice choice=rear_lens(s->camera->sensor,s->ready_mask,atomic_load(&s->zoom));
         if(choice.sensor!=s->physical_sensor) {
@@ -2066,6 +2111,7 @@ worker(void *context)
         } else candidate_sensor=0;
 
 		if (buffer == NULL) {
+			wd_mark("read-header");
 			n = read(device, &head, sizeof(head));
 			int read_error = n < 0 ? errno : 0;
 
@@ -2087,8 +2133,10 @@ worker(void *context)
 			say("frames of %ux%u from the kernel (the %s)", head.width, head.height, s->camera->name);
 			continue;
 		}
+		wd_mark("read-raw");
 		n = read(device, buffer, bytes);
 		int read_error = n < 0 ? errno : 0;
+		wd_mark("measure");
 
 		if (!s->running) { say("worker: stream no longer running after RAW read n=%zd errno=%d", n, read_error); break; }
 		if (n != (ssize_t)bytes) {
@@ -2175,7 +2223,9 @@ worker(void *context)
 			}
 		}
 		if (isp_ae(&isp, f, &st, &c)) {
+			wd_mark("ae-write");
 			ssize_t sent = write(device, &c, sizeof(c));
+			wd_mark("after-ae");
 
 			if (sent != sizeof(c)) {
                 error = sent < 0 ? errno : EMSGSIZE;
@@ -2200,7 +2250,9 @@ worker(void *context)
 			af.now = true;
 			af.sweep = true;
 		}
+		wd_mark("af");
 		af_frame(device, &af, f, raw, af_window, af_locked);
+		wd_mark("after-af");
 		s->frames++;
 
 		/* Luminance easing uses ONLY new-lens RAW and its measured levels.
@@ -2280,8 +2332,10 @@ worker(void *context)
 	stream_fault(s, error);
 	s->graph_running = false;
 	free(buffer);
+	wd_mark("worker-close");
     if(device>=0)(void)close_camera_once(s, device);
 	s->running = false;
+	atomic_fetch_add(&wd_gen, 1); /* diag29: end the stage watchdog */
 	say("frames stopped (%llu): first_errno=%d stop_errno=%d close_errno=%d", (unsigned long long)s->frames,
 	    atomic_load(&s->first_errno), atomic_load(&s->stop_errno), atomic_load(&s->close_errno));
 	camera_worker_thread = false;

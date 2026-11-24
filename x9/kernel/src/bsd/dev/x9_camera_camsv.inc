@@ -150,12 +150,16 @@ static int cam_camsv_finish(struct x9_camera_camsv_slot *slot,
         } else cam_camsv_retain(slot,e);
     }
     if(e && slot->state==X9_CAMSV_RETAINED)cam_camsv_retain(slot,e);
-    slot->last_errno=e;
+    /* diag29: a stop-time DONE that retired cleanly returns ESTALE only because
+     * canceled pixels are never published; that is not a slot fault. Recording
+     * it made the CAMSV shutdown admit (and reopen) refuse the retired slot. */
+    slot->last_errno=(drop && e==ESTALE && slot->state==X9_CAMSV_RETIRED)?0:e;
 out:
     if(drop)printf("X9 CAMERA STOP DONE: generation=%llu capture_id=%llu seq=%x "
         "core_cancel=%u state=%u errno=%d (no delivery; S1/lease retained, NOT AXI/map drain)\n",
         irq.generation,irq.capture_id,irq.inner_sequence,drop,slot->state,e);
-    if(slot->state!=X9_CAMSV_RETAINED)slot->last_errno=e;
+    if(slot->state!=X9_CAMSV_RETAINED)
+        slot->last_errno=(drop && e==ESTALE && slot->state==X9_CAMSV_RETIRED)?0:e;
     lck_mtx_unlock(&camera_camsv_lock);return e;
 }
 int x9_camera_camsv_finish(struct x9_camera_camsv_slot *slot,
