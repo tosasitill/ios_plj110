@@ -17,6 +17,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <os/log.h>
 #include "../kernel/src/bsd/dev/x9_haptic.h"
 enum {PLUGIN=1,ACTUATOR=2,OUTPUT=3,MAX_CLIENTS=64,QUEUE=16,PERIOD=512};
 #define LEAD_NS 20000000ULL
@@ -31,6 +32,11 @@ static bool ready,fault,stop_failed,dirty,cycle_valid;
 static Float64 last_sample,ticks_per_frame;
 static UInt32 last_frames,last_hash;
 static uint64_t generation,sequence,anchor,seed=1,last_due;
+/* diag32: a fault used to be permanent until mediaserverd restarted; every
+ * later StartIO failed and AQMEIO timed out (CMSession hang, mediaserverd
+ * killed when Camera re-routed audio). Faults now end with a clean STOP. */
+static unsigned late_drops,fault_logs,restarts;
+#define HLOG(...) os_log(OS_LOG_DEFAULT,"X9 HAPTIC HAL: " __VA_ARGS__)
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static AudioServerPlugInHostRef host;
 static dispatch_source_t timer;
@@ -51,8 +57,9 @@ static bool discover(void)
 }
 static struct client *client(UInt32 id)
 {for(unsigned i=0;i<MAX_CLIENTS;i++)if(clients[i].used && clients[i].id==id)return &clients[i];return NULL;}
-static void fault_io(void)
-{if(!fault){++seed;dirty=true;}fault=true;ready=false;cycle_valid=false;}
+static void fault_io(const char *why)
+{if(!fault){++seed;dirty=true;if(fault_logs<64){fault_logs++;HLOG("fault: %{public}s fd=%d running=%u queued=%u",why,fd,running,count);}}
+ fault=true;ready=false;cycle_valid=false;}
 static OSStatus stop_device(void)
 {
     if(fd<0)return stop_failed?'nope':0;
@@ -62,11 +69,13 @@ static OSStatus stop_device(void)
     bool after=ioctl(fd,X9_HAPTIC_GET_STATUS,&b)==0 && b.version==1;
     if(!before || !stopped || !after || b.generation!=a.generation+1 || b.queued_frames ||
         (b.flags&(X9_HAPTIC_RUNNING|X9_HAPTIC_OFF_FAILED)) || b.hw_state) {
-        stop_failed=true;fault_io();return 'nope'; /* retain fd for STOP retry */
+        stop_failed=true;fault_io("STOP not confirmed");return 'nope'; /* retain fd for STOP retry */
     }
     int old=fd;fd=-1;stop_failed=false;first=count=0;cycle_valid=false;
-    memset(queue,0,sizeof(queue));ready=qualified(&b) && !fault;
-    if(close(old)<0){fault_io();return 'nope';}return 0;
+    memset(queue,0,sizeof(queue));
+    if(close(old)<0){fault_io("close");return 'nope';}
+    if(fault){fault=false;++seed;dirty=true;HLOG("fault cleared after clean STOP gen=%llu",(unsigned long long)b.generation);}
+    ready=qualified(&b);return 0;
 }
 static void notify(void)
 {
@@ -78,6 +87,23 @@ static void notify(void)
         {kAudioDevicePropertyDeviceIsAlive,kAudioObjectPropertyScopeGlobal,0},
         {kAudioDevicePropertyDeviceIsRunning,kAudioObjectPropertyScopeGlobal,0}};
     host->PropertiesChanged(host,PLUGIN,2,p);host->PropertiesChanged(host,ACTUATOR,2,d);
+}
+static OSStatus start_device(void)
+{
+    ready=discover();if(!ready){HLOG("start: status device not qualified");return 'nope';}
+    fd=open("/dev/x9-haptic",O_WRONLY|O_NONBLOCK|O_CLOEXEC);
+    struct x9_haptic_start s={.version=1,.conversion=X9_HAPTIC_RETUNE,.intensity=1000,.sharpness=650};
+    if(fd<0 || ioctl(fd,X9_HAPTIC_START,&s)<0) {
+        int err=errno;HLOG("start: open/START failed fd=%d errno=%d",fd,err);
+        if(fd>=0)(void)stop_device();return 'nope';
+    }
+    struct x9_haptic_status state;
+    if(ioctl(fd,X9_HAPTIC_GET_STATUS,&state)<0 || !qualified(&state) ||
+       !(state.flags&X9_HAPTIC_RUNNING) || state.generation!=s.generation) {
+        fault_io("start status");(void)stop_device();return 'nope';
+    }
+    generation=s.generation;sequence=0;anchor=mach_absolute_time();
+    first=count=0;cycle_valid=false;++seed;return 0;
 }
 static void service(__unused void *context)
 {
@@ -94,23 +120,33 @@ static void service(__unused void *context)
              * prefill (+ boost startup) by the presentation time instead
              * of starting it there (log 329/330 "delayed"). */
             if(now_ns()+LEAD_NS<due_at[first])break;
-            if(now_ns()>due_at[first]+50000000ULL){fault_io();break;}
+            if(now_ns()>due_at[first]+50000000ULL) {
+                /* Stale feedback is dropped, never replayed late and never
+                 * a device fault (was: one late packet disabled haptics). */
+                if(late_drops++<32)HLOG("late packet dropped by %llu ms (drops=%u)",
+                    (unsigned long long)((now_ns()-due_at[first])/1000000ULL),late_drops);
+                memset(&queue[first],0,sizeof(queue[first]));first=(first+1)%QUEUE;--count;continue;
+            }
             struct x9_haptic_packet *p=&queue[first];
             size_t bytes=24+(size_t)p->frames*2;
             ssize_t n=write(fd,p,bytes);
             if(n<0 && (errno==EAGAIN || errno==EINTR))break;
-            if(n!=(ssize_t)bytes){fault_io();break;}
+            if(n!=(ssize_t)bytes){fault_io("short write");break;}
             memset(p,0,sizeof(*p));first=(first+1)%QUEUE;--count;
         }
     }
     if(fault && fd>=0 && !stop_failed)(void)stop_device();
     if(++tick%500==0) {
         if(!running && fd<0 && !fault && !stop_failed)ready=discover();
+        /* Clients still running after a fault-stop: reopen like StartIO. */
+        if(running && fd<0 && !fault && !stop_failed && restarts<64) {
+            OSStatus r=start_device();restarts++;HLOG("restart after fault: %d",(int)r);dirty=true;
+        }
         if(running && fd>=0 && !fault) {
             struct x9_haptic_status s;
             int result=ioctl(fd,X9_HAPTIC_GET_STATUS_NOWAIT,&s);
             if(result<0 && (errno==EAGAIN || errno==EINTR)){}
-            else if(result<0 || !qualified(&s) || !(s.flags&X9_HAPTIC_RUNNING) || s.generation!=generation)fault_io();
+            else if(result<0 || !qualified(&s) || !(s.flags&X9_HAPTIC_RUNNING) || s.generation!=generation)fault_io("status check");
         }
     }
     bool changed=dirty || was!=ready;dirty=false;
@@ -256,25 +292,12 @@ static OSStatus set_data(__unused AudioServerPlugInDriverRef d,AudioObjectID o,_
 static OSStatus start_io(__unused AudioServerPlugInDriverRef d,AudioObjectID o,UInt32 id)
 {
     if(o!=ACTUATOR)return '!obj';pthread_mutex_lock(&lock);struct client *c=client(id);OSStatus e=0;
-    if(!c)e='!obj';else if(fault || stop_failed)e='nope';
+    if(c && fault && fd<0 && !stop_failed){fault=false;++seed;HLOG("start: stale fault cleared (device stopped)");}
+    if(!c)e='!obj';else if(fault || stop_failed){e='nope';HLOG("start refused: fault=%d stop_failed=%d",fault,stop_failed);}
     else if(!c->running) {
-        if(!running) {
-            ready=discover();if(!ready)e='nope';
-            else {
-                fd=open("/dev/x9-haptic",O_WRONLY|O_NONBLOCK|O_CLOEXEC);
-                struct x9_haptic_start s={.version=1,.conversion=X9_HAPTIC_RETUNE,.intensity=1000,.sharpness=650};
-                if(fd<0 || ioctl(fd,X9_HAPTIC_START,&s)<0){e='nope';if(fd>=0)(void)stop_device();}
-                else {
-                    struct x9_haptic_status state;
-                    if(ioctl(fd,X9_HAPTIC_GET_STATUS,&state)<0 || !qualified(&state) ||
-                       !(state.flags&X9_HAPTIC_RUNNING) || state.generation!=s.generation) {
-                        fault_io();(void)stop_device();e='nope';
-                    } else {generation=s.generation;sequence=0;anchor=mach_absolute_time();
-                        first=count=0;cycle_valid=false;++seed;}
-                }
-            }
-        }
+        if(!running)e=start_device();
         if(!e){c->running=true;++running;}
+        HLOG("start client=%u result=%d running=%u gen=%llu",(unsigned)id,(int)e,running,(unsigned long long)generation);
     }
     pthread_mutex_unlock(&lock);notify();return e;
 }

@@ -54,6 +54,10 @@ struct x9_camera_smmu {
     uint64_t native_power;
     bool native_retire_attempted,native_restored,native_setup_issued,native_unstarted_retired;
     bool native_epoch_recycled;
+    /* diag32: STRTAB/CMDQ/EVTQ pages borrowed from native_previous (which
+     * stays exported and is never freed). The controller keeps only the
+     * first base written per boot, as Android reuses its probe-time tables. */
+    bool native_queues_adopted;
     struct x9_camera_smmu *native_previous;
     uint32_t native_ste_phase,native_retire_error,native_prior_word[17];
     uint64_t native_retire_epoch,native_prior_base[3];
@@ -188,8 +192,10 @@ static void cam_smmu_unpublished_free(struct x9_camera_smmu *m)
     if(m->exported)panic("X9 CAMERA: free of exported SMMU backing");
     if(m->map && x9_camera_s1_discard(&m->map))
         panic("X9 CAMERA: unpublished SMMU has published Stage-1");
-    cam_s1_free_page(&m->evt);cam_s1_free_page(&m->cmd);
-    if(m->ste.va)kmem_free(kernel_map,m->ste.va,m->ste_bytes);
+    if(!m->native_queues_adopted) {
+        cam_s1_free_page(&m->evt);cam_s1_free_page(&m->cmd);
+        if(m->ste.va)kmem_free(kernel_map,m->ste.va,m->ste_bytes);
+    }
     if(cam_smmu_namespace==m)cam_smmu_namespace=m->native_previous;
     m->magic=0;kfree_type(struct x9_camera_smmu,m);
 }
@@ -294,9 +300,23 @@ static int cam_smmu_prepare_replacement(uint32_t idr0,uint32_t idr1,uint32_t idr
     m->cmd_shift=cmd>8?8:cmd;m->evt_shift=evt>7?7:evt;
     cam_smmu_namespace=m;
     e=x9_camera_s1_create(idr5,iova,bytes,&m->map);
-    if(!e)e=cam_s1_alloc_page(&m->ste,cam_s1_oas[idr5&7u]);
-    if(!e)e=cam_s1_alloc_page(&m->cmd,cam_s1_oas[idr5&7u]);
-    if(!e)e=cam_s1_alloc_page(&m->evt,cam_s1_oas[idr5&7u]);
+    if(!e && previous && previous->exported && previous->ste.va && previous->cmd.va && previous->evt.va &&
+       previous->ste_bytes==CAM_S1_PAGE && previous->cmd_shift==m->cmd_shift &&
+       previous->evt_shift==m->evt_shift) {
+        /* Controller is CR0=ACK=0 (retired); nothing fetches these pages. */
+        m->ste=previous->ste;m->cmd=previous->cmd;m->evt=previous->evt;
+        m->native_queues_adopted=true;
+        bzero((void *)m->ste.va,CAM_S1_PAGE);bzero((void *)m->cmd.va,CAM_S1_PAGE);
+        bzero((void *)m->evt.va,CAM_S1_PAGE);
+        printf("X9 CAMERA SMMU TABLES REUSED: strtab=%llx cmdq=%llx evtq=%llx (first-write-only bases; Android probe-time tables)\n",
+            m->ste.pa,m->cmd.pa,m->evt.pa);
+    } else {
+        if(previous)printf("X9 CAMERA SMMU TABLES NOT REUSED: exported=%u ste_bytes=%u shifts=%u/%u\n",
+            previous->exported,previous->ste_bytes,previous->cmd_shift,previous->evt_shift);
+        if(!e)e=cam_s1_alloc_page(&m->ste,cam_s1_oas[idr5&7u]);
+        if(!e)e=cam_s1_alloc_page(&m->cmd,cam_s1_oas[idr5&7u]);
+        if(!e)e=cam_s1_alloc_page(&m->evt,cam_s1_oas[idr5&7u]);
+    }
     if(!e) {
         uint64_t *ste=(uint64_t *)m->ste.va;
         for(unsigned sid=0;sid<CAM_SMMU_STES;sid++)ste[sid*CAM_SMMU_STE_WORDS]=1;
