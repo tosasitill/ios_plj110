@@ -11,6 +11,9 @@
 #define X9LOG_VERSION 1u
 #define X9LOG_GAP 1u
 #define X9LOG_AHEAD 2u
+#define X9_REBOOT_BOOTLOADER_REQ 0x48u
+#define X9_REBOOT_BOOTLOADER_VALUE 0x5839u
+#define X9_REBOOT_BOOTLOADER_INDEX 1u
 struct x9log_reader {
  void *ctx;
  uint64_t (*position)(void *);

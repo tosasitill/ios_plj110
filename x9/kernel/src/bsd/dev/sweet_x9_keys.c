@@ -5,20 +5,150 @@
  * Never touch the touch driver's PMIF-P.
  * No long-press reset, regulator, pinmux or global interrupt writes. */
 #include <sys/systm.h>
+#include <sys/sysctl.h>
+#include <sys/reboot.h>
 #include <kern/clock.h>
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
+#include <IOKit/IOPlatformExpert.h>
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern int sweet_early_is_x9(void);
 extern int sweet_x9_arg(const char *name, int def);
+extern int reboot_kernel(int, char *);
 extern int X9PMIFAcquire(void);
 extern void X9PMIFRelease(void);
 extern void sweet_hid_key(int, int);
 extern kern_return_t thread_terminate(thread_t);
 static vm_offset_t key_pmif;
 static unsigned key_down;
+
+#define X9_BOOTLOADER_MAGIC 3u
+#define X9_WATCHDOG_REBOOT_MODE_OFF 0x24u
+#define X9_WATCHDOG_SWRST_OFF 0x14u
+#define X9_WATCHDOG_MODE_KEY 0x22000000u
+#define X9_WATCHDOG_MODE_IRQ_EN (1u << 3)
+#define X9_WATCHDOG_SWRST_KEY 0x1209u
+static vm_offset_t reboot_mode_mmio;
+static int reboot_bootloader_armed;
+static int (*prior_halt_restart)(unsigned int);
+
+static uint32_t reboot_mode_read(void)
+{
+ return *(volatile uint32_t *)(reboot_mode_mmio + X9_WATCHDOG_REBOOT_MODE_OFF);
+}
+
+static void reboot_mode_write(uint32_t value)
+{
+ *(volatile uint32_t *)(reboot_mode_mmio + X9_WATCHDOG_REBOOT_MODE_OFF) = value;
+ __asm__ volatile("dsb sy" ::: "memory");
+}
+
+static void reboot_watchdog_reset(void)
+{
+ uint32_t mode=*(volatile uint32_t *)reboot_mode_mmio;
+ *(volatile uint32_t *)reboot_mode_mmio=(mode & ~X9_WATCHDOG_MODE_IRQ_EN) |
+     X9_WATCHDOG_MODE_KEY;
+ __asm__ volatile("dsb sy" ::: "memory");
+ for (;;) {
+  *(volatile uint32_t *)(reboot_mode_mmio + X9_WATCHDOG_SWRST_OFF)=X9_WATCHDOG_SWRST_KEY;
+  __asm__ volatile("dsb sy" ::: "memory");
+  delay(5);
+ }
+}
+
+/* OPPO MT6993 Android (mt6993.dts reboot-mode on toprgu 0x24, mask 0xf;
+ * aee/hangdet.c WDT_NONRST_REG2=0x24: stage bits 29-31, KERNEL=3, reboot
+ * flag bit 11 cleared by the restart notifier before every orderly reset).
+ * Android then resets through PSCI SYSTEM_RESET (priority 129 > mtk_wdt 128);
+ * a TOPRGU SWRST is the abnormal-reset path LK classifies via these bits. */
+static uint32_t reboot_mode_value(uint32_t before)
+{
+ return (before & ~(0xfu | (1u << 11) | (7u << 29))) |
+     X9_BOOTLOADER_MAGIC | (3u << 29);
+}
+
+static int reboot_halt_restart(unsigned int type)
+{
+ if (type == kPERestartCPU && __atomic_load_n(&reboot_bootloader_armed,
+     __ATOMIC_ACQUIRE)) {
+  uint32_t before = reboot_mode_read();
+  uint32_t wanted = reboot_mode_value(before);
+  reboot_mode_write(wanted);
+  uint32_t actual = reboot_mode_read();
+  printf("X9 BOOTLOADER: 1c010024 %08x -> %08x (read %08x); PSCI SYSTEM_RESET\n",
+      before, wanted, actual);
+  __asm__ volatile("dsb sy" ::: "memory");
+  {
+   register uint64_t x0 __asm__("x0") = 0x84000009u;
+   __asm__ volatile("smc #0" : "+r"(x0) ::
+       "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9",
+       "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+  }
+  printf("X9 BOOTLOADER: PSCI SYSTEM_RESET returned; watchdog fallback\n");
+  reboot_watchdog_reset();
+ }
+ return prior_halt_restart ? prior_halt_restart(type) : -1;
+}
+
+static void reboot_install_hook(void)
+{
+ if (PE_halt_restart != reboot_halt_restart) {
+  prior_halt_restart = PE_halt_restart;
+  PE_halt_restart = reboot_halt_restart;
+ }
+}
+
+static void reboot_request_worker(__unused void *arg, __unused wait_result_t result)
+{
+ /* Let the USB status stage finish before normal shutdown tears down EP0. */
+ delay(100);
+ int error=reboot_kernel(RB_AUTOBOOT,NULL);
+ __atomic_store_n(&reboot_bootloader_armed,0,__ATOMIC_RELEASE);
+ printf("X9 BOOTLOADER: shutdown request returned %d\n",error);
+ (void)thread_terminate(current_thread());
+}
+
+int sweet_x9_reboot_bootloader_request(void)
+{
+ if (!sweet_early_is_x9() || !reboot_mode_mmio) {
+  return ENXIO;
+ }
+ reboot_install_hook();
+ if (__atomic_exchange_n(&reboot_bootloader_armed,1,__ATOMIC_ACQ_REL)) {
+  return EBUSY;
+ }
+ {
+  uint32_t now=reboot_mode_read();
+  printf("X9 BOOTLOADER: armed; 1c010024=%08x (mode=%u flag11=%u stage=%u) will write %08x; syncing and shutting down\n",
+      now, now & 0xfu, (now >> 11) & 1u, now >> 29, reboot_mode_value(now));
+ }
+ thread_t t;
+ if(kernel_thread_start(reboot_request_worker,NULL,&t)!=KERN_SUCCESS) {
+  __atomic_store_n(&reboot_bootloader_armed,0,__ATOMIC_RELEASE);
+  return ENOMEM;
+ }
+ thread_deallocate(t);
+ return 0;
+}
+
+static int sysctl_x9_reboot_bootloader(__unused struct sysctl_oid *oidp,
+    __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+ int value = 0;
+ int error = sysctl_handle_int(oidp, &value, 0, req);
+ if (error || !req->newptr) {
+  return error;
+ }
+ if (value != 1) {
+  return EINVAL;
+ }
+ return sweet_x9_reboot_bootloader_request();
+}
+SYSCTL_PROC(_debug, OID_AUTO, x9_reboot_bootloader,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED, 0, 0,
+    sysctl_x9_reboot_bootloader, "I", "X9 PLJ110: reboot to MT6993 fastboot");
 static uint32_t kr(unsigned off) { return *(volatile uint32_t *)(key_pmif+off); }
 static void kw(unsigned off,uint32_t v) {
  *(volatile uint32_t *)(key_pmif+off)=v;
@@ -104,9 +234,16 @@ static void worker(void *arg,wait_result_t result) {
 }
 void sweet_x9_keys_init(void) {
  static int started;
- int enabled=0;
- if(!sweet_early_is_x9()||started||(enabled=sweet_x9_arg("x9_pmic_keys",1))!=1)return;
- started=1;thread_t t;
+ if(!sweet_early_is_x9()||started)return;
+ started=1;
+ if(!reboot_mode_mmio)reboot_mode_mmio=ml_io_map(0x1c010000,0x1000);
+ if(reboot_mode_mmio) {
+  reboot_install_hook();
+  printf("X9 BOOTLOADER: watchdog mode mapped at %lx; root sysctl debug.x9_reboot_bootloader ready\n",
+      (unsigned long)reboot_mode_mmio);
+ } else printf("X9 BOOTLOADER: watchdog mapping failed; sysctl unavailable\n");
+ if(sweet_x9_arg("x9_pmic_keys",1)!=1)return;
+ thread_t t;
  if(kernel_thread_start(worker,NULL,&t)==KERN_SUCCESS)thread_deallocate(t);
  else printf("X9 KEYS: worker creation failed\n");
 }

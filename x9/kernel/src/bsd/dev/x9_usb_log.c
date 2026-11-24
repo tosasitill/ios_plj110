@@ -14,6 +14,7 @@ extern uint32_t sweet_log_copy(uint64_t *,char *,uint32_t);
 extern uint64_t sweet_log_position(void);
 extern void sweet_watchdog_pet(void);
 extern void thread_terminate_self(void);
+extern int sweet_x9_reboot_bootloader_request(void);
 #define BIT(n) (1U<<(n))
 #define EP0 0x100
 #define FIFO 0x300
@@ -58,6 +59,14 @@ static void setup(void)
  else if((type==0x80||type==0x81)&&req==0&&n==2&&!value&&!index){data[0]=data[1]=0;count=2;}
  else if(type==0x81&&req==10&&n==1&&!value&&!index){data[0]=0;count=1;}
  else if(type==1&&req==11&&!n&&!value&&!index){}
+ else if(type==0xc0&&req==X9_REBOOT_BOOTLOADER_REQ&&value==X9_REBOOT_BOOTLOADER_VALUE&&index==X9_REBOOT_BOOTLOADER_INDEX&&n==1&&configured){
+  /* Default x9_usb=0 runs this EP0 log worker, not x9_usb_device.c, so the
+   * bootloader request must be answered here too (logs 416-418 STALL). */
+  printf("X9 BOOTLOADER: USB request 0x48 received (log worker)\n");
+  int e=sweet_x9_reboot_bootloader_request();
+  printf("X9 BOOTLOADER: USB request returned %d\n",e);
+  if(e){stall(0);return;}
+  data[0]=1;count=1;}
  else if(type==0xc0&&req==X9LOG_BATCH_REQ&&configured&&n==X9LOG_BATCH_FRAME){int k=x9log_read_capacity(&reader,(uint32_t)value|((uint32_t)index<<16),data,sizeof(data),2);if(k<0){stall(0);return;}count=(unsigned)k;}
  else if(type==0xc0&&req==X9LOG_REQ&&configured&&n==64){int k=x9log_read(&reader,(uint32_t)value|((uint32_t)index<<16),data,2);if(k<0){stall(0);return;}count=(unsigned)k;}
  else{stall(n?0:SETUP);return;}
