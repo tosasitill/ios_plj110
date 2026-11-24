@@ -96,7 +96,9 @@ static int cam_stream_close_begin_locked(uint64_t epoch)
      * same binding and retained resources intact; do not mask/discard work
      * to manufacture a successful DONE. A canceled/unfinished request will
      * fail the actual receipt below, even if the software queue is empty. */
-    nanoseconds_to_absolutetime(500000000,&span);end=mach_absolute_time()+span;
+    /* 398: sensor samples were all read (sampled=7) but samples=0: the 500 ms
+     * budget ended inside the ~0.65 s close guards. */
+    nanoseconds_to_absolutetime(CAM_GUARD_BUDGET_NS,&span);end=mach_absolute_time()+span;
     e=0;
     for(;;) {
         bool pending;

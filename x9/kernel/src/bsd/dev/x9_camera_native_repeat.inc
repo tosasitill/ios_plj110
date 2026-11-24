@@ -114,7 +114,9 @@ static int cam_repeat_empty_note(unsigned bank,uint32_t counter)
 {
     if((counter^cam_repeat.after[bank])&~CAM_REPEAT_DROP)return CAM_FAIL(ESTALE);
     unsigned delta=((counter>>25)-(cam_repeat.after[bank]>>25))&127u;
-    if(delta>=64)return CAM_FAIL(ESTALE);
+    /* 398: ~30 drops/s with samples seconds apart (e2000101 at 65.8 s,
+     * a4000101 at 75.7 s); a modulo-128 field cannot prove direction across
+     * such gaps and Android never checks it. Statistic only. */
     cam_repeat.drops+=delta;cam_repeat.after[bank]=counter;
     return 0;
 }

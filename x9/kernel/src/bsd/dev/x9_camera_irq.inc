@@ -826,7 +826,7 @@ static int cam_irq_close_locked(uint64_t epoch)
     old=cam_irq_spin_take();cam_irq.accepting=false;owns=cam_irq.owns;
     if(owns)cam_irq_mask_all();cam_irq_spin_drop(old);
     lck_mtx_unlock(&camera_irq_lock);
-    nanoseconds_to_absolutetime(500000000,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(CAM_GUARD_BUDGET_NS,&span);end=mach_absolute_time()+span; /* worker DONE path runs guards */
     for(;;) {
         bool pending;
         old=cam_irq_spin_take();pending=cam_irq.busy||cam_irq.count;

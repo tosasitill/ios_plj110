@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 398：第一张真实 RAW 帧 + 镜像 x9-cam-stop-20261124
+
+- 398（x9-cam-done）：`DONE FBC count_accepted=1 samples=2 errno=0`（actual=e2000101），`X9 CAMERA RAW PUBLISH: sensor=1 capture_id=1 seq=1 width=4096 height=3072 stride=5120 bytes=15728640`，SOF→DONE 间隔约 13.7 ms（tick 差 13722240）。这是 x9 第一张通过原生 MM SMMU/CAMSV DMA 拿到的相机 RAW 帧。内容（是否是有效图像）还没有检查。
+- stream off 正常（`SENSOR STREAM off=1 ack=3 frame_count=ff errno=0`）。STREAM STOP `admitted=0 samples=0 sampled=7 errno=60`：sensor 已经读完，但 500 ms 预算在 close guard（约 0.65 s）里耗尽。
+- 修复：stream stop 和 cam_irq_close 的 worker 等待都从 500 ms 改成 CAM_GUARD_BUDGET_NS。cam_repeat_empty_note 不再因为 DROP 增量 ≥64 判 ESTALE（398 里 65.8 s→75.7 s 的模 128 增量是 97，下一步就会撞上；Android 不检查 DROP，这里只当统计）。
+- sha256 459518a1ba78ed716d5f029eba302d4a8ae6388abe8ec12c4de84512a8dd4ad9。
+
 #### 2026-11-24 397 结果（stream-on 成功）+ 镜像 x9-cam-done-20261124
 
 - 397（x9-cam-stream）：`SENSOR STREAM ack=1 control=1 samples=3 errno=0`，OUTMUX SETTLE latched，`X9 CAMERA: start ... (waiting for physical DMA)`，start 成功返回。SOF 被 worker 接受（errno=0）。
