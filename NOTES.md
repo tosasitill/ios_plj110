@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 ATF INIT（0x33c54）审计（未出镜像）
+
+- 流程：查"已 init"标志（[+292]，置位后再发 INIT 直接返回 2）→ 内部 PM_GET(1) → `0x46048` 清 S_CR0 并等 ACK → 校验 S_IDR0.bit31 / S_IDR1 → 写 S_CR1=0xc30（表和队列 ISH、non-cacheable）、S_CR2=2 → 分配 S_CMDQ(0x8090)/S_EVTQ(0x80a0)/S_STRTAB(0x8080/0x8088) → `0x46498`：S_CR0 依次开 CMDQEN、EVTQEN，S_INIT(0x803c)=1 全失效，发 CFGI 命令，注册 EL3 中断处理函数 `0x46820`，S_CR0|=0xd（SMMUEN）→ `0x47c9c` 建 secure STE（含 MMUP loader 的 stage-2 域）→ PM_PUT(1)。
+- **不碰 NS 寄存器组，也不写 NS wrapper 配置**，只有中断处理函数读 wrapper+0x80 和 TBU 故障寄存器、翻转 GLB_CTL0 bit6（ABT_CNT_CLR）。引用计数成对，x9 自己发的 PM_GET 引用仍然保留。
+- EL3 处理函数：PM_GET → 读 wrapper 中断状态 / 4 组 TBU 故障 → S_GERROR^S_GERRORN → 处理 EVTQ；0x52e3c 是会返回的错误打印。没看到会死循环的路径（没逐条走完 EVTQ 分支）。
+- **结论**：INIT 没有让 NS 侧寄存器不可访问的机制。三条静态线（NS device_reset、wrapper init、ATF INIT）都没能证明根因。
+
 #### 2026-11-24 NS 侧 device_reset 审计（未出镜像）
 
 - Android（mt6993_data_mm 有 DELAY_HW_INIT）在 probe_device 时按以下顺序初始化，全部发生在 MMUP 有流量之前：hw_init（`smmu_sec_wpcfg` SMC 0x80c → `smmu_init_wpcfg` 写 NS wrapper）→ `arm_smmu_device_reset`（CR0 清零 → CR1/CR2 → mtk CR1 NC → STRTAB → CMDQ → CFGI/TLBI → EVTQ → SMMUEN）→ `smmu_hw_sec_init`（INIT 0x800）。
