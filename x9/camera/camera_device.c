@@ -2039,7 +2039,7 @@ worker(void *context)
 			n = read(device, &head, sizeof(head));
 			int read_error = n < 0 ? errno : 0;
 
-			if (!s->running) break;
+			if (!s->running) { say("worker: stream no longer running after header read n=%zd errno=%d", n, read_error); break; }
 			if (n != (ssize_t)sizeof(head)) {
 				if (n < 0 && (read_error == EAGAIN || read_error == EINTR)) continue;
 				error = n < 0 ? read_error : EMSGSIZE;
@@ -2060,7 +2060,7 @@ worker(void *context)
 		n = read(device, buffer, bytes);
 		int read_error = n < 0 ? errno : 0;
 
-		if (!s->running) break;
+		if (!s->running) { say("worker: stream no longer running after RAW read n=%zd errno=%d", n, read_error); break; }
 		if (n != (ssize_t)bytes) {
 			if (n < 0 && (read_error == EAGAIN || read_error == EINTR)) continue;
 			error = n < 0 ? read_error : EMSGSIZE;
@@ -2273,6 +2273,8 @@ stream_stop_locked(CMBaseObjectRef o, CMBaseObjectRef *release)
 	struct stream *s = stream_of(o);
 
 	if (capture_join_errno) return ERR_NOT_AVAILABLE;
+	say("stream stop requested: worker_started=%d frames=%llu running=%d graph=%d",
+	    s->worker_started, (unsigned long long)s->frames, s->running, s->graph_running);
 	pthread_mutex_lock(&s->lock);
 	s->stopping = true;
 	s->running = false;

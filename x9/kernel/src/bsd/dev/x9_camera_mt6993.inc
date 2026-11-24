@@ -109,8 +109,16 @@ static int cam_rails_guard(struct cam_probe_journal *, bool);
 
 static uint32_t cam_rr(vm_offset_t base, unsigned off)
 { return *(volatile uint32_t *)(base+off); }
+/* Every camera MMIO store through cam_rw bumps this. A passing pure
+ * resource guard is reused only while no store happened in between and
+ * for at most CAM_GUARD_REUSE_NS (402: mm guard 30140 calls/19.9 s and
+ * SMI guard 1437 calls/18.5 s before stream-on, ~55 s start). Failures are
+ * never cached; external changes are still caught within the window. */
+static uint64_t cam_rw_count;
+#define CAM_GUARD_REUSE_NS 20000000ull
 static void cam_rw(vm_offset_t base, unsigned off, uint32_t value)
 {
+    cam_rw_count++;
     *(volatile uint32_t *)(base+off)=value;
     __asm__ volatile("dsb sy" ::: "memory");
 }

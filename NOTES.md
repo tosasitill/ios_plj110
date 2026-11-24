@@ -160,6 +160,21 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 log 402 → x9-cam-fast-20261124（黑屏根因：启动太慢，客户端放弃）
+
+- 桥日志已经能在串口看到（X9 CAMERA BRIDGE）。完整时间线：
+  1. 10.6 s：mediaserverd 请求 stream，桥同步写入 SENSOR 命令。
+  2. 64.993 s：内核 start 才返回（WRITE CALL command=3），整整阻塞约 54 s。
+  3. 64.999 s：桥紧接着又收到一次 "device: streams asked for (1)"。
+  4. 65.644 s：worker 只做完 peek 读（READ CALL peek=1 seq=1），之后没有完整读。同一时刻 repeat_admission 变为 0，是 stop() 调用了 cam_native_capture_stop_locked。
+  5. 74.2 s：sensor off。147 s：SMMU retire 以 ESTALE 失败，桥报 "frames stopped (0) … close_errno=70"。
+- 结论：桥没有转换问题。客户端/会话在内核 54 s 的 start 期间已经放弃，并重新请求 stream。桥执行 stop 后，worker 在 peek 之后看到 running=0 就退出了，所以 0 帧上屏。首帧 RAW 仍是纯黑电平（MSB 15–16）。REPEAT COMPLETE why=0，completed=1，记账本身正常；第二帧没有做，是因为 stop 关闭了 admission。
+- 修复：
+  1. cam_mm_guard 和 cam_smi_clock_guard 复用通过结果。条件：20 ms 内、期间没有任何 cam_rw 写（新增 cam_rw_count），且 journal 状态（seen/completed/active/pending/epoch 等）不变。失败结果不缓存。依据是 401 stream-on 之前 mm guard 30140 次、19.9 s，smi guard 1437 次、18.5 s。
+  2. SMMU retire：CR0/ACK=0 后，向 STRTAB_BASE（0x80）写入 0 无效，读回仍为 0x34b62c000。改为再用两次 32-bit 写重试；若仍保持本机写入的值，就当作 SMMUEN=0 下的惰性状态接受（Android 从不清零），下次 entry 也只接受这个值。其它 base 或字段不放宽。
+  3. 桥：stream_stop_locked 和 worker 因 running=0 退出时打印原因。
+- sha256 9ba4d56d28ea390aa5d8c840835841f47baf7a4e8846b57c4236ae6ff42a718c。
+
 #### 2026-11-24 log 401 → 诊断镜像 x9-cam-say-20261124
 
 - 401（x9-cam-black）首帧：`RAW STATS: seq=1 samples=16384 msb_mean=15.85 min=15 max=16 zero=0 sat=0 exp_lines=1000 gain_code=0 frame_lines=7546`。RAW10 MSB 恒为 15–16，也就是 10-bit 60–67，正好是 black=64 加读噪声，16384 个采样里没有一个有信号。首帧本身就是纯黑电平，不是桥把画面弄黑的。曝光 1000 行 × 4415 ns ≈ 4.4 ms、1x 增益，室内也不该完全平。可能的原因：sensor 出流后第一帧无效，或曝光/模拟链路没有真正生效。要看后续帧才能判断。

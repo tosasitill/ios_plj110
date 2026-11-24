@@ -151,9 +151,22 @@ static int cam_smi_clock_guard_untimed(void)
 }
 static int cam_smi_clock_guard(void)
 {
-    static unsigned hits;uint64_t t0=mach_absolute_time();
-    int e=cam_smi_clock_guard_untimed();
+    static unsigned hits;
+    static struct { uint64_t at,rw,epoch; unsigned seen,completed,pending,pending_slot; bool held,valid; } ok;
+    uint64_t t0=mach_absolute_time(),span;
+    int e;
+    nanoseconds_to_absolutetime(CAM_GUARD_REUSE_NS,&span);
+    if(ok.valid && ok.rw==cam_rw_count && t0-ok.at<span && ok.epoch==cam_smi.epoch &&
+       ok.seen==cam_smi.seen && ok.completed==cam_smi.completed && ok.pending==cam_smi.pending &&
+       ok.pending_slot==cam_smi.pending_slot && ok.held==cam_smi.held)return 0;
+    ok.valid=false;
+    e=cam_smi_clock_guard_untimed();
     cam_slow_note("cam_smi_clock_guard",&hits,t0);
+    if(!e) {
+        ok.rw=cam_rw_count;ok.at=mach_absolute_time();ok.epoch=cam_smi.epoch;ok.seen=cam_smi.seen;
+        ok.completed=cam_smi.completed;ok.pending=cam_smi.pending;ok.pending_slot=cam_smi.pending_slot;
+        ok.held=cam_smi.held;ok.valid=true;
+    }
     return e;
 }
 /* Android hwccf_api.c _v1_mm_hwccf_mtcmos_fsm_err_handle(), called by

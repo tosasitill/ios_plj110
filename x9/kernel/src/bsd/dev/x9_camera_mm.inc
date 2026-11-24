@@ -215,9 +215,25 @@ static int cam_mm_guard_untimed(struct cam_mm_journal *j,bool complete)
 }
 static int cam_mm_guard(struct cam_mm_journal *j,bool complete)
 {
-    static unsigned hits;uint64_t t0=mach_absolute_time();
-    int e=cam_mm_guard_untimed(j, complete);
+    static unsigned hits;
+    static struct { const struct cam_mm_journal *j; uint64_t at,rw; uint32_t seen,completed;
+        bool complete,active,receive_active,csi,smmu,valid; } ok;
+    uint64_t t0=mach_absolute_time(),span;
+    int e;
+    nanoseconds_to_absolutetime(CAM_GUARD_REUSE_NS,&span);
+    if(ok.valid && ok.j==j && ok.complete==complete && ok.rw==cam_rw_count && t0-ok.at<span &&
+       ok.seen==j->seen && ok.completed==j->completed && ok.active==j->active &&
+       ok.receive_active==j->receive.active && ok.csi==j->receive.csi_borrowed &&
+       ok.smmu==j->receive.smmu_owned)return 0;
+    ok.valid=false;
+    e=cam_mm_guard_untimed(j, complete);
     cam_slow_note("cam_mm_guard",&hits,t0);
+    if(!e) {
+        ok.j=j;ok.complete=complete;ok.rw=cam_rw_count;ok.at=mach_absolute_time();
+        ok.seen=j->seen;ok.completed=j->completed;ok.active=j->active;
+        ok.receive_active=j->receive.active;ok.csi=j->receive.csi_borrowed;
+        ok.smmu=j->receive.smmu_owned;ok.valid=true;
+    }
     return e;
 }
 static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera_mm_status *r)

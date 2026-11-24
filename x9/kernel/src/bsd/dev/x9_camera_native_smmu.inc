@@ -142,6 +142,36 @@ static int cam_native_write64(struct x9_camera_smmu *m,struct cam_native_snapsho
     cam_smmu_rw64(m,cam_native_base_off[field],value);s->base[field]=value;
     return cam_native_match(m,s);
 }
+/* 401/402: with CR0=CR0ACK=0, STRTAB_BASE (0x80) kept our table address
+ * after writing the zero prior. Android never zeroes it (device_reset
+ * rewrites it before every enable), and a disabled SMMU does not fetch the
+ * table. Retry as two 32-bit stores; if it still holds the value this host
+ * wrote, keep it as inert state and accept exactly that on the next entry. */
+static uint64_t cam_native_inert_strtab;
+static int cam_native_restore_base(struct x9_camera_smmu *m,struct cam_native_snapshot *s,
+    unsigned field,uint64_t value)
+{
+    unsigned off=cam_native_base_off[field];
+    uint64_t was,now;
+    int e=cam_native_match(m,s);if(e)return e;
+    was=s->base[field];
+    cam_smmu_rw64(m,off,value);
+    now=cam_smmu_rr64(m,off);
+    if(now!=value) {
+        cam_smmu_rw(m,off,(uint32_t)value);cam_smmu_rw(m,off+4,(uint32_t)(value>>32));
+        delay(10);now=cam_smmu_rr64(m,off);
+    }
+    if(now!=value) {
+        printf("X9 CAMERA NATIVE SMMU BASE RESTORE: field=%u off=%x prior=%llx written_by_host=%llx now=%llx cr0=%x ack=%x\n",
+            field,off,value,was,now,s->word[CAM_N_CR0],s->word[CAM_N_ACK]);
+        if(field || now!=was || s->word[CAM_N_CR0] || s->word[CAM_N_ACK])return CAM_FAIL(ESTALE);
+        cam_native_inert_strtab=now;
+        printf("X9 CAMERA NATIVE SMMU STRTAB ADOPT: base=%llx stays with SMMUEN=0 (not fetched; Android never zeroes)\n",now);
+        value=now;
+    }
+    s->base[field]=value;
+    return cam_native_match(m,s);
+}
 static int cam_native_enable(struct x9_camera_smmu *m,struct cam_native_snapshot *s,
     uint32_t value)
 {
@@ -237,7 +267,7 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
          entry.word[CAM_N_IDR5]) || sidbits<8 || sidbits>16)return CAM_FAIL(ENOTSUP);
     /* No normal bases/config/queue/interface are inherited. Initial GBPA
      * is preserved exactly; abort and bypass both have complete STE policies. */
-    if(entry.base[0] || entry.base[1] || entry.base[2] ||
+    if((entry.base[0] && entry.base[0]!=cam_native_inert_strtab) || entry.base[1] || entry.base[2] ||
        entry.word[CAM_N_CR0] || entry.word[CAM_N_ACK] || entry.word[CAM_N_CFG] ||
        entry.word[CAM_N_IRQ] || entry.word[CAM_N_IRQACK] ||
        entry.word[CAM_N_CP] || entry.word[CAM_N_CC] ||
@@ -426,7 +456,8 @@ static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m
     for(unsigned i=0;i<3 && !e;i++) {
         cam_native_match_step="retire:base";
         e=cam_native_producer_guard_locked(epoch,m);
-        if(!e)e=cam_native_write64(m,&now,i,prior.base[i]);
+        if(!e)e=cam_native_restore_base(m,&now,i,prior.base[i]);
+        if(!e && now.base[i]!=prior.base[i])prior.base[i]=now.base[i]; /* inert STRTAB only */
     }
     const unsigned fields[]={CAM_N_CFG,CAM_N_CR1,CAM_N_CR2,CAM_N_CP,CAM_N_CC};
     for(unsigned i=0;i<sizeof(fields)/sizeof(fields[0]) && !e;i++) {
