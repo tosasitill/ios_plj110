@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 MMUP 空转/睡眠路径静态审计（388 后，未出镜像）
+
+- 388 卡住时 MMUP 的 lr=0x146e4，所在函数 **不是普通 idle**，而是深睡（核心断电）路径：0xd1fe（睡眠入口：等忙完 → 0xc69a → 置 [0x47b30] 状态 3）→ 0x141b8（整套 GPR/FPR/CSR 存到 0x2973c）→ ce38(0,3)（vcp_switch_core_state off）→ 自定义睡眠指令 → wfi；复位向量 0x23c → 0x146fa 是唤醒恢复。status=f、pc=0 = 核心已断电。MMUP 初始化完没事做就进深睡，MMPC 的 DDRSRC 请求随之释放（与 388 观测一致，属正常行为）。
+- 自定义分支指令解码：opcode 0x67、funct3=1/2 = 立即数比较分支（B 型偏移，rs2 字段是 5 位有符号立即数；1=beqi，2=bnei），已用 b3a2/b3a6/b550 三处验证。0x33 funct7=0x40 是取单个位。
+- 0xc69a = "vcp core off"：引用 [0x25870]-1，到 0 才调 a06a(0,3)（mminfra mm2 off，user3）。a06a 内部：per-user 字节计数 0x25760+user，总计数 [0x2575c]；首次上电标志 [0x25798]（a622 置位）。0xa13e 处 `bnei total,1` 门控真正的上电；关电序列（等 SMMU ACK、SMMU LP、MM0 sw_prot 0x300004e8=0x7ff、MM_2 off）同样受总计数门控。
+- 计数持有者：user1（0x165b8 初始化时拿）只在 GIPC bit18 MM_INFRA_OFF 时释放；x9 从不写 MM GIPC（0x31bd0000 只读；mic 写的是 ADSP 的 GIPC 0x1df50000）。user2（AP HWCCF 投票）从未被 ack（STA=0）。user3 on/off 成对（不成对时会打 "vcp_core_state_cnt Unbalanced"，日志里没有）。→ 总计数 ≥1，**MMUP 睡眠不会执行 mm2/MM0 关电和总线保护**。注意：关电分支 a5de 处的递减没有逐条走完。
+- mm_mminfra_sel 0x8a→0x81：MMUP 固件里有自己的 cksys_mm 时钟表（mminfra_ao_sel、mminfra_sel、venc/vdec/img/ipe/disp/mml/cam 等），很可能是 MMUP 的 MMDVFS 改的。未验证。
+- 结论：MMUP 空转路径基本排除。SMMU 读挂死的触发条件仍未知；缺口仍然是"到底卡在哪个偏移"。
+
 #### 2026-11-24 388 结果（x9-cam-wpinit）
 
 - WP INIT 写入生效（glb0 0->1c2c05，tcu1 2810000->28100e2，tcu10 0->8，tcu0 本来就是 QoS 5），**但仍然在 res:smmu-snapshot 卡住** → "缺 wrapper 初始化"这个假设被否定。
