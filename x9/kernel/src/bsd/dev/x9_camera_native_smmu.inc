@@ -58,6 +58,7 @@ static void cam_native_read(struct x9_camera_smmu *m,struct cam_native_snapshot 
     cam_mmio_region=0;
     __asm__ volatile("dsb sy":::"memory");
 }
+static const char *cam_native_match_step="-";
 static int cam_native_match(struct x9_camera_smmu *m,const struct cam_native_snapshot *s)
 {
     if(cam_smmu_power_lost)return CAM_FAIL(ENXIO);
@@ -70,7 +71,20 @@ static int cam_native_match(struct x9_camera_smmu *m,const struct cam_native_sna
     if(!m->native_wp)return CAM_FAIL(ENXIO);
     cam_native_read(m,&now);
     memcpy(now.wp,s->wp,sizeof(now.wp)); /* Android: wrapper is write-only config */
-    return memcmp(s,&now,sizeof(now))?CAM_FAIL(ESTALE):0;
+    if(!memcmp(s,&now,sizeof(now)))return 0;
+    { /* 400: native retire failed ESTALE after CR0=0 with no detail. */
+        static unsigned logs;
+        if(logs<12) {
+            logs++;
+            for(unsigned i=0;i<CAM_N_WORDS;i++)if(s->word[i]!=now.word[i])
+                printf("X9 CAMERA NATIVE MATCH DIFF: step=%s word=%u off=%x expected=%x actual=%x\n",
+                    cam_native_match_step,i,cam_native_off[i],s->word[i],now.word[i]);
+            for(unsigned i=0;i<3;i++)if(s->base[i]!=now.base[i])
+                printf("X9 CAMERA NATIVE MATCH DIFF: step=%s base=%u off=%x expected=%llx actual=%llx\n",
+                    cam_native_match_step,i,cam_native_base_off[i],s->base[i],now.base[i]);
+        }
+    }
+    return CAM_FAIL(ESTALE);
 }
 static int cam_native_wp_write(struct x9_camera_smmu *m,struct cam_native_snapshot *s,
     unsigned field,uint32_t mask,uint32_t value)
@@ -389,10 +403,12 @@ static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m
         e=cam_smmu_submit(m,&cfg,1);
     }
     if(!e)e=cam_native_producer_guard_locked(epoch,m);
+    cam_native_match_step="retire:ste-live";
     if(!e)e=cam_smmu_storage(m);if(!e)e=cam_smmu_live(m);
     if(!e) {
         /* The IRQ worker takes camera_smmu_lock. Drop it while disabling and
          * draining the source, then revalidate the original producer proof. */
+        cam_native_match_step="retire:irq-shutdown";
         lck_mtx_unlock(&camera_smmu_lock);
         e=cam_smmu_irq_shutdown(m);
         lck_mtx_lock(&camera_smmu_lock);
@@ -404,14 +420,17 @@ static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m
         cam_native_read(m,&now);
         /* No untranslated source is left: exact OFF/gates and bus idle
          * precede SMMU/queue disable. GBPA is NEVER changed to hide traffic. */
+        cam_native_match_step="retire:disable";
         e=cam_native_enable(m,&now,0);
     }
     for(unsigned i=0;i<3 && !e;i++) {
+        cam_native_match_step="retire:base";
         e=cam_native_producer_guard_locked(epoch,m);
         if(!e)e=cam_native_write64(m,&now,i,prior.base[i]);
     }
     const unsigned fields[]={CAM_N_CFG,CAM_N_CR1,CAM_N_CR2,CAM_N_CP,CAM_N_CC};
     for(unsigned i=0;i<sizeof(fields)/sizeof(fields[0]) && !e;i++) {
+        cam_native_match_step="retire:fields";
         e=cam_native_producer_guard_locked(epoch,m);
         /* CMDQ cursors are restored ONLY AFTER full-target real SYNC
          * consumption AND CR0/ACK CMDQEN=0. OPPO device_reset writes both
@@ -426,6 +445,7 @@ static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m
         e=cam_native_producer_guard_locked(epoch,m);
         if(!e)e=cam_native_wp_write(m,&now,i-1,UINT32_MAX,prior.wp[i-1]);
     }
+    cam_native_match_step="retire:final-prior";
     if(!e)e=cam_native_producer_guard_locked(epoch,m);
     if(!e)e=cam_native_match(m,&prior);
     if(!e) {
@@ -442,5 +462,7 @@ out:
         "cr0=%x restored=%u errno=%d (SID80+normal priors; all backing retained)\n",
         epoch,m?m->native_retire_attempted:0,m?m->native_ste_phase:0,
         m?m->native_cr0:0,m?m->native_restored:0,e);
+    printf("X9 CAMERA NATIVE SMMU RETIRE STEP: last=%s\n",cam_native_match_step);
+    cam_native_match_step="-";
     lck_mtx_unlock(&camera_smmu_lock);return e;
 }

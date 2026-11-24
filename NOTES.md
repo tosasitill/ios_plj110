@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 400 结果 + 诊断镜像 x9-cam-retire-20261124
+
+- 400（x9-cam-dma）：第三次拿到 RAW。关闭流程一路通过：DMA STOP（ADOPT 残留 SW_RST=2，actual=3/3，samples=2）→ DMA RESTORE（stop=2/2）→ CREDIT SPENT（spent=1，count=aa000101）→ `IRQ CLOSE restore=0`。
+- 新失败：`NATIVE SMMU RETIRE ste_phase=3 cr0=0 restored=0 errno=70`。CR0 已经关掉（cam_native_enable(…,0) 成功），ESTALE 出在后面的 base/fields 恢复、最终和 prior 比较，或者 producer guard；日志里看不出是哪一个。
+- 没有猜着改。这个镜像只加诊断：cam_native_match 失败时逐个打印不一致的 word/base（`NATIVE MATCH DIFF step=… off=… expected=… actual=…`）；retire 记录最后所在阶段（`NATIVE SMMU RETIRE STEP: last=…`：disable/base/fields/final-prior/irq-shutdown/ste-live）。
+- sha256 9494213eedf2c8367e459bbb6388beb322988a2d3b787e6155d1106aad527c57。
+
 #### 2026-11-24 399 结果 + 镜像 x9-cam-dma-20261124
 
 - 399（x9-cam-stop）：第二次拿到 RAW（RAW PUBLISH 4096x3072，DONE FBC accepted）。关闭流程 STREAM STOP admitted=1 → RX PATH off（issued=3ff）→ TG GATE off → RECEIVE off → STREAM CONTROLS stopped=1，全部 errno=0。然后 IRQ CLOSE `restore=16`（EBUSY），而且没有打印 `DMA STOP` 行。
