@@ -33,6 +33,7 @@ extern int sweet_x9_arg(const char *, int);
 extern uint32_t sweet_log_copy(uint64_t *, char *, uint32_t);
 extern uint64_t sweet_log_position(void);
 extern void thread_terminate_self(void);
+extern int sweet_x9_reboot_bootloader_request(void);
 #define BIT(n) (1u << (n))
 #define R x9_mtu3_read
 #define W x9_mtu3_write
@@ -713,6 +714,13 @@ static void setup(void)
         }
     } else if (type == 0x21 && req == 0x43 && !index && !n && st.configuration && !(value & ~31u)) {
         lck_mtx_lock(&usb_lock); packet_filter=value; lck_mtx_unlock(&usb_lock); update_link();
+    } else if (type==0xc0 && req==X9_REBOOT_BOOTLOADER_REQ &&
+        value==X9_REBOOT_BOOTLOADER_VALUE && index==X9_REBOOT_BOOTLOADER_INDEX &&
+        n==1 && st.configuration) {
+        printf("X9 BOOTLOADER: USB request 0x48 received\n");
+        error=sweet_x9_reboot_bootloader_request();
+        printf("X9 BOOTLOADER: USB request returned %d\n",error);
+        if (!error) { control[0]=1; count=1; }
     } else if (type==0xc0 && st.configuration && ((req==X9LOG_BATCH_REQ && n==X9LOG_BATCH_FRAME) || (req==X9LOG_REQ && n==64))) {
         int k=x9log_read_capacity(&reader,(uint32_t)value|((uint32_t)index<<16),control,n,2);
         if (k<0) { stall(0); return; } count=(unsigned)k;

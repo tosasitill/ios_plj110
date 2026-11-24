@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Ask X9 iOS to reboot into MT6993 fastboot over the local USB log device."""
+import ctypes as C
+import subprocess
+import sys
+import time
+
+LIB = "/opt/homebrew/lib/libusb-1.0.dylib"
+
+
+def open_configured_device():
+    u = C.CDLL(LIB)
+    ctx = C.c_void_p()
+    u.libusb_init.argtypes = [C.POINTER(C.c_void_p)]
+    u.libusb_init.restype = C.c_int
+    if u.libusb_init(C.byref(ctx)):
+        raise RuntimeError("libusb initialization failed")
+    u.libusb_open_device_with_vid_pid.argtypes = [C.c_void_p, C.c_uint16, C.c_uint16]
+    u.libusb_open_device_with_vid_pid.restype = C.c_void_p
+    u.libusb_get_configuration.argtypes = [C.c_void_p, C.POINTER(C.c_int)]
+    u.libusb_get_configuration.restype = C.c_int
+    u.libusb_control_transfer.argtypes = [
+        C.c_void_p, C.c_uint8, C.c_uint8, C.c_uint16, C.c_uint16,
+        C.POINTER(C.c_ubyte), C.c_uint16, C.c_uint,
+    ]
+    u.libusb_control_transfer.restype = C.c_int
+    u.libusb_error_name.argtypes = [C.c_int]
+    u.libusb_error_name.restype = C.c_char_p
+    u.libusb_close.argtypes = [C.c_void_p]
+    u.libusb_exit.argtypes = [C.c_void_p]
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        handle = u.libusb_open_device_with_vid_pid(ctx, 0x1209, 1)
+        if handle:
+            config = C.c_int()
+            if u.libusb_get_configuration(handle, C.byref(config)) == 0 and config.value:
+                return u, ctx, handle
+            u.libusb_close(handle)
+        time.sleep(0.25)
+    u.libusb_exit(ctx)
+    raise RuntimeError("configured 1209:0001 absent for 60s")
+
+
+def fastboot_ready():
+    result = subprocess.run(
+        ["fastboot", "devices"], capture_output=True, text=True, timeout=3
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def main():
+    u, ctx, handle = open_configured_device()
+    try:
+        sent = False
+        try:
+            status = (C.c_ubyte * 1)()
+            wrote = u.libusb_control_transfer(
+                handle, 0xc0, 0x48, 0x5839, 1, status, 1, 5000
+            )
+            if wrote != 1 or status[0] != 1:
+                reason = u.libusb_error_name(wrote).decode() if wrote < 0 else "invalid status"
+                print(f"USB: bootloader request failed: {reason}", file=sys.stderr)
+                return 1
+            sent = True
+            print("USB: bootloader request control transfer completed")
+        except Exception as error:
+            print(f"USB: request completion uncertain ({error}); checking fastboot once")
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if fastboot_ready():
+                print("PASS: fastboot device observed; do not reconnect manually")
+                return 0
+            time.sleep(0.25)
+        if sent:
+            print("USB: request was accepted, but fastboot was not observed within 30s", file=sys.stderr)
+        else:
+            print("USB: fastboot was not observed; request delivery is unconfirmed", file=sys.stderr)
+        return 1
+    finally:
+        u.libusb_close(handle)
+        u.libusb_exit(ctx)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as error:
+        print(f"USB: {error}", file=sys.stderr)
+        sys.exit(1)
