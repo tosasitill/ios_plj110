@@ -861,6 +861,19 @@ stream_copy_property(CMBaseObjectRef o, CFStringRef key, CFAllocatorRef allocato
 		CFMutableDictionaryRef info = (CFMutableDictionaryRef)new_dict();
 		bool front = CFEqual(s->port, CFSTR("PortTypeFront"));
 		put(info, "sensorID", number_i(front ? 0x0354 : 0x0343)); /* kFigCapturePropertyValue_SensorID */
+		/*
+		 * _FigMotionGetCameraCharacterizationData picks FocalLengthCharacterization by module ids.
+		 * Without ModuleFocusID/ModuleActuatorID it takes the LensID path and reads "LensCoefficient";
+		 * D22 back/tele entries only have "LensCoefficients" -> -12783 (diag21). Back/tele: ids that
+		 * match entry 0 (LensID 1, ActuatorID 1, IntegratorID 1) via the ModuleInfo path. Front: its
+		 * single LensID entry. Apple calibration, not the OPPO module's: focus/motion estimates only.
+		 */
+		put(info, "ModuleLensID", number_i(1));
+		if (!front) {
+			put(info, "ModuleFocusID", number_i(1));
+			put(info, "ModuleActuatorID", number_i(1));
+			put(info, "ModuleIntegratorID", number_i(1));
+		}
 		value = info;
 		say_once("stream: ModuleInfo given", key, value);
 	} else if (key_is(key, "SupportedFormatsArray")) {
