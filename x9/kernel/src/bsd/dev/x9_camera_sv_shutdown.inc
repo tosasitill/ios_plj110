@@ -235,7 +235,11 @@ static int cam_sv_shutdown_locked(uint64_t epoch)
         }
         for(unsigned role=0;role<3;role++) {
             cam_sv_shutdown.actual[role]=cam_rr(m->sv[0],cam_sv_shutdown_stop[role]);
-            if(cam_sv_shutdown.actual[role]){e=CAM_FAIL(ESTALE);goto out;}
+            /* bit1 is the sticky reset ACK; Android's sv_reset never re-reads it. */
+            if(cam_sv_shutdown.actual[role]&~2u){e=CAM_FAIL(ESTALE);goto out;}
+            if(cam_sv_shutdown.actual[role] && !sample)
+                printf("X9 CAMERA CAMSV SHUTDOWN INHERITED: post-reset stop=%x value=%x (sticky reset ACK)\n",
+                    cam_sv_shutdown_stop[role],cam_sv_shutdown.actual[role]);
         }
         if(cam_rr(m->sv[0],0x7c) || cam_rr(m->sv[0],0x2008) ||
            cam_rr(m->sv[0],0x1d0)){e=CAM_FAIL(ESTALE);goto out;}
