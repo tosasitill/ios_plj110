@@ -970,13 +970,17 @@ static int cam_sv_request_guard_locked(uint64_t epoch,const struct x9_camera_cam
  * Both banks and cleared command control must be observed twice. If the
  * hardware cannot accept in this state, retain; never enable DMA to hide it.
  */
+/* 389: FBC credit reached count==target/control on both banks (seen=ack=3,
+ * samples=1) but the 1 s deadline expired before the confirming second sample,
+ * ~7.7 s after the request: the guards inside this loop dominate. Time them. */
+#define CAM_SV_TIMED(name,expr) ({ static unsigned _h;uint64_t _t0=mach_absolute_time();int _e=(expr);cam_slow_note(name,&_h,_t0);_e; })
 static int cam_sv_credit_issue_locked(uint64_t epoch,struct x9_camera_camsv_slot *slot)
 {
     uint64_t span,end;
     uint32_t control;
     int e;
     if(cam_sv.credit_issued || cam_sv.credit_phase!=X9_CAM_SV_CREDIT_EMPTY)return CAM_FAIL(EBUSY);
-    e=cam_sv_request_guard_locked(epoch,slot);if(e)return e;
+    e=CAM_SV_TIMED("credit:sv_request_guard",cam_sv_request_guard_locked(epoch,slot));if(e)return e;
     lck_mtx_lock(&camera_camsv_lock);e=slot->state==X9_CAMSV_ARMED?0:ESTALE;
     lck_mtx_unlock(&camera_camsv_lock);if(e)return e;
     if(cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS)return CAM_FAIL(EBUSY);
@@ -988,8 +992,8 @@ static int cam_sv_credit_issue_locked(uint64_t epoch,struct x9_camera_camsv_slot
         cam_sv.status.credit_target[bank]=cam_sv.credit_target[bank]=
             (before&~(CAM_SV_FBC_COUNT_MASK|0xffu))|0x10000u|((before+1)&0xffu);
     }
-    e=cam_sv_request_guard_locked(epoch,slot);if(e)return e;
-    e=cam_irq_credit_guard_locked(epoch);if(e)return e;
+    e=CAM_SV_TIMED("credit:sv_request_guard",cam_sv_request_guard_locked(epoch,slot));if(e)return e;
+    e=CAM_SV_TIMED("credit:irq_credit_guard",cam_irq_credit_guard_locked(epoch));if(e)return e;
     nanoseconds_to_absolutetime(1000000000ull /* log 376: guards cost 3-90 ms per poll */,&span);end=mach_absolute_time()+span;
     /* Journal BEFORE the single store. Once issued, failure is terminal and
      * leaves the SAME lease/RAW/controller/power pinned, with no cancellation.
@@ -1000,12 +1004,12 @@ static int cam_sv_credit_issue_locked(uint64_t epoch,struct x9_camera_camsv_slot
     e=CAM_FAIL(EAGAIN);
     for(unsigned poll=0;poll<10000;poll++) {
         bool target=true;
-        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
-        e=cam_sv_request_guard_locked(epoch,slot);if(e)break;
-        e=cam_irq_credit_guard_locked(epoch);if(e)break;
+        if(mach_absolute_time()>=end && !cam_sv.credit_samples){e=CAM_FAIL(ETIMEDOUT);break;}
+        e=CAM_SV_TIMED("credit:sv_request_guard",cam_sv_request_guard_locked(epoch,slot));if(e)break;
+        e=CAM_SV_TIMED("credit:irq_credit_guard",cam_irq_credit_guard_locked(epoch));if(e)break;
         for(unsigned bank=0;bank<2 && !e;bank++) {
             uint32_t count,actual;
-            e=cam_sv_power_guard();if(e)break;
+            e=CAM_SV_TIMED("credit:sv_power_guard",cam_sv_power_guard());if(e)break;
             count=cam_rr(cam_sv.view[bank],0x544);
             actual=cam_rr(cam_sv.view[bank],0x540);
             cam_sv.status.fbc_after[bank]=count;cam_sv.status.credit_control[bank]=actual;
@@ -1017,12 +1021,12 @@ static int cam_sv_credit_issue_locked(uint64_t epoch,struct x9_camera_camsv_slot
             else target=false;
         }
         if(e)break;
-        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
         cam_sv.credit_samples=target?cam_sv.credit_samples+1:0;
+        if(mach_absolute_time()>=end && cam_sv.credit_samples!=1 && cam_sv.credit_samples!=2){e=CAM_FAIL(ETIMEDOUT);break;}
         if(cam_sv.credit_samples==2) {
             cam_sv.credit_phase=X9_CAM_SV_CREDIT_ACCEPTED;
-            e=cam_sv_request_guard_locked(epoch,slot);
-            if(!e)e=cam_irq_credit_guard_locked(epoch);
+            e=CAM_SV_TIMED("credit:sv_request_guard",cam_sv_request_guard_locked(epoch,slot));
+            if(!e)e=CAM_SV_TIMED("credit:irq_credit_guard",cam_irq_credit_guard_locked(epoch));
             break;
         }
         e=CAM_FAIL(EAGAIN);delay(1);

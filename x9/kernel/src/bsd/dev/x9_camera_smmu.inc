@@ -132,10 +132,17 @@ static void cam_smmu_power_down(uint64_t token)
     (void)x9_mm_power_smmu_put(token,X9_MM_POWER_CAMERA);
     cam_smmu_power_token=0;
 }
+/* 384/386/388 hung in back-to-back MM SMMU reads without barriers; 389 passed
+ * with a dsb around every read, and mm_read (x9_mm_power) has never hung.
+ * Keep at most one MM SMMU/wrapper access outstanding. */
+static uint32_t cam_smmu_rd32(vm_offset_t a)
+{ uint32_t v;__asm__ volatile("dsb sy":::"memory");v=*(volatile uint32_t *)a;__asm__ volatile("dsb sy":::"memory");return v; }
+static uint64_t cam_smmu_rd64(vm_offset_t a)
+{ uint64_t v;__asm__ volatile("dsb sy":::"memory");v=*(volatile uint64_t *)a;__asm__ volatile("dsb sy":::"memory");return v; }
 static uint32_t cam_smmu_rr(struct x9_camera_smmu *m,unsigned off)
-{ return cam_smmu_mmio_ok(off)?*(volatile uint32_t *)(m->mmio+off):~0u; }
+{ return cam_smmu_mmio_ok(off)?cam_smmu_rd32(m->mmio+off):~0u; }
 static uint64_t cam_smmu_rr64(struct x9_camera_smmu *m,unsigned off)
-{ return cam_smmu_mmio_ok(off)?*(volatile uint64_t *)(m->mmio+off):~0ull; }
+{ return cam_smmu_mmio_ok(off)?cam_smmu_rd64(m->mmio+off):~0ull; }
 static void cam_smmu_rw(struct x9_camera_smmu *m,unsigned off,uint32_t v)
 {
     if(!cam_smmu_mmio_ok(off))return;
@@ -149,7 +156,7 @@ static void cam_smmu_rw64(struct x9_camera_smmu *m,unsigned off,uint64_t v)
     __asm__ volatile("dsb sy":::"memory");
 }
 static uint32_t cam_smmu_wp_rr(struct x9_camera_smmu *m,unsigned off)
-{ return cam_smmu_mmio_ok(0x1e0000+off)?*(volatile uint32_t *)(m->native_wp+off):~0u; }
+{ return cam_smmu_mmio_ok(0x1e0000+off)?cam_smmu_rd32(m->native_wp+off):~0u; }
 static void cam_smmu_wp_rw(struct x9_camera_smmu *m,unsigned off,uint32_t v)
 {
     if(!cam_smmu_mmio_ok(0x1e0000+off))return;

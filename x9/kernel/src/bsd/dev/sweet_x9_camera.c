@@ -197,8 +197,10 @@ static bool cam_boot_deferred(void)
     if(said++<4)printf("X9 CAMERA: start deferred until %ds uptime (now %llums, x9_cam_defer)\n",defer_s,ns/1000000ull);
     return true;
 }
+static void cam_slow_summary(const char *step);
 static void cam_progress(const char *step)
 {
+    if(!strncmp(step,"configure:",10) || !strncmp(step,"start:",6) || !strncmp(step,"prepare:smmu-start",18))cam_slow_summary(step);
     cam_progress_t0=mach_absolute_time();cam_progress_step=step;
     printf("X9 CAMERA PROGRESS: %s\n",step);
 }
@@ -425,6 +427,7 @@ static int start(uint32_t which, uint32_t mode)
     if(e) {
         st.flags|=X9_CAMERA_FAULT;st.last_errno=e;
         int cleanup=stop();st.last_errno=e;
+        cam_slow_summary("start-end");
         printf("X9 CAMERA: start sensor=%u errno=%d cleanup=%d retained=%u step=%s\n",
             which,e,cleanup,session.latched,step);
         cam_fail_dump(step);
@@ -432,6 +435,7 @@ static int start(uint32_t which, uint32_t mode)
     }
     st.flags|=X9_CAMERA_STREAMING;st.width=s->width;st.height=s->height;st.last_errno=0;
     thread_wakeup((event_t)&st.generation); /* actual stream-on ACK published */
+    cam_slow_summary("start-end");
     printf("X9 CAMERA: start sensor=%u generation=%llu (waiting for physical DMA)\n",which,st.generation);
     return 0;
 }

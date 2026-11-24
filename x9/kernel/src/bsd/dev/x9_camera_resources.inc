@@ -178,9 +178,9 @@ fail:
  * Record region/offset BEFORE every access so the watchdog STALL line names
  * the exact register (region 1 = 32-bit, 3 = 64-bit access). */
 static uint32_t cam_snap_rr(vm_offset_t b,unsigned off)
-{ uint32_t v;cam_mmio_region=1;cam_mmio_off=off;__asm__ volatile("dsb sy":::"memory");v=cam_rr(b,off);cam_mmio_reads++;return v; }
+{ uint32_t v;cam_mmio_region=1;cam_mmio_off=off;__asm__ volatile("dsb sy":::"memory");v=cam_rr(b,off);__asm__ volatile("dsb sy":::"memory");cam_mmio_reads++;return v; }
 static uint64_t cam_snap_rr64(vm_offset_t b,unsigned off)
-{ uint64_t v;cam_mmio_region=3;cam_mmio_off=off;__asm__ volatile("dsb sy":::"memory");v=cam_res_read64(b,off);cam_mmio_reads++;return v; }
+{ uint64_t v;cam_mmio_region=3;cam_mmio_off=off;__asm__ volatile("dsb sy":::"memory");v=cam_res_read64(b,off);__asm__ volatile("dsb sy":::"memory");cam_mmio_reads++;return v; }
 static void cam_smmu_snapshot(struct cam_receive_power *p,struct x9_camera_resources *r)
 {
     vm_offset_t b=p->smmu;

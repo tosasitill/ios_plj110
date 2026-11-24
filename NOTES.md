@@ -160,6 +160,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 镜像 x9-cam-dsb-20261124（MM SMMU 读加屏障 + 20 s/采集失败定位）
+
+- boot.img sha256 9af0aab73e71dbb269ad0b9f0eefac9857831e6ddc95024fe480f68d0b518f90，boot-args 同 389。
+- **修复 1（SMMU）**：cam_smmu_rr/rr64/wp_rr 和 snapshot 的读，前后都加 `dsb sy`，同一时间最多一个 MM SMMU/wrapper 访问在路上（写本来就有 dsb）。
+- **20 s 的真相（静态 + 389 日志）**：不是单个超时。res:done → engine-prepare 之间是几十个 0.4–1.7 s 的空档，外加一个 7 s（cam_sv_guard#3 32.77 → CAMSV QOS 39.80）和一个固定 1 s 的 outmux cfg_done 等待。代码里的 guard（sv/out/rx/mac/phy/mm/smi，单次 2–90 ms）在每次写字段、每次轮询里都会重新跑一遍，累积起来就是这 20 s（早在 375/381/383 就记录过这个现象，当时砍过一部分）。新增：每个 guard 的调用次数、总耗时、最大耗时按阶段汇总，在 start:/configure:/prepare:smmu-start/start-end 时打印 `X9 CAMERA GUARD COST`。
+- **采集失败（389）**：FBC credit 其实已经被硬件接受（两个 bank 都 count==target、control 匹配，seen=ack=3），但需要连续两次采样确认，第一次采样之后 1 s 期限已过，于是 ETIMEDOUT。REQUEST(52.342) → 结果(60.037) 共 7.7 s，几乎全花在 guard 上。**修复 2**：已经通过的第一次采样，即使过了期限也必须拿到确认采样（只有 samples==0 时才判超时）；同时给循环里的三个 guard 计时（credit:*）。
+
 #### 2026-11-24 389 结果（x9-cam-snapoff）：SMMU 没卡，native SMMU 启动成功
 
 - snapshot 21 次读全部完成（20.955，reads=21，最后一个是 0x100ac），紧接着 res:done。随后在 res:done 和 configure:engine-prepare 之间等了约 20 s（20.955 → 41.144）。384 也有同样约 20 s 的等待（19.59 → 40.016），说明这里有个约 20 s 的超时，不是挂死。
