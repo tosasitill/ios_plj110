@@ -17,6 +17,7 @@ static int cam_s1_dma_latch(struct x9_camera_s1 *m,int e)
             "inner=%x (retain, no rearm)\n",e,m->raw_state,
             m->raw_request.frame.generation,m->raw_request.frame.capture_id,
             m->raw_request.inner_sequence);
+        cam_fail_dump("raw-latch"); /* diag23: log only */
     }
     m->raw_state=CAM_RAW_RETAINED;
     return m->raw_errno;

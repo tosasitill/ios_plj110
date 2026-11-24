@@ -164,6 +164,9 @@ static void cam_irq_mask_all(void)
 {for(unsigned i=0;i<3;i++)cam_irq_wr(cam_irq_bank(i,0x180),cam_irq_bit(i));}
 static int cam_irq_fault(int e)
 {
+    /* diag23: name the CAM_FAIL(func:line) behind the first IRQ fault. Thread
+     * context only (every caller takes the IRQ spin through here). Log only. */
+    if(!cam_irq.error){printf("X9 CAMERA IRQ FAULT: errno=%d\n",e);cam_fail_dump("irq-fault");}
     boolean_t old=cam_irq_spin_take();
     if(!cam_irq.error)cam_irq.error=e;
     cam_irq.accepting=false;if(cam_irq.owns)cam_irq_mask_all();
