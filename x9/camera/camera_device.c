@@ -653,6 +653,7 @@ struct stream {
 	_Atomic bool    running;
 	_Atomic bool    graph_running;  /* the capture graph has started this stream: frames may be given out */
 	bool            worker_started;
+	bool            shadow;  /* begun while another stream streams: no hardware, no frames (protected by capture_control) */
 	int             torch;
 	_Atomic uint64_t frames, stills_given;
 	_Atomic int     first_errno, stop_errno, close_errno;
@@ -2279,6 +2280,7 @@ stream_stop_locked(CMBaseObjectRef o, CMBaseObjectRef *release, const char *reas
 	pthread_mutex_lock(&s->lock);
 	s->stopping = true;
 	s->running = false;
+	s->shadow = false;
 	s->graph_running = false; /* close admission before waiting for any render/callback */
 	bool in_callback = s->callback_active;
 	pthread_mutex_unlock(&s->lock);
@@ -2355,6 +2357,15 @@ stream_begin(CMBaseObjectRef o, bool graph)
 
 	pthread_mutex_unlock(&s->lock);
 	if (epoch_exhausted) goto done;
+	if (s->shadow && (active_stream == NULL || active_stream == o)) {
+		/* The live stream is gone (a real flip stops it first): start this one for real. */
+		pthread_mutex_lock(&s->lock);
+		s->shadow = false;
+		s->running = false;
+		s->graph_running = false;
+		pthread_mutex_unlock(&s->lock);
+		say("stream shadow promoted to a real start: camera=%u", s->camera->sensor);
+	}
 	/* Reap even a worker that already exited: running=false is not retirement or permission to open another sensor. */
 	if (active_stream != NULL && active_stream != o) {
 		struct stream *active = stream_of(active_stream);
@@ -2366,9 +2377,18 @@ stream_begin(CMBaseObjectRef o, bool graph)
 		 * phone reset in it. A real flip stops the active stream first, so only
 		 * refuse a concurrent start and keep the live sensor streaming. */
 		if (active->running && active->worker_started) {
-			say("stream replace refused: active camera=%u still streaming; concurrent start of camera=%u returns not-available",
-			    active->camera->sensor, s->camera->sensor);
-			result = ERR_NOT_AVAILABLE;
+			/* Refusing made mediaserverd relinquish the whole device (diag9/10).
+			 * Report this stream started as a shadow: no sensor, no frames. */
+			pthread_mutex_lock(&s->lock);
+			bool was_shadow = s->shadow;
+			s->shadow = true;
+			s->stopping = false;
+			s->running = true;
+			if (graph) s->graph_running = true;
+			pthread_mutex_unlock(&s->lock);
+			say("stream shadow %s: camera=%u graph=%u while camera=%u streams (no hardware, no frames)",
+			    was_shadow ? "update" : "start", s->camera->sensor, graph, active->camera->sensor);
+			result = 0;
 			goto done;
 		}
 		result = stream_stop_locked(active_stream, &release, "stream-begin:replace-active");
