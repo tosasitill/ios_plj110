@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 NS 侧 device_reset 审计（未出镜像）
+
+- Android（mt6993_data_mm 有 DELAY_HW_INIT）在 probe_device 时按以下顺序初始化，全部发生在 MMUP 有流量之前：hw_init（`smmu_sec_wpcfg` SMC 0x80c → `smmu_init_wpcfg` 写 NS wrapper）→ `arm_smmu_device_reset`（CR0 清零 → CR1/CR2 → mtk CR1 NC → STRTAB → CMDQ → CFGI/TLBI → EVTQ → SMMUEN）→ `smmu_hw_sec_init`（INIT 0x800）。
+- x9 只做了 PM_GET → WPCFG → INIT → 释放 MMUP，**既没写 NS wrapper，也没做 NS reset**。wrapper 配置只在相机 native 的 `smmu:wrapper` 步骤里写，而 384/386 都在走到这一步之前就挂了。
+- NS reset 本身：按 SMMUv3 架构，SMMUEN=0 / GBPA 直通时寄存器照样可访问，**不跳过它也解释不了读挂死**。DT 没有 `mediatek,dvm`，DVM 不参与。ATF WPCFG 只改 wrapper+0x218/0x21c 的低字节。SMMU_HANG_DETECT 只是 debug dump。
+- **唯一有机制的差异**：`smmu_init_wpcfg` 的 GLB_CTL0 位：DCM_EN(2)、CFG_TAB_DCM_EN(11)、EXTRA DCM(18..20)、**STD_AXI_MODE_DIS(0)**（源码注释："Used for MM_SMMU read command overtaking"）、stash mode3（bit10|13）；TCU_CTL1 AXSLC=0xe0、SLC_SB_ONLY(1)；TCU_CTL10 GID=8；TCU_CTL0 QoS=5。Android 在 TCU 有任何流量之前就写好；x9 在 MMUP 经 secure STE 取指、TCU 已经在工作时还是复位值。时机吻合：MMUP 释放前读 NS 寄存器全部正常（19.935 的 NS probe），挂死都在 MMUP 释放之后，而且时间点随机（与流量有关）。**但没有硬件文档能证明这会让寄存器读挂死，属于推断，未证实。**
+- 修复候选（按 Android 顺序，未实施）：在 x9_mm_power 的 WPCFG 之后、INIT 之前，用与 `cam_native_wp_init` 相同的值写 NS wrapper（0x309e0000 +0/+0x204/+0x228/+0x200）。
+
 #### 2026-11-24 静态分析（387 之后，未出镜像）
 
 - **开机卡 logo 与 SMMU 挂死无关**：384/386 的 presents 在约 16s 后就是 0，而 384 的 SMMU 读一直正常到 40.55s。卡开机的原因是 mediaserverd 阻塞在相机 start 里；387 用延迟启动后开机正常，证实了这一点。
