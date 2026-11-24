@@ -151,13 +151,13 @@ static uint32_t cam_rw_adopt_at(vm_offset_t base,unsigned off,uint32_t value,
  * Prints the first 3 calls of each guard slower than 2 ms. No behavior change. */
 /* 389: configure:source-prepare took ~20 s with no single long wait. Account
  * every guard call (count/total/max) and print per phase from cam_progress. */
-static struct { const char *name; unsigned calls; uint64_t total_ns, max_ns; } cam_slow_acc[16];
+static struct { const char *name; unsigned calls; uint64_t total_ns, max_ns; } cam_slow_acc[32];
 static uint64_t cam_slow_phase_t0;
 static void cam_slow_summary(const char *step)
 {
     uint64_t now=mach_absolute_time(),wall=0,sum=0;
     if(cam_slow_phase_t0)absolutetime_to_nanoseconds(now-cam_slow_phase_t0,&wall);
-    for(unsigned i=0;i<16 && cam_slow_acc[i].name;i++) {
+    for(unsigned i=0;i<32 && cam_slow_acc[i].name;i++) {
         if(!cam_slow_acc[i].calls)continue;
         sum+=cam_slow_acc[i].total_ns;
         printf("X9 CAMERA GUARD COST: before=%s %s calls=%u total_ms=%llu max_us=%llu\n",step,cam_slow_acc[i].name,
@@ -172,7 +172,7 @@ static void cam_slow_note(const char *name,unsigned *hits,uint64_t t0)
 {
     uint64_t ns;
     absolutetime_to_nanoseconds(mach_absolute_time()-t0,&ns);
-    for(unsigned i=0;i<16;i++) {
+    for(unsigned i=0;i<32;i++) {
         if(cam_slow_acc[i].name && cam_slow_acc[i].name!=name)continue;
         cam_slow_acc[i].name=name;cam_slow_acc[i].calls++;cam_slow_acc[i].total_ns+=ns;
         if(ns>cam_slow_acc[i].max_ns)cam_slow_acc[i].max_ns=ns;

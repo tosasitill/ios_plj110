@@ -532,7 +532,9 @@ static int cam_sv_request_authority(void)
     const struct x9_camera_camsv_dma *d=&cam_sv.request_dma;
     if(!cam_sv.request_held)return 0;
     if(!d->context || !d->lease || !d->backing || !d->check)return CAM_FAIL(ESTALE);
-    return d->check(d->context,d->lease,&cam_sv.request);
+    { static unsigned hits;uint64_t t0=mach_absolute_time();
+      int e=d->check(d->context,d->lease,&cam_sv.request); /* 392: S1 validate+pages+STE compare, ~0.1 s */
+      cam_slow_note("sv_request_authority",&hits,t0);return e; }
 }
 /* 390: one full environment sweep (sv/out/rx/mac/phy + nested mm/smi
  * guards) costs 0.1-0.5 s, and every acceptance poll re-ran it: 72 s of guard
@@ -540,18 +542,29 @@ static int cam_sv_request_authority(void)
  * after 2-3 polls. Reuse a successful sweep for 20 ms within the same epoch;
  * any failure is never cached, and request_authority still runs every call. */
 static uint64_t cam_sv_env_ok_at,cam_sv_env_ok_epoch;
+static bool cam_sv_env_ok_held;
+static __typeof__(cam_sv.request_dma.lease) cam_sv_env_ok_lease;
+static __typeof__(cam_sv.request_dma.backing) cam_sv_env_ok_backing;
+static __typeof__(cam_sv.request_dma.context) cam_sv_env_ok_context;
 static int cam_sv_environment_sweep(void);
 static int cam_sv_environment(void)
 {
     uint64_t now=mach_absolute_time(),age=0;
-    int e=cam_sv_request_authority();if(e)return cam_sv_fault(e);
-    if(cam_sv_env_ok_at && cam_sv_env_ok_epoch==cam_sv.epoch && !cam_sv.terminal) {
+    int e;
+    /* 392: the authority check alone is ~0.1 s (S1 walk + STE compare), so a
+     * cached sweep still cost 108 ms per poll. It is covered by the same
+     * 20 ms reuse, keyed on the very same lease/backing/context. */
+    if(cam_sv_env_ok_at && cam_sv_env_ok_epoch==cam_sv.epoch && !cam_sv.terminal &&
+       cam_sv.request_held==cam_sv_env_ok_held && cam_sv.request_dma.lease==cam_sv_env_ok_lease &&
+       cam_sv.request_dma.backing==cam_sv_env_ok_backing && cam_sv.request_dma.context==cam_sv_env_ok_context) {
         absolutetime_to_nanoseconds(now-cam_sv_env_ok_at,&age);
         if(age<20000000ull)return 0;
     }
     cam_sv_env_ok_at=0;
     e=cam_sv_environment_sweep();
-    if(!e){cam_sv_env_ok_at=mach_absolute_time();cam_sv_env_ok_epoch=cam_sv.epoch;}
+    if(!e){cam_sv_env_ok_at=mach_absolute_time();cam_sv_env_ok_epoch=cam_sv.epoch;
+        cam_sv_env_ok_held=cam_sv.request_held;cam_sv_env_ok_lease=cam_sv.request_dma.lease;
+        cam_sv_env_ok_backing=cam_sv.request_dma.backing;cam_sv_env_ok_context=cam_sv.request_dma.context;}
     return e;
 }
 static int cam_sv_environment_sweep(void)

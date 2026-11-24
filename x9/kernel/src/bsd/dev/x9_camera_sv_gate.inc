@@ -219,9 +219,11 @@ static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
         unsigned reg=cam_sv_find(offset);
         uint32_t bit=1u<<step,next=cam_sv_gate.target[step];
         bool complete=false;
-        if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
-        e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
-        e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
+        /* 392: same as receive in 391: step 0 had samples=1 when the single
+         * 1 s budget for all steps ran out. Each step gets its own budget. */
+        if(step!=first)end=mach_absolute_time()+span;
+        e=CAM_SV_TIMED("gate:sv_request_guard",cam_sv_request_guard_locked(epoch,cam_sv.request_slot));if(e)break;
+        e=CAM_SV_TIMED("gate:irq_control_guard",cam_irq_control_guard_locked(epoch,off && session.stream));if(e)break;
         if(cam_sv_gate.issued&bit || cam_sv.expected[0][reg]!=cam_sv_gate.prior[step]){e=CAM_FAIL(ESTALE);break;}
         cam_sv_gate.pending=step;cam_sv_gate.samples=0;
         if(next!=cam_sv_gate.prior[step]) {
@@ -230,16 +232,20 @@ static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
         }
         for(unsigned poll=0;poll<10000;poll++) {
             bool match=true;
-            if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
-            e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
-            e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
+            if(mach_absolute_time()>=end && !cam_sv_gate.samples){e=CAM_FAIL(ETIMEDOUT);break;}
+            e=CAM_SV_TIMED("gate:sv_request_guard",cam_sv_request_guard_locked(epoch,cam_sv.request_slot));if(e)break;
+            e=CAM_SV_TIMED("gate:irq_control_guard",cam_irq_control_guard_locked(epoch,off && session.stream));if(e)break;
+            /* Fresh outer read each poll (the sweep that used to refresh
+             * gate_after may be reused for 20 ms); same observer as the sweep. */
+            e=cam_sv_power_guard();if(e)break;
+            e=cam_sv_gate_sample_word(0,cam_sv.view[0],offset,cam_rr(cam_sv.view[0],offset));if(e)break;
             for(unsigned bank=0;bank<1;bank++) { /* outer only, as Android */
                 if(cam_sv.status.gate_after[bank][field]!=next)match=false;
                 else cam_sv_gate.seen[bank]|=bit; /* also records actual no-op observation */
             }
-            if(mach_absolute_time()>=end){e=CAM_FAIL(ETIMEDOUT);break;}
             cam_sv_gate.samples=match?cam_sv_gate.samples+1:0;
             if(cam_sv_gate.samples==2){complete=true;break;}
+            if(mach_absolute_time()>=end && !cam_sv_gate.samples){e=CAM_FAIL(ETIMEDOUT);break;}
             delay(1);
         }
         if(e)break;
@@ -250,7 +256,6 @@ static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
         cam_sv_gate.phase=off?X9_CAM_SV_GATE_STOPPED:X9_CAM_SV_GATE_ARMED;
         e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);
         if(!e)e=cam_irq_control_guard_locked(epoch,off && session.stream);
-        if(!e && mach_absolute_time()>=end)e=CAM_FAIL(ETIMEDOUT);
     }
     if(e){cam_sv.terminal=true;cam_sv_fault(e);}
     cam_sv_status();

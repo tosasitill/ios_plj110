@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 392 结果 + 镜像 x9-cam-gate-20261124
+
+- 392（x9-cam-rcv）：SMMU 第四次没卡。receive 4 个字段全过（`issued=f/0 seen=f/f errno=0`，outer=10000/701/4/1）。下一个失败点是 TG GATE：`issued=1 seen=1/1 samples=1 errno=60`（sv_gate.inc:240），8 个步骤共用 1 s 预算，同一个模式。
+- receive:sv_request_guard 一次 646 ms、下一次 108 ms 交替出现：缓存命中时仍要跑 request_authority = lease check（S1 validate + pages + STE compare，日志里的 st:s1-validate 周期），约 0.1 s；没命中就是完整检查，约 0.65 s。
+- 新镜像 sha256 8b23dc13a7747747b6cd94874c243751e39b26336ada081623985b039f3027ae：
+  - 环境检查缓存命中时跳过 authority（key 同时比对 epoch、held、lease/backing/context，20 ms 窗口，失败不缓存），authority 加计时（sv_request_authority）。
+  - TG gate：每步单独 1 s 预算，已通过的第一次采样过期后仍做确认采样，去掉结束时的总期限检查，每次轮询直接读 outer（经 cam_sv_gate_sample_word，和完整检查用同一个观察函数），guard 加计时（gate:*）。
+  - cam_slow_acc 从 16 扩到 32 项（392 的 16 项已满，receive:irq_control_guard 没被记录到）。
+
 #### 2026-11-24 391 结果 + 镜像 x9-cam-rcv-20261124
 
 - 391（x9-cam-memo）：SMMU 第三次没卡。FBC credit 仍然 `samples=2 errno=0`。receive 字段 0 现在通过了（`samples=2`），但 `issued=1/0`：4 个字段共用的 1 s 预算在发字段 1 之前就用完了（sv_hw.inc:1106 的字段开头期限检查）。FBC→RECEIVE 结果之间 1.54 s。
