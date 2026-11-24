@@ -4049,3 +4049,15 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - **收尾状态/下一次从这里继续**：安装器+README/交接 `c202888` 已push origin `feat/bluetooth-native`成功（edf7705..c202888）。当前最新完整boot仍为源码e7bf442的 `x9/out/bt-native-sco-full-20261115/boot/boot.img`，配套runtime/root-payload已构建，不是全部功能验收；未root安装，仍待用户对此次四binary+两Program-only job专用iOS根盘安装明确许可。随后执行安全stage与真实receipt核，用户手动boot并保存新原始日志；先查SSPM/profile/vendor所有ACK/DONE、kern.x9_bt_boot=0/power0、native injection/H4open/capabilities，再扫描→配对→BLE→A2DP→HFP/SCO。Audio vendor真实映射、活动连接suspend/FWwake callback与实机吞吐尚未完成；closed-transport-only不可包装为完整system suspend。目标保持active，不合未验收蓝牙进main，不自行boot/flash/写设备。
 
 - **继续整合：两处确定原生协议缺陷已修**：子代理 `093717b` 合为 `16d085a8`，纠正扫描 lower setter：`19a7e8` 实际写 `85a646`（standard extended scan），`19a83c` 写 `85a645`（Apple new VSC scan）。现前者取真实 ext_scan、后者0；原 provider slot1b8/1c8 与此一致，原 `199fac/19abc4` 才走标准2041/2042，避免此前选入已清空的vendor ops返回0xe11。子代理 `979a2fb` 合为 `fc759aaf`，原 `10b9ac:11001009→2a0003e9` 去掉 HostBufferSize ACL payload 多声明的4B。原H4 RX固定对象0x804、包预算2032含ACL头，实际payload2028；serial_open的4096是TX staging容量，不是RX容量。0c33 descriptor5e格式2122原样marshal，completion真实保留status，无需额外callback hook。两子代理正常编译exit0，未套件/设备/新镜像；原件decoded及日志保留本树 `x9/out/bluetooth-native/ios-power-handoff/` 与扫描代理原目录。
+
+## 2026-11-24 diag12-17 (camera close path; stopped by user)
+
+- Logs: .local/x9/logs/421-diag12..17.txt (diag15b = rerun of diag15).
+- diag12: x9_cam_defer measured mach_absolute_time (includes pre-kernel time), so it never deferred. diag13 measures from camera registration; start waits instead of EBUSY.
+- diag13/14: the reset is not tied to early boot. The camera close resets during the CAMSV TG gate-off whenever guard reuse (CAM_GUARD_REUSE_NS, from 2c36e326) is on.
+- diag14: x9_fb_on_reset (pre-arming TOPRGU 0x24) does not work. LK rewrites 0x24 after a watchdog reset. Reverted.
+- diag15 (CAM_GUARD_REUSE_NS=0): gate-off, receive, DMA stop and IRQ CLOSE all pass (restore=0). The close takes ~100-190 s and the UI sits on the logo the whole time. Both runs reset at about 190 s, right after the SMMU retire mark retire:cmdq-prod.
+- diag16: MM power/clock was healthy at each retire field. At cmdq-prod the snapshot was PROD=0xd, prior=0, with CMDQ_BASE already restored to 0. The reset followed within ms; USB loses the last ~1 KiB, so the exact access is unknown.
+- diag17 (e125dbf0): keeps PROD==CONS and skips the store. Untested: boot 1 sat on the logo and the user rebooted it at ~168 s, before the retire.
+- NOT done: the mainline (black-level frame 1, no later frames) versus the Android camsv/seninf flow.
+- boot_b holds diag17.
