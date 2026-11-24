@@ -30,11 +30,15 @@ static struct {
 } cam_irq_fbc;
 static int cam_repeat_note_locked(unsigned,uint32_t,uint32_t,bool *);
 static bool cam_repeat_done_target_locked(unsigned,uint32_t);
-static int cam_irq_fbc_fault_locked(int e)
+/* 396: these faults returned plain errno with no FAIL TRACE entry, so the
+ * stream-on ESTALE could not be located. Record the line (ring, spin-safe). */
+static int cam_irq_fbc_fault_at(int e,unsigned line)
 {
-    if(!cam_irq_fbc.error)cam_irq_fbc.error=e;
+    if(!cam_irq_fbc.error){cam_fail_note(e,"cam_irq_fbc_fault",line);cam_irq_fbc.error=e;}
     return cam_irq_fbc.error;
 }
+#define cam_irq_fbc_fault_locked(e) cam_irq_fbc_fault_at((e),__LINE__)
+static struct { unsigned bank,line; uint32_t control,counter,prior,want; } cam_irq_fbc_diag;
 /* AFTER all consumer controls are actually accepted, while input remains
  * inactive. A real producer must preserve this boundary before source-on.
  * Capture actual control/counter values twice, not just the software target.
@@ -119,8 +123,17 @@ static int cam_irq_fbc_note_locked(unsigned bank,uint32_t control,uint32_t count
     }
     prior=cam_irq_fbc.before[bank];want=cam_irq_fbc.target[bank];
     wcnt=counter&CAM_IRQ_FBC_WCNT;cnt=counter&CAM_IRQ_FBC_CNT;
+    /* 396: the first frame DONE'd (fbc 10001->101) while the stream-on ack
+     * loop was still running its guards; with the single credit consumed
+     * every later frame is dropped and DROP[31:25] counts. That is the real
+     * no-credit interval (the repeat path already accepts it), only after
+     * WCNT reached target and CNT is 0. RCNT/reserved stay exact. */
+    uint32_t drop_ok=((cam_irq_fbc.source_issued&CAM_STREAM_ON) &&
+        wcnt==(want&CAM_IRQ_FBC_WCNT) && !cnt)?0xfe000000u:0;
+    cam_irq_fbc_diag.bank=bank;cam_irq_fbc_diag.control=control;cam_irq_fbc_diag.counter=counter;
+    cam_irq_fbc_diag.prior=prior;cam_irq_fbc_diag.want=want;
     if(control!=cam_irq_fbc.control[bank] ||
-       ((counter^prior)&~(CAM_IRQ_FBC_WCNT|CAM_IRQ_FBC_CNT)) ||
+       ((counter^prior)&~(CAM_IRQ_FBC_WCNT|CAM_IRQ_FBC_CNT|drop_ok)) ||
        (wcnt!=(prior&CAM_IRQ_FBC_WCNT) && wcnt!=(want&CAM_IRQ_FBC_WCNT)) ||
        (cnt && cnt!=0x10000u) || (!(cam_irq_fbc.source_issued&CAM_STREAM_ON) && counter!=prior) ||
        ((cam_irq_fbc.seen[bank]&1u) && wcnt!=(want&CAM_IRQ_FBC_WCNT)) ||

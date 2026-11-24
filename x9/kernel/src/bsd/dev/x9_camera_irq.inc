@@ -400,7 +400,7 @@ static int cam_irq_unmask(unsigned role)
 static int cam_irq_core_ready(const struct x9_camera_camsv_irq *f)
 {
     uint64_t span,end;
-    nanoseconds_to_absolutetime(500000000,&span);end=mach_absolute_time()+span;
+    nanoseconds_to_absolutetime(CAM_GUARD_BUDGET_NS,&span);end=mach_absolute_time()+span; /* start() still runs guards after ON */
     for(;;) {
         int e=0;
         lck_mtx_lock(&camera_lock);

@@ -99,7 +99,8 @@ static int cam_stream_set_locked(const struct x9_camera_sensor *s,uint8_t value)
     e=cam_stream_guard_locked(s,!off);if(e)goto out;
     /* Fixed bounded observation, not a FPS/rate lease inferred from pclk.
      * Budget includes actual AP write/read transactions and last guards. */
-    nanoseconds_to_absolutetime(500000000,&span);end=mach_absolute_time()+span;
+    /* 396: one guard pass is ~0.65 s; the old 500 ms could not fit one poll. */
+    nanoseconds_to_absolutetime(CAM_GUARD_BUDGET_NS,&span);end=mach_absolute_time()+span;
     old=cam_irq_spin_take();
     if(cam_irq_fbc.source_error || cam_irq_fbc.error || (cam_irq_fbc.source_issued&bit))
         e=cam_irq_fbc.source_error?cam_irq_fbc.source_error:cam_irq_fbc.error?cam_irq_fbc.error:ESTALE;
@@ -187,6 +188,9 @@ out:
         "seen=%x prior_control=%x control=%x frame_count=%x sampled=%x samples=%u idle_samples=%u errno=%d "
         "(real AP 0100; NOT RAW/AXI/IRQ/worker/map drain)\n",
         cam_source.epoch,s->sensor,off,phase,issued,ack,seen,prior_control,control,frame_count,sampled,samples,idle_samples,e);
+    if(e)printf("X9 CAMERA FBC NOTE LAST: bank=%u control=%x counter=%x prior=%x want=%x fbc_err=%d src_err=%d irq_err=%d\n",
+        cam_irq_fbc_diag.bank,cam_irq_fbc_diag.control,cam_irq_fbc_diag.counter,cam_irq_fbc_diag.prior,
+        cam_irq_fbc_diag.want,cam_irq_fbc.error,cam_irq_fbc.source_error,cam_irq.error);
     if(cam_irq_tolerated.count)
         printf("X9 CAMERA CAMSV TOLERATED: count=%u err=%x cq=%x enq_err=%u (Android camsv_handle_err logs only)\n",
             cam_irq_tolerated.count,cam_irq_tolerated.err,cam_irq_tolerated.cq,cam_irq_tolerated.enq);

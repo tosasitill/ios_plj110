@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 396 结果（第一帧真的写出来了）+ 镜像 x9-cam-stream-20261124
+
+- 396（x9-cam-defer）：RX PATH `errno=0`，arm 全部完成，`NATIVE FIRST ARM ... iova=40000000`。stream-on 时 OUTMUX READY 成功，sensor 0100=1 已写。IRQ 记录：role1 SOF `sof=4`；role0 DONE `done=10000 fbc=101/101`（FBC 从 10001 变成 101，WCNT+1、CNT 0，说明第一帧确实已经 DMA 写完）。
+- 失败：`SENSOR STREAM issued=1 sampled=4 control=0 errno=70`，0100 写入后一次都没读回来就 ESTALE，而且 FAIL TRACE 里没有对应条目：cam_irq_fbc_fault_locked 返回的是不经 CAM_FAIL 的普通 errno。
+- 推断（没有直接证据）：stream-on 确认循环每次 guard 约 0.65 s（而预算只有 500 ms），第一帧 DONE 之后唯一的 credit 已经用掉，后面的帧都被丢弃，DROP[31:25] 计数增加；cam_irq_fbc_note_locked 要求除 WCNT/CNT 外的位保持不变，所以 ESTALE。repeat 路径本来就接受 DROP（native_repeat.inc:110）。
+- 修复：note_locked 在 source 已发出、WCNT 到 target 并且 CNT=0 时接受 DROP 变化；stream-on 预算 500 ms → CAM_GUARD_BUDGET_NS；worker 的 cam_irq_core_ready 500 ms → CAM_GUARD_BUDGET_NS。
+- 诊断：cam_irq_fbc_fault 现在会写进 FAIL TRACE（带行号）；stream 失败时打印 `FBC NOTE LAST`（bank/control/counter/prior/want 和各个 error）。
+- sha256 74ce52f7f3991465f6446442ab4ff5c40975c3eefb54088e2d25df96ba108293。
+
 #### 2026-11-24 395 结果 + 镜像 x9-cam-defer-20261124
 
 - 395（x9-cam-route）：route guard 修复生效，OUT 步不再 ESTALE。新失败：RX PATH `pending=4 issued=1f samples=0 errno=60`（cam_source_wait_locked:241）。cam_out_commit 等了 10 s（上一版把它的期限也改成了 10 s），然后 `OUTMUX ADOPT: cfg_done pending ... settle after stream-on` 延后处理；之后的完整等待要求 inner bank 也到 target，但 sensor 没开就没有 VSYNC，inner 不会加载，所以超时。
