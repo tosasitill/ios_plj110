@@ -519,6 +519,18 @@ static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m
         delay(20000);
         if(!e)x9_mm_power_smmu_dump(field_steps[i]);
         delay(20000);
+        /* diag16 reset right after this point with CMDQ_BASE already restored
+         * to 0 and PROD=CONS=0xd: storing PROD=0 alone makes the queue look
+         * non-empty at PA 0. Linux device_reset never leaves PROD!=CONS with an
+         * invalid base. Equal cursors are an empty, inert queue; the next owner
+         * rewrites them before enabling CMDQ, so keep them and never store. */
+        if(!e && (fields[i]==CAM_N_CP || fields[i]==CAM_N_CC)) {
+            if(now.word[CAM_N_CP]!=now.word[CAM_N_CC]){e=CAM_FAIL(EBUSY);break;}
+            printf("X9 CAMERA RETIRE FIELD: %s kept %x (PROD==CONS empty queue, no store)\n",
+                field_steps[i],now.word[fields[i]]);
+            prior.word[fields[i]]=now.word[fields[i]];
+            continue;
+        }
         /* CMDQ cursors are restored ONLY AFTER full-target real SYNC
          * consumption AND CR0/ACK CMDQEN=0. OPPO device_reset writes both
          * PROD/CONS. This is own disabled-queue restoration, not a fake
