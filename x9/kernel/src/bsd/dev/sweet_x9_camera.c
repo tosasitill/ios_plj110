@@ -186,12 +186,18 @@ extern void x9_mm_power_stall_dump(void);
  * MM SMMU read that never returns, and boot stays on the logo. Refuse
  * starts until uptime >= x9_cam_defer seconds (default 90, 0 = off) so boot
  * completes first; a later Camera open starts normally. */
+/* mach_absolute_time() keeps counting from before this kernel (log 404 read
+ * 70.6 s at 11.2 s uptime, and warm resets do not clear it), so measure from
+ * camera platform registration, which happens ~3 s into boot. */
+static uint64_t cam_boot_t0;
+#define CAM_BOOT_T0_UPTIME_NS (3ull*NSEC_PER_SEC)
 static bool cam_boot_deferred(void)
 {
     static int defer_s=-1;
     if(defer_s<0){int v=90;if(!PE_parse_boot_argn("x9_cam_defer",&v,sizeof(v)))v=90;defer_s=v<0?0:v;}
     if(!defer_s)return false;
-    uint64_t ns;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+    if(!cam_boot_t0)return true; /* not registered yet: certainly early boot */
+    uint64_t ns;absolutetime_to_nanoseconds(mach_absolute_time()-cam_boot_t0,&ns);ns+=CAM_BOOT_T0_UPTIME_NS;
     if(ns>=(uint64_t)defer_s*NSEC_PER_SEC)return false;
     static unsigned said;
     if(said++<4)printf("X9 CAMERA: start deferred until %ds uptime (now %llums, x9_cam_defer)\n",defer_s,ns/1000000ull);
@@ -457,6 +463,7 @@ static int start(uint32_t which, uint32_t mode)
 }
 int x9_camera_register_platform(const struct x9_camera_platform *p)
 {
+    if(!cam_boot_t0)cam_boot_t0=mach_absolute_time();
     if(!p || p->version!=X9_CAMERA_PLATFORM_VERSION || !p->power || !p->read8 ||
        !p->write8 || !p->configure || !p->exposure || !p->capture)return CAM_FAIL(EINVAL);
     struct x9_camera_config config={0};
