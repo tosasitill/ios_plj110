@@ -250,6 +250,9 @@ static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
         }
         if(e)break;
         if(!complete){e=CAM_FAIL(ETIMEDOUT);break;}
+        /* Commit both outer samples so a reused sweep cannot leave a stale prior. */
+        cam_sv.expected[0][reg]=next;
+        cam_sv_publish();
         cam_sv_gate.pending=X9_CAM_SV_GATE_STEPS;
     }
     if(!e) {

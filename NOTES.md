@@ -160,6 +160,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-24 log 403 → x9-cam-gate-cache-20261124（TG gate journal 修复，待上机）
+
+- **观察**：12.256 s 请求 stream，22.551 s start 返回 `errno=70`，约 10.3 s；VCP/MM_2、native configure、SMMU export、FBC credit、receive arm 都已通过。最早失败是 `TG GATE off=0 phase=1 pending=8 issued=1 seen=1/0 samples=2 errno=70 SEN=1/0`，fail trace 指向 `cam_sv_gate_transition_locked:227`；没有 sensor stream-on、RAW publish 或第二帧。日志没有构建标识；其快 guard 计时与 `f38b326b` 一致是推断。
+- **根因（静态 + 日志）**：初始 SEN 为 `0x2000`。gate step 0 写 `CMOS_EN` 得到 `0x2001` 并完成两次外层读回，但 `cam_sv_gate_sample_word()` 只更新 gate 状态，没有提交 `cam_sv.expected[0][SEN]`。step 1 的 FLUSH 已是继承值，因此是 no-op，prior 为 `0x2001`。401/402 的慢 guard 会在两步之间重新 sweep 并刷新 expected；403 复用了 20 ms environment cache，expected 仍为 `0x2000`，step 1 的 prior 检查遂误报 ESTALE。
+- **修复**：每个 gate step 双样本验收后立即执行 `cam_sv.expected[0][reg]=next; cam_sv_publish();`，包括 no-op step；不重试写、不放宽读回、不撤回快缓存。改动在 `x9/kernel/src/bsd/dev/x9_camera_sv_gate.inc:253`。
+- **构建（未上机）**：`python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --name x9-cam-gate-cache-20261124` exit 0；104/104 overlay 对象编译（3 prebuilt）、链接、shim 与 boot 打包成功。`boot.img` 15,331,328 B，sha256 `c0d68d3d0c82181ba99df154f317730dce7cf9cd34b1a12e6d682780f20b4fb9`。产物：`x9/out/x9-cam-gate-cache-20261124/boot.img`。纯内核改动，无需 mailbox；这不是硬件验证。
+- **下一份日志按顺序看**：`TG GATE ... errno=0` → `NATIVE FIRST ARM` → `SENSOR STREAM ... errno=0` → `RAW PUBLISH`/`RAW STATS` → 桥 `READ CALL peek=0` → `CONTROLLER LOCK`/`NATIVE NEXT`/`REPEAT` → 非黑画面。402 已暴露的首帧纯黑和 peek 后停止问题尚未解决，不能把本镜像称为“出帧成功”。
+
 #### 2026-11-24 log 402 → x9-cam-fast-20261124（黑屏根因：启动太慢，客户端放弃）
 
 - 桥日志已经能在串口看到（X9 CAMERA BRIDGE）。完整时间线：
