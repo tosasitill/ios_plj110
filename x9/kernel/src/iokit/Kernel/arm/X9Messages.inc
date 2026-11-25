@@ -195,8 +195,8 @@ static uint64_t x9m_store_submit(const x9m_job &j){
   diag_submits++;
   struct x9ms_storage_request sr={};unsigned sok=x9ms_storage_decode(j.req,j.len,&sr);
   printf("X9 SMS DIAG: 0607 SIM%u op %u step %u dec %u storage %u tag %u/%u idx %u flag %u 103=%u\n",
-   j.sim+1,j.op,j.step,sok,sok?sr.storage:0xff,sok?sr.has_tag:0xff,
-   sok?sr.tag:0xff,sok?sr.index:0xffffffffu,flag,j.op==X9M_TAG&&j.step==1?0:1);
+   j.sim+1,j.op,j.step,sok,sok==X9MS_OK?sr.storage:0xff,sok==X9MS_OK?sr.has_tag:0xff,
+   sok==X9MS_OK?sr.tag:0xff,sok==X9MS_OK?sr.index:0xffffffffu,flag,j.op==X9M_TAG&&j.step==1?0:1);
  }
  if(j.op==X9M_TAG&&j.step==1){
   /* Serialize exactly the same frame, but carry this mutation's original
