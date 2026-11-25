@@ -79,7 +79,15 @@ static int cam_phy_digital_stop(void)
     if(n==CAM_PHY_NO_REG)return CAM_FAIL(EINVAL);
     r=&cam_phy.reg[n];mask=r->owned&(CAM_DSK_ENABLE|CAM_DSK_LP11_IDLE);
     if(!mask)return 0;
-    if(r->before&(CAM_DSK_ENABLE|CAM_DSK_LP11_IDLE|CAM_DSK_RESET))return CAM_FAIL(EBUSY);
+    /* diag43: Android never clears DESKEW EN/LP11_IDLE at stop (no
+     * "DESKEW_EN, 0" anywhere in isp8s phy_3_0.c). When the session started
+     * with them already set (left by a previous session), there is nothing
+     * of ours to undo: leave the inherited value instead of EBUSY, which
+     * failed the front camera close and killed mediaserverd. */
+    if(r->before&(CAM_DSK_ENABLE|CAM_DSK_LP11_IDLE|CAM_DSK_RESET)) {
+        printf("X9 CAMERA PHY DESKEW KEEP: before=%x owned=%x (inherited, Android never clears)\n",r->before,r->owned);
+        r->owned&=~mask;return 0;
+    }
     /* No PHY lane or DELAY_EN/PERIODIC/APPLY was enabled. Stop only the
      * generic deskew configuration before other digital controls change.
      * Neither a late IRQ poll nor a reset is used as a drain assertion. */

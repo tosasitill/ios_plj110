@@ -358,14 +358,18 @@ static int cam_phy_ctle_unforce(void)
         if(n==CAM_PHY_NO_REG)return CAM_FAIL(EINVAL);
         r=&cam_phy.reg[n];
         if(r->owned) {
-            if(r->before&CAM_PHY_DELAY_FORCE_EN)return CAM_FAIL(EBUSY);
+            /* diag43: inherited force (previous session): keep it, as the
+             * vendor flow does, instead of failing the close with EBUSY. */
+            if(r->before&CAM_PHY_DELAY_FORCE_EN)
+                printf("X9 CAMERA PHY CTLE KEEP: bank=%u off=%x before=%x (inherited force)\n",b,offset+4,r->before);
             e=cam_phy_write(b,offset+4,r->owned,r->before);
             if(!e)r->owned=0;
         }
         n=cam_phy_find(b,offset);if(n==CAM_PHY_NO_REG)return CAM_FAIL(EINVAL);
         r=&cam_phy.reg[n];
         if(!e && r->owned) {
-            if(r->before&(CAM_PHY_DELAY_EN|CAM_PHY_DELAY_APPLY))return CAM_FAIL(EBUSY);
+            if(r->before&(CAM_PHY_DELAY_EN|CAM_PHY_DELAY_APPLY))
+                printf("X9 CAMERA PHY CTLE KEEP: bank=%u off=%x before=%x (inherited delay)\n",b,offset,r->before);
             e=cam_phy_write(b,offset,r->owned,r->before);
             if(!e)r->owned=0;
         }
