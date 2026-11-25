@@ -653,7 +653,7 @@ static void rhw_section(const char *tag,const uint32_t *s,unsigned n)
         if((i&7)==7 || i+1==n) { printf("%s\n",line); off=0; }
     }
 }
-static void rhw_dump(void)
+static void __unused rhw_dump(void)
 {
     rhw_fail=0;
     rhw_section("J0",rhw_sel_j,sizeof(rhw_sel_j)/4);
@@ -671,7 +671,7 @@ static void rhw_dump(void)
  * the ACL payload, last one ending in "; coredump end". FF/FE 05 frames are
  * FW log. Collect printable runs first; printing to serial would stall RX. */
 static char cd_text[24576];
-static void fw_assert_dump(void)
+static void __unused fw_assert_dump(void)
 {
     uint32_t echo=0; unsigned frames=0,dump=0,logs=0,other=0,perr=0; uint64_t bytes=0; size_t used=0;
     bool ended=false;
@@ -762,7 +762,6 @@ static void stall_probe(void)
     stall_collect("FC3A",sched,sizeof(sched),300);
     static const uint8_t version[]={1,0x01,0x10,0};
     stall_collect("1001",version,sizeof(version),300);
-    if(stall_probes==1) { rhw_dump(); fw_assert_dump(); }
     bool answered=false;
     for(unsigned i=0;i<pending_count;i++)
         if(pending[i].length>=6 && pending[i].data[0]==4 && pending[i].data[1]==0x0e &&
@@ -871,6 +870,27 @@ static void worker(void *unused,wait_result_t result)
                 have_rx=error==0;
                 if(have_rx) { hci_trace("RX",incoming.data,incoming.length); stall_outstanding=false; }
             }
+        }
+        /* connac3 FE01: Android drops this command complete in btmtk_rx_work
+         * and reloads the ROM-patch section named by data[6] over WMT before
+         * the stack sees it. This worker is the only RX owner, so the
+         * download's own ACKs are consumed here; Android needs a workqueue
+         * only because its rx_work thread cannot wait for them. */
+        if(have_rx && incoming.length==7 && incoming.data[0]==4 &&
+           incoming.data[1]==0x0e && incoming.data[2]==4 && incoming.data[3]==1 &&
+           incoming.data[4]==1 && incoming.data[5]==0xfe) {
+            unsigned bin=incoming.data[6];
+            static unsigned dynamic_logs;
+            bool log=dynamic_logs<8;
+            if(log) { dynamic_logs++; printf("X9 BT: dynamic FW section %u requested\n",bin); }
+            struct x9_bt_download_result dr;
+            int derr=x9_bt_download_dynamic(&ops.io,bin,&dr);
+            if(log)
+                printf("X9 BT: dynamic FW section %u %s errno=%d bytes=%llu ready=%u\n",
+                    bin,derr?"failed":"loaded",derr,(unsigned long long)dr.bytes,
+                    dr.already_ready);
+            stall_outstanding=false; stall_probed=false;
+            have_rx=false;
         }
         /* Retain the WHOLE frame under temporary daemon backpressure.
          * Closed-daemon packets are discarded by serial_rx, as before.

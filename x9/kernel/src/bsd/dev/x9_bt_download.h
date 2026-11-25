@@ -22,6 +22,10 @@ struct x9_bt_download_result {
 };
 int x9_bt_download_mt6653(const struct x9_bt_download_ops *, const uint8_t *,
                           size_t, struct x9_bt_download_result *);
+/* connac3 FE01 dynamic request: reload one built-in section by bin index,
+ * forced to WMT framing like Android's DOWNLOAD_BY_INDEX while WORKING. */
+int x9_bt_download_dynamic(const struct x9_bt_download_ops *, unsigned,
+                           struct x9_bt_download_result *);
 int x9_bt_download_builtin(const struct x9_bt_download_ops *, struct x9_bt_download_result *);
 /* Board initializer calls this before pin/power/clock mutations. */
 int x9_bt_download_preflight_builtin(void);

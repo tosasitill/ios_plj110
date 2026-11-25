@@ -55,9 +55,10 @@ static int exchange(const struct x9_bt_download_ops *o, const uint8_t *cmd,
     *status=reply[7]; return 0;
 }
 static int download_one(const struct x9_bt_download_ops *o, const uint8_t *fw,
-                        const uint8_t *m, struct x9_bt_download_result *r)
+                        const uint8_t *m, struct x9_bt_download_result *r,
+                        int force_wmt)
 {
-    uint32_t size=le32(m+16),offset=le32(m+4),mode=le32(m+32)&255;
+    uint32_t size=le32(m+16),offset=le32(m+4),mode=force_wmt?0:(le32(m+32)&255);
     r->last_type=le32(m+28); r->last_index=(le32(m+32)>>16)&255; r->selected++;
     if(!size) return 0;
     uint8_t announce[10+SPEC_BYTES]={1,0x6f,0xfc,58,1,1,54,0,0,0};
@@ -126,7 +127,7 @@ int x9_bt_download_mt6653(const struct x9_bt_download_ops *o, const uint8_t *fw,
         for(uint32_t n=0;n<count;n++) {
             const uint8_t *m=fw+FW_MAP+MAP_BYTES*n;
             if(le32(m+28)!=types[t]) continue;
-            if((error=download_one(o,fw,m,r))) return error;
+            if((error=download_one(o,fw,m,r,0))) return error;
             break;
         }
         /* Android sends connfem after the type3 pass, even if it is absent. */
@@ -134,9 +135,27 @@ int x9_bt_download_mt6653(const struct x9_bt_download_ops *o, const uint8_t *fw,
     }
     for(uint32_t n=0;n<count;n++) {
         const uint8_t *m=fw+FW_MAP+MAP_BYTES*n;
-        if(((le32(m+32)>>16)&255)==3) return download_one(o,fw,m,r);
+        if(((le32(m+32)>>16)&255)==3) return download_one(o,fw,m,r,0);
     }
     return 0; /* Missing optional bin is Android's no-op, not radio-ready. */
+}
+int x9_bt_download_dynamic(const struct x9_bt_download_ops *o,unsigned bin,
+                           struct x9_bt_download_result *r)
+{
+    if(!o || !r || !o->exchange || !o->raw_write || !o->drain ||
+       !o->sleep_ms || !o->now_ms) return EINVAL;
+    *r=(struct x9_bt_download_result){0};
+    uint32_t count; int error=validate(x9_bt_payload,X9_BT_PAYLOAD_BYTES,&count);
+    if(error) return error;
+    /* Android's DOWNLOAD_BY_INDEX path matches the first section by bin index
+     * and forces PATCH_DOWNLOAD_USING_WMT while the chip is WORKING. The FE01
+     * event carries that index; ignore the section's DMA bit here. */
+    for(uint32_t n=0;n<count;n++) {
+        const uint8_t *m=x9_bt_payload+FW_MAP+MAP_BYTES*n;
+        if(((le32(m+32)>>16)&255)!=(bin&255)) continue;
+        return download_one(o,x9_bt_payload,m,r,1);
+    }
+    return ENOENT;
 }
 int x9_bt_download_builtin(const struct x9_bt_download_ops *ops,struct x9_bt_download_result *result)
 {
