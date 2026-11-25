@@ -160,13 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
-#### 2026-11-25 log 428 → feat/bt-default-on（蓝牙默认初始化 + x9_mdlog=0 降温候选；未上机）
+#### 2026-11-25 log 429 → feat/bt-default-on（蓝牙默认初始化 + x9_mdlog=0 降温候选；worker/固件/HCI 已上机）
 
 - **观察（log 428）**：batch r1 已获用户授权仅写入 `boot_b` 并重启；AppSync v6 注入 SpringBoard，jbctl `--repair-container`/`--ensure-local-storage` 均 exit 0；ALS 已派发真实 lux=232，proximity 已派发真实 near=1，并收到原生 ENABLE/DISABLE ACK errno=0。日志中无内核 panic/reset 标记；AegirPoster 仍反复崩溃。
 - **蓝牙根因（观察）**：r1 只有 `x9_bt=1`，`x9_bluetooth_start()` 在缺少 `x9_bt_init=1` 时提前返回；flow-control calibration 又要求显式 `x9_bt_fc`。因此只有被动注册，`X9BluetoothLaunch` 因 board session 不可用回退 stock bluetoothd，未进入 FE01 重载、能力上报或扫描。
 - **本分支改动**：`sweet_x9_board_defaults` 加入 `x9_bt=1`、`x9_bt_init=1`、`x9_bt_fc=1`、`x9_torch=3`；calibration 改用 `sweet_x9_arg("x9_bt_fc",0)`，`x9_bt_init=0` 仍可保持被动。`boot-device.json` 显式列出三项 Bluetooth token，打包解析器确认三项板级默认均为 1。boot line 加 `x9_mdlog=0` 后为 592/约 607 B。
-- **构建（未上机）**：`python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --boot-arg x9_mdlog=0 --name x9-bt-default-mdlog0-20261125` exit 0，build.log `: error:` 计数 0；`boot.img` 15,343,616 B，SHA-256 `67a11c40aeeb3ec6f53d9aaab9f759fbc5983bb01e279f068fd54ad8f2c7d827`。该镜像仍是 host-verified candidate，不是硬件启动结果。
-- **当前设备/下一步**：用户报告持续发热并授权回到 fastboot；helper 实际观察到 fastboot，设备保持 fastboot 冷却。新候选未刷入。下一步需用户确认后仅写 `boot_b`、单 logger 验证 worker/FE01/能力/扫描/UI，并比较 `x9_mdlog=0` 的热与日志变化；ALS/prox 用户态效果、near→far、自动亮度以及 Mac 侧 IPA 安装仍未闭环。
+- **构建**：`python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --boot-arg x9_mdlog=0 --name x9-bt-default-mdlog0-20261125` exit 0，build.log `: error:` 计数 0；`boot.img` 15,343,616 B，SHA-256 `67a11c40aeeb3ec6f53d9aaab9f759fbc5983bb01e279f068fd54ad8f2c7d827`。构建时 `boot.json` 的 scope 仍是 `host-verified candidate, not a hardware boot result`；本轮上机结果见下。
+- **上机观察（log 429）**：用户授权后仅写 `boot_b` 并重启，候选 SHA-256 `67a11c40…d827` 与构建记录一致。单一 logger 以 4096 B batch 持续写入 `/Users/tosasitill/429.txt`。`X9 BT` 完成 MT6653 firmware session，X9BluetoothLaunch 打开 board session，bluetoothd 通过 H4/vendor bridge 打开 `cu.bluetooth`（errno=0），FE01 dynamic FW section 2 加载 errno=0；HCI 能力从全 0 变为 ext scan=1/adv=1/controller sets=16/native slots=5/periodic=1/PAST=1/coded=1/2M=1。WMT vendor event 已被消费。这证明 worker、固件、桥接与控制器初始化通过，**不等于** Settings UI 可用、扫描到设备或配对成功。
+- **mdlog/发热（观察与未证）**：429 的完整 boot args 含 `x9_mdlog=0`，未出现 mdlog 活动标记；候选是否降低温度仍需同场景对照，当前不能仅据缺少日志下结论。
+- **当前设备/下一步**：设备已进入普通 iOS，logger 429 继续采集。下一步从同一份日志核对蓝牙 UI/扫描/配对与 `x9_mdlog=0` 热表现；ALS/prox 用户态效果、near→far、自动亮度以及 Mac 侧 IPA 安装仍未闭环。
 
 #### 2026-11-24 log 421（diag8–10）→ fix/camera-preview-diagnostics（双流设备模型是 retire/复位的触发源；仍未出帧）
 
