@@ -325,6 +325,7 @@ static int frame_length(const uint8_t *p,uint32_t n)
         return n<5?0:5+(unsigned)p[2]-2;
     case 4: return n<3?0:3+p[2];
     case 5: return n<5?0:5+p[3]+((unsigned)(p[4]&0x3f)<<8);
+    case 0x40: case 0x41: return n<5?0:5+p[3]+((unsigned)p[4]<<8); /* H4_RECV_RHW_* */
     default: return -EPROTO;
     }
 }
@@ -606,6 +607,64 @@ SYSCTL_PROC(_kern,OID_AUTO,x9_bt_power,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY|CT
  * DEV0_HOST_AWAKE, 0xFF when DEV0_BT_AWAKE=0, own-clear WMT 6f/03 and its
  * E4 ACK. Frames collected meanwhile stay in pending[] for the daemon. The
  * stalled command is retransmitted once only if the firmware answered. */
+/* Android mt6653_rhw_dumpReg (mt6653_bt_dbg_sop.h v20250417): RHW packets
+ * 0x40 write / 0x41 read, {type,0,0,8,0,addr32,val32}; reply echoes the
+ * first 9 bytes, value at [9]. Select via 0x20023a0c, read 0x20023a10. */
+static const uint32_t rhw_sel_j[]={0xc0043400,0xc0043000};
+static const uint32_t rhw_sel_a[]={0xc0040200,0xc0040201,0xc0040202,0xc0040203,0xc0040204,0xc0040205,0xc0040206,0xc0040207,0xc0040208,0xc0040209,0xc004020a,0xc004020b,0xc004020c,0xc004020d,0xc004020e,0xc004020f,0xc0040210,0xc0040211,0xc0040212,0xc0040213,0xc0040214,0xc0040215,0xc0040216,0xc0040217,0xc0040218,0xc0040219,0xc004021a,0xc004021b,0xc004021c,0xc004021d,0xc004021e,0xc004021f,0xc0040220,0xc0040221,0xc0040222,0xc0040223,0xc0040224,0xc0040225,0xc0040400,0xc0040401,0xc0040402,0xc0040403};
+static const uint32_t rhw_sel_d[]={0xc0040e00,0xc0040e01,0xc0040e02,0xc0040e03,0xc0040e04,0xc0040e05,0xc0040e06,0xc0040e07,0xc0040e08,0xc0040e09,0xc0040e0a,0xc0040e0b,0xc0040e0c,0xc0040e0d,0xc0040e0e,0xc0040e0f,0xc0040e10,0xc0040e11,0xc0040e12,0xc0040e13,0xc0040e14,0xc0040e15,0xc0040e16,0xc0040e17,0xc0040e18,0xc0040e19,0xc0040e1a,0xc0040e1b,0xc0040e1c,0xc0040e1d,0xc0040e1e,0xc0040e1f,0xc0040e20,0xc0040e21,0xc0040e22,0xc0040e23,0xc0040e24,0xc0040e25,0xc0040e26,0xc0040e27,0xc0040e28,0xc0040e29,0xc0040e2a,0xc0040e2b,0xc0040e2c,0xc0040e2d,0xc0040e2e,0xc0040e2f,0xc0040e30,0xc0040e31,0xc0040e32,0xc0040e33,0xc0040e34,0xc0040e35,0xc0040e36,0xc0040e37,0xc0040e38,0xc0040e39,0xc0040e3a,0xc0040e3b,0xc0040e3c,0xc0040e3d,0xc0040e3e,0xc0040e3f,0xc0040e40,0xc0040e41,0xc0040e42,0xc0040e43,0xc0040e44,0xc0040e45,0xc0040e46,0xc0040e47,0xc0040e48,0xc0040e49,0xc0040e4a,0xc0040e4b,0xc0040e4c,0xc0040e4d,0xc0040e4e,0xc0040e4f,0xc0040e50,0xc0040e51,0xc0040e52,0xc0040e53,0xc0040e54};
+static const uint32_t rhw_sel_i[]={0xc0042600,0xc0042601,0xc0042602,0xc0042603,0xc0042604,0xc0042605,0xc0042606,0xc0042607,0xc0042608,0xc0042609,0xc004260a,0xc0042800,0xc0042a00,0xc0042c00,0xc0042e00,0xc0042e01,0xc0042e02,0xc0042e03,0xc0042e04,0xc0042e05,0xc0042e06,0xc0042e07,0xc0042e08,0xc0042e09,0xc0042e0a,0xc0042e0b,0xc0042e0c,0xc0042e0d,0xc0042e10,0xc0042e11,0xc0042e12,0xc0042e13,0xc0042e14,0xc0042e15,0xc0042e16,0xc0042e17,0xc0042e18,0xc0042e19,0xc0042e1a,0xc0042e1b,0xc0042e1c,0xc0042e1d,0xc0043000,0xc0043001,0xc0043002,0xc0043003,0xc0043004,0xc0043005,0xc0043006,0xc0043007,0xc0043008,0xc0043009,0xc004300a,0xc004300b,0xc004300c,0xc004300d,0xc004300e,0xc004300f,0xc004301e};
+static const uint32_t rhw_sel_g[]={0xc0041600,0xc0041601,0xc0041602,0xc0041603};
+static unsigned rhw_fail;
+static int rhw_op(uint8_t type,uint32_t addr,uint32_t val,uint32_t *out)
+{
+    uint8_t tx[13]={type,0,0,8,0,(uint8_t)addr,(uint8_t)(addr>>8),(uint8_t)(addr>>16),(uint8_t)(addr>>24),
+        (uint8_t)val,(uint8_t)(val>>8),(uint8_t)(val>>16),(uint8_t)(val>>24)};
+    if(type==0x41) tx[9]=tx[10]=tx[11]=tx[12]=0;
+    size_t sent=0; int error=raw_write(NULL,tx,sizeof(tx),&sent);
+    if(error) return error;
+    uint64_t end=now_ms(NULL)+100;
+    while(now_ms(NULL)<end) {
+        int e=next_frame(&incoming);
+        if(e==EAGAIN) { sleep_ms(NULL,1); continue; }
+        if(e) return e;
+        if(incoming.length==13 && !memcmp(incoming.data,tx,9)) {
+            if(out) *out=incoming.data[9]|((uint32_t)incoming.data[10]<<8)|
+                ((uint32_t)incoming.data[11]<<16)|((uint32_t)incoming.data[12]<<24);
+            return 0;
+        }
+        hci_trace("RX?",incoming.data,incoming.length);
+        if(incoming.data[0]!=0x40 && incoming.data[0]!=0x41 && pending_count<8) pending[pending_count++]=incoming;
+    }
+    return ETIMEDOUT;
+}
+static void rhw_section(const char *tag,const uint32_t *s,unsigned n)
+{
+    char line[160]; unsigned off=0,row=0;
+    for(unsigned i=0;i<n;i++) {
+        uint32_t v=0xdeaddead;
+        if(rhw_fail<=4) {
+            int e=rhw_op(0x40,0x20023a0c,s[i],NULL);
+            if(!e) e=rhw_op(0x41,0x20023a10,0,&v);
+            if(e) { rhw_fail++; printf("X9 BT RHW %s sel=%08x errno=%d\n",tag,s[i],e); v=0xdeaddead; }
+        }
+        if(!off) off=(unsigned)snprintf(line,sizeof(line),"X9 BT RHW %s[%u]",tag,row++);
+        off+=(unsigned)snprintf(line+off,sizeof(line)-off," %08x",v);
+        if((i&7)==7 || i+1==n) { printf("%s\n",line); off=0; }
+    }
+}
+static void rhw_dump(void)
+{
+    rhw_fail=0;
+    rhw_section("J0",rhw_sel_j,sizeof(rhw_sel_j)/4);
+    rhw_section("D0",rhw_sel_d,sizeof(rhw_sel_d)/4);
+    rhw_section("J1",rhw_sel_j,sizeof(rhw_sel_j)/4);
+    rhw_section("A",rhw_sel_a,sizeof(rhw_sel_a)/4);
+    rhw_section("G",rhw_sel_g,sizeof(rhw_sel_g)/4);
+    rhw_section("I",rhw_sel_i,sizeof(rhw_sel_i)/4);
+    rhw_section("J2",rhw_sel_j,sizeof(rhw_sel_j)/4);
+    rhw_section("D1",rhw_sel_d,sizeof(rhw_sel_d)/4);
+}
 static void stall_collect(const char *what,const uint8_t *tx,size_t len,uint32_t ms)
 {
     size_t sent=0; int error=raw_write(NULL,tx,len,&sent);
@@ -659,6 +718,7 @@ static void stall_probe(void)
     stall_collect("FC3A",sched,sizeof(sched),300);
     static const uint8_t version[]={1,0x01,0x10,0};
     stall_collect("1001",version,sizeof(version),300);
+    if(stall_probes==1) rhw_dump();
     bool answered=false;
     for(unsigned i=0;i<pending_count;i++)
         if(pending[i].length>=6 && pending[i].data[0]==4 && pending[i].data[1]==0x0e &&
@@ -778,7 +838,17 @@ static void worker(void *unused,wait_result_t result)
         if(error) break;
         if(n && native_tx[0]==1 && n>=3) {
             uint16_t op=native_tx[1]|((uint16_t)native_tx[2]<<8);
-            if(op==0x0c03) le_host_ready=false;
+            if(op==0x0c03) {
+                le_host_ready=false;
+                static bool rhw_baseline;
+                if(!rhw_baseline && !have_rx && !pending_count) {
+                    /* Healthy-state reference before the daemon's first Reset. */
+                    rhw_baseline=true; rhw_fail=0;
+                    rhw_section("BJ",rhw_sel_j,sizeof(rhw_sel_j)/4);
+                    rhw_section("BA",rhw_sel_a,sizeof(rhw_sel_a)/4);
+                    rhw_section("BJ1",rhw_sel_j,sizeof(rhw_sel_j)/4);
+                }
+            }
             else if(op==0x0c6d) le_host_ready=true;
             else if(op==0x203b && !le_host_ready) {
                 /* hci_exchange reuses incoming: keep an undelivered frame. */
