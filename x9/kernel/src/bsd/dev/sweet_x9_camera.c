@@ -211,6 +211,11 @@ static void cam_progress(const char *step)
     if(!strncmp(step,"configure:",10) || !strncmp(step,"start:",6) || !strncmp(step,"prepare:smmu-start",18))cam_slow_summary(step);
     cam_progress_t0=mach_absolute_time();cam_progress_step=step;
     printf("X9 CAMERA PROGRESS: %s\n",step);
+    /* diag34: the first-open freeze (diag32/32b/33) lands in the ~1 KiB the
+     * USB console loses after prepare:controller. Flush 20 ms after each
+     * prepare/SMMU bring-up mark, as cam_drain_mark does on the stop path,
+     * so the last visible mark is the step that hung. Logging only. */
+    if(!strncmp(step,"prepare:",8) || !strncmp(step,"smmu:",5) || !strncmp(step,"ft:",3))delay(20000);
 }
 /* Stop-path step mark: the USB console loses ~1 KiB at a SoC reset, so wait
  * 20 ms after each mark for the host to drain it; the last visible mark is

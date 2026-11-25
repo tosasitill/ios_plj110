@@ -58,6 +58,11 @@ struct x9_camera_smmu {
      * stays exported and is never freed). The controller keeps only the
      * first base written per boot, as Android reuses its probe-time tables. */
     bool native_queues_adopted;
+    /* diag34: Android lifecycle. arm_smmu_device_reset runs once per boot;
+     * the bank then stays CR0=CMDQEN|EVTQEN|SMMUEN with the same STRTAB/CMDQ/
+     * EVTQ bases. A session only switches STE80 (S1 <-> abort) through the
+     * live CMDQ. Set on the cold first start and on every live reopen. */
+    bool native_live;
     struct x9_camera_smmu *native_previous;
     uint32_t native_ste_phase,native_retire_error,native_prior_word[17];
     uint64_t native_retire_epoch,native_prior_base[3];
@@ -255,6 +260,12 @@ static int cam_smmu_storage(struct x9_camera_smmu *m)
                (!m->native && sid==CAM_SMMU_DISPLAY)) {
                 if(w==0)expected=1ull|(4ull<<1);
                 if(w==1 && (m->idr1&(1u<<27)))expected=1ull<<44;
+            } else if(sid==CAM_SMMU_SID && m->native && m->native_ste_phase && m->native_live) {
+                /* Live bank: phase1 V=0 (word1 still S1), phase2 words1..7=0,
+                 * phase3 V=1 Config=abort. Never bypass a translated master
+                 * while SMMUEN stays on. */
+                if(w==0)expected=m->native_ste_phase==3?1ull:0;
+                if(w==1 && m->native_ste_phase==1)expected=cam_smmu_s1_ste_word1(m);
             } else if(sid==CAM_SMMU_SID && m->native && m->native_ste_phase) {
                 if(w==0)expected=m->native_ste_phase==3?
                     (m->native_bypass?1ull|(4ull<<1):1ull):0;
@@ -279,7 +290,8 @@ static int cam_smmu_storage(struct x9_camera_smmu *m)
 }
 
 static int cam_smmu_prepare_replacement(uint32_t idr0,uint32_t idr1,uint32_t idr5,
-    uint64_t iova,uint32_t bytes,struct x9_camera_smmu *previous,struct x9_camera_smmu **out)
+    uint64_t iova,uint32_t bytes,struct x9_camera_smmu *previous,bool live,
+    struct x9_camera_smmu **out)
 {
     struct x9_camera_smmu *m;
     unsigned cmd=(idr1>>21)&31u,evt=(idr1>>16)&31u;
@@ -287,7 +299,7 @@ static int cam_smmu_prepare_replacement(uint32_t idr0,uint32_t idr1,uint32_t idr
     if(!out || *out)return CAM_FAIL(EINVAL);
     if(!cam_smmu_capable(idr0,idr1,idr5))return CAM_FAIL(ENOTSUP);
     lck_mtx_lock(&camera_smmu_lock);
-    if(cam_smmu_namespace!=previous || (previous &&
+    if(cam_smmu_namespace!=previous || (live && (!previous || !previous->native_live)) || (previous &&
        (!previous->native || !previous->native_restored || !previous->native_epoch_recycled ||
         previous->native_started || previous->pending || previous->native_retire_error))) {
         lck_mtx_unlock(&camera_smmu_lock);return CAM_FAIL(EBUSY);
@@ -303,13 +315,25 @@ static int cam_smmu_prepare_replacement(uint32_t idr0,uint32_t idr1,uint32_t idr
     if(!e && previous && previous->exported && previous->ste.va && previous->cmd.va && previous->evt.va &&
        previous->ste_bytes==CAM_S1_PAGE && previous->cmd_shift==m->cmd_shift &&
        previous->evt_shift==m->evt_shift) {
-        /* Controller is CR0=ACK=0 (retired); nothing fetches these pages. */
         m->ste=previous->ste;m->cmd=previous->cmd;m->evt=previous->evt;
         m->native_queues_adopted=true;
-        bzero((void *)m->ste.va,CAM_S1_PAGE);bzero((void *)m->cmd.va,CAM_S1_PAGE);
-        bzero((void *)m->evt.va,CAM_S1_PAGE);
-        printf("X9 CAMERA SMMU TABLES REUSED: strtab=%llx cmdq=%llx evtq=%llx (first-write-only bases; Android probe-time tables)\n",
-            m->ste.pa,m->cmd.pa,m->evt.pa);
+        if(live) {
+            /* The enabled bank is fetching this exact table and these queues.
+             * Keep every STE (bypass for others, STE80 abort) and both empty
+             * rings untouched; export only rewrites STE80, then CFGI. */
+            m->native=true;m->native_bypass=previous->native_bypass;m->native_live=true;
+            m->native_ste_phase=3;m->native_policy=previous->native_policy; /* storage() needs it */
+        } else {
+            /* Controller is CR0=ACK=0 (retired); nothing fetches these pages. */
+            bzero((void *)m->ste.va,CAM_S1_PAGE);bzero((void *)m->cmd.va,CAM_S1_PAGE);
+            bzero((void *)m->evt.va,CAM_S1_PAGE);
+        }
+        printf("X9 CAMERA SMMU TABLES REUSED: strtab=%llx cmdq=%llx evtq=%llx live=%u (Android probe-time tables)\n",
+            m->ste.pa,m->cmd.pa,m->evt.pa,live);
+    } else if(live) {
+        printf("X9 CAMERA SMMU TABLES NOT REUSED (live bank needs them): exported=%u ste_bytes=%u shifts=%u/%u\n",
+            previous->exported,previous->ste_bytes,previous->cmd_shift,previous->evt_shift);
+        if(!e)e=CAM_FAIL(EBUSY);
     } else {
         if(previous)printf("X9 CAMERA SMMU TABLES NOT REUSED: exported=%u ste_bytes=%u shifts=%u/%u\n",
             previous->exported,previous->ste_bytes,previous->cmd_shift,previous->evt_shift);
@@ -317,11 +341,13 @@ static int cam_smmu_prepare_replacement(uint32_t idr0,uint32_t idr1,uint32_t idr
         if(!e)e=cam_s1_alloc_page(&m->cmd,cam_s1_oas[idr5&7u]);
         if(!e)e=cam_s1_alloc_page(&m->evt,cam_s1_oas[idr5&7u]);
     }
-    if(!e) {
+    if(!e && !live) {
         uint64_t *ste=(uint64_t *)m->ste.va;
         for(unsigned sid=0;sid<CAM_SMMU_STES;sid++)ste[sid*CAM_SMMU_STE_WORDS]=1;
         ste[CAM_SMMU_DISPLAY*CAM_SMMU_STE_WORDS]=1ull|(4ull<<1);
         if(idr1&(1u<<27))ste[CAM_SMMU_DISPLAY*CAM_SMMU_STE_WORDS+1]=1ull<<44;
+    }
+    if(!e) {
         m->mmio=ml_io_map(0x30800000,0x20000); /* mapping, not an MMIO read */
         if(!m->mmio)e=CAM_FAIL(ENOMEM);
     }
@@ -335,7 +361,7 @@ static int cam_smmu_prepare_replacement(uint32_t idr0,uint32_t idr1,uint32_t idr
  * fresh-MM/cold-bank reopen path supplies an independently recycled prior. */
 int x9_camera_smmu_prepare(uint32_t idr0,uint32_t idr1,uint32_t idr5,
     uint64_t iova,uint32_t bytes,struct x9_camera_smmu **out)
-{ return cam_smmu_prepare_replacement(idr0,idr1,idr5,iova,bytes,NULL,out); }
+{ return cam_smmu_prepare_replacement(idr0,idr1,idr5,iova,bytes,NULL,false,out); }
 
 int x9_camera_smmu_export(struct x9_camera_smmu *m,struct x9_camera_smmu_export *out)
 {
@@ -349,6 +375,10 @@ int x9_camera_smmu_export(struct x9_camera_smmu *m,struct x9_camera_smmu_export 
         uint64_t *ste=(uint64_t *)m->ste.va;
         /* Pin queues/STE before Stage-1 export, including its failure. */
         m->exported=true;
+        /* Live bank: STE80 was proven abort (phase3) above. Word1 is written
+         * while Config=abort ignores it, then word0 switches to S1; the
+         * caller issues CFGI_STE/CD + TLBI + SYNC (arm_smmu_write_ste order). */
+        if(m->native_live)m->native_ste_phase=0;
         e=x9_camera_s1_export(m->map,CAM_SMMU_ASID,&m->view.map);
         if(!e) {
             ste[CAM_SMMU_SID*CAM_SMMU_STE_WORDS+1]=cam_smmu_s1_ste_word1(m);
