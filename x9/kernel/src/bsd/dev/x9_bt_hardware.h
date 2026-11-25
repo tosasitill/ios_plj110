@@ -17,6 +17,9 @@ int x9_bt_hardware_sleep(void);
 int x9_bt_hardware_wake(void);
 int x9_bt_hardware_awake(bool *awake, bool *need_ff);
 int x9_bt_hardware_ownership_finish(void);
+void x9_bt_hardware_snapshot(const char *why);
+int x9_bt_hardware_host_awake_set(bool *bt_awake);
+int x9_bt_hardware_bt_awake(void);
 /* Failure cleanup is NOT controller function-off. Live FW returns EBUSY
  * and retains its supply/resources; unproven SSPM resources return their
  * readiness error without touching gated UART/pins/PMIC. Caller logs the

@@ -436,6 +436,28 @@ int x9_bt_hardware_ownership_finish(void)
     ownership=OWN_DRIVER;
     return 0;
 }
+/* Native-session stall diagnostics (log bt5: controller silent after
+ * 0x203b). Read-only snapshot of the hub DEV0/STA0/IRQ state. */
+void x9_bt_hardware_snapshot(const char *why)
+{
+    if (!hub) { printf("X9 BT STALL %s: hub unmapped\n",why); return; }
+    uint32_t dev=rd(hub,DEV0), sta=rd(hub,STA0);
+    printf("X9 BT STALL %s: dev0=%x sta0=%x irq_sta=%x con2=%x own=%u host_awake=%u cmm_bt_awake=%u bt_awake=%u sent=%u\n",
+           why,dev,sta,rd(hub,IRQ_STA),rd(hub,CON2),ownership,(dev>>11)&1,(sta>>3)&1,(sta>>6)&1,(sta>>7)&1);
+}
+/* btmtk_uart_driver_own steps 1-2 inside an existing driver-owned session:
+ * (re)assert DEV0_HOST_AWAKE and report DEV0_BT_AWAKE (STA0 bit6). */
+int x9_bt_hardware_host_awake_set(bool *bt_awake)
+{
+    if (!bt_awake) return EINVAL;
+    *bt_awake=false;
+    if (ownership!=OWN_DRIVER) return ENXIO;
+    int error=host_awake(true);
+    *bt_awake=(rd(hub,STA0)&(1u<<6))!=0;
+    return error;
+}
+int x9_bt_hardware_bt_awake(void)
+{ return hub?(int)((rd(hub,STA0)>>6)&1):-1; }
 int x9_bt_hardware_stop(void)
 {
     /* Worker disables its UART IRQ/TX first. Never clear MD/ADSP requests

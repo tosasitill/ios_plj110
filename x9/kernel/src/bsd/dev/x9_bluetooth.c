@@ -85,6 +85,13 @@ static void hci_trace(const char *dir,const uint8_t *p,uint32_t n)
     printf("X9 HCI %s len=%u %s\n",dir,n,hex);
 }
 static uint8_t native_tx[BT_WIRE_FRAME_MAX];
+/* Stall probe state (log bt5): last native HCI command and whether any
+ * controller frame has arrived since it left the UART. */
+static uint8_t stall_cmd[264];
+static uint32_t stall_cmd_len;
+static uint64_t stall_cmd_ms;
+static bool stall_outstanding, stall_probed;
+static unsigned stall_probes;
 static unsigned pending_count;
 static uint64_t frame_start;
 static uint32_t rd(volatile uint32_t *p,unsigned off) { return p[off/4]; }
@@ -595,6 +602,47 @@ SYSCTL_PROC(_kern,OID_AUTO,x9_bt_note,CTLTYPE_STRING|CTLFLAG_WR|CTLFLAG_ANYBODY|
     NULL,0,note_sysctl,"A","X9 Bluetooth userland bridge messages (stderr is /dev/null)");
 SYSCTL_PROC(_kern,OID_AUTO,x9_bt_power,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY|CTLFLAG_LOCKED,
     NULL,0,power_sysctl,"I","Explicit closed-transport ownership: 0 awake, 1 asleep, 2 unavailable/transition");
+/* Android btmtk_uart_driver_own, run once per stalled command: snapshot,
+ * DEV0_HOST_AWAKE, 0xFF when DEV0_BT_AWAKE=0, own-clear WMT 6f/03 and its
+ * E4 ACK. Frames collected meanwhile stay in pending[] for the daemon. The
+ * stalled command is retransmitted once only if the firmware answered. */
+static void stall_probe(void)
+{
+    stall_probes++;
+    boolean_t old=rx_lock(); uint32_t rl=rx.len; int re=rx.error; rx_unlock(old);
+    printf("X9 BT STALL #%u: cmd %02x%02x len=%u %llums without RX; uart lsr=%x ier=%x rxring=%u rxerr=%d pending=%u asm=%u\n",
+        stall_probes,stall_cmd_len>2?stall_cmd[2]:0,stall_cmd_len>1?stall_cmd[1]:0,stall_cmd_len,
+        (unsigned long long)(now_ms(NULL)-stall_cmd_ms),rd(uart,0x14),rd(uart,0x04),rl,re,pending_count,assembling.length);
+    x9_bt_hardware_snapshot("before");
+    bool awake=false; int error=x9_bt_hardware_host_awake_set(&awake);
+    printf("X9 BT STALL host_awake errno=%d bt_awake=%d\n",error,awake);
+    if(!awake) {
+        const uint8_t ff=0xff; size_t sent=0;
+        error=raw_write(NULL,&ff,1,&sent);
+        if(!error) error=drain(NULL,100);
+        for(unsigned i=0;i<50 && x9_bt_hardware_bt_awake()!=1;i++) sleep_ms(NULL,1);
+        printf("X9 BT STALL sent 0xFF errno=%d bt_awake=%d\n",error,x9_bt_hardware_bt_awake());
+    }
+    static const uint8_t own_clear[]={1,0x6f,0xfc,6,1,3,2,0,3,1};
+    uint8_t reply[64]; size_t n=sizeof(reply); unsigned before=pending_count;
+    error=exchange(NULL,own_clear,sizeof(own_clear),reply,&n,500);
+    char hex[16*3+1]; hex[0]=0;
+    for(size_t i=0;!error && i<n && i<16;i++) snprintf(hex+3*i,4,"%02x ",reply[i]);
+    printf("X9 BT STALL own-clear errno=%d reply=%s queued=%u\n",error,hex,pending_count-before);
+    for(unsigned i=before;i<pending_count;i++) hci_trace("RX*",pending[i].data,pending[i].length);
+    x9_bt_hardware_snapshot("after");
+    bool answered=false;
+    for(unsigned i=0;i<pending_count;i++)
+        if(pending[i].length>=6 && pending[i].data[0]==4 && pending[i].data[1]==0x0e &&
+           stall_cmd_len>=3 && pending[i].data[4]==stall_cmd[1] && pending[i].data[5]==stall_cmd[2]) answered=true;
+    if(!error && !answered && stall_cmd_len) {
+        size_t sent=0; int e=raw_write(NULL,stall_cmd,stall_cmd_len,&sent);
+        if(!e) e=drain(NULL,1000);
+        hci_trace("RETX",stall_cmd,stall_cmd_len);
+        printf("X9 BT STALL retransmit errno=%d\n",e);
+        stall_cmd_ms=now_ms(NULL);
+    }
+}
 static void worker(void *unused,wait_result_t result)
 {
     (void)unused; (void)result;
@@ -665,7 +713,7 @@ static void worker(void *unused,wait_result_t result)
                 error=next_frame(&incoming);
                 if(error && error!=EAGAIN) break;
                 have_rx=error==0;
-                if(have_rx) hci_trace("RX",incoming.data,incoming.length);
+                if(have_rx) { hci_trace("RX",incoming.data,incoming.length); stall_outstanding=false; }
             }
         }
         /* Retain the WHOLE frame under temporary daemon backpressure.
@@ -688,8 +736,14 @@ static void worker(void *unused,wait_result_t result)
              * or acknowledge a partial write / incomplete UART drain. */
             x9_bt_serial_tx_finish(error?0:n,generation,error);
             if(error) break;
+            if(native_tx[0]==1 && n<=sizeof(stall_cmd)) {
+                memcpy(stall_cmd,native_tx,n); stall_cmd_len=n;
+                stall_cmd_ms=now_ms(NULL); stall_outstanding=true; stall_probed=false;
+            }
             lck_mtx_lock(&bt_lock); bs.tx_frames++; lck_mtx_unlock(&bt_lock);
         }
+        if(stall_outstanding && !stall_probed && !have_rx && !pending_count &&
+           now_ms(NULL)-stall_cmd_ms>300) { stall_probed=true; stall_probe(); }
         sleep_ms(NULL,1);
     }
     printf("X9 BT: native worker loop exit errno=%d\n",error);
