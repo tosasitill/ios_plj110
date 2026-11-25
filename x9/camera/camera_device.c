@@ -515,7 +515,7 @@ static const struct camera {
 } cameras[3] = {
 	{ 1, "Back Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:0", false, 4.0, 1.8, 1.22, 65.0,
 	  { { 4032, 3024, 30 }, { 4096, 3072, 30 } } },        /* "Photo", "X9-Video-30" */
-	{ 2, "Front Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:1", false, 2.87, 2.2, 1.0, 70.0,
+	{ 2, "Front Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:1", true, 2.87, 2.2, 1.0, 70.0,
 	  { { 3088, 2320, 30 }, { 3264, 2448, 30 } } },        /* same real preview mode, cropped output */
     /* Exact D22 standalone telephoto ID:2/port, not virtual dual ID:3.
      * Optical fields remain a D22-compatible descriptor, not X9 calibration. */

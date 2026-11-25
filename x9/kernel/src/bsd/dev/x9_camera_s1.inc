@@ -42,6 +42,7 @@ struct x9_camera_s1 {
     uint64_t raw_pa[CAM_S1_MAX_PAGES];
     int last_errno;
     bool published; /* may be visible to HW, NOT attached/ready */
+    bool verified;  /* diag44: full check passed after publish; tables/pages immutable since */
     /* CPU pin is independent of userspace staging frame_readers. Only the
      * CAMSV qualified-completion path changes this cache ownership record.
      * One immutable slot/context per backing; no cross-slot alias/rebind. */
@@ -232,7 +233,18 @@ int x9_camera_s1_validate(struct x9_camera_s1 *m)
     int e;
     lck_mtx_lock(&camera_s1_lock);
     if(cam_progress_step)cam_progress("s1:check-private");
-    e=cam_s1_check_private(m);
+    /* diag44: a published map is permanent and immutable (wired pages, our
+     * own PTEs; free/discard panic or clear magic). The full walk is O(pages^2)
+     * plus ~1200 pmap lookups and ran on every lease check (~40 per frame),
+     * so after one full pass only re-read the CD words that attach it. */
+    if(m && m->magic==CAM_S1_MAGIC && m->published && m->verified && !m->last_errno) {
+        const volatile uint64_t *cd=(const volatile uint64_t *)m->cd.va;
+        e=(cd[0]==cam_s1_cd_word0(m) && cd[1]==m->root.pa && cd[3]==CAM_S1_MAIR)?0:CAM_FAIL(ESTALE);
+        if(e)m->verified=false;
+    } else {
+        e=cam_s1_check_private(m);
+        if(!e && m->published)m->verified=true;
+    }
     if(e && m && m->magic==CAM_S1_MAGIC && !m->last_errno)m->last_errno=e;
     lck_mtx_unlock(&camera_s1_lock);return e;
 }

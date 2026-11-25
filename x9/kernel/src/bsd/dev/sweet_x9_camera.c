@@ -210,7 +210,10 @@ static void cam_progress(const char *step)
     x9_crumb_cam_step(step);
     if(!strncmp(step,"configure:",10) || !strncmp(step,"start:",6) || !strncmp(step,"prepare:smmu-start",18))cam_slow_summary(step);
     cam_progress_t0=mach_absolute_time();cam_progress_step=step;
-    printf("X9 CAMERA PROGRESS: %s\n",step);
+    /* diag44: the per-check storage marks (st:, s1:) ran ~160x/s while
+     * streaming (4 console lines per lease check); keep them as crumbs and
+     * stall-watchdog steps only. */
+    if(strncmp(step,"st:",3) && strncmp(step,"s1:",3))printf("X9 CAMERA PROGRESS: %s\n",step);
     /* diag34: the first-open freeze (diag32/32b/33) lands in the ~1 KiB the
      * USB console loses after prepare:controller. Flush 20 ms after each
      * prepare/SMMU bring-up mark, as cam_drain_mark does on the stop path,

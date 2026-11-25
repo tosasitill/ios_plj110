@@ -279,15 +279,29 @@ isp_ae(struct isp *isp, const struct hakios_camera_frame *f, const struct isp_st
 		return false;
 	}
 	want = now * pow(ratio, 0.7);
+	/*
+	 * Anti-banding: mains lighting flickers at 100 Hz (50 Hz mains), and a
+	 * rolling shutter exposed for anything but a whole number of 10 ms
+	 * shows it as dark and light bands. From one band up, keep the exposure
+	 * a whole number of bands and make up the rest with gain.
+	 */
+	uint32_t band = (uint32_t)(1e7 / f->line_ns + 0.5);
 	if (want <= fast) {
 		lines = want < 16 ? 16 : (uint32_t)want;
-		gain = f->gain_unity;
+		if (band && want >= band) {
+			lines = (uint32_t)(want / band) * band;
+		}
+		gain = (uint32_t)(want / lines * f->gain_unity);
+		gain = gain < f->gain_unity ? f->gain_unity : gain;
 	} else if (want <= (double)fast * 16) {
-		lines = fast;
-		gain = (uint32_t)(want / fast * f->gain_unity);
+		lines = band && fast >= band ? fast / band * band : fast;
+		gain = (uint32_t)(want / lines * f->gain_unity);
 	} else {
 		lines = (uint32_t)(want / 16);
 		lines = lines > longest - f->margin ? longest - f->margin : lines < fast ? fast : lines;
+		if (band && lines >= band) {
+			lines = lines / band * band;
+		}
 		frame_lines = lines + f->margin;
 		double g = want / lines;
 

@@ -645,11 +645,22 @@ static int cam_smmu_live(struct x9_camera_smmu *m)
 int x9_camera_smmu_check(struct x9_camera_smmu *m)
 {
     int e;
+    static uint64_t chk_n,chk_ns,chk_max,chk_t0;
+    uint64_t t0=mach_absolute_time(),ns;
     lck_mtx_lock(&camera_smmu_lock);
     e=cam_smmu_identity(m);
     if(!e)e=cam_smmu_storage(m);
     if(!e)e=m->shared_attempted?cam_smmu_shared_check_locked(m):cam_smmu_live(m);
     if(e && m==cam_smmu_namespace && m && m->exported)cam_smmu_latch(m,e);
+    absolutetime_to_nanoseconds(mach_absolute_time()-t0,&ns);
+    if(!chk_t0)chk_t0=t0;
+    chk_n++;chk_ns+=ns;if(ns>chk_max)chk_max=ns;
+    if(!(chk_n&511)) {
+        uint64_t span;absolutetime_to_nanoseconds(mach_absolute_time()-chk_t0,&span);
+        printf("X9 CAMERA SMMU CHECK STATS: n=512 avg_us=%llu max_us=%llu per_s=%llu busy_permille=%llu\n",
+            chk_ns/512/1000,chk_max/1000,span?512ull*1000000000ull/span:0,span?chk_ns*1000/span:0);
+        chk_ns=chk_max=0;chk_t0=mach_absolute_time();
+    }
     lck_mtx_unlock(&camera_smmu_lock);return e;
 }
 
