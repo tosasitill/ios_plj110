@@ -520,6 +520,13 @@ static void x9c_init_poll(uint8_t *frame){
     q.token=0;
     if(!q.held&&good){x9c_voice_rat[sim].networkType=networkType;x9c_voice_rat[sim].valid=true;q.done=true;
      printf("X9 CALL: SIM%u voice RAT networkType %u cached (042f)\n",sim+1,networkType);}
+    else if(!q.held){
+     /* One 042f per SIM. A delivered but unusable 0430 is terminal for this
+      * boot; resubmitting on the same gate spins 042f/0430 without a log and
+      * consumes the shared 16-bit MIPC txid space. */
+     q.held=true;
+     printf("X9 CALL: SIM%u 042f response unusable; voice RAT cache stays empty\n",sim+1);
+    }
     bzero(frame,X9_MIPC_FRAME_MAX);
    }else if(rc<0)q.held=true;
   }
@@ -813,10 +820,10 @@ static void x9c_mt_observe(const struct x9cw_inbound_state &in){
  * voiceRat -> Apple RAT (语义对应, 推断) -> asWirelessTechnology 1f03304ac ->
  * convertWirelessTechnologyToCallTechnology 1f03921e8 (实测 WT4->CT2/WT8->CT1/
  * WT0x20->CT4/else->CT6; NR->CT6 is the real result, not a placeholder).
- * The kernel 042f read-only query/8100 parse that POPULATES this cache is NOT
- * implemented yet, and the NAS registration owner carries only local routing
- * flags, not a parsed RAT. So the cache stays empty and this provider returns
- * no technology: CallList publication is fail-closed until the query lands.
+ * The kernel 042f read-only query/8100 parse that POPULATES this cache is
+ * implemented in x9c_init_poll (x9c_voice_rat_submit + x9cw_voice_rat) and
+ * runs once per SIM after CS registration. While the cache is empty this
+ * provider returns no technology and CallList publication stays fail-closed.
  * docs 495-506 forbid rat2->LTE4 and Unknown placeholders; a real queried
  * networkType mapped by x9cw_calltechnology is the only admitted source. */
 static int x9c_call_technology(unsigned sim,unsigned *technology){
