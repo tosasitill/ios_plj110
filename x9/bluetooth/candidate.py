@@ -3,7 +3,7 @@
 
 Native userland/jobs -> offline root payload -> (optional) kernel-embedded
 root payload -> full overlay kernel -> ONE boot.img. With boot-arg
-x9_bt_root=1 the kernel's PID1 installs the seven root files itself before
+x9_bt_root=1 the kernel's PID1 installs the root payload files itself before
 launchd starts (x9_bluetooth_root.inc); a second boot-rollback/boot.img with
 x9_bt_root=2 restores the Apple originals. Completion is published only after every normal build command exits
 zero. There is no new-artifact hash, unpack, disassembly or test-suite pass.
