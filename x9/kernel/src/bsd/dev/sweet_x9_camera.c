@@ -86,6 +86,8 @@ static uint32_t frame_bytes;
  * This is NOT a DMA mapping/ownership counter. A busy staging buffer drops
  * the next delivery rather than blocking a hardware completion on user VM. */
 static unsigned frame_readers;
+/* diag46: per-frame cache-maintenance timing (x9_camera_s1_dma.inc), printed by x9_camera_deliver. */
+static uint64_t cam_perf_cpu_ns,cam_perf_dev_ns;
 static uint64_t consumed;
 static struct hakios_camera_frame head;
 /* Source completion order is independent of accepted userland frame count.
@@ -577,7 +579,35 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
         head.gain_unity=1024;head.gain_max=65536;
         head.frame_lines=f.frame_lines;head.frame_lines_min=s->frame_lines;head.frame_lines_max=s->frame_max;
         head.margin=s->margin;head.sensor=f.sensor;head.focus=HAKIOS_CAMERA_NO_FOCUS;
-        memcpy(frame,f.raw,f.bytes);frame_bytes=f.bytes;wakeup(&frame_bytes);
+        { /* diag46: per-frame timing and MIPI receive errors, every 32 frames.
+           * CSIRX_MAC_CSI2_IRQ_STATUS latches without IRQ_EN; Android treats
+           * anything outside 0x324 (ECC ok, CRC ok, FS, FE) as an error and
+           * clears it with 0xffffffff (phy_3_0.c:4813). */
+            static uint64_t n,copy_ns,copy_max,last_time,gap_ns,err_frames,err_or,crc,ecc2,ecc1,sync;
+            uint64_t t0=mach_absolute_time(),ns;
+            memcpy(frame,f.raw,f.bytes);
+            absolutetime_to_nanoseconds(mach_absolute_time()-t0,&ns);copy_ns+=ns;if(ns>copy_max)copy_max=ns;
+            if(last_time && f.time>last_time){absolutetime_to_nanoseconds(f.time-last_time,&ns);gap_ns+=ns;}
+            last_time=f.time;
+            if(cam_mac.held && cam_mac.bank[CAM_MAC_A]) {
+                uint32_t v=cam_rr(cam_mac.bank[CAM_MAC_A],0xc8),bad=v&~0x324u;
+                if(bad){err_frames++;err_or|=bad;}
+                if(v&(1u<<6))crc++;
+                if(v&(1u<<4))ecc2++;
+                if(v&(1u<<3))ecc1++;
+                if(v&((1u<<0)|(1u<<7)|(1u<<13)))sync++;
+                if(v)cam_rw(cam_mac.bank[CAM_MAC_A],0xc8,0xffffffffu);
+            }
+            if(++n==32) {
+                printf("X9 CAMERA FRAME PERF: frames=32 interval_ms=%llu copy_us=%llu/%llu cpu_inval_us=%llu dev_flush_us=%llu "
+                    "csi_err_frames=%llu err_or=%llx crc=%llu ecc2=%llu ecc1=%llu sync=%llu\n",
+                    gap_ns/31/1000000,copy_ns/32/1000,copy_max/1000,cam_perf_cpu_ns/32/1000,cam_perf_dev_ns/32/1000,
+                    err_frames,err_or,crc,ecc2,ecc1,sync);
+                n=copy_ns=copy_max=gap_ns=err_frames=err_or=crc=ecc2=ecc1=sync=0;
+                cam_perf_cpu_ns=cam_perf_dev_ns=0;
+            }
+        }
+        frame_bytes=f.bytes;wakeup(&frame_bytes);
         { /* Black-preview triage: is the RAW itself dark/empty? RAW10 packed,
            * bytes 0..3 of each 5-byte group are the pixel MSBs (black=64/4). */
             static unsigned stats_logs;

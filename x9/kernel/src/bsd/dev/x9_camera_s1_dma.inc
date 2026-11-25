@@ -73,12 +73,20 @@ static int cam_s1_dma_device(struct x9_camera_camsv_slot *slot)
     if(!e) {
         /* Bind before any cache op: partial publication cannot be replayed
          * or rebound. Export's one-time flush is NOT a per-frame rearm. */
+        /* diag46: a repeat re-arm (IDLE) follows CPU_INVAL + CPU reads only;
+         * the CPU never writes RAW, so no line can be dirty and the
+         * post-DONE IVAC already drops any clean/speculative line. The
+         * full CIVAC is kept for the first arm of a backing. */
+        bool repeat=m->raw_state==CAM_RAW_IDLE;
+        uint64_t t0=mach_absolute_time(),ns;
         m->raw_slot=slot;m->raw_context=slot->dma.context;m->raw_check=slot->dma.check;
         m->raw_lease=slot->dma.lease;m->raw_request=*r;
         m->raw_state=CAM_RAW_RETAINED;
-        for(unsigned i=0;i<m->pages && !e;i++)
+        for(unsigned i=0;i<m->pages && !e && !repeat;i++)
             e=cam_cache_range(m->raw+(vm_offset_t)i*CAM_S1_PAGE,
                 CAM_S1_PAGE,CAM_CACHE_DEVICE);
+        if(repeat)__asm__ volatile("dsb sy":::"memory");
+        absolutetime_to_nanoseconds(mach_absolute_time()-t0,&ns);cam_perf_dev_ns+=ns;
         if(!e)e=cam_s1_check_private(m);
         if(e)cam_s1_dma_latch(m,e);
         else m->raw_state=CAM_RAW_DEVICE;
@@ -100,9 +108,11 @@ static int cam_s1_dma_cpu(struct x9_camera_camsv_slot *slot)
          * NC device output may coexist with speculatively filled WB lines.
          * IVAC drops those lines WITHOUT writing them over the new pixels. */
         m->raw_state=CAM_RAW_CPU;
+        uint64_t t0=mach_absolute_time(),ns;
         for(unsigned i=0;i<m->pages && !e;i++)
             e=cam_cache_range(m->raw+(vm_offset_t)i*CAM_S1_PAGE,
                 CAM_S1_PAGE,CAM_CACHE_CPU);
+        absolutetime_to_nanoseconds(mach_absolute_time()-t0,&ns);cam_perf_cpu_ns+=ns;
         if(!e)e=cam_s1_check_private(m);
     }
     if(e && m && m->magic==CAM_S1_MAGIC && m->raw_slot==slot)

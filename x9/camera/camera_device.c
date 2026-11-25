@@ -2134,7 +2134,10 @@ worker(void *context)
 			continue;
 		}
 		wd_mark("read-raw");
+		static uint64_t pf_t0, pf_t1, pf_read, pf_proc, pf_dlv, pf_n, pf_last, pf_gap;
+		pf_t0 = mach_absolute_time();
 		n = read(device, buffer, bytes);
+		pf_t1 = mach_absolute_time();
 		int read_error = n < 0 ? errno : 0;
 		wd_mark("measure");
 
@@ -2298,12 +2301,25 @@ worker(void *context)
                     f->sensor,(unsigned long long)f->sequence,running,graph,configured,handlers,enabled,known);
             }
         }
+		uint64_t pf_t2 = mach_absolute_time();
 		for (unsigned i = 0; s->graph_running && i < OUTPUTS; i++) {
 			struct output_snapshot snapshot = { 0 };
 
 			if (!snapshot_take(s, i, hakios_camera_sof_time(f), &snapshot)) continue;
 			invoked |= deliver(s, &snapshot, &presentation, f, raw, metadata, &delivery_faults[i]);
 			snapshot_release(&snapshot);
+		}
+		{ /* diag46: where a frame's time goes in the bridge, every 32 frames */
+			uint64_t pf_t3 = mach_absolute_time();
+			pf_read += pf_t1 - pf_t0; pf_proc += pf_t2 - pf_t1; pf_dlv += pf_t3 - pf_t2;
+			if (pf_last) pf_gap += pf_t3 - pf_last;
+			pf_last = pf_t3;
+			if (++pf_n == 32) {
+				say("perf: frames=32 interval_ms=%.1f read_ms=%.1f process_ms=%.1f deliver_ms=%.1f",
+				    elapsed_ms(pf_gap, 0) / 31, elapsed_ms(pf_read, 0) / 32, elapsed_ms(pf_proc, 0) / 32,
+				    elapsed_ms(pf_dlv, 0) / 32);
+				pf_n = pf_read = pf_proc = pf_dlv = pf_gap = 0;
+			}
 		}
 		if (metadata != NULL) {
 			CFRelease(metadata);
