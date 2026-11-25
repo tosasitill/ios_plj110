@@ -127,20 +127,6 @@ static int cam_native_wp_init(struct x9_camera_smmu *m,struct cam_native_snapsho
         s->wp[0],s->wp[1],s->wp[2],s->wp[3],e);
     return e;
 }
-/* diag32: reopen on reused queues. device_reset writes CMDQ PROD/CONS=0;
- * if the controller keeps its old (equal, empty) cursor, continue from it. */
-static int cam_native_cursor_reset(struct x9_camera_smmu *m,struct cam_native_snapshot *s,unsigned field)
-{
-    int e=cam_native_match(m,s);if(e)return e;
-    uint32_t before=s->word[field],got;
-    cam_smmu_rw(m,cam_native_off[field],0);got=cam_smmu_rr(m,cam_native_off[field]);
-    if(got && got==before && m->native_queues_adopted)
-        printf("X9 CAMERA NATIVE QUEUE ADOPT: off=%x kept=%x (write ignored; same queue continues)\n",
-            cam_native_off[field],got);
-    else got=0;
-    s->word[field]=got;
-    return cam_native_match(m,s);
-}
 static int cam_native_write32(struct x9_camera_smmu *m,struct cam_native_snapshot *s,
     unsigned field,uint32_t value)
 {
@@ -237,7 +223,6 @@ static int cam_native_full_table(struct x9_camera_smmu *m,unsigned shift,bool by
     vm_offset_t va=0;uint64_t pa=0;unsigned bytes=64u<<shift;
     if(shift<8 || shift>16 || m->exported)return CAM_FAIL(EINVAL);
     cam_progress(bytes!=m->ste_bytes?"ft:alloc-contig":"ft:fill");
-    if(bytes!=m->ste_bytes && m->native_queues_adopted)return CAM_FAIL(EINVAL);
     if(bytes!=m->ste_bytes) {
         if(kmem_alloc_contig(kernel_map,&va,bytes,PAGE_MASK,0,0,
             KMA_DATA|KMA_ZERO,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS)return CAM_FAIL(ENOMEM);
@@ -503,12 +488,12 @@ static int cam_native_smmu_start_impl(uint64_t token,uint64_t iova,uint32_t byte
     CAM_NATIVE_STEP("strtab-base",cam_native_write64(m,&entry,0,m->view.strtab_base));
     CAM_NATIVE_STEP("strtab-cfg",cam_native_write32(m,&entry,CAM_N_CFG,m->view.strtab_cfg));
     CAM_NATIVE_STEP("cmdq-base",cam_native_write64(m,&entry,1,m->view.cmdq_base));
-    CAM_NATIVE_STEP("cmdq-prod",cam_native_cursor_reset(m,&entry,CAM_N_CP));
-    CAM_NATIVE_STEP("cmdq-cons",cam_native_cursor_reset(m,&entry,CAM_N_CC));
-    if(!e && entry.word[CAM_N_CP]!=entry.word[CAM_N_CC]){step="cmdq-adopt";e=CAM_FAIL(ESTALE);}
-    if(!e && entry.word[CAM_N_CP]) {
-        m->prod=m->cons=m->last_prod=m->last_cons=m->wait_cons=entry.word[CAM_N_CP];
-    }
+    /* diag40: diag31's plain device_reset cursor stores. diag32's
+     * cam_native_cursor_reset (old table-reuse reopen) is unused: the live
+     * bank never re-runs this cold path, and diag39 bisected the first-open
+     * freeze to that hunk. */
+    CAM_NATIVE_STEP("cmdq-prod",cam_native_write32(m,&entry,CAM_N_CP,0));
+    CAM_NATIVE_STEP("cmdq-cons",cam_native_write32(m,&entry,CAM_N_CC,0));
     /* As in Android, enable CMDQ before invalidations, then initialize EVTQ.
      * All four initial queue cursors were confirmed zero at admission. */
     CAM_NATIVE_STEP("cmdq-enable-ack",cam_native_enable(m,&entry,CAM_SMMU_CR0_CMDQEN));
