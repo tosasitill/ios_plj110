@@ -178,7 +178,7 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 | `x9-bootloader-reboot-psci-20261124` | `.worktrees/x9-bootloader-reboot`，分支 `feat/x9-bootloader-reboot` | log 421：PSCI 后实际进入 fastboot，helper PASS | 后续重启场景不据此自动重复 |
 | camera diag17 | 历史提交 `e125dbf0` | 仅 host 构建；首 boot 未到 retire | 未完成 retire/出帧验收；不声称仍在 boot_b |
 
-本轮文档整理未构建、未刷机、未重启、未写 root/mailbox，也没有新 CI run。
+本轮文档整理基于 `994d5fe0`，README/规则提交为 `d6f92195`；未构建、未刷机、未重启、未写 root/mailbox，也没有新 CI run。
 
 ## 6. 分系统当前交接
 
