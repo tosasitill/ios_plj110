@@ -143,7 +143,18 @@ static int cam_source_add(unsigned kind,unsigned bank,unsigned offset,uint32_t m
     if(mask&~f.full)return CAM_FAIL(EINVAL);
     for(unsigned b=0;b<f.banks;b++) {
         f.before[b]=cam_source_expected(&f,b);
-        if(f.before[b]&mask)return CAM_FAIL(EBUSY); /* no inherited enable repair */
+        /* diag42: Android only ever SETS the PHY AFIFO FLUSH_EN and lane
+         * enables (isp8s phy_3_0.c csirx_dphy_setting :3838-3953, never
+         * cleared or checked), so a previous session/sensor leaves them on
+         * (ANA 0x100=0x414141). Adopt inherited PHY enables like Android;
+         * the off step restores the inherited value. MAC/OUT keep the guard. */
+        if((f.before[b]&mask) && kind==CAM_SOURCE_PHY)
+            printf("X9 CAMERA SOURCE INHERITED: phy bank=%u off=%x before=%x mask=%x (Android sets without check)\n",
+                bank,offset,f.before[b],mask);
+        else if(f.before[b]&mask) {
+            printf("X9 CAMERA SOURCE BUSY: kind=%u bank=%u off=%x before=%x mask=%x\n",kind,bank,offset,f.before[b],mask);
+            return CAM_FAIL(EBUSY); /* no inherited enable repair */
+        }
         f.on[b]=f.before[b]|value;
     }
     if(f.banks==2 && f.before[0]!=f.before[1])return CAM_FAIL(ESTALE);
