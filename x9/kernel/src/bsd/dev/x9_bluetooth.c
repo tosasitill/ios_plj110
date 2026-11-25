@@ -665,6 +665,50 @@ static void rhw_dump(void)
     rhw_section("J2",rhw_sel_j,sizeof(rhw_sel_j)/4);
     rhw_section("D1",rhw_sel_d,sizeof(rhw_sel_d)/4);
 }
+/* btmtk_send_assert_cmd, USE_DEVICE_NODE==1: RHW_ASSERT_CMD writes
+ * 0x81028918 (content[9]=0x01 on MT6653). FW then streams its coredump as
+ * ACL frames with handle bytes 6f fc (btmtk_fw_log.c), text from byte 4 of
+ * the ACL payload, last one ending in "; coredump end". FF/FE 05 frames are
+ * FW log. Collect printable runs first; printing to serial would stall RX. */
+static char cd_text[24576];
+static void fw_assert_dump(void)
+{
+    uint32_t echo=0; unsigned frames=0,dump=0,logs=0,other=0,perr=0; uint64_t bytes=0; size_t used=0;
+    bool ended=false;
+    int e=rhw_op(0x40,0x81028918,0x01,&echo);
+    printf("X9 BT ASSERT rhw write errno=%d\n",e);
+    uint64_t start=now_ms(NULL),end=start+15000,last=start;
+    while(!ended && now_ms(NULL)<end && now_ms(NULL)-last<3000) {
+        e=next_frame(&incoming);
+        if(e==EAGAIN) { sleep_ms(NULL,1); continue; }
+        if(e) { perr++; assembling.length=0; if(perr>50) break; continue; }
+        frames++; last=now_ms(NULL); bytes+=incoming.length;
+        const uint8_t *p=incoming.data; uint32_t n=incoming.length;
+        bool cd=n>5 && p[0]==2 && p[1]==0x6f && p[2]==0xfc;
+        bool lg=n>5 && p[0]==2 && (p[1]==0xff || p[1]==0xfe) && p[2]==0x05;
+        if(cd) dump++; else if(lg) logs++; else { other++; if(other<=6) hci_trace("RX#",p,n); }
+        if(cd || lg) {
+            uint32_t run=0;
+            for(uint32_t i=5;i<=n;i++) {
+                bool pr=i<n && p[i]>=0x20 && p[i]<0x7f;
+                if(pr) { run++; continue; }
+                if(run>=6 && used+run+2<sizeof(cd_text)) {
+                    if(lg) cd_text[used++]='%';
+                    memcpy(cd_text+used,p+i-run,run); used+=run; cd_text[used++]='|';
+                }
+                run=0;
+            }
+            if(cd && n>=8 && p[n-3]=='e' && p[n-2]=='n' && p[n-1]=='d') ended=true;
+        }
+    }
+    printf("X9 BT ASSERT frames=%u coredump=%u fwlog=%u other=%u parser_err=%u bytes=%llu ms=%llu end=%d text=%lu\n",
+        frames,dump,logs,other,perr,(unsigned long long)bytes,(unsigned long long)(now_ms(NULL)-start),ended,(unsigned long)used);
+    for(size_t o=0;o<used;o+=150) {
+        size_t k=used-o<150?used-o:150; char line[160];
+        memcpy(line,cd_text+o,k); line[k]=0;
+        printf("X9 BT CD %s\n",line);
+    }
+}
 static void stall_collect(const char *what,const uint8_t *tx,size_t len,uint32_t ms)
 {
     size_t sent=0; int error=raw_write(NULL,tx,len,&sent);
@@ -718,7 +762,7 @@ static void stall_probe(void)
     stall_collect("FC3A",sched,sizeof(sched),300);
     static const uint8_t version[]={1,0x01,0x10,0};
     stall_collect("1001",version,sizeof(version),300);
-    if(stall_probes==1) rhw_dump();
+    if(stall_probes==1) { rhw_dump(); fw_assert_dump(); }
     bool answered=false;
     for(unsigned i=0;i<pending_count;i++)
         if(pending[i].length>=6 && pending[i].data[0]==4 && pending[i].data[1]==0x0e &&
