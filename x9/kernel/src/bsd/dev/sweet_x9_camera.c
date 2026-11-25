@@ -186,7 +186,7 @@ extern void x9_mm_power_smmu_dump(const char *tag);
 extern void x9_mm_power_stall_dump(void);
 /* Logs 383-386: a sensor start issued by mediaserverd at ~11s ends in an
  * MM SMMU read that never returns, and boot stays on the logo. Refuse
- * starts until uptime >= x9_cam_defer seconds (default 90, 0 = off) so boot
+ * starts until uptime >= x9_cam_defer seconds (default 0 = off) so boot
  * completes first; a later Camera open starts normally. */
 /* mach_absolute_time() keeps counting from before this kernel (log 404 read
  * 70.6 s at 11.2 s uptime, and warm resets do not clear it), so measure from
@@ -196,7 +196,7 @@ static uint64_t cam_boot_t0;
 static bool cam_boot_deferred(void)
 {
     static int defer_s=-1;
-    if(defer_s<0){int v=90;if(!PE_parse_boot_argn("x9_cam_defer",&v,sizeof(v)))v=90;defer_s=v<0?0:v;}
+    if(defer_s<0){int v=0;if(!PE_parse_boot_argn("x9_cam_defer",&v,sizeof(v)))v=0;defer_s=v<0?0:v;}
     if(!defer_s)return false;
     if(!cam_boot_t0)return true; /* not registered yet: certainly early boot */
     uint64_t ns;absolutetime_to_nanoseconds(mach_absolute_time()-cam_boot_t0,&ns);ns+=CAM_BOOT_T0_UPTIME_NS;
