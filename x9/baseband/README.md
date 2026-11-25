@@ -1,27 +1,39 @@
-# X9 基带桥：AT 控制面、MIPC IPv4 WDS 与 DPMAIF
+# X9 基带桥：AT 控制面、MIPC IPv4 WDS、DPMAIF 与通话状态
 
-**当前蜂窝运行基线是 CELL131 / 日志189；不是下文历史 hl/hs 候选。**
-CELL131 已进入系统，两卡信号/5G/attach 有证据，但 CreateProfile27 被94拒绝142次，
-没有 Start20、ACT201、GET205、EIF4302，PDP TX/RX=0。已提交 RAM profiles、CallType35
-及后续 ACT/队列修正尚无新蜂窝运行验收；typed transport、持续资格和退休账本仍是独立候选。
-**没有新的可交付蜂窝 boot.img；不以固件可读、5G图标、静态链或单位编译代替联网成功。**
-当前决定与产物以仓库根 `NOTES.md` 的 CELL-CHAIN-CODE 为准；下文旧构建命令仅供历史追溯。
+## 当前状态（2026-11-26）
+
+- 历史 CELL131 / log 189 有两卡信号、5G 与 attach 证据，但 `CreateProfile27` 被 94 拒绝 142 次，
+  没有 Start20/ACT201/GET205/EIF4302，PDP TX/RX=0。后续 RAM profile、ACT/队列修正没有新的
+  蜂窝设备验收；不能把注册或 5G 图标写成联网成功。
+- 当前源码发布一次 **VOICE09**；**VOICE20** 带 SIM2 owner/transport/transaction retry fencing；
+  **CallList46** 已启用并带 client deduplication、generation/epoch/revision 与真实 RAT gating。
+  这些是主机编译/源码状态，不是可拨号或可通话验收。
+- stock typed `ims::Call`/FSM/delegate owner、双向 voice PCM、AudioObject/IOProc 与 IMS SIP
+  信令仍未接通。MD→DSP `3D00` 不是 AP↔DSP REG_DMA，不能据此声称语音传输。
+- 短信 `0606` 只表示 modem 接受，不表示对端投递；生产 WMS tag→MIPC flag 为 `{2,1,3,4}`，
+  `0x210000` 已归于通用 AT ERROR，但独立反汇编确认仍缺，不能解释为空收件箱。
+- 没有新的完整蜂窝设备候选。当前候选、构建结果与下一动作以 [`../../NOTES.md`](../../NOTES.md)
+  为准；`qcom/` 的 UniXNU 代码仅作为 portable 上游参考。
 
 `qcom/` 引入 UniXNU/QcomBaseband（BSD-2-Clause，HoshinoYumeka / chiba233；上游提交见
 `qcom/UPSTREAM.json`）。只使用 portable `baseband/`：AppleBaseband IOKit、QMUX/QRTR、
 Sahara 兼容桥、PDP helper 与 VINYL Tape。Qualcomm IPA/GSI 不适用于 MT6993 的 DPMAIF。
 未导入参考项目针对 iOS17 的 CommCenter/BBTicket 机器码修改；本项目保留原始 20H392 用户态。
 
-## 历史 hs 候选启动与构建（不是当前测试要求）
+## 历史 hs 候选（不是当前测试要求）
 
-在仓库根，由用户手动执行：
+`x9-rev252hs-md` 是历史候选：当时使用 34 MiB external pinned/immutable 固件包与插件 275，
+boot.img 为 12,918,784 B；这些数字不描述当前主线。当前 allowlist 是 280，固件与 root manifest
+必须来自实际私有输入。历史 hn/hr 未上机，hm 不作为候选；旧日志不得拼接成 hs 的运行证据。
 
-```sh
-fastboot boot x9/out/x9-rev252hs-md/boot.img
-```
+本设备不支持临时 `fastboot boot`。只有用户明确授权时才写 `boot_b`，由用户手动启动并提供
+新日志。不得改 GPT、删除 Android、解除 root/插件/日志/固件专用文件的保护。构建成功后不额外
+解包、重算 hash、反汇编或运行测试套件。
+
+### 当时的重编命令（历史，勿直接复用）
 
 - **不用再放固件或挂载目录**：独立 34 MiB pinned+immutable 固件文件已 stage；不重新 create/resume。
-- 插件 **275** 未改，不需 mailbox staging，也不传 `--revision` 重建插件。
+- 历史构建使用 external 固件与当时 allowlist；不得据此判断当前固件或插件已经 staging。
 - 不 flash、不改 GPT、不删除 Android，不解除 root/插件/日志/固件专用文件的保护。
 - 回退镜像：`x9/out/x9-rev252hl-md/boot.img`。hn/hr 为历史未上机候选；hm 不作为上机候选。
 - 新日志另存为新的 `~/N.txt`；不要把 156/157 的缓存拼接成 hs 的运行证据。
@@ -382,8 +394,19 @@ MD usr-slot/secondary引用未资格化，不能说main已有正lease。新代�
 
 ### 6. 语音、短信和 IMS/音频
 
-需要额外真实 MD call/SMS/IMS 信令和音频路由实现；不属于已写的六个服务控制查询。
-只能在相应真实请求/状态/音频闭环通过后报告可通话，不能用 LTE/5G 注册替代。
+当前已有 VOICE09、带 owner/retry fencing 的 VOICE20、CallList46、CallList 去重与 RAT gating，
+以及 RawSend20/MT 8601/8603/WMS37 的短信控制面。它们不等于 stock 电话或 Messages 已可用：
+
+- 缺独立于临时 `ims::Call` 对象的 typed provider `(clientId, UUID, native epoch/ID)` owner、
+  FSM/delegate 生命周期与真实 SIP INVITE/REGISTER 证据。
+- MD→DSP `3D00` 不是 AP↔DSP REG_DMA；voice producer/payload/ACK、RV32 consumer、EMI ring、
+  codec/cadence/scene 与 VirtualAudio/AudioObject/IOProc provider 仍未接通。
+- SMS `0606` 是 modem 接受；`0607` 诊断硬编码 index 1，只记录 shape/status/index。
+  storage flag 固定 `{2,1,3,4}`；query-all/filter、混合异常 status、durable SIM storage 与
+  Messages UI 持久化未验收。`0x210000` 不能当作空 inbox。
+
+只能在真实请求、状态、投递/存储与双向音频闭环通过后报告可通话或短信已送达，不能用 LTE/5G
+注册、VOICE20 可构造或 ACK 替代。
 
 ## 回读与维护
 

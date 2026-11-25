@@ -46,13 +46,14 @@
 ## 构建和手动复核
 
 常规 `x9/build/build.py kernel|all` 自动构建 iOS 16 arm64 桥和 `torchctl`。
-桥约 71 KiB，内嵌内核，生成头被 gitignore；**Metal 插件 275 不变，无需 mailbox**。
-只构建工具也可以：
+桥约 71 KiB，内嵌内核，生成头被 gitignore；torch 本身不改变 Metal 插件，当前 allowlist 为 **280**，
+kernel-only 且 allowlist 不变时无需 mailbox。完整设备候选使用 `boot-device.json` 和新的 `--name`。
+
+只构建工具也可以（工具路径由仓库私有配置提供，不硬编码用户目录）：
 
 ```bash
-python3 -I x9/torch/build.py \
-  --developer-dir /Users/tosasitill/Downloads/Xcode.app/Contents/Developer \
-  --out .local/x9/torch-tools
+python3 -I x9/torch/build.py --developer-dir <Xcode15>/Contents/Developer \
+  --out x9/out/torch-tools-<unique-name>
 ```
 
 模式 3 在可写 iOS 根盘创建自有 `/private/var/x9/torch/libx9-torch-<内容哈希>.dylib`。

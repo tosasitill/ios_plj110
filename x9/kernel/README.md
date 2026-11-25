@@ -1,47 +1,50 @@
 # X9 kernel overlay
 
 The X9 kernel is the frozen SWEET XNU object tree (XNU `8796.141.3` plus the
-sweet/topaz lineage through patch 0185, built once on the build Mac) relinked
-with 57 X9 overlay objects. This directory is the single source of truth for
-those overlay objects; `x9/build/build.py` compiles and links them.
+sweet/topaz lineage through patch 0185) relinked with X9 overlay objects. The
+current full builds report **104/104 overlay objects, including 3 prebuilt
+objects**. This directory is the source of truth for the overlay;
+`x9/build/build.py` compiles and links it. That count is a host-build result,
+not a device feature claim.
 
 | Path | Contents |
 | --- | --- |
 | `src/` | Overlay sources and headers at their XNU-relative paths |
-| `generated/` | Generated inputs (CSF firmware, compute/desktop programs, the plugin allowlist header) |
-| `recipe.json` | Compile templates (exact argument lists, include order kept), each object's source and template, link and strip commands |
-| `link-order.txt` | The exact link order: `xnu:<object in the frozen tree>` or `x9:<overlay object>` |
-| `prebuilt/` | Objects whose source is known but whose compile command was never recorded |
+| `generated/` | Generated inputs (CSF firmware, compute/desktop programs, plugin allowlist, private runtime manifests) |
+| `recipe.json` | Compile templates, source/template/prebuilt selection and exact link/strip commands |
+| `link-order.txt` | Exact link order: `xnu:<frozen-tree object>` or `x9:<overlay object>` |
+| `prebuilt/` | Objects whose original compile command was not recorded |
 
-Placeholders in `recipe.json`: `{DEVELOPER_DIR}` (Xcode), `{DXB}` (the XNU
-build directory `.../xnu/build-dxb/dxb`, which holds the frozen object tree,
-`EXPORT_HDRS`, `fakeroot` and the `dxb/xnu` source tree the headers come
-from), `{SRC}` and `{GEN}` (this directory).
+Placeholders in `recipe.json`: `{DEVELOPER_DIR}` (Xcode), `{DXB}` (the frozen
+XNU build tree, including `EXPORT_HDRS`, `fakeroot` and source headers), `{SRC}`
+and `{GEN}` (this directory).
 
-## Origin
+## Origin and prebuilt boundary
 
-Imported 2026-11-01 from pan220-batched-cache-ranges with
-`x9/build/scripts/collect-build-inputs.py`. Before that, every candidate was a
-copy of the previous one with a few files string-patched and only those
-objects recompiled; the 57 objects came from 15 different candidate
-directories (pan111 through pan220). For each object the source was taken from
-the compiler depfile, else from the object's debug info, else from the recorded
-command. All 93 files had a single content across the candidates that used
-them. The `ccache-bin/clang` wrapper used for some objects was replaced by the
-Xcode clang it caches.
+Imported on 2026-11-01 from `pan220-batched-cache-ranges` with
+`x9/build/scripts/collect-build-inputs.py`. Before that, candidates copied the
+previous image and recompiled only changed objects; the original 57 objects came
+from 15 candidate directories (pan111 through pan220). Sources were recovered
+from compiler depfiles, debug information or recorded commands. Historical
+object counts are not current counts.
 
-`prebuilt/` holds six objects from pan117: `start.o`, `SweetCPU.cpo`,
-`sweet_early.o`, `sleh.o`, `prng_random.o`, `IOKitBSDInit.o`. Their sources are
-in `src/` (from pan117, pan116 `reconstructed-inputs` and
-`work/x9-usb-live/recover-build`), but no compile command exists for them, so
-editing those sources has no effect until a command is reconstructed and the
-object moves into `recipe.json` with a template.
+Three objects currently use `prebuilt/` without a reconstructable compile
+command: `prng_random.o`, `sweet_early.o` and `start.o`. Editing their source has
+no effect until a compile command is reconstructed and the object moves into the
+normal recipe. `sleh.o` has a recipe entry and is not one of the three counted
+prebuilt objects.
 
-`x9/xnu-patches/` remains as history of how these sources evolved; it is not
-an input to the build.
+`x9/xnu-patches/` remains history and is not a build input. Current XNU source
+changes live in `x9/xnu/`; overlay changes live in `src/` plus `recipe.json` and
+`link-order.txt`.
 
-## Where things are now
+## Current build and plugin contract
 
-Live status, the current image and its boot arguments are in `../../NOTES.md`.
-Plugin allowlist header (`generated/x9_render_external_manifest.h`) is rewritten
-by `build.py plugins|all`; see `../BUILD.md` and `../mailbox/README.md`.
+Live candidate paths, boot arguments and evidence labels are in
+[`../../NOTES.md`](../../NOTES.md). Build commands are in
+[`../BUILD.md`](../BUILD.md).
+
+The generated Metal allowlist currently names plugin revision **280**. Plugin
+binaries are not linked into the kernel or boot.img: they are staged through the
+mailbox and installed on the iOS root. A revision/hash change requires a matching
+mailbox/root package; an unchanged allowlist needs no staging.

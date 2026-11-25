@@ -5,7 +5,7 @@ overlay, the Mali/PanVK/Metal userspace and the plugin update mailbox. Logs,
 device dumps, build outputs and `boot.img` artifacts are not committed.
 
 `../README.md` and `README.md` describe the architecture and status; `../NOTES.md`
-is the live handoff (current image, boot args, open problems). Patch and
+is the live handoff (current candidates, boot args, open problems). Patch and
 diagnostic-token reference for PanVK/metal2vulkan: `PANVK-PATCHES.md`.
 Inputs that live outside git: `EXTERNAL-DEPENDENCIES.md`.
 
@@ -13,28 +13,35 @@ Inputs that live outside git: `EXTERNAL-DEPENDENCIES.md`.
 
 | Component | Source in this repo | External input |
 | --- | --- | --- |
-| XNU kernel | `kernel/` overlay (57 objects, see `kernel/README.md`) | the frozen SWEET XNU object tree on the build Mac |
+| XNU kernel | `kernel/` overlay (104 objects in the current full build, 3 prebuilt; see `kernel/README.md`) | the frozen SWEET XNU object tree on the build Mac |
 | Shim / loader | `shim/`, `tools/` | LLVM/lld 22 |
-| ADT + payload + boot.img | `tools/boot-xnu.py`, `build/boot.json` | `root-manifest.json` for the device's root extents |
+| ADT + payload + boot.img | `tools/boot-xnu.py`, `build/boot-device.json` | `root-manifest.json` for the device's root extents |
 | Mali userspace (PanVK) | `build/third_party/00-mesa-panvk-x9.patch` | Mesa `300b5fd7b44120b80607d1c90b40bb126e8d3ec8` |
 | Metal runtime | `build/third_party/01-metal2vulkan-x9.patch`, `build/third_party/metal2vulkan-pan205/` | metal2vulkan |
 | AIR → NIR frontend | `build/scripts/build-compiler.py`, `build/scripts/build-v14.py` | AIR frontend `c84b4634277a70beac73921029b1fb6afc2530af` |
-| Plugin delivery | `mailbox/` | — |
+| Plugin delivery | `mailbox/` | independent staged/root-installed package |
 
 Plugin binaries are **not** in the boot partition. The kernel carries only an
 exact `path`/`size`/`SHA-256` allowlist (`kernel/generated/x9_render_external_manifest.h`,
-currently plugin revision 275), checks the installed files at every boot,
+currently plugin revision **280**), checks the installed files at every boot,
 and disables Metal discovery when a file is missing or differs. Rebuilding the
-plugins means regenerating that header.
+plugins means regenerating that header and staging the matching package.
 
 ## Kernel and boot.img
 
-One command, on the build Mac:
+One full-device command, on the build Mac:
 
 ```bash
-cp x9/build/config.example.json x9/build/local.json   # once; repo-relative inputs, edit tool paths
-python3 -I x9/build/build.py                           # kernel + boot.img
+cp x9/build/config.example.json x9/build/local.json   # once; edit tool paths
+python3 -I x9/build/prepare-local.py --check
+PATH=/opt/homebrew/opt/llvm@22/bin:$PATH \
+python3 -I x9/build/build.py all \
+  --boot-config x9/build/boot-device.json \
+  --name <unique-name>
 ```
+
+If LLVM 22 tools are not on PATH, set `X9_OBJCOPY` and `X9_NM` explicitly to the
+matching `llvm-objcopy` and `llvm-nm`. Every candidate must use a new output name.
 
 `local.json` (gitignored) names the machine paths:
 
@@ -44,31 +51,32 @@ python3 -I x9/build/build.py                           # kernel + boot.img
 | `dxb` | XNU build tree: `.local/dxb` (macOS kext ABI) or `.local/dxb-iosabi` (iOS kext ABI); built by `xnu/build-xnu.sh` |
 | `llvm_clang`, `lld` | LLVM/lld 22 for the bare-metal shim |
 | `root_manifest` | the device's `root-manifest.json` (holds the serial and extent map; never commit it) |
-| `compiler_launcher` | optional, e.g. `ccache`: prefixes every kernel compile, so a new output directory (every commit gets one) reuses earlier compiles |
+| `compiler_launcher` | optional, e.g. `ccache`: prefixes every kernel compile, so a new output directory reuses earlier compiles |
 
-The output goes to `x9/out/<name>/` (default `x9-<git hash>[-dirty]`):
-`kernel-objects/`, `kernel-link.filelist`, `kernel.development.sweet`, and
-`boot.img` with its `boot.json`, plus `build.log` with every command and its
-output. A failed compile prints the compiler output followed by
-`!! <object> failed`, the remaining objects still compile, and the build stops
+The output goes to `x9/out/<name>/`: `kernel-objects/`,
+`kernel-link.filelist`, `kernel.development.sweet`, and `boot.img` with its
+`boot.json`, plus `build.log`. A failed compile prints the compiler output followed
+by `!! <object> failed`, the remaining objects still compile, and the build stops
 with the list of failed objects. Other forms:
 
 ```bash
-python3 -I x9/build/build.py kernel                  # compile, link, strip only
-python3 -I x9/build/build.py boot --kernel <kernel>  # package an existing kernel
-python3 -I x9/build/build.py --dry-run               # print every command
-python3 -I x9/build/build.py --name pan221-foo       # choose the output name
+python3 -I x9/build/build.py kernel --name <unique-name>
+python3 -I x9/build/build.py boot --kernel <kernel> \
+  --boot-config x9/build/boot-device.json --name <unique-name>
+python3 -I x9/build/build.py --dry-run
+python3 -I x9/build/build.py all --revision <N> --name <unique-name>
 ```
 
-`build/boot.json` only carries the base arguments (rootdisk, `cpus=8`, `-v`, ...).
-Feature/experiment tokens (`x9_wifi_real=1`, GPU clock/park/async, `x9pl`, ...)
-are passed per build as `--boot-arg`; packaging with the base alone gives a
-system without Wi-Fi or GPU tuning. Recover the previous full set with
-`strings x9/out/<prev>/shim/embedded-payload.bin | grep x9_metal_render`.
+`build/boot.json` only carries base arguments. **Use `build/boot-device.json` for
+a full device candidate**; it carries the current Wi-Fi, GPU, UFS, modem, sensor,
+camera and Bluetooth configuration. Add experiment tokens with `--boot-arg`.
+The current default Bluetooth configuration has only `x9_bt=1`; a full-init
+candidate explicitly adds `x9_bt_init=1 x9_bt_fc=1`.
+
 Output directory names must be unique: reusing one overwrites its image.
 
 Compiles are incremental through compiler depfiles. Boot-args and packaging
-options live in `build/boot.json`. To change the kernel, edit `kernel/src/`;
+options live in the selected boot config. To change the kernel, edit `kernel/src/`;
 to add an object, add its source, a template and an entry in
 `kernel/recipe.json`, and its place in `kernel/link-order.txt`.
 
@@ -239,9 +247,12 @@ kernel at them; with `all` it then builds the kernel and boot.img into the
 same output directory, which is then a complete candidate:
 
 ```bash
-python3 x9/build/prepare-local.py                     # once / after moving scripts: links .local
-python3 -I x9/build/build.py all --revision 208       # plugins + kernel + boot.img
-python3 -I x9/build/build.py plugins --revision 208   # plugins + package only
+python3 -I x9/build/prepare-local.py --check
+PATH=/opt/homebrew/opt/llvm@22/bin:$PATH \
+python3 -I x9/build/build.py all --revision <N> \
+  --boot-config x9/build/boot-device.json --name <unique-name>
+PATH=/opt/homebrew/opt/llvm@22/bin:$PATH \
+python3 -I x9/build/build.py plugins --revision <N> --name <unique-name>
 ```
 
 Steps (all logged to `x9/out/<name>/build.log`, long steps streamed):
@@ -261,9 +272,9 @@ Steps (all logged to `x9/out/<name>/build.log`, long steps streamed):
    plugin files it lists.
 
 `package-plugins.py --from-mailbox <plugin-package>/mailbox.json` rewrites only
-the allowlist (e.g. to go back to the installed 207 package). The Xcode and
-Homebrew locations come from `developer_dir` and `homebrew` in `local.json`
-(environment `DEVELOPER_DIR` / `X9_HOMEBREW` override).
+the allowlist (for example, to match a previously installed package). This does not
+install that package. The Xcode and Homebrew locations come from `developer_dir`
+and `homebrew` in `local.json` (environment `DEVELOPER_DIR` / `X9_HOMEBREW` override).
 
 Third-party trees (`.local/x9/work/x9-metal-render/`): Mesa
 `300b5fd7b44120b80607d1c90b40bb126e8d3ec8` + `build/third_party/00-mesa-panvk-x9.patch`
@@ -294,4 +305,6 @@ The root preflight is never skipped: by default it runs
 live HFS UUID/geometry); `--root-manifest` or a custom `--root-check` script
 override it. `mailbox/README.md` documents the mailbox contract and its safety
 rules. Both backing files must stay pinned and immutable, and only the listed
-slices are ever written. Then flash the candidate's boot.img by hand.
+slices are ever written. Staging is a device mutation and requires explicit user
+authorization. The user then boots the authorized `boot_b` candidate by hand; this
+device does not support temporary `fastboot boot`.

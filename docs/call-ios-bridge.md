@@ -3061,13 +3061,13 @@ codec/MD owner/物理 writer 白名单均未动。单对象 `Builder.compile_one
   走既有全局 offline，不重试。CMD 身份 tombstone 保留到 boot（退休规则未证明）。
 - 8901 到达即把 MO outbound 置 blocked（既有策略）：本轮 MO dial 本就不准入，
   无功能损失；MT 之后 MO 基线需重启重建，记录为已知限制。
-- **VOICE09 仍不公告**：CommCenter 不会发 VOICE 请求，iOS 无来电显示/接听/拨号
-  UI；`x9c_dial_submit` 仍无生产 caller，VOICE22 未准入，CallList/音频未闭合。
-  文档"输入闭合前不发布 VOICE"的边界继续有效。
+- **当时状态（已被后续源码更新）**：VOICE09 尚未公告，CommCenter 不会发 VOICE 请求，
+  iOS 无来电显示/接听/拨号 UI；`x9c_dial_submit` 仍无生产 caller，VOICE22 未准入，
+  CallList/音频未闭合。当前发布与调用边界见根 `NOTES.md`。
 - 来电被 approve 后网络侧继续振铃直至对端挂断/网络超时；MD 侧 ECPI0→132/6→133
   由既有 reducer 跟踪，状态变化有界日志（不含号码），供 boot 日志核对信令链。
 
-**验收方式（用户手动 `fastboot boot` 候选后）：** 另一手机拨打本机 SIM2，
+**验收方式（当前 X9 不适用临时 `fastboot boot`；仅另行授权写 `boot_b` 并重启后）：** 另一手机拨打本机 SIM2，
 串口应出现 boot registration → CMD8901 confirmed → incoming CMD owned →
 approve=1 queued → physical TX ok → MT INCOMING/CONVERSATION/END 序列；
 iOS 屏幕无来电 UI 是预期边界，不是失败。未接听的来电不应产生 0907。

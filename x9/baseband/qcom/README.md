@@ -37,7 +37,8 @@ python3 drivers/QcomBaseband/scripts/build.py --tree .
 
 This builds `build/qcom-baseband/libQcomBaseband.a` with the baseband IOKit bridge. Add `--coachz` to include the SC7180 IPA configuration, GSI and board adapter. `coachz_modem.c` includes the command, RX and modem implementations in one translation unit. `coachz_baseband.cpp` includes `coachz_bb_pdp.cpp` in its C++ translation unit. The build uses the selected kernel's compile records.
 
-A board provides modem power/firmware startup, SMEM/SMP2P, GLINK/QRTR transport and rmtfs. It calls the bridge through [QcomBaseband.h](baseband/QcomBaseband.h) and supplies `coachz_modem_data_send` and `coachz_modem_data_receiver` on the QRTR/IPA owner thread. `--coachz` supplies these packet hooks through the SC7180 adapter. See [Coachz integration](platform/coachz/README.md) and the [porting guide](https://unixnu.com/porting/baseband).
+A board provides modem power/firmware startup, SMEM/SMP2P, GLINK/QRTR transport and rmtfs. It calls the bridge through [QcomBaseband.h](baseband/QcomBaseband.h) and supplies `coachz_modem_data_send` and `coachz_modem_data_receiver` on the QRTR/IPA owner thread. `--coachz` supplies these packet hooks through the SC7180 adapter. See the upstream `platform/coachz/README.md` (not included in this X9 vendor tree)
+and the [porting guide](https://unixnu.com/porting/baseband).
 
 Run the imported host models with `python3 scripts/check.py`. Test cellular traffic with a SIM that has an active data plan.
 

@@ -1,6 +1,20 @@
 # X9 原生相机桥
 
-## 当前状态（2026-11-18）
+## 当前状态（2026-11-26）
+
+- 历史 diag12–17 聚焦 close/TG gate-off 与 guard reuse。`CAM_GUARD_REUSE_NS=0` 时
+  gate-off/receive/DMA stop/IRQ close 通过，但 close 约 100–190 s，随后在 SMMU
+  `retire:cmdq-prod` 附近复位。diag16 观察到 `PROD=0xd`、prior=0、CMDQ_BASE 已恢复 0；
+  diag17 保持 `PROD==CONS` 并跳过 store，但没有完成 retire/出帧验收。diag17 仅为历史 host
+  构建，不声称它仍在 `boot_b`。
+- 早期多流问题也已定位：iOS 在第一路后立即请求第二路，replace/reject 都会关闭主摄并触发
+  retire。候选方向是第二路“影子流”成功但不碰硬件，保持主摄多帧；仍未证明稳定出帧。
+- 当前没有非黑多帧、完整 read、PixelBufferHandler/屏幕预览、照片或视频验收。
+- 下文 2026-11-18 的 log 356 与各阶段实现记录是历史证据；其中“无 native caller”等描述只对应
+  当时状态，不能覆盖后续源码，也不能替代当前候选日志。当前交接见
+  [`../../NOTES.md`](../../NOTES.md)。
+
+## 历史状态（2026-11-18，log 356）
 
 首帧错误按驱动实际执行顺序定位。`NATIVE CONFIG stage=9 completed=1fe errno=0` 表示 receiver 到 OUTMUX 全部通过。接下来 `NATIVE PREPARE step=` 覆盖 RAW 规划、控制线程和 SMMU 导出，`NATIVE FIRST ARM` / `IRQ ARM` 覆盖 DMA、CAMSV 请求、GIC、FBC 和接收源切换，随后才执行 `SENSOR STREAM`。cdev 在首个 RAW 尚未发布时按代记录一次 `RAW WAIT`。已取得 RAW 的 iOS worker 会分输出记录首次 PTS metadata、像素锁、渲染及 metadata 挂载错误。`first picture given` 表示相应输出已实际调用 handler。
 
@@ -97,7 +111,9 @@ RAW v2 中的真实 SOF 观察值。RAW `time` 仍为 DONE，保留独立 SOF/DO
 
 **尚未闭合的验收**：Camera.app 图标与视频模式是否出现、四 ID/close→真实 RAW→handler→移动画面、编码器真实选中/编码、视频 start/stop、QuickTime 音视频封装、Photos 保存/重开播放、切镜 `source_gap` 和画面。保持同 graph 或软件工厂 `result=0` 都不是录像完成证明。真正同步预热/无采集中断需要底层多路采集及 iOS 同步源合同；硬件 VENC、镜头标定、AF/OIS 与原生三摄 UI 仍未完成。
 
-设备由用户手动 `fastboot boot` 候选并提供新日志；沿用 GPU280 时无需 mailbox。不默认启用 `x9_mgwipe=3` 缓存重建。确切提交、候选路径、构建结果与下一动作见 `NOTES.md` §5。
+设备不支持临时 `fastboot boot`。只有用户明确授权时才写 `boot_b`，由用户手动启动并提供新日志；
+沿用 GPU280 时无需 mailbox。不默认启用 `x9_mgwipe=3` 缓存重建。确切提交、候选路径、构建结果与
+下一动作见 [`../../NOTES.md`](../../NOTES.md) 的相机交接。
 
 ## 基础接口与历史实现记录
 

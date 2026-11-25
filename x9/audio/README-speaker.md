@@ -63,7 +63,7 @@ MMU／D-cache 来掩盖问题。目标是减少整棵树的重复工作，不预
 验收必须看到 ADSP 返回／明确不授权退路 → boot_args／jump → Darwin。
 没有新的上机证据前，不标记 loader 回归已修或音频可用。
 
-完整证据和编译边界见 [NOTES.md 的 BOOT-AUDIO-AUDIT](../../NOTES.md#音频-loader-原因复核boot-audio-audit2026-11-11)。
+完整证据和编译边界见 [`../../NOTES.md`](../../NOTES.md) 与 Git 历史中的 BOOT-AUDIO-AUDIT。
 原始日志仍在私有 `.local/x9/work/dual-sim-187/boot130-disk-20261110-164549/`；
 只读统计／冻结源码单位对象分析在 `.local/x9/work/audio-loader-audit-20261111/`，不入 git。
 本次仅补文档，无代码修改、构建、CI、测试套件或设备操作。
@@ -96,12 +96,12 @@ AFE/stream/resource 状态 selector 只返回缓存，不申请硬件资源。
 以下保留为接线齐后最终构建的入口：
 
 ```sh
-/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I \
-  x9/audio/build.py --out x9/out/speaker-hal-only/audio
+python3 -I x9/audio/build.py --out x9/out/speaker-hal-<unique-name>/audio
 
 # 完整 kernel 构建会自行构建、签名并嵌入 speaker HAL，无需先执行上一条。
-/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I \
-  x9/build/build.py kernel --name speaker-final
+PATH=/opt/homebrew/opt/llvm@22/bin:$PATH \
+python3 -I x9/build/build.py kernel \
+  --boot-config x9/build/boot-device.json --name speaker-<unique-name>
 ```
 
 输出 `audio/X9Audio.driver`、`audio/audioctl`（iOS 16 arm64、adhoc 签名）

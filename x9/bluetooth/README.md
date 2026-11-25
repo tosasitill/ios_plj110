@@ -2,19 +2,35 @@
 
 目标是未修改的 iOS **16.7.16 / 20H392** `bluetoothd`，不是 AppleBT kernel user-client 的仿制品。
 本目录的 H4/vendor 适配仅修改经过 UUID 与指令校验的进程内映射，不改 Apple 原件文件。
-**当前不可 stage：SSPM移交需要当前启动的真实寄存器匹配，vendor序列已嵌入但尚无XNU回包证据，sleep/resume与iOS验收未完成。**
 
-## 当前入口
+## 当前状态与证据（2026-11-26）
 
-- `x9_bt=1` 注册 metadata service 与 `/dev/cu.bluetooth`。当前 boot-device 已有此项，但不启动硬件下载。
+- **passive 默认**：`x9/build/boot-device.json` 只有 `x9_bt=1`，注册 metadata service 与
+  `/dev/cu.bluetooth`，但不启动硬件下载。完整初始化候选必须显式追加
+  `x9_bt_init=1 x9_bt_fc=1`；`x9_bt_fc=1` 使用 MTK SW 流控。
+- **历史设备观察**：`~/425.txt` 对应 `x9-bt-vendor-events-20261125`（提交 `414cbe3f`）。
+  FE01 被识别为 connac3 动态固件 section 请求并完成 section 2 重载；完整 capabilities 已返回；
+  `0xE0..0xFF` 厂商事件在 Apple H4 parser 前消费后，先前的 reason-607 崩溃消失，bluetoothd
+  存活超过 139 s。这不是当前主线或当前设备状态的重新验收。
+- **仍未验收**：Settings 灰色、`BluetoothManager.available`、实际扫描/配对/连接/BLE、
+  A2DP/HFP/SCO 双向声音、睡眠与活动连接 suspend/resume。H4 只提供 HCI，不是 PCM codec。
+- **Settings 候选**：`.worktrees/bt-default-on` 的
+  `x9-bt-settings-diag-20261125-r2` 已有完整 host 构建，但未刷入、未安装 root、未运行
+  Preferences 诊断 hook。`BluetoothManager` 只有 `[self+0x18]==2` 才 available；五个原生
+  setup 调用全部成功才写 state 2，不能直接改 state 或伪造 native 返回。
+- 根 payload 的 `candidate_ready`、`stageable`、`root_installed` 与
+  `runtime_verified/audio_verified` 是不同状态；当前没有搜索或音频成功证据。
+
+## 启动入口
+
+- `x9_bt=1`：注册 metadata service 与 `/dev/cu.bluetooth`；不启动硬件下载。
 - 旧 `x9_bt_probe` / `x9_bt_raw` ROM 探针与用户侧 H4 注入路径已移除；selectors 2/3 返回 unsupported。
-- `x9_bt_init=1` 是完整 session 的 worker 入口，**当前不加入 boot-device，也不交付部分初始化镜像**。
-  它不是绕过前置的开关，无法跳过 SSPM handoff / ownership；失败仍保留确切 errno。
-- 完整初始化还要求显式 `x9_bt_fc`（Android `UART_FC` enum：0=NONE、1=MTK SW、2=Linux、3=HW）。
-  缺失 `ENOENT`、范围外 `EINVAL`、尚未实现的Linux/HW模式 `ENOTSUP`，全部在供电前返回。
-  **2026-11-15实际运行证据为 `uart_launcher -f 1 -p /dev/ttyS3`**：现已实现MTK SW的AP硬件backend，
-  enum1→WMT byte0x80，不能选0绕过。仍不向boot-device添加init/fc参数或生成部分初始化镜像。
-- `kern.x9_bt_boot` 默认 `ENXIO`，仅完整 session 到 DONE 且 driver_owned 才可为0。
+- `x9_bt_init=1`：完整 session 的 worker 入口。它不是绕过 ownership/SSPM handoff 的开关，
+  失败仍保留确切 errno；完整初始化镜像必须同时提供 `x9_bt_fc`。
+- `x9_bt_fc`：Android `UART_FC` enum，0=NONE、1=MTK SW、2=Linux、3=HW。
+  缺失 `ENOENT`、范围外 `EINVAL`、尚未实现的 Linux/HW 模式 `ENOTSUP`，全部在供电前返回。
+  enum 1 配置 AP 的 MTK SW backend（WMT byte `0x80`），不能选 0 绕过。
+- `kern.x9_bt_boot` 默认 `ENXIO`，仅完整 session 到 DONE 且 driver_owned 才可为 0。
   明确睡眠后为 `EHOSTDOWN`，转换中为 `EBUSY`，不能把保留固件当作 awake。
   `kern.x9_bt_stage` 是最后返回的 session stage，**不是 ready 指标**。
 - `kern.x9_bt_power` 是同步的明确 ownership 请求：0=awake/resume、1=asleep、2=初始化/转换/不可用。
@@ -36,16 +52,12 @@
   8250参考原件的SW分支与源码一致；escape与XON/XOFF由UART硬件处理，不二次软件转义H4或下载原始流。
   只启用PIO的RDI/RLSI，屏蔽无handler的XOFF/RTS/CTS IRQ；baud/bank/IER修改与真实RX IRQ共用锁。
   失败回滚还恢复XON/XOFF/INB_WORD bank，不只恢复DLL/DLH/EFR。**实现已编译不代表24M PIO已上机验证。**
-- **SSPM移交实现，未在XNU实跑**：Android generic CMM24M config 是 TODO，不能据此给CMM写AP参数。
-  本次已只读取到活跃slot的2MiB SSPM原件，ID0/1/99与BL2 loader结构匹配；ID1为RV32/RVC代码。
-  原件含CMM映射及endpoint写入，静态厂商分支仍不能单靠sample值推波特率。
-  已有备份和当前加载的原始 `uarthub_drv.ko` 的 `uarthub_config_baud_rate_mt6993`
-  也在24M分支直接返回0、无配置写入。本次补采的Android启动日志在11.067400..469、15.504009..124记录
-  实测hub208MHz/mux2以及dev0/CMM的sample7/point4/DLL1/fracdb,1/EFRa/XON11/XOFF13/escape1/db/DMA3。
-  新post_download只在当前SSPM request-ready/resources、208MHz mux、CRC enabled及两端完整配置匹配后恢复multi-host，
-  按Android启用MD/ADSP FIFO及host-awake反馈。DLH必须为0以证明完整divisor=1；不重写CMM或非SSPM PLL路径。
-  非生产SW流控、inband或任何配置不符仍ENOTSUP，不以静态原件/共享SRAM当作当前移交成功。
-  host-awake state bit11、SET bit2、CLR bit4已区分；XNU移交与真实反馈验证仍须实机证明。
+- **SSPM/CMM 移交**：Android generic CMM 24M config 是 TODO，不能据此给 CMM 写 AP 参数。
+  当前离线材料包含活跃 slot 的 2 MiB SSPM 原件、ID 0/1/99 与 BL2 loader 结构，以及 Android
+  启动日志中的 hub 208 MHz/mux 2 与 dev0/CMM 配置。post_download 只在当前 request-ready、
+  resources、208 MHz mux、CRC 与两端配置全部匹配后恢复 multi-host；非生产 SW 流控、inband
+  或任何配置不符仍 `ENOTSUP`。log 425 的 capabilities/FE01 证据不替代 CMM 移交、sleep/resume
+  或活动连接 suspend 的独立验收。
 - `x9_bluetooth.c`：将 session/下载器接入 worker；XO必须读取已有7个boot args且record长度25，不使用默认校准。
   UART3真实SPI0x148+32的IRQ收包、32KiB原始ring、worker WMT完整帧与opcode选择、保留无关包、实际partial TX。
   不宣称这是Linux APDMA，也不启用没有resume callback的wake-enhance。失败先关自己的IRQ、复位BT、按lease清理。
@@ -65,7 +77,8 @@
   BDADDR反序、radio的signed-byte长/短分支、功率表96+6+96+6交错、sleep literal尾部覆盖均按原load/store实现。
   尚未移植的可选表/属性分支在构建时报错，不会静默跳过；缺输入的passive stub在runtime供电前ENOENT。
   session供电前校验**全部**packet，再在function-on后顺序等待每条真实Command Complete/status0，记录失败step/opcode/status，
-  无模糊TX重试，最后确切FC37 append不可缺失。controller_config不再是固定ENOENT；**未在XNU实机执行**。
+  无模糊TX重试，最后确切FC37 append不可缺失。controller_config不再是固定ENOENT；log 425已观察完整capabilities，
+  但搜索、配对、连接、睡眠与音频仍须各自验收。
   不将注释中的VENDOR_CMD或源码示例 `bt.cfg` 当作生产配置。
   `uart_launcher` 的 `HCIUARTSETBAUD` 保存用户所选配置；node==1的LOADPATCH是no-op，下载在pre_open。
   `bt.cfg` loader只编入node==0路径，不能把node==1的生产HAL/vendor流程错误归成“等待bt.cfg”。
@@ -136,9 +149,9 @@
 - `X9BlueTool -R`实现原件 `com.apple.BlueTool` XPC契约，`RunBuiltinScript boot/init`明确调用 resume，deepsleep 明确调用 sleep；
   成功前验证实际 power/boot 与 resume 后完整 IO READY。失败result1、原始BSD errno另存x9_errno；不吞 EPERM、不合成manufacturer/firmware，未知命令拒绝。
   launcher 与无旧 FD/RX 线程的 H4 reopen 同样调用 resume，不用 boot-status 冒充睡眠。
-- **未完成**：XNU上完整vendor序列回包与SSPM/CMM移交验证、MTK SW PIO实机验证、Linux/HW backend、sleep/firmware-own/resume 实机验证、
-  实机COW与能力/缓存路由、启动及场景验收。
-  当前不安装或修改root上的launch plist。
+- **未完成**：完整 vendor/session 的当前主线复验、CMM/SSPM 移交与 MTK SW PIO 的独立证据、
+  Linux/HW backend、sleep/firmware-own/resume 实机验证、实机 COW 与能力/缓存路由、Settings 可用性、
+  扫描/配对/BLE 与 A2DP/HFP/SCO 音频验收。当前不安装或修改 root 上的 launch plist。
 
 ## 编译与只读核对
 
@@ -149,7 +162,7 @@ python3 -I x9/bluetooth/build.py --kernel-objects --out x9/out/bluetooth-native/
 编译/adhoc签名 `btctl`、`X9H4Transport.dylib`、`X9BluetoothLaunch`、`X9BlueTool`；单独编译6个BSD对象、UART IRQ hook及2个IOKit owner对象。
 使用常规BT/Wi-Fi私有生成器；不链接完整kernel、不打包boot、不测试、不安装、不操作设备。
 输出 `build.json` 保持 `stageable=false`。
-完整显式 init 构建拒绝重复 selector，要求已实测的 `x9_bt=1 x9_bt_init=1 x9_bt_fc=1` 和全部原始 firmware/connfem/vendor 输入。
+完整显式 init 构建拒绝重复 selector，要求 `x9_bt=1 x9_bt_init=1 x9_bt_fc=1` 和全部原始 firmware/connfem/vendor 输入。
 并行构建可用 `x9/xnu/build-xnu.sh macos --isolated x9/out/<唯一名>/dxb`，不修改共享 `.local/dxb*/xnu`。
 `x9/bluetooth/package.py --runtime <完整userland输出> --out x9/out/<新名>` 只生成离线 root payload，
 保留原始 jobs 与只改 Program 的候选，**不安装，不写设备，不等于原生运行验收**。
@@ -211,6 +224,22 @@ payload 上限251按原模块声明 maxlen255/四字节wire头的安全预算设
 真实控制器已报告 SCO244。长度回绕或畸形帧 fail closed，硬件SW转义不再软件二次编码。
 这项修复是传输适配，不证明 HCI voice-route、WBS 配置或 HFP/SCO 音频验收成功。
 
+### HCI 与 PCM 是两条独立链
+
+- `X9H4Transport` 只复用 Apple 的 H4 HCI open/RxLoop/TX/close；kernel serial FIFO 也不是 codec。
+  UART SCO 长度转换只保证 H4 wire 形状，不产生或消费 PCM。
+- 当前 X9 `AudioServerPlugIn` 只有 Speaker/Hawking，没有 X9 编写的 Bluetooth PCM consumer。
+  AP↔DSP/AFE ring、`3D00` 或 FC72 都不是 Bluetooth PCM 路由证据。
+- 20H392 原生 `bluetoothd` 仍有 XPC audio publication、A2DP start/stop/data、HFP SCO completion、
+  HFPAudioDevice 与 HCI send-thread 等候选消费者；静态符号存在不证明它们在 X9 上成功实例化。
+- Android traced HFP 使用标准 HCI `0x043D`，input/output data path 位于 payload offset 50/51。
+  FC72 是 MTK voice-interface 初始化，不是 per-codec route，也不能替代标准 HFP 状态机。
+- A2DP 最小验收链：真实 controller/ACL → Apple A2DP 初始化与编码器 → start/stop/suspend →
+  media payload → 对端实际声音；HFP 最小验收链：SCO/voice-setting → `0x043D` 与连接状态 →
+  双向 PCM callback → 对端与 X9 实际声音。
+- 下一离线步骤是追 HFP HCI data-source 选择与 SCO buffer callbacks，再对照 X9 AudioServer
+  缺少的 consumer；不得伪造 route state、PCM callback 或 audio_verified。
+
 `python3 -I x9/tools/bluetooth_vendor.py --required` 是纯标准库的原件移植构建入口，生成gitignored
 `x9/kernel/generated/x9_bt_vendor.inc`。`build.py all`也接此生成器；显式`x9_bt_init=1`时要求完整原件，
 不能从零输入生成“成功的空vendor初始化”。私有生成物包含地址/校准，不入git、不打印参数。
@@ -235,7 +264,8 @@ btctl --sections
 sysctl kern.x9_bt_boot kern.x9_bt_stage
 ```
 
-必须后续验证完整HCI Reset/真实capabilities、扫描/配对/BLE，A2DP/HFP/SCO单独验收；当前没有这些成功证据。
+log 425 已提供 HCI Reset 后 capabilities 与厂商事件过滤的历史证据；当前主线仍须复验完整初始化，
+并单独验收扫描/配对/BLE、A2DP/HFP/SCO。不得把这些历史观察外推为当前设备搜索或音频成功。
 
 ## Android在线原件取证与离线解码
 

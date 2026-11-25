@@ -1,24 +1,38 @@
 # X9 native GPU backend
 
-**Current state (see `../../NOTES.md` for the live handoff).** The desktop is
-rendered by the GPU. Path: backboardd -> Apple Metal API -> the
-`X9GeneralMetal<rev>` plugin (metal2vulkan runtime + AIR frontend) -> PanVK
-(`X9PanVK<rev>`, Mesa with `x9/metal/General/panvk/*.c`) -> the kernel's
-`X9Render*` IOKit user client -> a resident CSF render engine on the MT6993
-Mali (persistent MCU session, 8 CSG slots, parked render group, async
-submission, live map/unmap, IOSurface-lock-driven CPU cache maintenance).
-Plugins ship through the mailbox (`../mailbox/README.md`); current revision 275.
-Typical figures: 17-22 fps, GPU stack pinned at 1716 MHz, per-job wait
-6-15 ms (memory-bandwidth bound; DVFSRC bring-up in progress).
+**Current source state (2026-11-26; see [`../../NOTES.md`](../../NOTES.md) for the live handoff).**
+The desktop rendering path is backboardd → Apple Metal API → `X9GeneralMetal<rev>`
+(metal2vulkan runtime + AIR frontend) → `X9PanVK<rev>` (Mesa plus
+`x9/metal/General/panvk/*.c`) → the kernel `X9Render*` user client → a resident
+CSF render engine on the MT6993 Mali. The implementation includes persistent MCU
+sessions, CSG slots, parked render groups, async submission, live map/unmap and
+IOSurface-lock-driven CPU cache maintenance.
 
-Known gaps: CSG slots are bound per process until the device closes (the 9th
-client fails), a 256 px-period vertical seam artefact during app open/close,
-no hardware vsync.
+Plugins ship through the [`../mailbox/README.md`](../mailbox/README.md); the current
+generated allowlist is revision **280**. That does not prove revision 280 is installed
+or that the current main branch has been retested. Historical 17–22 fps, fixed
+1716 MHz and 6–15 ms per-job figures belong to older captures and must not be
+presented as current performance.
 
-The sections below are the **historical pan166-pan171 bring-up** of the
-compute/private-tile path and the first general-renderer design. They are kept
-for the ABI and cache-ownership reasoning; pan numbers and "candidate" wording
-are obsolete (the project now uses `rev252xx` names).
+Current smoothness limits are structural, not a single clock setting:
+
+- 60/90/120 timing nodes and DCS switching code exist, but IOFB mode publication and
+  DSI PLL/PHY reconfiguration are not established.
+- Software cadence schedules 120 only when `hz==120`; every other value, including
+  90, falls back to 60 Hz.
+- The global enqueue watermark is not a frame-specific fence. Completion means CPU
+  visibility, not a calibrated GPU execution timestamp.
+- Two CPU flip buffers plus pending/ready records do not implement a complete
+  render/ready/scanning/free lifecycle.
+- `x9_fill=1` normally composites on CPU first and `directPresent()` commonly copies
+  again on CPU. Client-surface direct scan-out is disabled.
+- CSG slots remain bound per process until close (the ninth client fails), a
+  256 px-period vertical seam was observed during older app transitions, and
+  hardware vsync is absent.
+
+The sections below are **historical pan166–pan171 bring-up**. They remain useful
+for ABI and cache-ownership reasoning, but their candidate names, paths and
+performance observations are not current claims.
 
 ## Verified system compute
 
@@ -422,9 +436,10 @@ not advertised, because they bypass submission ownership; runtime image
 copy fallback submits through the same native driver. Internal and staging
 GPU submissions therefore use the same kernel ownership boundary too.
 
-Fresh read-only references are in work/references/UniXNU-gpu/: Adreno740,
-AdrenoMetal, GopFramebuffer, UniXNU-sm8550-common and UniXNU-sheng. Their exact
-commits are pinned in reference-inputs.json. The Adreno740 memory/VM code
+Historical reconstruction used read-only UniXNU-gpu references under
+`work/references/UniXNU-gpu/`; current fixed references belong under `.local/references/`.
+The Adreno740, AdrenoMetal, GopFramebuffer, UniXNU-sm8550-common and UniXNU-sheng
+commits were pinned in the historical reference-inputs.json. The Adreno740 memory/VM code
 separates explicit publication/acquisition from a board-proven IO-coherent
 fast path. X9 reuses that ownership principle with MT6993 operations; it does
 not import Qualcomm registers, SMMU setup or their4KiB host-page assumptions.

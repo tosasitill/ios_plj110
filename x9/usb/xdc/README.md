@@ -1,5 +1,11 @@
 # X9Mtu3Xdci: MTU3 device controller behind Apple's USB device stack
 
+> **Static ABI and preparation only (2026-11-26).** This directory documents the
+> native-controller design and verified ABI work. It is not an installed or
+> device-verified Apple USB stack. The runnable X9 path remains CDC-ECM plus the
+> private bulk interface described in [`../README.md`](../README.md); there is no
+> installer/binder for `X9Mtu3Xdci`, and Mac enumeration/pairing is unverified.
+
 Goal: a kernel `X9Mtu3Xdci : IOUSBDeviceController` drives the MT6993 MTU3 device
 controller so the unmodified 20H392 `IOUSBDeviceFamily`, `AppleUSBDeviceMux`,
 configd `USBDeviceConfiguration` and `lockdownd` enumerate as an iPhone and pair

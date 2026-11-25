@@ -1,6 +1,10 @@
 # X9 AppSync / 越狱用户态接入
 
 这是 **20H392、arm64 的离线候选**，不是已验收的完整越狱或 Mac 配对镜像。
+当前私有 runtime 为 **v6**，包含 storage repair 工具与注入/storage 链；历史 `~/428.txt`
+有 v6 注入/storage repair 运行证据，但没有 Mac 传输后的真实 IPA 安装、应用启动或持久性验收。
+kernel 只验证并注入精确 runtime 环境，不安装这些文件。当前 `.local/` v6 路径与候选 manifest
+是私有构建输入，不提交到 Git。实际状态以 [`../../NOTES.md`](../../NOTES.md) 为准。
 不改 Apple executable、launchd plist、dyld cache，也不移植 sheng 的
 arm64e/PAC、SPTM、trust-cache-v2、DWC3 或全局 vtable 补丁。
 
@@ -29,10 +33,10 @@ arm64e/PAC、SPTM、trust-cache-v2、DWC3 或全局 vtable 补丁。
 ## 构建（只在 Mac）
 
 ```sh
-python3 -I x9/appsync/build.py --out .local/x9/appsync/runtime-NEW
+python3 -I x9/appsync/build.py --out x9/out/appsync-runtime-<unique-name>
 ```
 
-输出目录必须是新的 `.local/` 或 `x9/out/` 子目录。生成：
+输出目录必须是新的 `x9/out/` 子目录；不在 `.local/` 新建实验目录。生成：
 
 - `root/private/var/x9/jailbreak/20H392/{lib,bin,licenses}`；
 - `runtime.json`：签名后的库/工具 metadata；
@@ -46,7 +50,7 @@ AppSync 是独立 GPL-3.0-or-later 用户库，归属见 `vendor/PROVENANCE.md`�
 正常内核构建使用私有 local config 的：
 
 ```json
-{"appsync_runtime": ".local/x9/appsync/runtime-NEW/runtime.json"}
+{"appsync_runtime": "x9/out/appsync-runtime-<unique-name>/runtime.json"}
 ```
 
 `build.py` 只生成 gitignored `x9_appsync_runtime.inc` **哈希 metadata**。
@@ -62,7 +66,7 @@ AppSync 是独立 GPL-3.0-or-later 用户库，归属见 `vendor/PROVENANCE.md`�
 2. 仅库文件就位还不算成功：必须看见 `X9 APPSYNC: verified runtime environment
    appended`，随后真实 installd/Helper/SpringBoard 的 adapter active 日志。
    ABI mismatch 或 loader error 时返回该层，不虚报“可以安装”。
-3. 设备上可执行（须先提供真正的控制会话，当前并未提供 shell）：
+3. 只有 runtime 已 staging 且注入链确认活跃后，才在设备 iOS 的已授权控制会话执行：
 
    ```sh
    /private/var/x9/jailbreak/20H392/bin/x9-jbctl --status

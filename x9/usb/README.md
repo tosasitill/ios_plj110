@@ -1,9 +1,20 @@
 # X9 USB2 device 开发
 
-## AppSync / 原生 IPA 安装入口（2026-11-12，未实机验收）
+## 当前状态（2026-11-26）
 
-`../appsync/` 现在提供独立的 iOS16 arm64 安装/FrontBoard hooks、递归 ldid
-签名器及离线 runtime；不改 Apple executables。构建成功不代表运行库已经
+- 已实现并编译的路径是 USB2 CDC-ECM `ue0` 与自有 private bulk；不是原生
+  `IOUSBDeviceFamily → AppleUSBDeviceMux → lockdownd` 栈。
+- MTU3 native controller/ABI、NATIVE10/11/13 等代码存在，但没有 installer 或完整 binder，
+  `native_apple_stack=0`。当前没有 X9 的 Mac 枚举、Trust/Pair/TLS 或 Finder 配对证据。
+- AppSync v6 的注入/storage repair 链有历史运行证据；从 Mac 经 AFC/installation_proxy
+  安装 IPA、应用实际启动与跨重启持久性均未验收。
+- 当前设备不支持临时 `fastboot boot`。只有明确授权时才写 `boot_b`，由用户手动启动；
+  不得改 GPT、bootloader、recovery、modem、persist 或 pinned root extents。
+
+## AppSync / 原生 IPA 安装入口（2026-11-12 起，未实机验收）
+
+`../appsync/` 提供 iOS16 arm64 安装/FrontBoard hooks、递归 ldid
+签名器及离线 v6 runtime；不改 Apple executables。构建成功不代表运行库已经
 staging，或 x9 原生 Apple USB backend 已经完成。
 
 `install.py` 使用真正的系统 usbmuxd/lockdownd：现有 Pair record → verified
@@ -70,7 +81,7 @@ receipt绑定原生设备 identity 的SHA256。Lookup只证明该bundle/version�
 在原生用户安装路径上，不证明未知的上次Install成功、实际启动或跨重启持久性。
 Lookup缺少LookupResult不当成“未安装”；receipt在首次上传前用O_EXCL原子占有，
 同receipt的两个并发调用不能互相覆盖in-flight状态后重复Install。
-**这不是新增的可Finder配对boot；registry仍为空，NATIVE10的bulk backend未安装。**
+**这不是新增的可 Finder 配对 boot；registry 仍无 installer，NATIVE10/11/13 backend 未安装。**
 
 **当前是已实现的 USB2 CDC-ECM + 自有 bulk 传输候选，不是已验收的完整 iPhone USB 栈。**
 尚无本版本实机枚举、DMA、网络或配对结果。USB3、Type-C 双角色、原生
@@ -97,7 +108,7 @@ Lookup缺少LookupResult不当成“未安装”；receipt在首次上传前用O
 
 新 worker 与日志 worker **二选一**，不同时操作 MTU3。保留已验证的 LK
 USB2 PHY/时钟初始化，不猜测完整冷启动上电序列；不会切 host 角色或输出 VBUS。
-设备仍由用户手动临时 `fastboot boot`，不写 boot/GPT/固件分区。
+设备由用户手动启动明确授权的 `boot_b` 候选，不写 GPT/固件分区；本工具自身不刷机或重启。
 
 iOS 用户工具由常规 kernel 构建生成到输出目录的 `usb/usbctl` 与
 `usb/libx9usb.a`，**不自动安装**。首次往根盘 staging 必须另确认并按项目 extent

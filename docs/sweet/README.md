@@ -1,15 +1,15 @@
 # ios-sweet (Redmi Note 10 Pro / SM7150) — 历史存档
 
-> 这是项目最初的 sweet 移植的 README(2026-10-18 状态),已不再维护。当前工作是 OPPO Find X9,见仓库根 `README.md` 与 `x9/`。
+> 这是项目最初的 sweet 移植的 README(2026-10-18 状态),已不再维护。当前工作是 OPPO Find X9,见仓库根 [`README.md`](../../README.md) 与 [`x9/`](../../x9/README.md)。
 > 文中 `tools/`、`shim/`、`xnu/`、`site/` 仍是 sweet 时代代码,相对路径以仓库根为准。
 
 > **This repository also carries the OPPO Find X9 port (`x9/`).** That work is a
 > separate bring-up for the OPPO Find X9 / PLJ110 / MT6993: direct LK shim,
 > XNU `8796.141.3` with its own patch series, native UFS extent root, and the
 > Mali/PanVK/Metal render path. It shares the boot-flow ideas below but none of
-> the Qualcomm (SM7150) code. Start at [`x9/README.md`](x9/README.md) for status
-> and [`x9/BUILD.md`](x9/BUILD.md) to build it. Everything below describes the
-> sweet port.
+> the Qualcomm (SM7150) code. Start at [`x9/README.md`](../../x9/README.md) for status
+> and [`x9/BUILD.md`](../../x9/BUILD.md) to build it. Everything below describes the
+> sweet port; its `fastboot boot` workflow does not apply to the X9.
 
 **Apple's iOS 16 running on a Redmi Note 10 Pro.**
 
@@ -207,7 +207,8 @@ Not in git: partition backups, live device trees, recovery images, Apple firmwar
 - Touch: Goodix GT9896 at I²C `0x5d` on QUP SE7 (`0xa84000`), powered by PM6150L LDO11 through RPMh.
 - Buttons: power and volume down on the PM6150 PON block, volume up on PM6150L GPIO2 (SPMI SID 4).
 
-More in [`NOTES.md`](NOTES.md).
+The sweet engineering log is preserved in Git history; the current X9 handoff is
+in [`../../NOTES.md`](../../NOTES.md).
 
 ## Credits
 
