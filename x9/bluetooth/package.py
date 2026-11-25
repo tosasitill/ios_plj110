@@ -19,12 +19,14 @@ ROOT = Path(__file__).resolve().parents[2]
 UUID = 'AA9424E8-0648-34E2-B3CF-E6C793B9D471'
 STOCK_SHA = '8b7c0a0bea51544db82269d7f2775ab7996b8740927283428c4753e032df3a8f'
 SETTINGS_PATH = '/System/Library/PrivateFrameworks/PreferencesUI.framework/Settings.plist'
+SETTINGS_DIAG_PATH = '/usr/lib/X9SettingsBTDiag.dylib'
 SETTINGS_SHA = 'eaa1d66b12febdb8f03aec21ae0724916830e499c14657d3da712039280d0957'
 BINARIES = {
     'btctl': '/usr/bin/x9-btctl',
     'X9H4Transport.dylib': '/usr/lib/X9H4Transport.dylib',
     'X9BluetoothLaunch': '/usr/libexec/X9BluetoothLaunch',
     'X9BlueTool': '/usr/libexec/X9BlueTool',
+    'X9SettingsBTDiag.dylib': '/usr/lib/X9SettingsBTDiag.dylib',
 }
 JOBS = (
     ('com.apple.bluetoothd', '/usr/sbin/bluetoothd', [],
@@ -85,6 +87,15 @@ def package(runtime, out, settings_original=None):
             or value.get('bridge') != 'X9H4Transport.dylib'
             or value.get('launch_gate') != 'X9BluetoothLaunch'
             or value.get('bluetool_adapter') != 'X9BlueTool'
+            or value.get('settings_diagnostic') != 'X9SettingsBTDiag.dylib'
+            or value.get('settings_diagnostic_default') is not False
+            or value.get('settings_diagnostic_contract') != {
+                'preferences_uuid': 'B2ED1830-FB2B-3702-B254-17872B2E0A97',
+                'manager_uuid': '54FB08F7-FE66-344D-B7CE-31838CDEE572',
+                'mobile_bluetooth_uuid': 'FDE5B98E-2257-35C8-B323-92B824492207',
+                'hook_count': 7, 'boot_arg': 'x9_bt_settings_diag=1',
+                'log_interface': 'kern.x9_bt_note', 'manager_state_modified': False,
+            }
             or value.get('power_interface') != 'kern.x9_bt_power'
             or value.get('power_lifecycle') != 'closed-transport-only'):
         raise ValueError('requires the complete version-locked native/power bridge build')
@@ -168,6 +179,8 @@ def package(runtime, out, settings_original=None):
         'runtime_verified': False, 'audio_verified': False,
         'installed': False, 'stageable': False,
         'power_interface': 'kern.x9_bt_power', 'power_lifecycle': 'closed-transport-only',
+        'settings_diagnostic': SETTINGS_DIAG_PATH, 'settings_diagnostic_default': False,
+        'settings_diagnostic_contract': value['settings_diagnostic_contract'],
         'files': entries, 'original_jobs': backups[:2],
         'original_launchd_cache': backups[2],
         'original_settings': backups[3] if settings is not None else None,

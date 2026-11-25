@@ -160,6 +160,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-25 feat/bt-settings-root → Preferences 蓝牙 setup 诊断（本地编译/打包完成，未上机）
+
+- **范围/基线**：工作树 `.worktrees/bt-default-on`、分支 `feat/bt-settings-root`，起点 `ceee23ce`；根 checkout 的并行 call/SMS/MIPC 未提交工作未触碰。用户报告 Settings 蓝牙开关仍灰色；本轮没有刷机、重启、root 写入或 live sysfs 操作，设备状态未重新探测。
+- **观察与静态证据**：log 429 已证明 MT6653 worker、固件、H4 bridge、FE01 重载与 HCI 能力发布通过，但不证明 Settings/BluetoothManager 可用。20H392 `BluetoothManager.available` 仅在 `[self+0x18] == 2` 时为真；`_setup:` 依次调用 `BTServiceAddCallbacks`、`BTLocalDeviceGetDefault`、`BTLocalDeviceAddCallbacks`、`BTAccessoryManagerGetDefault`、`BTAccessoryManagerAddCallbacks`，五项均成功才写状态 2。`__btSessionEventCallback` 仅在两个 status word 均为 0 时触发 setup。具体失败调用仍未观测，不能先认定修复层。
+- **实现**：新增 `x9/bluetooth/X9SettingsBTDiag.c`，仅在 Preferences 且 `X9_BT_SETTINGS_DIAG=1` 时加载；校验 Preferences/BluetoothManager/MobileBluetooth 三个固定 UUID、实际 `MH_EXECUTE`、符号所属 image 与七处原始 ARM64 prologue 后，用 COW trampoline hook 六个 MobileBluetooth 导出和 `__btSessionEventCallback`。native 参数/结果/callback 原样转发，只记录 enter/result/status；不写 `BluetoothManager+0x18`、不伪造 `BTResult`、不合成 callback。文本页保持 R|X，临时页仅 R|W|COPY，写入前后失效 icache；日志走既有 `kern.x9_bt_note` 并保存/恢复 `errno`。
+- **注入/root 边界**：新增 `x9/kernel/src/bsd/kern/x9_bt_settings_exec_env.inc`，由默认关闭的 `x9_bt_settings_diag=1` 开启，只匹配 `/Applications/Preferences.app/Preferences`；已有 `DYLD_INSERT_LIBRARIES` 或 `X9_BT_SETTINGS_DIAG` 时完全保留并跳过。注入前从生成 payload 元数据读取诊断文件的精确 size/SHA/mode，经 `x9_btr_check` 校验实际安装文件。rollback 关闭诊断注入，并由通用 root rollback 删除当前精确 hash 的自有诊断文件。build/package/candidate 已接入第五个自有二进制；`launchd.plist` 仍是最后提交文件，`X9 BT ROOT:` 是唯一安装回执。
+- **本地验证（不是实机功能验收）**：`python3 -I x9/bluetooth/test_settings_diag.py` 3 项通过；`git diff --check` 通过。最终 userland 构建到 `x9/out/bt-settings-userland-final-20261125/`，诊断 dylib arm64 iOS16 编译+adhoc 签名成功（仅有意的 constructor static-initializer linker warning）。真实九文件 payload 为 `x9/out/bt-settings-payload-final-20261125/`；`root_header.py` 嵌入 9 files / 1,237,772 B / 1 个可升级旧版本。隔离 XNU 树 `x9/out/bt-settings-xnu-20261125/dxb/` 基础构建成功；最终 `kern_exec.o` 在嵌入最终 root header 后再次编译通过（161 个既有 warning，无 error）。无 CI run ID。
+- **未完成/下一步**：尚未构建完整候选 boot.img；先汇总 bluetoothd session-attach 研究，再按既有 `candidate.py` 一次构建 native userland、九文件 payload、完整 overlay kernel、主 boot 与关闭诊断的 rollback boot。上机后仅开启 `x9_bt_settings_diag=1`，先抓五个 setup 调用和 session callback 的 native 返回值，再决定修复层。安装诊断 dylib、修改 Settings.plist/launchd cache、刷写新 boot_b 均需新的明确用户授权；扫描、配对、BLE、A2DP/HFP/SCO 仍未验收。
+
 #### 2026-11-25 log 429 → feat/bt-default-on（蓝牙默认初始化 + x9_mdlog=0 降温候选；worker/固件/HCI 已上机）
 
 - **观察（log 428）**：batch r1 已获用户授权仅写入 `boot_b` 并重启；AppSync v6 注入 SpringBoard，jbctl `--repair-container`/`--ensure-local-storage` 均 exit 0；ALS 已派发真实 lux=232，proximity 已派发真实 near=1，并收到原生 ENABLE/DISABLE ACK errno=0。日志中无内核 panic/reset 标记；AegirPoster 仍反复崩溃。
