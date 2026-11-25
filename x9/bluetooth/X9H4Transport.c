@@ -112,22 +112,35 @@ static int serial_open(uint32_t mode,const char *configuration)
 }
 __attribute__((constructor)) static void install(void)
 {
-    const struct mach_header_64 *h=(const struct mach_header_64 *)_dyld_get_image_header(0);
-    x9_bt_note("X9 H4: constructor entered (%s)\n",getprogname());
-    if(!h || h->magic!=MH_MAGIC_64 || h->cputype!=CPU_TYPE_ARM64 || h->cpusubtype!=0 ||
-       h->filetype!=MH_EXECUTE || h->sizeofcmds>65536) return;
+    /* Image 0 is not guaranteed to be the main executable once
+     * DYLD_INSERT_LIBRARIES is set; pick the one MH_EXECUTE image and use
+     * its own slide. Every early return reports why (log bt3: silent). */
+    const struct mach_header_64 *h=NULL; uint32_t index=UINT32_MAX,count=_dyld_image_count();
+    for(uint32_t i=0;i<count;i++) {
+        const struct mach_header_64 *m=(const struct mach_header_64 *)_dyld_get_image_header(i);
+        if(m && m->magic==MH_MAGIC_64 && m->filetype==MH_EXECUTE) { h=m; index=i; break; }
+    }
+    x9_bt_note("X9 H4: constructor entered (%s) exe=%u/%u\n",getprogname(),index,count);
+    if(!h) { x9_bt_note("X9 H4: no MH_EXECUTE image; no table changed\n"); return; }
+    if(h->cputype!=CPU_TYPE_ARM64 || (h->cpusubtype&~CPU_SUBTYPE_MASK)!=0 || h->sizeofcmds>65536) {
+        x9_bt_note("X9 H4: unexpected header cpu=%#x sub=%#x cmds=%u; no table changed\n",
+                   (unsigned)h->cputype,(unsigned)h->cpusubtype,(unsigned)h->sizeofcmds);
+        return;
+    }
     const uint8_t *at=(const uint8_t *)(h+1),*end=at+h->sizeofcmds;
     int locked=0;
     for(uint32_t k=0;k<h->ncmds;k++) {
-        if((size_t)(end-at)<sizeof(struct load_command)) return;
         const struct load_command *c=(const struct load_command *)at;
-        if(c->cmdsize<sizeof(*c) || c->cmdsize>(size_t)(end-at)) return;
+        if((size_t)(end-at)<sizeof(struct load_command) ||
+           c->cmdsize<sizeof(*c) || c->cmdsize>(size_t)(end-at)) {
+            x9_bt_note("X9 H4: malformed load command %u; no table changed\n",k); return;
+        }
         if(c->cmd==LC_UUID && c->cmdsize==sizeof(struct uuid_command))
             locked=!memcmp(((const struct uuid_command *)c)->uuid,original_uuid,sizeof(original_uuid));
         at+=c->cmdsize;
     }
     if(!locked) { x9_bt_note("X9 H4: unsupported bluetoothd UUID; no table changed\n"); return; }
-    slide=_dyld_get_image_vmaddr_slide(0);
+    slide=_dyld_get_image_vmaddr_slide(index);
     if(*uptr(OPEN_SLOT)!=address(NATIVE_OPEN) ||
        *uptr(CLOSE_SLOT)!=address(NATIVE_CLOSE) ||
        *uptr(0x100844180)!=address(NATIVE_WRITE)) {
