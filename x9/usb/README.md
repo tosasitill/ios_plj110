@@ -12,6 +12,36 @@ session → StartService(AFC/installation_proxy) → 唯一新目录上传 → �
 DeviceCertificate。不使用 private bulk/self-made mux，不替换 daemon。
 协议布局参照 libimobiledevice `src/afc.c` 和 `src/installation_proxy.c`。
 
+### 网络 lockdown 候选入口（`netlockdown.py`，未实机验收）
+
+20H392 的 `System/Library/LaunchDaemons/com.apple.mobile.lockdown.plist` 为
+lockdownd 声明了 IPv4/IPv6 62078 socket，所以网络 lockdown 既不需要 usbmuxd，
+也不需要 Apple USB device mux。`netlockdown.py` 是这条候选路径的主机端：同样的
+4 字节大端长度 + plist 帧走 TCP，`StartSession` 后仍按 DeviceCertificate pin
+升级 TLS，再 `StartService` AFC/installation_proxy。它复用 `pairing.py` 的
+证书生成、私有 record 路径/落盘规则和 `verified_session`，以及 `install.py`
+的 IPA 预检、AFC 上传与权威 Lookup；record 结构不通用：TCP 路径没有 usbmuxd
+serial，改用设备身份摘要，状态止于 `device-accepted`。不自动配对，不重放
+Pair/Install，不打印设备标识或对端错误原文（映射为固定类别）。
+
+以下前提都还没有实机证据：`x9_usb=1/2` 的 ECM `ue0` 链路可达；设备端
+`/Library/Lockdown/ServiceAgents` 服务表存在；installation_proxy 的 Install
+在 AppSync runtime 生效后真正可安装。任一步不满足都会停在 `--session` 或
+`--probe`，不得据此声称已安装。
+
+```sh
+# 首次：生成主机 record 并发送原始 Pair；Trust 仍只由设备 UI 接受
+python3 -I x9/usb/netlockdown.py --pair --record .local/x9/net/pair.plist
+# 已配对后：验证会话；再探测两个安装服务能否 StartService（只连接后关闭）
+python3 -I x9/usb/netlockdown.py --session --record .local/x9/net/pair.plist
+python3 -I x9/usb/netlockdown.py --probe --record .local/x9/net/pair.plist
+# 预检通过后才做唯一一次 Install；中断只能 --verify，不能重跑
+python3 -I x9/usb/netlockdown.py --install /path/to/Example.ipa \
+  --record .local/x9/net/pair.plist --receipt .local/x9/net/install-1.plist
+python3 -I x9/usb/netlockdown.py --verify --record .local/x9/net/pair.plist \
+  --receipt .local/x9/net/install-1.plist
+```
+
 **以下是原生 backend/Trust/TLS 已验收后的操作者步骤，不要现在选别的设备
 代替 X9 测试，也不要重复启动旧失败的 USB 候选：**
 
