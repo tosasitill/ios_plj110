@@ -15,16 +15,19 @@ static void (*during_md_lock)();
 static void lck_mtx_lock(int *){assert(!lock_depth);lock_depth=1;if(during_md_lock)during_md_lock();}
 static void lck_mtx_unlock(int *){assert(lock_depth);lock_depth=0;}
 static int x9_at_enabled(){return 1;}
-static int sweet_x9_arg(const char *,int){return 1;}
+static bool sms_diag_enabled;
+static int sweet_x9_arg(const char *name,int def){
+ return !strcmp(name,"x9_sms_diag")?sms_diag_enabled:!strcmp(name,"x9_dual_sim")?1:def;
+}
 static uint64_t fake_ms;
 static uint64_t mach_absolute_time(){return fake_ms*1000000;}
 static void absolutetime_to_nanoseconds(uint64_t t,uint64_t *ns){*ns=t;}
 static bool at_online=true;
 int x9_md_at_online(){assert(!lock_depth);return at_online;}
-static unsigned writes;
+static unsigned writes,last_length;static uint8_t last_frame[X9_MIPC_FRAME_MAX];
 static void (*during_write)();
-static int x9md_tx(unsigned a,unsigned b,unsigned c,unsigned d,unsigned e,const uint8_t *,unsigned n){
- assert(!lock_depth&&a==5&&b==217&&c==0&&d==16+n&&e==0);writes++;if(during_write)during_write();return 0;
+static int x9md_tx(unsigned a,unsigned b,unsigned c,unsigned d,unsigned e,const uint8_t *p,unsigned n){
+ assert(!lock_depth&&a==5&&b==217&&c==0&&d==16+n&&e==0);writes++;last_length=n;memcpy(last_frame,p,n);if(during_write)during_write();return 0;
 }
 #include "../../kernel/src/bsd/dev/x9_mipc_bridge.inc"
 /* This fixture owns no CALL allocation. Keep the shared transport's END
@@ -456,6 +459,7 @@ static void sms_ack_completion_physical_failure(){
  assert(x9m_incoming_sms[0].token==7&&x9_mm_slots[0].token==7);
 }
 static x9m_job &ack_command_admitted(uint8_t req[16]){
+ x9m_init_stage=2;x9m_sims[0].init=X9M_INIT_DONE;
  uint8_t p[24],out[24];x9cw_header(p,24,0x8601,1,44);x9cw_scalar(p+16,0x100,3,1);x9mi_rx(p,24);
  uint32_t n=0,token=0;assert(x9_md_mipc_message_event(out,24,&n,&token)==1&&token);
  auto &in=x9m_incoming_sms[0];in.token=token;in.delivered=true;in.generation=x9q_clients[0].generation;
@@ -507,6 +511,53 @@ static void sms_ack_retry_entry_scope(){
  x9q_clients[0].generation++;assert(!x9m_ack_repeated(CBQ_PORT_BASE,X9BB_NODE,X9BB_PORT_BASE+5,req,16));
  assert(j.op==X9M_ACK&&!replies&&!writes&&x9_mm_slots[0].state==3);
 }
+static void sms_diag_ready(unsigned sim){
+ x9m_init_stage=2;auto &s=x9m_sims[sim];s.wanted=s.ready=s.md_known=s.md_ready=true;s.init=X9M_INIT_DONE;
+}
+static x9m_job *sms_diag_job(unsigned sim){
+ for(auto &j:x9m_jobs)if(j.op==X9M_DIAG&&j.sim==sim)return &j;return nullptr;
+}
+static uint64_t sms_diag_status_cnf(uint64_t token,unsigned result=0){
+ uint8_t p[64]={};x9cw_header(p,sizeof(p),0x60c,1,(unsigned)token);x9cw_scalar(p+16,0,result,4);
+ x9cw_scalar(p+24,0x100,7,4);x9cw_scalar(p+32,0x101,11,2);x9cw_scalar(p+40,0x102,22,2);
+ x9cw_scalar(p+48,0x103,33,2);x9cw_scalar(p+56,0x104,0,1);x9cw_put16(p+14,48);x9mi_rx(p,sizeof(p));return token;
+}
+static void sms_diag_request_boundary(){
+ uint8_t p[24]={};x9cw_header(p,16,0x60b,1,0);assert(x9_md_mipc_submit(p,16));
+ p[8]=0;assert(!x9_md_mipc_submit(p,16));p[8]=3;assert(!x9_md_mipc_submit(p,16));
+ p[8]=1;x9cw_scalar(p+16,0x100,3,1);x9cw_put16(p+14,8);assert(!x9_md_mipc_submit(p,24));
+ x9_mm_poisoned=1;x9cw_header(p,16,0x60b,1,0);assert(!x9_md_mipc_submit(p,16));
+}
+static void sms_diag_disabled(){
+ sms_diag_ready(0);x9m_poll();assert(!sms_diag_job(0)&&!writes&&!x9m_sims[0].diag_stage);
+}
+static void sms_diag_status_then_cmgr_error(){
+ sms_diag_enabled=true;sms_diag_ready(0);x9m_poll();auto *jp=sms_diag_job(0);assert(jp&&jp->step==0&&jp->follow);
+ x9m_poll();assert(jp->token);x9mi_tick();assert(writes==1&&last_length==16&&x9q_u16(last_frame+10)==0x60b);
+ uint64_t status=jp->token;sms_diag_status_cnf(status);x9m_poll();assert(jp->op==X9M_DIAG&&jp->step==1&&jp->follow&&!jp->token);
+ x9m_poll();assert(jp->token);x9mi_tick();assert(writes==2&&x9q_u16(last_frame+10)==0x607);
+ assert(x9mm_one(last_frame,last_length,0x100,3)&&x9mm_one(last_frame,last_length,0x101,5));
+ assert(x9mm_one(last_frame,last_length,0x103,0)&&x9mm_one(last_frame,last_length,0x104,0));
+ auto index=x9w_tlv(last_frame,last_length,0x102);assert(index.p&&index.n==2&&x9q_u16(index.p)==1);
+ uint8_t p[32];x9cw_header(p,sizeof(p),0x608,1,(unsigned)jp->token);x9cw_scalar(p+16,0,0x210000,4);
+ x9cw_scalar(p+24,0x103,0,2);x9mi_rx(p,sizeof(p));x9m_poll();
+ assert(!jp->op&&x9m_sims[0].diag_stage==2&&!replies&&writes==2);
+}
+static void sms_diag_status_then_cmgr_success(){
+ sms_diag_enabled=true;sms_diag_ready(0);x9m_poll();auto *jp=sms_diag_job(0);assert(jp);
+ x9m_poll();assert(jp->token);x9mi_tick();sms_diag_status_cnf(jp->token);x9m_poll();
+ assert(jp->step==1&&!jp->token);x9m_poll();assert(jp->token);x9mi_tick();
+ uint8_t p[312]={},record[264]={};record[0]=1;record[3]=0;record[2]=2;
+ x9cw_header(p,sizeof(p),0x608,1,(unsigned)jp->token);x9cw_scalar(p+16,0,0,4);
+ x9cw_scalar(p+24,0x100,3,1);x9cw_scalar(p+32,0x103,1,2);x9cw_put16(p+36,1);
+ x9cw_put16(p+40,0x8104);x9cw_put16(p+42,264);memcpy(p+44,record,sizeof(record));x9cw_put16(p+14,296);assert(x9w_wire(p,sizeof(p)));x9mi_rx(p,sizeof(p));x9m_poll();
+ assert(!jp->op&&x9m_sims[0].diag_stage==2&&!replies);
+}
+static void sms_diag_status_failure(){
+ sms_diag_enabled=true;sms_diag_ready(0);x9m_poll();auto *jp=sms_diag_job(0);assert(jp);
+ x9m_poll();assert(jp->token);x9mi_tick();assert(writes==1);sms_diag_status_cnf(jp->token,0x210000);x9m_poll();
+ assert(!jp->op&&x9m_sims[0].diag_stage==2&&!replies&&writes==1);
+}
 int main(int argc,char **argv){
  assert(argc==2);x9mi_online(1);x9w_control_ready=true;
  struct {const char *name;void (*run)();} cases[]={
@@ -540,6 +591,8 @@ int main(int argc,char **argv){
   {"sms_ack_retry_before_identical",sms_ack_retry_before_identical},{"sms_ack_retry_before_changed",sms_ack_retry_before_changed},
   {"sms_ack_retry_after_identical",sms_ack_retry_after_identical},{"sms_ack_retry_after_changed",sms_ack_retry_after_changed},
   {"sms_ack_retry_malformed_before",sms_ack_retry_malformed_before},{"sms_ack_retry_malformed_after",sms_ack_retry_malformed_after},
-  {"sms_ack_retry_entry_scope",sms_ack_retry_entry_scope}};
+  {"sms_ack_retry_entry_scope",sms_ack_retry_entry_scope},
+  {"sms_diag_request_boundary",sms_diag_request_boundary},{"sms_diag_disabled",sms_diag_disabled},{"sms_diag_status_then_cmgr_error",sms_diag_status_then_cmgr_error},
+  {"sms_diag_status_then_cmgr_success",sms_diag_status_then_cmgr_success},{"sms_diag_status_failure",sms_diag_status_failure}};
  for(auto &c:cases)if(!strcmp(argv[1],c.name)){c.run();return 0;}return 2;
 }

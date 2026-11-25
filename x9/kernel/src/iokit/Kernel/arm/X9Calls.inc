@@ -15,11 +15,10 @@
  * is withheld fail-closed. Registration/approval are terminal for this boot
  * on timeout or transport loss; no retry.
  * x9cw_dial still translates ordinary VOICE20 digits to the captured SIM2
- * profile only when a caller explicitly supplies that verified context.
- * A verified single-call mapping is required before x9cw_action can be
- * submitted. The asynchronous DIAL join exists but has no production
- * admission caller; profile/audio admission remains unconnected. Other
- * VOICE requests get unsupported, never a success bootstrap/readiness stub.
+ * profile for a bound, registered owner. VOICE09 and CallList are published,
+ * but each indication still requires live allocation identity, a measured RAT
+ * query and owned call state. No audio/network readiness is inferred.
+ * Other VOICE requests get unsupported, never a success bootstrap/readiness stub.
  * Explicit VOICE44 routing, guarded VOICE21 end-current-call (MO epoch or
  * owned MT CONVERSATION identity) and guarded VOICE22 answer (owned MT
  * INCOMING identity, captured empty 0907 -> 0908/result0) keep production
@@ -32,11 +31,12 @@
 #include "../../../bsd/dev/x9_call_init.h"
 #include "../../../bsd/dev/x9_call_handover.h"
 struct x9c_dial_job {
- bool used,answered,cnf,held;unsigned slot,sim,len;
+ bool used,answered,cnf,held;unsigned slot,sim,len;uint32_t transaction;
  uint64_t generation,deadline,token,reply,binding;struct x9cw_dial_join join;
  uint8_t req[64];
 };
 static x9c_dial_job x9c_dial_job;
+static const struct x9cw_dial_profile x9c_measured_dial_profile={1,2,1,0,0,0};
 static struct x9cw_outbound_state x9c_outbound;
 static struct x9cw_inbound_state x9c_inbound;
 static bool x9c_observed;
@@ -60,7 +60,8 @@ struct x9c_approve_owner {
 static struct x9c_approve_owner x9c_approve_owners[X9_C_APPROVE_OWNERS];
 /* VOICE binding is independent of NAS/WMS clients and has NO SIM default. */
 struct x9c_client {bool bound,registered,handover;unsigned sim;uint32_t handover_floor;uint64_t generation,bridge_generation,binding;
- struct x9cw_handover_queue pending;};
+ struct x9cw_handover_queue pending;
+ bool calllist_valid;uint64_t calllist_epoch,calllist_revision;unsigned calllist_direction,calllist_id;};
 static x9c_client x9c_clients[CBQ_MAX_CLIENTS];
 static uint64_t x9c_binding_next;
 static bool x9c_bound_live(unsigned slot,unsigned sim,uint64_t generation,uint64_t binding){
@@ -384,6 +385,7 @@ static void x9c_reg_answer(unsigned slot,unsigned index,uint16_t error){
   else x9c_response_release(w.reply); // the successful batch already owns Result03
   struct x9c_client &c=x9c_clients[slot];
   if(!error){
+   if(!c.registered)c.calllist_valid=false;
    c.registered=true;
    if(w.options.present&2){
     bool enabled=c.handover;c.handover=w.options.handover!=0;
@@ -447,7 +449,7 @@ static void x9c_init_poll(uint8_t *frame){
  }
  if(!online){
   for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){x9c_clients[i].registered=false;x9c_clients[i].handover=false;
-   bzero(&x9c_clients[i].pending,sizeof(x9c_clients[i].pending));}
+   x9c_clients[i].calllist_valid=false;bzero(&x9c_clients[i].pending,sizeof(x9c_clients[i].pending));}
   for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++)for(unsigned index=0;index<X9_C_REG_WAITS;index++){
    struct x9c_reg_wait &w=x9c_reg_wait[i][index];
    if(w.used&&!w.answered)x9c_reg_answer(i,index,X9Q_NOT_READY);
@@ -830,55 +832,75 @@ static int x9c_call_technology(unsigned sim,unsigned *technology){
  if(sim>=2||!x9c_voice_rat[sim].valid)return 0;
  return x9cw_calltechnology(x9c_voice_rat[sim].networkType,technology);
 }
-/* CallList46 publication owner. Complete machinery, deliberately staged like
- * x9c_dial_submit: it is NOT called from x9c_poll. Two independent gates must
- * open before a live caller may admit it, and neither is satisfied this round:
- *  (1) the VOICE09 announcement boundary stays closed until dial/status/SIM
- *      routing and voice audio are reconciled (header comment; no bootarg);
- *  (2) x9c_call_technology must return a proven CallTechnology (docs 495-506).
- * It reconciles ONE owned call from the MD reducers (single-call SIM2 mode20
+/* CallList46 publication owner. x9c_poll calls this only after VOICE09 is
+ * announced by the bridge. Each client must still be bound/registered, own a
+ * live QMUX allocation, and have a real 042f-derived CallTechnology. It
+ * reconciles ONE owned call from the MD reducers (single-call SIM2 mode20
  * subset), revision-tracked so an unchanged state is not republished, encodes
  * via x9cw_calllist (no RemoteNumberList), and transfers an IOMallocData-owned
  * frame through the MD->bb batch. No number, no audio, no readiness claim. */
-static bool x9c_calllist_announced=false; /* closed boundary; no bootarg override */
-struct x9c_calllist_publication {unsigned slot,sim;uint64_t generation;bb_x9_call_frame frame;};
-static int x9c_calllist_publish_callback(void *context){
+static bool x9c_calllist_announced=true;
+static bool x9c_calllist_select_state(const struct x9cw_outbound_state &o,
+                                     const struct x9cw_inbound_state &in,unsigned sim,
+                                     unsigned *id,unsigned *ios_state,unsigned *direction,
+                                     struct x9cw_end_reason *reason,uint64_t *epoch,uint64_t *revision){
+ if(sim!=1)return false;
+ if(in.sim==sim&&in.seen&&!in.blocked&&!in.pending&&in.native_id&&in.native_id<=255){
+  *id=in.native_id;*ios_state=in.ios_state;*direction=2;*reason=in.end_reason;
+  *epoch=in.epoch;*revision=in.revision;return true;
+ }
+ if(o.seen&&!o.blocked&&o.native_id&&o.native_id<=255){
+  *id=o.native_id;*ios_state=o.ios_state;*direction=1;*reason=o.end_reason;
+  *epoch=o.epoch;*revision=o.revision;return true;
+ }
+ return false;
+}
+static bool x9c_calllist_select(unsigned sim,unsigned *id,unsigned *ios_state,unsigned *direction,
+                               struct x9cw_end_reason *reason,uint64_t *epoch,uint64_t *revision){
+ struct x9cw_outbound_state o;struct x9cw_inbound_state in;
+ if(x9_md_mipc_call_snapshot(&o)!=1||x9_md_mipc_call_incoming_snapshot(&in)!=1)return false;
+ return x9c_calllist_select_state(o,in,sim,id,ios_state,direction,reason,epoch,revision);
+}
+struct x9c_calllist_publication {
+ unsigned slot,sim,id,direction;uint64_t generation,binding,bridge_generation,epoch,revision;
+ bb_x9_call_frame frame;
+};
+static int x9c_calllist_publish_callback(void *context,
+                                       const struct x9cw_outbound_state *outbound,
+                                       const struct x9cw_inbound_state *inbound){
  struct x9c_calllist_publication &p=*static_cast<x9c_calllist_publication *>(context);
  const struct x9c_client &c=x9c_clients[p.slot];
- if(!x9w_control_ready||!c.registered||!x9c_bound_live(p.slot,p.sim,p.generation,c.binding))return 0;
+ if(!x9w_control_ready||!c.registered||c.bridge_generation!=p.bridge_generation||
+    !x9c_bound_live(p.slot,p.sim,p.generation,p.binding))return 0;
+ unsigned id,ios_state,direction;struct x9cw_end_reason reason;uint64_t epoch,revision;
+ if(!x9c_calllist_select_state(*outbound,*inbound,p.sim,&id,&ios_state,&direction,&reason,&epoch,&revision)||
+    id!=p.id||direction!=p.direction||epoch!=p.epoch||revision!=p.revision)return 0;
  return bb_x9_call_calllist(CBQ_PORT_BASE+p.slot,X9BB_NODE,c.bridge_generation,&p.frame,1)?1:0;
 }
 static void x9c_calllist_flush(unsigned slot){
- static uint64_t last_epoch,last_revision;static unsigned last_direction,last_id;static bool last_valid;
  if(!x9c_calllist_announced||slot>=CBQ_MAX_CLIENTS)return;
  struct x9c_client &c=x9c_clients[slot];
  if(!c.bound||!c.registered||c.generation!=x9q_clients[slot].generation||!x9c_event_transport_ready())return;
- struct x9cw_outbound_state o;struct x9cw_inbound_state in;
- bool mo=x9_md_mipc_call_snapshot(&o)==1;
- bool mt=x9_md_mipc_call_incoming_snapshot(&in)==1;
  unsigned id,ios_state,direction;struct x9cw_end_reason reason={0,0};uint64_t epoch,revision;
- /* MT incoming drives the call UI; prefer its owned identity when present,
-  * else the owned MO call. Both reducers are single-call and block on foreign
-  * events, so this selects the one observed call, not a multi-call merge. */
- if(mt&&in.seen&&!in.blocked&&!in.pending&&in.native_id&&in.native_id<=255){
-  id=in.native_id;ios_state=in.ios_state;direction=2;reason=in.end_reason;epoch=in.epoch;revision=in.revision;
- }else if(mo&&o.seen&&!o.blocked&&o.native_id&&o.native_id<=255){
-  id=o.native_id;ios_state=o.ios_state;direction=1;reason=o.end_reason;epoch=o.epoch;revision=o.revision;
- }else return;
- if(last_valid&&last_epoch==epoch&&last_revision==revision&&last_direction==direction&&last_id==id)return;
+ if(!x9c_calllist_select(c.sim,&id,&ios_state,&direction,&reason,&epoch,&revision))return;
+ if(c.calllist_valid&&c.calllist_epoch==epoch&&c.calllist_revision==revision&&
+    c.calllist_direction==direction&&c.calllist_id==id)return;
  unsigned technology;
  if(!x9c_call_technology(c.sim,&technology))return; /* fail-closed: no proven RAT */
  uint8_t sdu[25];unsigned size=x9cw_calllist(sdu,sizeof(sdu),id,ios_state,direction,technology,1,&reason);
  if(!size)return;
  uint32_t floor;
  if(x9_md_mipc_call_cursor(&floor)!=1)return;
- x9c_calllist_publication p={};p.slot=slot;p.sim=c.sim;p.generation=c.generation;
+ x9c_calllist_publication p={};p.slot=slot;p.sim=c.sim;p.id=id;p.direction=direction;
+ p.generation=c.generation;p.binding=c.binding;p.bridge_generation=c.bridge_generation;
+ p.epoch=epoch;p.revision=revision;
  p.frame.sdu=sdu;p.frame.size=size;
  p.frame.owned=static_cast<uint8_t *>(IOMallocData(CBQ_HDR+size));
  if(!p.frame.owned)return;
- int rc=x9_md_mipc_call_publish(floor,x9c_calllist_publish_callback,&p);
+ int rc=x9_md_mipc_call_publish_state(floor,x9c_calllist_publish_callback,&p);
  if(rc!=1){bzero(p.frame.owned,CBQ_HDR+size);IOFreeData(p.frame.owned,CBQ_HDR+size);}
- else{last_valid=true;last_epoch=epoch;last_revision=revision;last_direction=direction;last_id=id;}
+ else{c.calllist_valid=true;c.calllist_epoch=epoch;c.calllist_revision=revision;
+  c.calllist_direction=direction;c.calllist_id=id;}
  bzero(sdu,sizeof(sdu));
 }
 static void x9c_error(struct x9c_dial_job &j,uint16_t err){
@@ -888,15 +910,14 @@ static void x9c_error(struct x9c_dial_job &j,uint16_t err){
  if(!j.answered&&!x9c_live(j))x9c_response_release(j.reply);
  j.answered=true;bzero(j.req,sizeof(j.req));
 }
-/* Admission is deliberately NOT called by x9c_request until actual CALL
- * initialization, VOICE SIM binding and runtime profile policy are proven.
- * A future caller must supply that context; even then, require a complete
- * owned GET_STATUS empty baseline and no outstanding dial owner. */
+/* VOICE20 dispatch uses the measured SIM2 ordinary-IMS profile. The caller
+ * must already be bound/registered on a live bridge, have no changing bind or
+ * outstanding dial owner, and present an owned empty GET_STATUS baseline. */
 static bool x9c_dial_submit(unsigned slot,const uint8_t *req,unsigned len,
                             const struct x9cw_dial_profile &profile){
  if(slot>=CBQ_MAX_CLIENTS||!x9c_clients[slot].bound||x9c_clients[slot].sim!=profile.sim||
     !x9c_clients[slot].registered||x9c_clients[slot].generation!=x9q_clients[slot].generation||
-    x9c_bind_pending(slot,true)||x9c_dial_job.used||len>sizeof(x9c_dial_job.req))return false;
+    !x9c_event_transport_ready()||x9c_bind_pending(slot,true)||x9c_dial_job.used||len>sizeof(x9c_dial_job.req))return false;
  struct x9cw_outbound_state state;struct x9cw_dial_join join={};
  if(x9_md_mipc_call_snapshot(&state)!=1||!x9cw_dial_join_begin(&join,&state,&profile))return false;
  uint8_t frame[104];unsigned n=x9cw_dial(req,len,frame,sizeof(frame),&profile,state.native_count);
@@ -912,7 +933,7 @@ static bool x9c_dial_submit(unsigned slot,const uint8_t *req,unsigned len,
   * No cancellation, automatic hangup, retry, or request-token reuse. */
  struct x9c_dial_job &j=x9c_dial_job;bzero(&j,sizeof(j));j.used=true;
  j.slot=slot;j.sim=profile.sim;j.generation=x9q_clients[slot].generation;
- j.binding=x9c_clients[slot].binding;j.len=len;memcpy(j.req,req,len);
+ j.binding=x9c_clients[slot].binding;j.len=len;j.transaction=x9cw_u16(req+1);memcpy(j.req,req,len);
  j.join=join;j.token=token;j.deadline=deadline;j.reply=reply;
  if(!x9cw_dial_join_sent(&j.join,token)){j.held=true;x9c_error(j,X9Q_INTERNAL);}
  return true;
@@ -1028,6 +1049,24 @@ static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
     }
    }
    err=x9c_bind_pending(slot,true)?X9Q_BUSY:x9c_reg_begin(slot,req,len);if(!err)return true;
+  }else if(x9cw_u16(req+3)==0x20){
+   /* The accepted owner fences every later request under its transaction,
+    * including a changed/malformed retry: one terminal, one MD mutation. */
+   if(x9c_dial_job.used&&x9c_dial_job.slot==slot&&
+      x9c_dial_job.generation==x9q_clients[slot].generation&&
+      x9c_dial_job.transaction==x9cw_u16(req+1))return true;
+   struct x9cw_dial_number dial;
+   if(!x9cw_qmi_dial(req,len,&dial))err=X9Q_ARG;
+   else if(x9c_bind_pending(slot,true))err=X9Q_BUSY;
+   else if(!x9c_clients[slot].bound||!x9c_clients[slot].registered||
+           x9c_clients[slot].generation!=x9q_clients[slot].generation)err=X9Q_NOT_READY;
+   else if(x9c_clients[slot].sim!=1)err=X9Q_UNSUPPORTED;
+   else if(x9c_dial_job.used)err=X9Q_BUSY;
+   else if(x9c_dial_submit(slot,req,len,x9c_measured_dial_profile)){
+    printf("X9 CALL: VOICE20 txn %u admitted on measured SIM2 route (digits %u); no audio readiness implied\n",
+     x9cw_u16(req+1),dial.length);
+    return true;
+   }else err=X9Q_NOT_READY;
   }else if(x9cw_u16(req+3)==0x21){
    unsigned op,id;
    /* The live allocation's validated host transaction already owns its

@@ -41,6 +41,8 @@ static int x9mm_request(const uint8_t *p,unsigned n,unsigned id){
     (x9mi_u16(v)==0x8601||x9mi_u16(v)==0x8603);
  }
  if(p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))return 0;
+ /* MD 91368e1c: header-only CPMS query; no storage selection or mutation. */
+ if(id==0x60b)return n==16;
  if(id==0xa04)return n==24&&x9mm_one(p,n,0x100,0);
  if(id==0x601){
   /* Real SMS host-ready settings, or read-only SMSC query. No SMS/NV writes. */
@@ -71,7 +73,7 @@ static int x9mm_request(const uint8_t *p,unsigned n,unsigned id){
  * IMSA a04 snapshots and other generic/CALL registrations stay independent.
  * Called after transport framing/validation, including with x9_mi_lock held. */
 static int x9mm_inbox_request(const uint8_t *p,unsigned n,unsigned id){
- if(id==0x601||id==0x605||id==0x607)return 1;
+ if(id==0x601||id==0x605||id==0x607||id==0x60b)return 1;
  if(id==0x30b)return x9mm_request(p,n,id);
  return id==0x307&&n==24&&x9mi_u16(p+16)==0x100&&x9mi_u16(p+18)==2&&
   (x9mi_u16(p+20)==0x4601||x9mi_u16(p+20)==0x4a01);

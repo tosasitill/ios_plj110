@@ -168,6 +168,13 @@ int x9_md_mipc_call_publish(uint32_t floor,x9_md_mipc_call_publish_cb callback,v
   rc=callback(context)?1:0;
  lck_mtx_unlock(&x9_mi_lock);return rc;
 }
+int x9_md_mipc_call_publish_state(uint32_t floor,x9_md_mipc_call_publish_state_cb callback,void *context){
+ if(!callback)return -1;
+ int rc=-1;lck_mtx_lock(&x9_mi_lock);
+ if(!x9_mc_poisoned&&!x9_mi_poisoned&&x9_mi_online&&floor<=x9_mc_next)
+  rc=callback(context,&x9_mc_outbound,&x9_mc_inbound)?1:0;
+ lck_mtx_unlock(&x9_mi_lock);return rc;
+}
 int x9_md_mipc_call_event_ordered(uint8_t *out,uint32_t room,uint32_t *len,uint32_t *token,uint32_t *sequence){
  if(!out||!len||!token||!sequence)return -1;
  *len=*token=*sequence=0;int rc=0;lck_mtx_lock(&x9_mi_lock);

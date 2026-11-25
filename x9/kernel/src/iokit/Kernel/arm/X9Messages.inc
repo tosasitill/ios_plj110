@@ -15,7 +15,7 @@
  */
 #include "../../../bsd/dev/x9_sms_storage.h"
 constexpr unsigned X9M_JOBS=32, X9M_INCOMING=16;
-enum { X9M_SEND=1, X9M_ACK, X9M_REG, X9M_SMSC, X9M_LIST, X9M_READ, X9M_TAG };
+enum { X9M_SEND=1, X9M_ACK, X9M_REG, X9M_SMSC, X9M_LIST, X9M_READ, X9M_TAG, X9M_DIAG };
 struct x9m_client {
  bool events,mwi_events,ready_ind,ims_ind,routes,status_reports;
  uint8_t route[6],route_mask; uint64_t reg_next;
@@ -38,7 +38,7 @@ static x9m_incoming x9m_incoming_sms[X9M_INCOMING];
 enum { X9M_CFG_IND=0, X9M_IMS_IND, X9M_READY_QUERY, X9M_WAIT_READY, X9M_HOST_READY, X9M_INIT_DONE };
 struct x9m_sim {
  bool wanted,ready,reg_valid,md_known,md_ready,init_hold,init_timed_out;
- unsigned reg,init; uint64_t sampled,init_token,init_deadline,ready_epoch,init_epoch;
+ unsigned reg,init,diag_stage; uint64_t sampled,init_token,init_deadline,ready_epoch,init_epoch;
 };
 static x9m_sim x9m_sims[2];
 static unsigned x9m_init_stage;
@@ -80,6 +80,9 @@ static bool x9m_ack_response(const x9m_job &j){
  bzero(p.p,sizeof(p.p));return admitted;
 }
 static void x9m_error(x9m_job &j,uint16_t err){
+ if(j.op==X9M_DIAG){
+  j.answered=true;if(j.sim<2)x9m_sims[j.sim].diag_stage=2;return;
+ }
  if(j.op==X9M_ACK){
   if(j.answered)return;
   if(!x9m_live(j.slot,j.generation)){j.answered=true;return;}
@@ -174,8 +177,9 @@ static bool x9m_stored(const uint8_t *p,unsigned n,x9q_view &records,unsigned &c
  * Apple fans out RawRead for a list: accept bounded queued work instead of
  * returning BUSY for every message after the first. Never replay a sent token. */
 static bool x9m_store_blocked(const x9m_job &j){
- for(const x9m_job &other:x9m_jobs)if(&other!=&j&&x9m_storage(other.op)&&other.sim==j.sim&&
-  (other.hold||other.token||other.store_order<j.store_order))return true;
+ for(const x9m_job &other:x9m_jobs)if(&other!=&j&&other.sim==j.sim&&
+   (other.op==X9M_DIAG||(x9m_storage(other.op)&&
+    (other.hold||other.token||other.store_order<j.store_order))))return true;
  return false;
 }
 static uint64_t x9m_store_submit(const x9m_job &j){
@@ -187,9 +191,9 @@ static uint64_t x9m_store_submit(const x9m_job &j){
  /* 103=0 is permitted ONLY for a single indexed CMGR in ModifyTag step1;
   * never mark an entire CMGL enumeration read. CPMS is always explicit. */
  f.byte(0x103,j.op==X9M_TAG&&j.step==1?0:1);f.byte(0x104,storage.p[0]);
- /* 0x210000 has no proven meaning yet (empty store vs schema/flag error).
-  * Log the decoded host request and the response TLV shape; never guess an
-  * empty list from a nonzero result. Values only, no PDU or number bytes. */
+ /* 0x210000 is l5usms_get_l5_res_from_at's generic AT ERROR with no
+  * CMS/CME cause, not proof of an empty store. Log request/result shape only;
+  * never guess an empty list from a nonzero result or expose PDU/number bytes. */
  static unsigned diag_submits;
  if(diag_submits<8){
   diag_submits++;
@@ -295,6 +299,27 @@ static void x9m_init_poll(uint8_t *response,unsigned room){
   else{f.byte(0x100,0);f.byte(0x105,1);f.byte(0x106,2);}
   uint64_t token=f.submit();
   if(token){s.init=step;s.init_token=token;s.init_epoch=s.ready_epoch;s.init_deadline=x9q_ms()+300000;}
+ }
+}
+static bool x9m_diag_enabled(){
+ static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_sms_diag",0)==1;
+ return enabled!=0;
+}
+static bool x9m_diag_storage_busy(unsigned sim,const x9m_job *self){
+ for(const x9m_job &other:x9m_jobs)if(&other!=self&&other.sim==sim&&x9m_storage(other.op))return true;
+ return false;
+}
+static void x9m_diag_poll(){
+ if(!x9m_diag_enabled())return;
+ for(unsigned sim=0;sim<x9_md_sim_count();sim++){
+  x9m_sim &s=x9m_sims[sim];
+  if(s.diag_stage||!s.ready||!x9w_control_ready||!x9_md_mipc_message_online())continue;
+  bool busy=x9m_diag_storage_busy(sim,nullptr);
+  for(const x9m_job &j:x9m_jobs)if(j.op==X9M_DIAG&&j.sim==sim){busy=true;s.diag_stage=1;}
+  if(busy)continue;
+  uint8_t req[7]={};x9m_job *j=x9m_new(X9M_DIAG,0,sim,req,sizeof(req),true);
+  if(j){s.diag_stage=1;j->follow=true;
+   printf("X9 SMS DIAG: SIM%u storage status probe armed; explicit bootarg only\n",sim+1);}
  }
 }
 struct x9m_publication {
@@ -545,6 +570,33 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
  x9m_reply(slot,service,req,err);return true;
 }
 static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
+ if(j.op==X9M_DIAG){
+  const unsigned expected=j.step?0x608:0x60c;unsigned result=1;
+  bool known=x9w_wire(p,n)&&x9q_u16(p+10)==expected&&p[8]==(1u<<j.sim)&&x9w_word(p,n,0,result);
+  if(!known||result){
+   printf("X9 SMS DIAG: SIM%u %s known %u result 0x%x id 0x%04x tx %u; no retry\n",
+    j.sim+1,j.step?"CMGR":"CPMS",known?1:0,result,known?(unsigned)x9q_u16(p+10):0u,
+    known?(unsigned)x9q_u16(p+12):0u);
+   x9m_error(j,X9Q_INTERNAL);return;
+  }
+  if(!j.step){
+   const unsigned tags[5]={0x100,0x101,0x102,0x103,0x104},sizes[5]={4,2,2,2,1};
+   unsigned values[5]={UINT32_MAX,0,0,0,0};
+   for(unsigned i=0;i<5;i++){
+    x9q_view v=x9w_tlv(p,n,tags[i]);if(!v.p||v.n!=sizes[i])continue;
+    values[i]=0;for(unsigned k=0;k<v.n;k++)values[i]|=(unsigned)v.p[k]<<(8*k);
+   }
+   printf("X9 SMS DIAG: SIM%u CPMS 100=%u 101=%u 102=%u 103=%u 104=%u\n",
+    j.sim+1,values[0],values[1],values[2],values[3],values[4]);
+   j.step=1;j.follow=true;j.token=0;return;
+  }
+  x9q_view records={nullptr,0};unsigned count=0,type=UINT32_MAX,index=0;
+  bool valid=x9m_stored(p,n,records,count);
+  if(valid&&count){x9w_byte(p,n,0x100,type);index=x9q_u16(records.p);}
+  printf("X9 SMS DIAG: SIM%u CMGR index1 valid %u count %u type %u index_match %u; payload not logged\n",
+   j.sim+1,valid?1:0,count,type,valid&&count==1&&index==1?1:0);
+  j.answered=true;j.follow=false;j.token=0;x9m_sims[j.sim].diag_stage=2;return;
+ }
  unsigned result=1;
  bool stored=x9m_storage(j.op);
  bool known=x9w_wire(p,n)&&x9q_u16(p+10)==(stored?0x608:j.op==X9M_SEND?0x606:j.op==X9M_REG?0xa05:0x602)&&
@@ -632,7 +684,7 @@ static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
 static void x9m_del(unsigned slot){
  bzero(&x9m_clients[slot],sizeof(x9m_clients[slot]));
  /* Sent SMS/ACK owners survive deletion and drain their late result. */
- for(x9m_job &j:x9m_jobs)if(j.op&&j.slot==slot){
+ for(x9m_job &j:x9m_jobs)if(j.op&&j.op!=X9M_DIAG&&j.slot==slot){
   if(j.op==X9M_TAG&&j.step==1&&j.token)
    x9_md_mipc_message_mark_read_abandon(j.token,j.slot,j.generation);
   j.answered=true;
@@ -657,6 +709,19 @@ static void x9m_poll(){
   if(j.op==X9M_TAG&&j.step==1&&j.token&&
     (j.answered||now>=j.deadline||!x9m_live(j.slot,j.generation)||!x9w_control_ready||!x9m_sims[j.sim].ready))
    x9_md_mipc_message_mark_read_abandon(j.token,j.slot,j.generation);
+  if(j.op==X9M_DIAG&&!j.token){
+   if(j.answered||now>=j.deadline){x9m_error(j,X9Q_NOT_READY);bzero(&j,sizeof(j));continue;}
+   if(!x9m_sims[j.sim].ready||!x9w_control_ready||!x9_md_mipc_message_online())continue;
+   if(j.step&&x9m_diag_storage_busy(j.sim,&j))continue;
+   x9w_frame f(j.step?0x607:0x60b,1u<<j.sim);
+   if(j.step){
+    const uint8_t index[2]={1,0};f.byte(0x100,3);f.byte(0x101,5);f.tlv(0x102,index,2);
+    f.byte(0x103,0);f.byte(0x104,0);
+   }
+   j.token=f.submit();if(!j.token)continue;j.follow=false;
+   printf("X9 SMS DIAG: SIM%u %s submitted token %llu\n",j.sim+1,j.step?"CMGR":"CPMS",
+    (unsigned long long)j.token);
+  }
   if(x9m_storage(j.op)&&!j.token){
    if(!j.follow||now>=j.deadline||j.answered||!x9m_live(j.slot,j.generation)){
     x9m_error(j,X9Q_NOT_READY);
@@ -747,4 +812,5 @@ static void x9m_poll(){
   uint8_t req[7]={0,0,0,0x20,0,0,0};x9m_job *j=x9m_new(X9M_REG,slot,sim,req,7,true);
   if(j){x9w_frame f(0xa04,1u<<sim);f.byte(0x100,0);j->token=f.submit();if(!j->token)bzero(j,sizeof(*j));}
  }
+ x9m_diag_poll();
 }
