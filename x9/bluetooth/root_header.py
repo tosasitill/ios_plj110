@@ -43,7 +43,9 @@ def load(payload, apple):
     meta = json.loads((payload / 'root-payload.json').read_text())
     if meta.get('kind') != 'x9-bluetooth-native-root-payload' or meta.get('ios_build') != '20H392':
         raise ValueError('not a 20H392 native Bluetooth root payload')
-    originals = {item['sha256']: item for item in meta['original_jobs'] + [meta['original_launchd_cache']]}
+    originals = {item['sha256']: item for item in
+                 meta['original_jobs'] + [meta['original_launchd_cache'], meta.get('original_settings')]
+                 if isinstance(item, dict)}
     files = meta['files']
     if [f['path'] for f in files] != meta['install_order']:
         raise ValueError('payload file order differs from install_order')

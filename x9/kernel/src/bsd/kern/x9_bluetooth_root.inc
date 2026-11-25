@@ -4,12 +4,13 @@
  * else on the root is read or written, and no whole-root image is involved.
  *
  *   x9_bt_root=0 (default)  do nothing
- *   x9_bt_root=1            install the seven files embedded in this kernel
- *   x9_bt_root=2            restore the Apple originals, remove our four files
+ *   x9_bt_root=1            install the root payload embedded in this kernel
+ *   x9_bt_root=2            restore the Apple originals, remove our own files
  *
  * Apple binaries are never modified; /usr/sbin/bluetoothd and BlueTool must
- * match the build-time originals before anything is written. The three
- * replaced Apple files (two jobs, launchd cache) must hold their exact
+ * match the build-time originals before anything is written. The four
+ * replaced Apple files (two jobs, launchd cache, PreferencesUI Settings.plist
+ * with the Bluetooth row's capability gate removed) must hold their exact
  * original bytes; the original is first kept as a same-directory hard link
  * "<path>.x9-orig" (no data copy), then the verified new file is renamed over
  * it atomically. The cache is last on install and first on restore, so an

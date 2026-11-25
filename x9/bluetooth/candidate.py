@@ -162,7 +162,10 @@ def build(a):
     embed_root = bool(root_args)
     if embed_root != bool(a.apple_originals):
         raise ValueError('x9_bt_root=1 and --apple-originals must be given together')
+    if embed_root != bool(a.settings_original):
+        raise ValueError('x9_bt_root=1 and --settings-original must be given together')
     apple = repository_path(a.apple_originals) if embed_root else None
+    settings = repository_path(a.settings_original) if embed_root else None
     if a.previous_payload and not embed_root:
         raise ValueError('--previous-payload only applies with x9_bt_root=1')
     previous = [repository_path(path) for path in a.previous_payload]
@@ -225,7 +228,10 @@ def build(a):
                  '--launchd-source', job_snapshot, '--launchd-cache-source', job_snapshot / CACHE_NAME,
                  '--out', runtime], log)
             stage = 'offline-root-payload'
-            run([sys.executable, '-I', X9 / 'bluetooth/package.py', '--runtime', runtime, '--out', payload], log)
+            package_command = [sys.executable, '-I', X9 / 'bluetooth/package.py', '--runtime', runtime]
+            if settings is not None:
+                package_command += ['--settings-original', settings]
+            run(package_command + ['--out', payload], log)
             stage = 'kernel-root-payload'
             if embed_root:
                 run([sys.executable, '-I', X9 / 'bluetooth/root_header.py', '--payload', payload,
@@ -329,6 +335,8 @@ if __name__ == '__main__':
                     help='explicit repo-local original 20H392 version-7 launchd service cache')
     ap.add_argument('--apple-originals', type=Path,
                     help='private 20H392 bluetoothd/BlueTool originals; required with --boot-arg x9_bt_root=1')
+    ap.add_argument('--settings-original', type=Path,
+                    help='private 20H392 PreferencesUI Settings.plist original; required with --boot-arg x9_bt_root=1')
     ap.add_argument('--previous-payload', type=Path, action='append', default=[],
                     help='earlier candidate root-payload already installed on the device; repeatable')
     ap.add_argument('--abi', choices=('macos', 'ios'), default='macos')
