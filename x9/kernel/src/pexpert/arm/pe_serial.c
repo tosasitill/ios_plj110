@@ -760,6 +760,8 @@ static const struct {
 	{ "x9_bb", 1 },
 	{ "x9_dual_sim", 1 },
 	{ "x9_bt", 1 },
+	{ "x9_bt_init", 1 },
+	{ "x9_bt_fc", 1 },
 	{ "x9_torch", 3 },
 	{ "x9_camera", 1 },
 	{ "x9pl", 1 },
