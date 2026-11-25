@@ -19,7 +19,8 @@ CASES = (
     'no_auto_policy', 'command_roundtrip', 'failure_retained',
     'duplicate_pending', 'changed_duplicate', 'duplicate_replied',
     'overflow_isolated', 'bounded_tombstones', 'fifo', 'fragmented',
-    'late_cnf', 'sms_priority', 'staged_ios',
+    'late_cnf', 'sms_priority', 'staged_ios', 'voice20_dispatch',
+    'calllist_client_isolation', 'calllist_stale_publication', 'calllist_generation_fence',
     'dial_golden', 'dial_invalid', 'dial_whitelist',
     'dial_roundtrip', 'dial_tx_failure', 'dial_cnf_invalid',
     'progress_framing', 'outbound_states', 'current_arrays', 'status_fence',
@@ -64,12 +65,12 @@ class CallBridgeTests(unittest.TestCase):
         (OUT / (name + '.log')).write_text(p.stdout + p.stderr)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
-    def test_voice_not_advertised(self):
+    def test_voice_advertised_once(self):
         source = (ROOT / 'x9/kernel/src/iokit/Kernel/arm/X9Baseband.cpp').read_text()
         table = source.partition('const x9bb_service x9bb_services[] = {')[2].partition('};')[0]
         self.assertTrue(table, 'service table must be reviewed if its declaration changes')
         services = [int(v, 16) for v in re.findall(r'\{\s*(0x[0-9a-fA-F]+)', table)]
-        self.assertNotIn(9, services, 'VOICE cannot be published before Android flow is reconciled')
+        self.assertEqual(services.count(9), 1, 'VOICE09 must have one real service entry')
 
 
 for _case in CASES:

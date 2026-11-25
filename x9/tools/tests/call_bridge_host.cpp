@@ -127,13 +127,56 @@ static bool bb_x9_call_handover(uint32_t local,uint32_t node,uint64_t generation
  }
  return true;
 }
+static unsigned calllist_batches,calllist_count;static uint8_t calllist_slots[CBQ_MAX_CLIENTS];
+static uint8_t calllist_last[CBQ_MAX_CLIENTS][25];static unsigned calllist_sizes[CBQ_MAX_CLIENTS];
+static bool bb_x9_call_calllist(uint32_t local,uint32_t node,uint64_t generation,bb_x9_call_frame *f,uint32_t count){
+ assert(lock_depth==1&&node==X9BB_NODE&&count==1&&f->owned&&f->size>=18&&f->size<=25);
+ unsigned slot=local-CBQ_PORT_BASE;assert(slot<CBQ_MAX_CLIENTS&&generation==bb_x9_call_identity(local,node));
+ assert(f->sdu[0]==4&&!x9cw_u16(f->sdu+1)&&x9cw_u16(f->sdu+3)==0x2e);
+ assert(calllist_count<sizeof(calllist_slots));calllist_slots[calllist_count++]=slot;
+ calllist_sizes[slot]=f->size;memcpy(calllist_last[slot],f->sdu,f->size);
+ calllist_batches++;free(f->owned);return true;
+}
 #include "../../kernel/src/iokit/Kernel/arm/X9Calls.inc"
 // Explicit synthetic bound/registered VOICE owner for staging-only cases;
 // NAS's sim_slot is no longer used as the independently bound CALL context.
 static void dial_owner_fixture(){
+ x9w_control_ready=true;x9mi_online(1);
  struct x9c_client &c=x9c_clients[0];c.bound=c.registered=true;c.sim=1;
  c.generation=x9q_clients[0].generation;c.bridge_generation=call_bridge_generation[0];
  c.binding=++x9c_binding_next;
+}
+static void calllist_fixture(){
+ dial_owner_fixture();assert(x9c_calllist_announced);
+ x9c_voice_rat[1].valid=true;x9c_voice_rat[1].networkType=4096;
+ x9_mc_outbound={};x9_mc_outbound.epoch=1;x9_mc_outbound.revision=1;
+ x9_mc_outbound.native_id=7;x9_mc_outbound.seen=1;x9_mc_outbound.ios_state=1;
+ struct x9c_client &c=x9c_clients[1];c.bound=c.registered=true;c.sim=1;
+ c.generation=x9q_clients[1].generation;c.bridge_generation=call_bridge_generation[1];
+ c.binding=++x9c_binding_next;
+}
+static void calllist_client_isolation(){
+ calllist_fixture();
+ x9c_calllist_flush(0);assert(calllist_count==1&&calllist_slots[0]==0);
+ assert(calllist_last[0][11]==7&&calllist_last[0][12]==1&&calllist_last[0][14]==1&&calllist_last[0][15]==4);
+ x9c_calllist_flush(0);assert(calllist_count==1);
+ x9c_calllist_flush(1);assert(calllist_count==2&&calllist_slots[1]==1);
+ x9c_clients[1].sim=0;x9c_voice_rat[0].valid=true;x9c_voice_rat[0].networkType=4096;
+ x9c_calllist_flush(1);assert(calllist_count==2);
+ x9c_clients[1].sim=1;x9c_clients[1].binding=++x9c_binding_next;
+ x9c_clients[1].registered=true;x9c_clients[1].calllist_valid=false;
+ x9c_calllist_flush(1);assert(calllist_count==3&&calllist_slots[2]==1);
+}
+static void calllist_stale_publication(){
+ calllist_fixture();x9_mc_outbound.revision=2;
+ md_lock_until_hook=4;during_md_lock=[](){x9_mc_outbound.revision=3;};
+ x9c_calllist_flush(0);assert(!calllist_count&&!x9c_clients[0].calllist_valid);
+ x9c_calllist_flush(0);assert(calllist_count==1&&x9c_clients[0].calllist_revision==3);
+}
+static void calllist_generation_fence(){
+ calllist_fixture();md_lock_until_hook=4;during_md_lock=[](){x9q_clients[0].generation++;};
+ x9c_calllist_flush(0);assert(!calllist_count&&!x9c_clients[0].calllist_valid);
+ x9q_clients[0].generation--;x9c_calllist_flush(0);assert(calllist_count==1);
 }
 
 static unsigned incoming(uint8_t *p,unsigned mask=0x22,unsigned tx=0x2345){
@@ -431,13 +474,32 @@ static void sms_priority(){
  x9mi_tick();assert(writes==1&&x9cw_u16(last_frame+10)==0x8602);
  x9mi_tick();assert(writes==2&&x9cw_u16(last_frame+10)==0x8902);
 }
+static void empty_baseline();
+static void rx_progress(unsigned,unsigned,unsigned);
 static void staged_ios(){
  uint8_t qmi[]={0,1,0,0x22,0,4,0,1,1,0,7};
  assert(!x9c_request(1,X9BB_PORT_BASE+5,qmi,sizeof(qmi))&&!qmi_replies);
  assert(x9c_request(1,X9BB_PORT_BASE+9,qmi,sizeof(qmi))&&qmi_replies==1&&qmi_error==94);
  uint8_t dial[64];unsigned n=dial_qmi(dial);
- assert(x9c_request(1,X9BB_PORT_BASE+9,dial,n)&&qmi_replies==2&&qmi_error==94);
+ assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,dial,n)&&qmi_replies==2&&qmi_error==16);
  x9mi_tick();assert(!writes&&!x9_mi_next&&!x9_mc_next);
+}
+static void voice20_dispatch(){
+ empty_baseline();uint8_t q[64],p[24];unsigned n=dial_qmi(q);dial_owner_fixture();const unsigned before=writes;
+ assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,n)&&!qmi_replies);
+ assert(x9c_dial_job.used&&x9c_dial_job.transaction==0x1234&&x9c_dial_job.len==n);
+ const uint64_t token=x9c_dial_job.token;assert(token);
+ assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,n)&&!qmi_replies);
+ q[10]='9';assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,n)&&!qmi_replies);
+ q[10]='*';assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,n)&&!qmi_replies);
+ assert(x9c_dial_job.token==token&&x9c_dial_job.req[10]=='1');
+ x9mi_tick();assert(writes==before+1&&last_length==72&&last_frame[20]=='1');
+ x9cw_header(p,24,0x902,2,(unsigned)token);x9cw_scalar(p+16,0,0,4);x9mi_rx(p,24);
+ rx_progress(130,7,0);x9c_poll();
+ assert(qmi_replies==1&&!qmi_error&&qmi_response_len==18&&qmi_response[17]==7);
+ q[10]='*';assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,n)&&qmi_replies==1);
+ q[10]='1';x9cw_put16(q+1,0x1235);
+ assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,n)&&qmi_replies==2&&qmi_error==X9Q_BUSY);
 }
 /* Full synthetic MD frames, never padded/reconstructed Android DUMP tails.
  * These cases have been added for future authorized execution; compilation
@@ -1016,7 +1078,7 @@ static void register_transition(){
  p[20]=0;assert(!x9cw_call_register_cnf(p,32,0x307,7,&r)); // failure TLV is not success
 }
 static void register_begin(unsigned slot=0){
- x9w_control_ready=true;uint8_t q[]={0,90,0,3,0,4,0,0x13,1,0,0};
+ x9c_cmd_init.held=false;x9c_init[1].held=false;x9w_control_ready=true;uint8_t q[]={0,90,0,3,0,4,0,0x13,1,0,0};
  assert(x9c_request(CBQ_PORT_BASE+slot,X9BB_PORT_BASE+9,q,sizeof(q)));
 }
 static void register_cnf(uint64_t token,unsigned request,unsigned result=0){
@@ -1029,15 +1091,15 @@ static void register_sequence(){
  x9mi_tick();assert(writes==1&&last_frame[8]==0xff&&x9cw_u16(last_frame+20)==0x8901);
  register_cnf(token,0x30b);assert(x9c_cmd_init.confirmed&&x9c_init[1].stage==X9_CI_STATUS);
  for(unsigned id:{0x4901u,0x4902u}){
-  token=x9c_init[1].token;x9mi_tick();assert(last_frame[8]==2&&x9cw_u16(last_frame+20)==id);
+  token=x9c_init[1].token;x9mi_tick();token=x9c_init[1].token;assert(last_frame[8]==2&&x9cw_u16(last_frame+20)==id);
   register_cnf(token,0x307);assert(!qmi_replies);
  }
  assert(x9c_init[1].registered&&!x9c_init[1].baseline_known);
- token=x9c_init[1].token;x9mi_tick();assert(x9cw_u16(last_frame+10)==0x909&&last_length==16);
+ token=x9c_init[1].token;x9mi_tick();token=x9c_init[1].token;assert(x9cw_u16(last_frame+10)==0x909&&last_length==16);
  uint8_t p[704];unsigned n=current_frame(p,0);x9cw_put16(p+12,(unsigned)token);
  x9mi_rx(p,n);x9c_poll();assert(qmi_replies==1&&!qmi_error&&x9c_clients[0].registered&&x9c_init[1].baseline_known);
  assert(writes==4&&!x9c_init[0].stage&&!x9c_init[0].registered);
- unsigned before=qmi_replies;register_begin();x9c_poll();x9mi_tick();assert(qmi_replies==before&&writes==4);
+ unsigned before=qmi_replies;register_begin();x9c_poll();x9mi_tick();assert(qmi_replies==before&&writes==5&&x9cw_u16(last_frame+10)==0x42f);
 }
 static void register_timeout(){
  bind_voice();register_begin();x9c_poll();uint64_t token=x9c_cmd_init.token;x9mi_tick();
@@ -1048,7 +1110,7 @@ static void register_timeout(){
 static void register_deleted(){
  bind_voice();register_begin();x9c_poll();uint64_t token=x9c_cmd_init.token;x9mi_tick();
  x9c_del(0);x9q_clients[0].generation++;register_cnf(token,0x30b);x9mi_tick();
- assert(writes==1&&!qmi_replies&&x9c_cmd_init.confirmed&&!x9c_init[1].token);
+ assert(writes==2&&!qmi_replies&&x9c_cmd_init.confirmed&&x9c_init[1].token);
 }
 static void register_unsupported(){
  uint8_t q[]={0,90,0,3,0,4,0,0x13,1,0,1};bind_voice();
@@ -1081,14 +1143,15 @@ static void handover_codec(){
  assert(!x9cw_handover_indication(q,10,1)&&!x9cw_handover_indication(q,11,0)&&!x9cw_handover_indication(q,11,10));
 }
 static void handover_begin(unsigned slot=0,unsigned value=1,unsigned transaction=91){
- uint8_t q[]={0,(uint8_t)transaction,0,3,0,4,0,0x14,1,0,(uint8_t)value};
+ if(!x9c_reg_wait[slot][0].used)x9c_cmd_init.held=false;
+ x9c_init[1].held=false;uint8_t q[]={0,(uint8_t)transaction,0,3,0,4,0,0x14,1,0,(uint8_t)value};
  x9c_request(CBQ_PORT_BASE+slot,X9BB_PORT_BASE+9,q,sizeof(q));
 }
 static void handover_concurrent_bootstrap(){
  bind_voice();register_begin();handover_begin();assert(!qmi_replies);
  x9c_poll();x9mi_tick();register_cnf(x9c_cmd_init.token,0x30b);
  for(unsigned id:{0x4901u,0x4902u}){
-  uint64_t token=x9c_init[1].token;x9mi_tick();assert(x9cw_u16(last_frame+20)==id);register_cnf(token,0x307);
+  uint64_t token=x9c_init[1].token;x9mi_tick();token=x9c_init[1].token;assert(x9cw_u16(last_frame+20)==id);register_cnf(token,0x307);
  }
  uint64_t token=x9c_init[1].token;x9mi_tick();
  uint8_t p[704];handover_frame(p,0);x9mi_rx(p,32);handover_frame(p,1);x9mi_rx(p,32);x9c_poll();
@@ -1113,14 +1176,14 @@ static void handover_subscription_fence(){
  handover_frame(p,3);x9mi_rx(p,32);x9c_poll();assert(qmi_indications==2&&qmi_indication_states[1]==4);
 }
 static void handover_pending_timeout(){
- bind_voice();x9w_control_ready=true;handover_begin();x9c_poll();x9mi_tick();
+ bind_voice();x9w_control_ready=true;x9c_init[1].stage=X9_CI_DONE;handover_begin();x9c_poll();x9mi_tick();
  uint8_t p[32];handover_frame(p,0);x9mi_rx(p,32);x9c_poll();assert(!qmi_indications);
  uint64_t token=x9c_cmd_init.token;fake_ms=25000;x9c_poll();register_cnf(token,0x30b);
  assert(qmi_replies==1&&qmi_error==X9Q_NOT_READY&&!qmi_indications&&!x9c_clients[0].handover);
  assert(!x9c_reg_wait[0][0].event_count&&x9c_cmd_init.held);
 }
 static void handover_pending_overflow(){
- bind_voice();x9w_control_ready=true;handover_begin();x9c_poll();x9mi_tick();
+ bind_voice();x9w_control_ready=true;x9c_init[1].stage=X9_CI_DONE;handover_begin();x9c_poll();x9mi_tick();
  uint8_t p[32];
  for(unsigned i=0;i<8;i++){
   handover_frame(p,i&1);x9mi_rx(p,32);x9c_poll();
@@ -1132,7 +1195,7 @@ static void handover_pending_overflow(){
  register_cnf(x9c_cmd_init.token,0x30b);assert(qmi_replies==1&&!x9c_init[1].token);
 }
 static void handover_transport_loss(){
- bind_voice();x9w_control_ready=true;handover_begin();x9c_poll();x9mi_tick();
+ bind_voice();x9w_control_ready=true;x9c_init[1].stage=X9_CI_DONE;handover_begin();x9c_poll();x9mi_tick();
  uint64_t token=x9c_cmd_init.token;uint8_t p[32];
  handover_frame(p,0);x9mi_rx(p,32);x9c_poll();assert(x9c_reg_wait[0][0].event_count==1);
  handover_frame(p,4);x9mi_rx(p,32);assert(x9_mc_poisoned&&x9_md_mipc_online());
@@ -1141,11 +1204,11 @@ static void handover_transport_loss(){
  register_cnf(token,0x30b);assert(!x9c_cmd_init.token&&!x9c_cmd_init.confirmed&&!x9c_init[1].token);
 }
 static void handover_request_identity(){
- bind_voice();x9w_control_ready=true;handover_begin();handover_begin();assert(!qmi_replies);
+ bind_voice();x9w_control_ready=true;x9c_init[1].stage=X9_CI_DONE;handover_begin();handover_begin();assert(!qmi_replies);
  handover_begin(0,0,92);assert(qmi_replies==1&&qmi_error==X9Q_BUSY);
  handover_begin(0,0,91);assert(qmi_replies==2&&qmi_error==X9Q_ARG);
  assert(x9c_reg_wait[0][0].answered&&!x9c_clients[0].handover);
- x9c_poll();x9mi_tick();assert(!writes&&!x9c_cmd_init.token);
+ x9c_cmd_init.confirmed=true;x9c_rat_query[1].done=true;x9c_poll();x9mi_tick();assert(!writes&&!x9c_cmd_init.token);
 }
 static void handover_completed_changed(){
  bind_voice();x9w_control_ready=true;x9c_cmd_init.confirmed=true;
@@ -1320,7 +1383,7 @@ static void handover_live_queue_sequence(){
  bzero(&q,sizeof(q));assert(x9cw_handover_queue_push(&q,0,1,0)<0&&q.blocked);
 }
 int main(int argc,char **argv){
- assert(argc==2);x9mi_online(1);
+ assert(argc==2);x9c_cmd_init.held=true;x9c_init[0].held=x9c_init[1].held=true;x9mi_online(1);
  struct {const char *name;void (*run)();} cases[]={
   {"codec_golden",codec_golden},{"codec_invalid",codec_invalid},{"incoming_routes",incoming_routes},{"action_codec",action_codec},
   {"dial_golden",dial_golden},{"dial_invalid",dial_invalid},{"dial_whitelist",dial_whitelist},
@@ -1364,9 +1427,12 @@ int main(int argc,char **argv){
   {"handover_live_generation_sim",handover_live_generation_sim},{"handover_live_overflow_disable",handover_live_overflow_disable},
   {"handover_live_no_request_deadline",handover_live_no_request_deadline},{"handover_live_queue_sequence",handover_live_queue_sequence},
   {"request_whitelist",request_whitelist},{"no_auto_policy",no_auto_policy},{"command_roundtrip",command_roundtrip},
+ {"calllist_client_isolation",calllist_client_isolation},{"calllist_stale_publication",calllist_stale_publication},
+ {"calllist_generation_fence",calllist_generation_fence},
   {"failure_retained",failure_retained},{"duplicate_pending",duplicate_pending},{"changed_duplicate",changed_duplicate},
   {"duplicate_replied",duplicate_replied},{"overflow_isolated",overflow_isolated},{"bounded_tombstones",bounded_tombstones},
-  {"fifo",fifo},{"fragmented",fragmented},{"late_cnf",late_cnf},{"sms_priority",sms_priority},{"staged_ios",staged_ios}};
+  {"fifo",fifo},{"fragmented",fragmented},{"late_cnf",late_cnf},{"sms_priority",sms_priority},{"staged_ios",staged_ios},
+  {"voice20_dispatch",voice20_dispatch}};
  for(auto c:cases)if(!strcmp(argv[1],c.name)){c.run();assert(!lock_depth);return 0;}
  return 2;
 }

@@ -78,6 +78,11 @@ int x9_md_mipc_call_cursor(uint32_t *sequence);
 typedef int (*x9_md_mipc_call_publish_cb)(void *context);
 int x9_md_mipc_call_publish(uint32_t floor,
  x9_md_mipc_call_publish_cb callback, void *context);
+struct x9cw_inbound_state;
+typedef int (*x9_md_mipc_call_publish_state_cb)(void *context,
+ const struct x9cw_outbound_state *, const struct x9cw_inbound_state *);
+int x9_md_mipc_call_publish_state(uint32_t floor,
+ x9_md_mipc_call_publish_state_cb callback, void *context);
 int x9_md_mipc_call_event_ordered(uint8_t *frame, uint32_t capacity, uint32_t *length,
                                uint32_t *token, uint32_t *sequence);
 /* Native MO observation, copied under the MD lock. No registration, request,
