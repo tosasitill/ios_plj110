@@ -643,6 +643,30 @@ static void stall_probe(void)
         stall_cmd_ms=now_ms(NULL);
     }
 }
+/* LE host prelude (log bt6 vs Android btsnoop CsLog_2026_1125_155703):
+ * the controller's HCI task wedges when 0x203b is the first LE query after
+ * HCI Reset. Android always precedes it with Set Event Mask, Write LE Host
+ * Support and LE Set Event Mask (exact parameters below). bluetoothd's own
+ * later 0c01/0c6d/2001 overwrite these values. */
+static bool le_host_ready;
+static void le_host_prelude(void)
+{
+    static const uint8_t cmds[3][12]={
+        {1,0x01,0x0c,8,0xff,0xff,0xff,0xff,0xff,0xff,0xbf,0x3d},
+        {1,0x6d,0x0c,2,0x01,0x00},
+        {1,0x01,0x20,8,0x7f,0xfe,0x02,0x7f,0x07,0xf8,0x07,0x00},
+    };
+    for(unsigned i=0;i<3;i++) {
+        size_t len=(size_t)cmds[i][3]+4;
+        uint8_t reply[64]; size_t n=sizeof(reply);
+        hci_trace("TX+",cmds[i],(uint32_t)len);
+        int error=hci_exchange(NULL,cmds[i],len,reply,&n,1000);
+        printf("X9 BT: LE host prelude %02x%02x errno=%d status=%d\n",cmds[i][2],cmds[i][1],
+            error,(!error && n>=7)?reply[6]:-1);
+        if(error) break;
+    }
+    le_host_ready=true;
+}
 static void worker(void *unused,wait_result_t result)
 {
     (void)unused; (void)result;
@@ -724,6 +748,19 @@ static void worker(void *unused,wait_result_t result)
             have_rx=false;
         error=x9_bt_serial_tx_claim(native_tx,sizeof(native_tx),&n,&generation);
         if(error) break;
+        if(n && native_tx[0]==1 && n>=3) {
+            uint16_t op=native_tx[1]|((uint16_t)native_tx[2]<<8);
+            if(op==0x0c03) le_host_ready=false;
+            else if(op==0x0c6d) le_host_ready=true;
+            else if(op==0x203b && !le_host_ready) {
+                /* hci_exchange reuses incoming: keep an undelivered frame. */
+                if(have_rx && pending_count<8) {
+                    memmove(pending+1,pending,pending_count*sizeof(pending[0]));
+                    pending[0]=incoming; pending_count++; have_rx=false;
+                }
+                if(!have_rx) le_host_prelude();
+            }
+        }
         if(n) {
             hci_trace("TX",native_tx,n);
             uint32_t wire_length=0;
