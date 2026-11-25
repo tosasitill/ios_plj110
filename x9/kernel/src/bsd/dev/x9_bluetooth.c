@@ -69,6 +69,21 @@ struct bt_frame { uint32_t length; uint8_t data[BT_WIRE_FRAME_MAX]; };
 static struct bt_frame assembling, pending[8];
 /* Sole worker owns these; no 8KiB packet is allocated on the kernel stack. */
 static struct bt_frame incoming;
+/* Bounded native HCI trace (log bt4: 203b Command Complete never seen by
+ * bluetoothd). x9_bt_hci_trace=N packets, default 400, 0 disables. */
+static int hci_trace_left=-1;
+static void hci_trace(const char *dir,const uint8_t *p,uint32_t n)
+{
+    if(hci_trace_left<0) {
+        int v=400; if(!PE_parse_boot_argn("x9_bt_hci_trace",&v,sizeof(v))) v=400;
+        hci_trace_left=v<0?0:v;
+    }
+    if(!hci_trace_left) return;
+    hci_trace_left--;
+    char hex[16*3+1]; uint32_t m=n<16?n:16; hex[0]=0;
+    for(uint32_t i=0;i<m;i++) snprintf(hex+3*i,4,"%02x ",p[i]);
+    printf("X9 HCI %s len=%u %s\n",dir,n,hex);
+}
 static uint8_t native_tx[BT_WIRE_FRAME_MAX];
 static unsigned pending_count;
 static uint64_t frame_start;
@@ -650,6 +665,7 @@ static void worker(void *unused,wait_result_t result)
                 error=next_frame(&incoming);
                 if(error && error!=EAGAIN) break;
                 have_rx=error==0;
+                if(have_rx) hci_trace("RX",incoming.data,incoming.length);
             }
         }
         /* Retain the WHOLE frame under temporary daemon backpressure.
@@ -661,6 +677,7 @@ static void worker(void *unused,wait_result_t result)
         error=x9_bt_serial_tx_claim(native_tx,sizeof(native_tx),&n,&generation);
         if(error) break;
         if(n) {
+            hci_trace("TX",native_tx,n);
             uint32_t wire_length=0;
             size_t sent=0; error=native_to_wire(n,&wire_length);
             if(!error) error=raw_write(NULL,native_tx,wire_length,&sent);
@@ -675,6 +692,7 @@ static void worker(void *unused,wait_result_t result)
         }
         sleep_ms(NULL,1);
     }
+    printf("X9 BT: native worker loop exit errno=%d\n",error);
     lck_mtx_lock(&bt_lock); power.live=false; power.state=2; power.error=error;
     if(power.busy && !power.done) { power.done=true; wakeup(&power.done); }
     lck_mtx_unlock(&bt_lock);
