@@ -13,7 +13,9 @@ static int cam_phy_deskew_reset(void)
     int e;
     if(n==CAM_PHY_NO_REG || cam_phy.status.deskew_reset_pending ||
        cam_phy.status.deskew_reset_released)return CAM_FAIL(EALREADY);
-    if(cam_phy_read(n)&(CAM_DSK_RESET|CAM_DSK_ENABLE|CAM_DSK_LP11_IDLE))return CAM_FAIL(EBUSY);
+    /* diag41: Android (phyA_init sets EN+LP11_IDLE, then an unconditional
+     * SW_RST pulse) never checks the prior CTRL; a previous session leaves
+     * EN/LP11 set, so a guard here refused every reopen with EBUSY. */
     e=cam_phy_dependencies();if(e)return e;
     /* Dedicated inactive deskew FSM reset, NOT a way to cancel pending
      * calibration/meter/DMA requests. Mark before assertion. A failed
