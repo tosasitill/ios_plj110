@@ -606,9 +606,32 @@ SYSCTL_PROC(_kern,OID_AUTO,x9_bt_power,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY|CT
  * DEV0_HOST_AWAKE, 0xFF when DEV0_BT_AWAKE=0, own-clear WMT 6f/03 and its
  * E4 ACK. Frames collected meanwhile stay in pending[] for the daemon. The
  * stalled command is retransmitted once only if the firmware answered. */
+static void stall_collect(const char *what,const uint8_t *tx,size_t len,uint32_t ms)
+{
+    size_t sent=0; int error=raw_write(NULL,tx,len,&sent);
+    if(!error) error=drain(NULL,100);
+    hci_trace(what,tx,(uint32_t)len);
+    unsigned got=0; uint64_t end=now_ms(NULL)+ms;
+    while(now_ms(NULL)<end) {
+        int e=next_frame(&incoming);
+        if(!e) {
+            got++; hci_trace("RX*",incoming.data,incoming.length);
+            if(pending_count<8) pending[pending_count++]=incoming;
+        } else if(e!=EAGAIN) { printf("X9 BT STALL %s parser errno=%d\n",what,e); break; }
+        else sleep_ms(NULL,1);
+    }
+    boolean_t old=rx_lock(); uint64_t rcv=rx.received,irq=rx.interrupts,err=rx.errors; rx_unlock(old);
+    printf("X9 BT STALL %s tx errno=%d frames=%u rx bytes=%llu irqs=%llu errs=%llu\n",what,error,got,
+        (unsigned long long)rcv,(unsigned long long)irq,(unsigned long long)err);
+}
 static void stall_probe(void)
 {
     stall_probes++;
+    {
+        boolean_t o2=rx_lock(); uint64_t rcv=rx.received,irq=rx.interrupts,err=rx.errors; rx_unlock(o2);
+        printf("X9 BT STALL counters rx bytes=%llu irqs=%llu errs=%llu\n",(unsigned long long)rcv,
+            (unsigned long long)irq,(unsigned long long)err);
+    }
     boolean_t old=rx_lock(); uint32_t rl=rx.len; int re=rx.error; rx_unlock(old);
     printf("X9 BT STALL #%u: cmd %02x%02x len=%u %llums without RX; uart lsr=%x ier=%x rxring=%u rxerr=%d pending=%u asm=%u\n",
         stall_probes,stall_cmd_len>2?stall_cmd[2]:0,stall_cmd_len>1?stall_cmd[1]:0,stall_cmd_len,
@@ -631,6 +654,11 @@ static void stall_probe(void)
     printf("X9 BT STALL own-clear errno=%d reply=%s queued=%u\n",error,hex,pending_count-before);
     for(unsigned i=before;i<pending_count;i++) hci_trace("RX*",pending[i].data,pending[i].length);
     x9_bt_hardware_snapshot("after");
+    /* btmtk_query_fw_schedule_info: FW (not hub) answers 04 ff .. 3a fc a0. */
+    static const uint8_t sched[]={1,0x3a,0xfc,2,0xa0,0};
+    stall_collect("FC3A",sched,sizeof(sched),300);
+    static const uint8_t version[]={1,0x01,0x10,0};
+    stall_collect("1001",version,sizeof(version),300);
     bool answered=false;
     for(unsigned i=0;i<pending_count;i++)
         if(pending[i].length>=6 && pending[i].data[0]==4 && pending[i].data[1]==0x0e &&
