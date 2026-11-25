@@ -768,6 +768,11 @@ static const struct {
 	 * Keep ADT artwork, framebuffer and HID on the same selector path. */
 	{ "x9_fill", 1 },
 	{ "x9_ui", 1 },
+	/* User request (2026-11-25): ambient light and proximity start their
+	 * native secure SCP transport by default. x9_als=0 / x9_prox=0 and an
+	 * explicit x9s mask still override. */
+	{ "x9_als", 3 },
+	{ "x9_prox", 3 },
 	/* X9_BOARD_DEFAULTS_END */
 };
 

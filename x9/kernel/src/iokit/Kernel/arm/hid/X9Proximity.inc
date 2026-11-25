@@ -37,8 +37,10 @@ private:
 OSDefineMetaClassAndStructors(X9Proximity,IOHIDEventService);
 bool X9Proximity::start(IOService *provider)
 {
- int sensors=0,mode=0; PE_parse_boot_argn("x9s",&sensors,sizeof(sensors));
- mode=(sensors&8)?3:0; PE_parse_boot_argn("x9_prox",&mode,sizeof(mode));
+ int sensors=0,mode=0,has_sensors;
+ has_sensors=PE_parse_boot_argn("x9s",&sensors,sizeof(sensors))?1:0;
+ mode=(sensors&8)?3:0;
+ if (!PE_parse_boot_argn("x9_prox",&mode,sizeof(mode)) && !has_sensors) mode=sweet_x9_arg("x9_prox",0);
  if (!sweet_early_is_x9() || mode<1 || mode>3) return false;
  fTimer=NULL; fSequence=0; fIntervalUs=200000; fDetectionMode=0;
  fIngressActive=fValid=fReplay=false; fError=0;

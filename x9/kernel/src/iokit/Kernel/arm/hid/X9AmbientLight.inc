@@ -42,9 +42,11 @@ X9AmbientLight::start(IOService *provider)
 	fIngressActive = false;
 	/* Compact sensor mask: bit0 ALS, bit1 pressure, bit2 GPS. Explicit
 	 * per-device arguments override it (including diagnostic mode). */
-	int sensors = 0; PE_parse_boot_argn("x9s", &sensors, sizeof(sensors));
+	int sensors = 0; int has_sensors;
+	has_sensors = PE_parse_boot_argn("x9s", &sensors, sizeof(sensors)) ? 1 : 0;
 	int enabled = (sensors&1) ? 1 : 0;
-	PE_parse_boot_argn("x9_als", &enabled, sizeof(enabled));
+	if (!PE_parse_boot_argn("x9_als", &enabled, sizeof(enabled)) && !has_sensors)
+		enabled = sweet_x9_arg("x9_als", 0);
 	if (!sweet_early_is_x9() || (enabled != 1 && enabled != 2 && enabled != 3)) return false;
 	/* One token: 1=external ingress, 2=diagnostic, 3=native secure SCP. */
 	int diagnostic = enabled == 2;
