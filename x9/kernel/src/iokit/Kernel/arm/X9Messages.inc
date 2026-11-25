@@ -187,6 +187,17 @@ static uint64_t x9m_store_submit(const x9m_job &j){
  /* 103=0 is permitted ONLY for a single indexed CMGR in ModifyTag step1;
   * never mark an entire CMGL enumeration read. CPMS is always explicit. */
  f.byte(0x103,j.op==X9M_TAG&&j.step==1?0:1);f.byte(0x104,storage.p[0]);
+ /* 0x210000 has no proven meaning yet (empty store vs schema/flag error).
+  * Log the decoded host request and the response TLV shape; never guess an
+  * empty list from a nonzero result. Values only, no PDU or number bytes. */
+ static unsigned diag_submits;
+ if(diag_submits<8){
+  diag_submits++;
+  struct x9ms_storage_request sr={};unsigned sok=x9ms_storage_decode(j.req,j.len,&sr);
+  printf("X9 SMS DIAG: 0607 SIM%u op %u step %u dec %u storage %u tag %u/%u idx %u flag %u 103=%u\n",
+   j.sim+1,j.op,j.step,sok,sok?sr.storage:0xff,sok?sr.has_tag:0xff,
+   sok?sr.tag:0xff,sok?sr.index:0xffffffffu,flag,j.op==X9M_TAG&&j.step==1?0:1);
+ }
  if(j.op==X9M_TAG&&j.step==1){
   /* Serialize exactly the same frame, but carry this mutation's original
    * owner and absolute host guard to the native allocator/unique writer. */
@@ -539,6 +550,19 @@ static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
  bool known=x9w_wire(p,n)&&x9q_u16(p+10)==(stored?0x608:j.op==X9M_SEND?0x606:j.op==X9M_REG?0xa05:0x602)&&
   p[8]==(1u<<j.sim)&&x9w_word(p,n,0,result);
  if(!known||result){j.hold=(j.op==X9M_SEND&&!known)||(j.op==X9M_TAG&&j.step!=0);
+  static unsigned diag_failures;
+  if(stored&&diag_failures<8){
+   diag_failures++;
+   printf("X9 SMS DIAG: 0608 SIM%u op %u known %u result 0x%x id 0x%04x tx %u tlvs",
+    j.sim+1,j.op,known?1:0,result,known?(unsigned)x9q_u16(p+10):0u,known?(unsigned)x9q_u16(p+12):0u);
+   for(unsigned at=16;known&&at<n;){
+    unsigned k=x9q_u16(p+at+2);
+    printf(" %x/%u",(unsigned)x9q_u16(p+at)&0x7fffu,k);
+    if(k>n-at-4)break;
+    at+=k?((k+11)&~7u):16;
+   }
+   printf("\n");
+  }
   printf("X9 SMS/IMS: operation %u SIM%u CNF known %u result %u\n",j.op,j.sim+1,known?1:0,result);
   x9m_error(j,X9Q_INTERNAL);return;}
  x9q_packet response(j.req);
