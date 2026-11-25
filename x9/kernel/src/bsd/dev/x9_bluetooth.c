@@ -892,6 +892,20 @@ static void worker(void *unused,wait_result_t result)
             stall_outstanding=false; stall_probed=false;
             have_rx=false;
         }
+        /* MTK WMT events (HCI event 0xE4) belong to the vendor transport and
+         * are never delivered to the host stack on Android. Apple's event
+         * descriptor table has no 0xE4 entry; hcievents.c fatals with reason
+         * 607 on the unknown code. Consume the complete H4 frame here. */
+        if(have_rx && incoming.length>=3 && incoming.data[0]==4 &&
+           incoming.data[1]==0xe4 && incoming.length==(uint32_t)incoming.data[2]+3) {
+            static unsigned wmt_logs;
+            if(wmt_logs<8) {
+                wmt_logs++;
+                printf("X9 BT: WMT event %02x len=%u consumed\n",
+                       incoming.data[2]?incoming.data[3]:0,incoming.length);
+            }
+            have_rx=false;
+        }
         /* Retain the WHOLE frame under temporary daemon backpressure.
          * Closed-daemon packets are discarded by serial_rx, as before.
          * The bounded IRQ ring still makes a genuinely stalled consumer
