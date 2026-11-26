@@ -796,7 +796,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   if(voice_probe_logs<16){
    voice_probe_logs++;
    x9q_view operation=x9q_tlv(req,len,1),call_id=x9q_tlv(req,len,0x10);
-   printf("X9 CALL: VOICE unsupported msg 0x%04x txn %u operation_len=%u operation=%d call_id_len=%u\n",
+   printf("X9 CALL: VOICE request msg 0x%04x txn %u operation_len=%u operation=%d call_id_len=%u\n",
           id,x9q_u16(req+1),operation.n,
           id==0x31&&operation.p&&operation.n==1?(int)operation.p[0]:-1,call_id.n);
   }

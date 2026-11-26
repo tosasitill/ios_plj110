@@ -371,10 +371,9 @@ static inline int x9cw_current(const uint8_t *p,unsigned n,struct x9cw_current *
  *out=c;return 1;
 }
 /* A hangup targets a real observed MO epoch AND a complete owned current
- * snapshot. RIL386180 accepts current state0..5: ACTIVE0/ALERTING3
- * match our observed ordinary SIM2 mode20 call; initial ECPI130 is mode0
- * and is deliberately not admitted as a mode20 end target.
- * are admitted. No wildcard, inferred single count, default id or MT here.
+ * snapshot. Current states ACTIVE0/DIALING2/ALERTING3 are the RIL enum
+ * (RIL386180); ECPI130 maps to ORIGINATION1 and RIL DIALING2
+ * (RIL268db0/199ee0). No wildcard, inferred count, default ID or MT here.
  * The snapshot revision is copied again and checked at writer selection. */
 struct x9cw_end_target {uint64_t epoch,revision;uint32_t native_id;unsigned sim,direction;};
 static inline int x9cw_end_target(const struct x9cw_outbound_state *s,
@@ -386,7 +385,8 @@ static inline int x9cw_end_target(const struct x9cw_outbound_state *s,
     (s->mode!=20&&s->mode!=0))return 0;
  const struct x9cw_current_call *r=&c->calls[0];
  if(r->id!=id||r->direction||(r->mode!=20&&r->mode!=0)||(r->flags&1u)||
-    !((s->ios_state==5&&r->state==3)||
+    !((s->ios_state==1&&r->state==2)||
+      (s->ios_state==5&&r->state==3)||
       (s->ios_state==3&&r->state==0)))return 0;
  out->epoch=s->epoch;out->revision=s->revision;out->native_id=id;out->sim=1;out->direction=0;return 1;
 }

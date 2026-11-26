@@ -724,11 +724,12 @@ static void incoming_end_reason(){
  s={};assert(x9cw_inbound_begin(&s,&cmd)==1);unsigned n=reason_frame(p,133,1);
  assert(x9cw_progress(p,n,&c)&&x9cw_inbound_apply(&s,&c)==-1&&!s.end_reason.known);
 }
-static unsigned current_frame(uint8_t *p,unsigned count,unsigned result=0){
+static unsigned current_frame(uint8_t *p,unsigned count,unsigned result=0,
+                              unsigned mode=20,unsigned state=0){
  assert(count<=1);x9cw_header(p,704,0x90a,2,0);unsigned at=32;
  x9cw_scalar(p+16,0,result,4);x9cw_scalar(p+24,0x100,count,4);
  const unsigned tags[]={0x10b,0x10c,0x10d,0x10e,0x10f,0x110,0x8111,0x112,0x113,0x8114,0x115};
- const uint32_t words[]={7,0,20,0,0,129,0,0,0x100000,0,0};
+ const uint32_t words[]={7,0,mode,state,0,129,0,0,0x100000,0,0};
  if(count)for(unsigned j=0;j<11;j++){
   unsigned base=(0x7000-j*8)|(tags[j]&0x8000);
   x9cw_put16(p+at,tags[j]);x9cw_put16(p+at+12,base);x9cw_put16(p+at+14,count);at+=16;
@@ -965,8 +966,8 @@ static void end_request(){
  assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q))&&x9c_end_job.stage==1);
  assert(!qmi_replies);
 }
-static void end_query_cnf(){
- uint8_t p[704];unsigned n=current_frame(p,1);x9cw_put16(p+12,(unsigned)x9c_end_job.token);
+static void end_query_cnf(unsigned mode=20,unsigned state=0){
+ uint8_t p[704];unsigned n=current_frame(p,1,0,mode,state);x9cw_put16(p+12,(unsigned)x9c_end_job.token);
  x9mi_rx(p,n);x9c_poll();assert(x9c_end_job.stage==2&&x9c_end_job.token&&x9_mc_end_token);
 }
 static void end_target_codec(){
@@ -1019,7 +1020,7 @@ static void ios_end_roundtrip(){
  assert(qmi_replies==1&&!x9c_end_job.used&&!x9_mc_end_token&&x9_mc_outbound.ended&&x9_mc_outbound.count_known);
 }
 static void ios_end_all_roundtrip(){
- bind_voice();rx_progress(130,7,0);rx_progress(132);
+ bind_voice();rx_progress(130,7,0);
  x9c_clients[0].calllist_valid=true;x9c_clients[0].calllist_epoch=x9_mc_outbound.epoch;
  x9c_clients[0].calllist_id=7;
  uint8_t q[]={0,78,0,0x31,0,4,0,1,1,0,8};
@@ -1027,7 +1028,7 @@ static void ios_end_all_roundtrip(){
  uint64_t query=x9c_end_job.token;
  q[5]=0;x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,7);
  assert(x9c_end_job.token==query&&!qmi_replies);
- x9mi_tick();end_query_cnf();uint64_t token=x9c_end_job.token;x9mi_tick();
+ x9mi_tick();end_query_cnf(0,2);uint64_t token=x9c_end_job.token;x9mi_tick();
  assert(writes==2&&x9cw_u16(last_frame+10)==0x905&&x9cw_u32(last_frame+20)==0&&x9cw_u32(last_frame+28)==7);
  uint8_t p[24];x9cw_header(p,24,0x906,2,(unsigned)token);x9cw_scalar(p+16,0,0,4);
  x9mi_rx(p,sizeof(p));x9c_poll();assert(qmi_replies==1&&!qmi_error&&qmi_response_len==14&&x9cw_u16(qmi_response+3)==0x31);

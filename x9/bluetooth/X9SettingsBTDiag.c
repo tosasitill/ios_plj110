@@ -29,6 +29,7 @@ static const uint8_t manager_uuid[16] = {0x54,0xfb,0x08,0xf7,0xfe,0x66,0x34,0x4d
 static const uint8_t mobile_uuid[16] = {0xfd,0xe5,0xb9,0x8e,0x22,0x57,0x35,0xc8,0xb3,0x23,0x92,0xb8,0x24,0x49,0x22,0x07};
 static _Atomic unsigned notes;
 static const uint8_t settings_uuid[16] = {0x43,0x3b,0xd2,0x2d,0x83,0x55,0x34,0x2f,0xba,0x34,0xd2,0x47,0x1d,0xc0,0x1c,0xb0};
+static const uint8_t core_bluetooth_uuid[16] = {0x40,0x85,0x02,0x43,0x24,0xa8,0x34,0x02,0x9b,0x19,0x33,0x92,0xd4,0xaf,0x07,0x2b};
 
 static void note(const char *format, ...)
 {
@@ -64,6 +65,44 @@ static int image_uuid(const void *base, const uint8_t expected[16])
 
 static id (*original_specifiers)(id, SEL);
 static void (*original_central_state)(id, SEL, id);
+static void (*original_xpc_invalid)(id, SEL);
+static void (*original_handle_state)(id, SEL, id);
+
+static void manager_xpc_invalid(id object, SEL selector)
+{
+    note("CoreBluetooth manager XPC connection invalidated");
+    original_xpc_invalid(object, selector);
+}
+
+static void manager_handle_state(id object, SEL selector, id args)
+{
+    note("CoreBluetooth manager received XPC state update");
+    original_handle_state(object, selector, args);
+}
+
+static void settings_install_xpc(void *context)
+{
+    const struct mach_header *header = context;
+    Class manager = objc_getClass("CBManager");
+    if (!manager) return;
+    Method invalid = class_getInstanceMethod(manager, sel_registerName("xpcConnectionIsInvalid"));
+    Method update = class_getInstanceMethod(manager, sel_registerName("handleStateUpdatedMsg:"));
+    const char *invalid_type = invalid ? method_getTypeEncoding(invalid) : NULL;
+    const char *update_type = update ? method_getTypeEncoding(update) : NULL;
+    Dl_info invalid_info = {0}, update_info = {0};
+    if (!invalid_type || !update_type ||
+        strcmp(invalid_type, "v16@0:8") || strcmp(update_type, "v24@0:8@16") ||
+        !dladdr((void *)method_getImplementation(invalid), &invalid_info) || invalid_info.dli_fbase != header ||
+        !dladdr((void *)method_getImplementation(update), &update_info) || update_info.dli_fbase != header) {
+        note("CoreBluetooth manager XPC diagnostic identity rejected");
+        return;
+    }
+    original_xpc_invalid = (void (*)(id, SEL))method_getImplementation(invalid);
+    original_handle_state = (void (*)(id, SEL, id))method_getImplementation(update);
+    method_setImplementation(invalid, (IMP)manager_xpc_invalid);
+    method_setImplementation(update, (IMP)manager_handle_state);
+    note("CoreBluetooth manager XPC diagnostics installed");
+}
 
 static int bool_ivar(id object, const char *name)
 {
@@ -133,6 +172,8 @@ static void settings_image_added(const struct mach_header *header, intptr_t slid
     (void)slide;
     if (image_uuid(header, settings_uuid))
         dispatch_async_f(dispatch_get_main_queue(), (void *)header, settings_install_ui);
+    if (image_uuid(header, core_bluetooth_uuid))
+        dispatch_async_f(dispatch_get_main_queue(), (void *)header, settings_install_xpc);
 }
 
 /* The audit VAs are preferred Mach-O VAs, not offsets from the image header.
