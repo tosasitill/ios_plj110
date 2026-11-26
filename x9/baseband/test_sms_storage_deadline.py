@@ -20,6 +20,7 @@ class StorageDeadline(unittest.TestCase):
 #include <cstdint>
 #define bzero(p,n) std::memset(p,0,n)
 #define X9Q_NOT_READY 7
+#define X9M_SEND 3
 struct Job { unsigned op, sim; bool answered, hold, follow; uint64_t deadline; unsigned char req[16], stored_pdu[16]; };
 static uint64_t clock_ms; static int error_count, done_count; static bool answered_at_done;
 static bool x9m_storage(unsigned op) { return op==1; }
@@ -42,6 +43,12 @@ int main() {
  if(error_count||done_count!=1||!answered_at_done) return 3;
  Job d={2,0,false,false,false,100,{},{} }; run(d,101);
  if(error_count||done_count!=1||answered_at_done) return 4;
+ Job e={3,0,false,false,false,100,{},{} }; run(e,99);
+ if(error_count||done_count!=1||answered_at_done) return 5;
+ Job f={3,0,false,false,false,100,{},{} }; run(f,100);
+ if(error_count!=1||done_count!=1||!answered_at_done) return 6;
+ Job g={3,0,true,false,false,100,{},{} }; run(g,101);
+ if(error_count||done_count!=1||!answered_at_done) return 7;
  return 0;
 }
 '''
