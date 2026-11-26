@@ -21,12 +21,13 @@ MAIN = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--mode', required=True, choices=(
     'producer', 'queue', 'client', 'config', 'instance', 'factory', 'selection',
-    'action', 'action-owner', 'action-update', 'action-assignment', 'action-driver'))
+    'action', 'action-owner', 'action-update', 'action-assignment', 'action-driver', 'manager-queue'))
 parser.add_argument('--root-mount', type=Path, default=Path('/private/tmp/x9root'),
                     help='existing current root mount; this tool never attaches or changes it')
 parser.add_argument('--out', required=True, type=Path, help='NEW directory under repository x9/out')
 args = parser.parse_args()
-QUEUE_ONLY = args.mode == 'queue'
+MANAGER_QUEUE = args.mode == 'manager-queue'
+QUEUE_ONLY = args.mode == 'queue' or MANAGER_QUEUE
 CLIENT_ONLY = args.mode == 'client'
 CONFIG_ONLY = args.mode == 'config'
 INSTANCE_ONLY = args.mode == 'instance'
@@ -278,7 +279,7 @@ for image in export_images:
                 value, r = uleb(r); va = base + value
                 selected = any(k == image and a <= va < a+n for _, k, a, n in slices)
                 selected |= image == 'cxx' and name.endswith('__shared_weak_count4lockEv')
-                selected |= image == 'dispatch' and name in ('_dispatch_async_f', '_dispatch_group_notify_f', '_dispatch_queue_attr_make_with_qos_class', '_dispatch_queue_create_with_target$V2')
+                selected |= image == 'dispatch' and name in ('_dispatch_async_f', '_dispatch_group_notify_f', '_dispatch_queue_attr_make_with_qos_class', '_dispatch_queue_create_with_target$V2', '_dispatch_queue_create')
                 if CLIENT_ONLY:
                     selected |= image == 'base' and va == 0x1f038b750
                     selected |= image == 'dispatch' and name in ('_dispatch_sync', '_dispatch_async_and_wait')
@@ -365,7 +366,10 @@ stub_specs = ((0x1f03c19b8, '_dispatch_async_f'), (0x1f03c1a0c, '_dispatch_group
                      (0x1f03c1a24, '_dispatch_queue_attr_make_with_qos_class'),
                      (0x1f03c1a3c, '_dispatch_queue_create_with_target$V2'),
                      (0x1f2f7b31c, '__ZNSt3__119__shared_weak_count4lockEv'))
-if CLIENT_ONLY:
+if MANAGER_QUEUE:
+    stub_specs = ((0x1f2e83024, '_dispatch_queue_attr_make_with_qos_class'),
+                  (0x1f2e83030, '_dispatch_queue_create'))
+elif CLIENT_ONLY:
     stub_specs = ((0x1f2fb16cc, '__Z9isPresentRKNSt3__110shared_ptrIK8RegistryEERK13PersonalityID'),
                   (0x1f2e82fe8, '_dispatch_async_and_wait'), (0x1f2e83084, '_dispatch_sync'))
 elif CONFIG_ONLY or INSTANCE_ONLY or FACTORY_ONLY or SELECTION_ONLY or ACTION_ONLY:

@@ -37,3 +37,14 @@
 - 下一步应资格化 getter block 的实际 queue 临界范围和 added/enabled 更新与该 queue 的交错，并证明 CallInfo 本次 slot→PersonalityID 到该 block 的唯一强关联；同时验证具体 controller/model 动态类型及 virtual slots。只有证实一致的串行化和 rebind/晚回调退休规则后，才能设计 capture。若 queue 或对象类型不能资格化，应继续 fail closed，而不是由 clientId、controller counter、PBI 或 getter 成功合成 epoch。
 
 本次未运行 reader、重新采样私有原件或设备操作；未写 typed provider、调用原 ABI、构建或声称语音验收。
+
+### Manager queue 创建入口的原件资格（2026-11-26）
+
+此前 selection 证据只证明 manager C2 保存两个 stub 的结果；本轮从现有 root Cryptex cache 的原 slide-v2 chain 和独立 libdispatch export trie 资格化了这两个目标：
+
+- `1f2e83024` 的 `ADRP/LDR/BR` 读取 chain 成员 `20f7e8f48`，目标 `18db970d0` 是 `_dispatch_queue_attr_make_with_qos_class`。
+- `1f2e83030` 同样读取 `20f7e8f50`，目标 `18dba57f0` 是 `_dispatch_queue_create`。
+
+结合既有已资格 C2 `1f2e4b34c..370`：原代码以 null attribute、`qos=0x19`、relative priority 0 调前者，将其返回值传给后者，并把 queue 存于 manager `+18`。这比旧 indirect-symbol 线索更强：**原件调用目标已资格**。不过这里不是 `dispatch_queue_create_with_target` 调用，不能将它等同 tracker 使用的独立 child queue；也未验证运行时 queue 属性、queue specific 标志、tracker 输入 queue 与 manager queue 是否同一对象，或 added/enabled 实际总在 manager queue 执行。已资格 Client getter 的同步 dispatch 本身无法证明 record 更新不会在其周围交错，仍不能提交复合身份 snapshot。
+
+复现：在现有固定 `.local` 与已挂载 root 下运行 `python3 x9/tools/call_context_evidence.py --mode manager-queue --out x9/out/<新目录>`；本次输出 `x9/out/call-manager-queue-final-20261126/`，命令 exit 0，两个 12B stub、4096B GOT page 和原 export/chain proof。读取原 cache 与已有挂载，不附加或修改设备。下一步应先资格 tracker bind 的 target queue producer 与 manager `+18` 的对象身份/执行顺序，而不是将同 QoS 或相同字段偏移当同一 queue。
