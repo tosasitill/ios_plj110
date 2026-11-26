@@ -30,6 +30,19 @@ struct x9m_job {
 static x9m_job x9m_jobs[X9M_JOBS];
 static uint64_t x9m_store_order;
 static bool x9m_storage(unsigned op){return op==X9M_LIST||op==X9M_READ||op==X9M_TAG;}
+/* An active WMS storage transaction owns its QMI transaction number until
+ * the native work is retired. A repeated or changed request cannot enqueue
+ * another 0607 or produce a competing terminal response. */
+static bool x9m_storage_repeated(unsigned slot,uint64_t generation,const uint8_t *req,unsigned len){
+ if(!req||len<7)return false;
+ for(const x9m_job &j:x9m_jobs)if(x9m_storage(j.op)&&j.slot==slot&&
+  j.generation==generation&&x9q_u16(j.req+1)==x9q_u16(req+1)){
+  if(j.len!=len||memcmp(j.req,req,len))
+   printf("X9 SMS: storage txn %u changed reuse rejected; original owner retained\n",x9q_u16(req+1));
+  return true;
+ }
+ return false;
+}
 struct x9m_incoming {
  uint32_t token; unsigned sim,len,slot; uint64_t generation,next_delivery;
  bool delivered,replying,held; uint64_t ack_wait; uint8_t pdu[255];
@@ -470,6 +483,7 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   if(!x9m_sims[sim].ready||!x9w_control_ready||!x9_md_mipc_message_online())err=X9Q_NOT_READY;
   else{x9q_packet p(req);x9m_number(p,1,1,1);p.send(local,port);return true;}
  }else if(service==5&&(id==0x31||id==0x22||id==0x23)){
+  if(x9m_storage_repeated(slot,x9q_clients[slot].generation,req,len))return true;
   struct x9ms_storage_request storage;unsigned decoded=x9ms_storage_decode(req,len,&storage);
   if(decoded)err=decoded==X9MS_ARG?X9Q_ARG:X9Q_UNSUPPORTED;
   /* Apple sends List31 during startup before the real host-ready CNF.
