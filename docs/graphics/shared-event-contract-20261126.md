@@ -68,3 +68,26 @@ sed -n '8448,8517p;8675,8820p' /tmp/iosurface.dis
 - The selector 40 fallback ignores async registrations. XNU's generated `device/device_server.c` forwards the async wake port; `ipc_kobject_server` transfers request rights **on success** and destroys the request descriptors on error. Thus only the fallback success path releases the unused send right via `releaseAsyncReference64`; sync calls and the existing large-output rejection do not manually drop it. This is resource cleanup, not listener implementation. The success/unsupported statuses are intentionally unchanged; a real implementation will need to replace this discard path with explicit ownership and teardown.
 
 Repro (offline): `xcrun llvm-objdump --macho --dylibs-used <AegirPoster>`, `xcrun llvm-objdump --macho --disassemble --no-show-raw-insn <AegirPoster>`, `strings -a <AegirPoster>`; inspect the generated `device_server.c` async method and `osfmk/kern/ipc_kobject.c` plus `iokit/Kernel/IOUserClient.cpp` in the fixed local XNU tree. Not device or feature verification.
+
+## QuartzCore drawable 的局部 nil 路径（2026-11-26）
+
+固定 20H392 QuartzCore 的 `-[CAMetalDrawable initWithDrawablePrivate:layer:]` 在 `0x1882a7020..7040` 的条件分支从 classref `0x1dcdf6440` 创建对象，存入 drawable 的 `+72`；这是原生 `IOSurfaceSharedEvent`：QuartzCore `--objc-meta-data` 显示该 classref 原始值 `0x201dd6a69b8`，去除 dyld cache 高位后为 `0x1dd6a69b8`，与同版 IOSurface 的 `_OBJC_CLASS_$_IOSurfaceSharedEvent` 符号一致。该对象分配走 `0x18dbcd258` 外部入口；该类的 `-init` 在 selector 36 或 38 失败时返回 nil（见上文）。
+
+QuartzCore `layer_private_present` 在 `0x18829e0c4..f0` 取 drawable 的 `sharedEvent`；当 event 为 nil 时分支至 `0x18829e1ac` 并尾调用 `layer_private_present_impl`，非 nil 才有可能执行 `notifyListener:atValue:block:`。这确实证明该调用点具有 nil 的本地 present 回退，**不是**整个 QuartzCore、AegirPoster 或所有使用 IOSurfaceSharedEvent 的调用方均安全的证明，也不证明回退的显示或性能已验收。selector 36/38 只看到连接和参数，并不可靠区分来自 CAMetalDrawable 的请求与其他用户；因此不能依据进程名全局拒绝这两个 selector，也没有作行为修改。
+
+复核（所有输出仅为静态 host 证据）：
+
+```sh
+xcrun llvm-objdump --macho --disassemble --no-show-raw-insn \
+ .local/apple/dsc-20H392/System/Library/Frameworks/QuartzCore.framework/QuartzCore \
+ > x9/out/shared-event-consumer-20261126/quartz.dis
+xcrun llvm-objdump --macho --objc-meta-data \
+ .local/apple/dsc-20H392/System/Library/Frameworks/QuartzCore.framework/QuartzCore \
+ > x9/out/shared-event-consumer-20261126/quartz.objc
+rg '1dcdf6440' x9/out/shared-event-consumer-20261126/quartz.objc
+xcrun nm -nm .local/apple/dsc-20H392/System/Library/Frameworks/IOSurface.framework/IOSurface \
+ | grep 'OBJC_CLASS_\$_IOSurfaceSharedEvent'
+sed -n '25095,25208p;34344,34435p' x9/out/shared-event-consumer-20261126/quartz.dis
+```
+
+命令均 exit 0；`quartz.dis`、`quartz.objc` 为 gitignored scratch。未构建或操作设备；没有证明这条路径在 430 执行，不能将其归因为 SIGABRT 根因。

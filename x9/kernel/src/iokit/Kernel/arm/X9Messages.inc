@@ -774,8 +774,9 @@ static void x9m_poll(){
    }
    if(taken==1){
     /* take may wait for the MD lock: recheck after it returns, before
-     * a storage CNF can publish success or start a later TAG stage. */
-    if(x9m_storage(j.op)&&!j.answered&&x9q_ms()>=j.deadline)
+     * an MO/storage CNF can publish success or start a later TAG stage.
+     * Still drain the actual result; a timed-out send is never retried. */
+    if((j.op==X9M_SEND||x9m_storage(j.op))&&!j.answered&&x9q_ms()>=j.deadline)
      x9m_error(j,X9Q_NOT_READY);
     x9m_job_done(j,p,n);bzero(p,sizeof(p));
     if(j.hold){bzero(j.req+7,sizeof(j.req)-7);bzero(j.stored_pdu,sizeof(j.stored_pdu));

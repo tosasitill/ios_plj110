@@ -95,7 +95,7 @@ static bool bb_x9_call_result(uint32_t local,uint32_t node,uint64_t generation,c
                               unsigned size,uint8_t *owned,unsigned room,uint64_t deadline){
  assert(!lock_depth&&owned&&room==CBQ_HDR+size&&(size==14||size==18));
  const unsigned id=x9cw_u16(sdu+3);
- assert(id==3||id==0x20||id==0x21||id==0x44);
+ assert(id==3||id==0x20||id==0x21||id==0x22||id==0x44);
  assert(size!=18||id==0x20);
  if(call_bb_expire)fake_ms=deadline;
  if(!call_batch_accept||generation!=bb_x9_call_identity(local,node)||
@@ -1007,6 +1007,25 @@ static void ios_answer_malformed_duplicate(){
  malformed[1]=80;x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,malformed,sizeof(malformed));
  assert(qmi_replies==1&&qmi_error==X9Q_ARG&&!writes&&x9c_answer_job.token==42);
 }
+/* Synthetic wire fixtures exercise production reducers/adapter, not a device. */
+static void ios_answer_receipt(){
+ bind_voice();uint8_t p[704];incoming(p);x9cw_scalar(p+16,0x100,7,4);x9mi_rx(p,64);
+ identity_progress(p,0,7,20,1,"456",1);x9mi_rx(p,512);
+ assert(x9_mc_inbound.seen&&x9_mc_inbound.ios_state==2);
+ uint8_t q[]={0,79,0,0x22,0,4,0,1,1,0,7};
+ assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q))&&x9c_answer_job.stage==1);
+ uint64_t token=x9c_answer_job.token;x9mi_tick();assert(writes==1&&x9cw_u16(last_frame+10)==0x909);
+ unsigned n=current_frame(p,1);x9cw_scalar(p+72,0x6ff8,1,4); /* second array: MT direction */
+ x9cw_put16(p+12,(unsigned)token);x9mi_rx(p,n);x9c_poll();
+ assert(x9c_answer_job.stage==2&&x9c_answer_job.token&&x9_mc_answer_token);
+ token=x9c_answer_job.token;x9mi_tick();assert(writes==2&&x9cw_u16(last_frame+10)==0x907);
+ x9cw_header(p,24,0x908,2,(unsigned)token);x9cw_scalar(p+16,0,0,4);x9mi_rx(p,24);
+ call_batch_accept=false;x9c_poll();
+ assert(!qmi_replies&&!x9c_answer_job.used&&x9_mc_answer_token==token&&x9_mc_inbound.ios_state==2);
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));assert(!qmi_replies&&writes==2);
+ call_batch_accept=true;x9c_response_poll();
+ assert(qmi_replies==1&&!qmi_error&&x9_mc_answer_token==token&&x9_mc_inbound.ios_state==2);
+}
 static void ios_end_abandon(){
  bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();end_query_cnf();
  x9c_del(0);x9q_clients[0].generation++;x9mi_tick();x9c_poll();
@@ -1429,7 +1448,7 @@ int main(int argc,char **argv){
   {"ios_end_guard_selection_bb_deadline",ios_end_guard_selection_bb_deadline},
   {"ios_end_guard_selected_release",ios_end_guard_selected_release},
   {"ios_end_abandon",ios_end_abandon},{"ios_end_late_cnf",ios_end_late_cnf},
-  {"ios_end_malformed_duplicate",ios_end_malformed_duplicate},{"ios_answer_malformed_duplicate",ios_answer_malformed_duplicate},
+  {"ios_answer_receipt",ios_answer_receipt},{"ios_end_malformed_duplicate",ios_end_malformed_duplicate},{"ios_answer_malformed_duplicate",ios_answer_malformed_duplicate},
   {"ios_end_duplicate",ios_end_duplicate},{"ios_end_changed_duplicate",ios_end_changed_duplicate},
   {"incoming_states",incoming_states},{"incoming_state_invalid",incoming_state_invalid},{"incoming_observer",incoming_observer},
   {"register_codec",register_codec},{"register_transition",register_transition},{"register_sequence",register_sequence},
