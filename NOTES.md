@@ -291,7 +291,7 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 **推断 / 下一步**
 
 - 高置信：PDP/WDS/MDLOG 增加活动；中置信：render-owner 而非 dark timer 造成 GPU churn；低置信：MDLOG 本身造成测温差异。没有匹配 A/B。
-- 2026-11-26 log 430 已定位一个具体暗屏 GPU churn 源：AegirPoster SharedEvent abort 循环（§6.13），灭屏后每 ~10 s 重生渲染并触发 GPU PM awake/retention。先止崩再谈温度 A/B。
+- log 430 的 AegirPoster abort 循环在灭屏后继续，其 Metal 初始化与部分 GPU PM awake/retention 同窗口（§6.13）。SharedEvent 是待验证线索，尚无止崩或降温 A/B。
 - 下一步离线把 428 的 `X9 SAMPLE` 线程记录与 201.107 s PDP burst、201–203 s GPU transitions 对齐。未来 instrumentation 只用有界内核计数/返回地址和既有采样，不 live sysfs。
 
 ### 6.7 点击亮屏 / 抬腕唤醒
@@ -365,7 +365,7 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 缺口：`dumpsys sms` 返回 “Can't find service: sms”（sms.txt 空）；`/proc/bus/input/devices` Permission denied，但 `dumpsys input` 给出 `touchpanel` event2（KEYBOARD|TOUCH|TOUCH_MT，Generic.kl）及 pmic/gpio/fp/headset 设备。后续短信证据需另找 `isms`/telephony 有界计数或既有 Android 日志，不读消息正文/号码；不升级到 sysfs。
 - 标签：全部为 **Android 侧观察 / 静态源码定位**，不是 iOS device boot、runtime_verified 或 feature acceptance。S3910 源码定位修正了 §6.7 旧结论；PS 极性、iOS wake 接受、stock BT PCM consumer 仍未闭合。
 
-### 6.13 2026-11-26 log 430 设备启动观察与 AegirPoster 崩溃根因
+### 6.13 2026-11-26 log 430 设备启动观察与 AegirPoster 崩溃线索
 
 用户授权“重启 fb 刷入最新测试镜像启动日志收取新一轮日志，收取后停到 fb”后，刷入 `x9-eight-merge-20261126-r1` 到 `boot_b`（OKAY），启动并收取 `~/430.txt`（2.83 MB，内核时间 ~242 s），随后 `ios-reboot-bootloader-usb` PASS 停回 fastboot。未写 root/mailbox、未碰其它分区。
 
@@ -377,7 +377,7 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - **BT**：11.435 s capabilities 后无任何 X9 BT 行；无 setup state2 / Preferences 注入观察。Settings 灰仍属未验证（设备已停 fb，无法交互）。
 - **CELL/SMS**：WDS `MD-session unobserved` 属 `x9w_probe()` 的状态日志，不是 RRC 查询。430 无 `x9_cell_diag=1` boot-arg，也无 CSCON/PCH 诊断命令或注册日志；SMS stored list queued QMI txn22，无 0x210000 映射证据。
 
-**AegirPoster 崩溃循环（GPU / 灭屏热的已定位运行时根因）**
+**AegirPoster 崩溃循环（GPU / 灭屏热的运行时线索）**
 
 - 观察：`CRASH AegirPoster` 每 ~10 s 双崩溃（launchd 重生→~0.5 s 再崩→节流 10 s），430 共 44 次、428 共 66 次，**灭屏（55 s）后持续到 242 s**。sig 6（SIGABRT），pc/lr/far 相对 slide 恒定。MapsSpotlightInd 27.4 s 同路径崩溃 1 次；driverkitd 7.9 s sig 9（重生，非异常）。
 - host 符号化（slide 0x2d8c0000，`/tmp/dsc-index.json` 重建自 `.local/apple/dsc-20H392/`，atos）：`__pthread_kill ← pthread_kill ← abort ← _objc_terminate ← _dispatch_client_callout ← _dispatch_block_invoke_direct ← __FBSSERIALQUEUE_IS_CALLING_OUT_TO_A_BLOCK__ ← -[FBSSerialQueue _targetQueue_performNextIfPossible]`。即 **FrontBoardServices 串行队列 block 内未捕获 ObjC 异常 → abort**。首次崩溃附近有 `X9 GENERAL METAL: factory caller=AegirPoster` + `SWEET SURF: AegirPoster sel 40`；selector 日志有 log-once 限制，不能断定每次崩溃前的最后动作。
@@ -385,7 +385,7 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 推断（待验证）：`SweetSurface.cpp` 对这些 selector 默认返回成功但不实现共享事件/通知，可能与 Poster 异常有关；现有日志没有异常名称或完整抛出栈，不能证明因果。灭屏后 Poster 重生与 GPU PM awake/retention 在 201 s 段相邻，支持存在 churn，但不能归因全部 wake 或量化热负载。这是 428/430 共有的**先前存在缺口**，不是八项修复引入的回归。
 - 边界：尚未证明实现 SharedEvent 族即可消除崩溃（需 host 合同 + 后续设备复证）；不得把 host 符号化/反汇编称为设备 runtime_verified。
 
-**下一步**：派子代理 (a) 按 IOSurface.framework ABI 在 SweetSurface 实现/安全处理 SharedEvent 族（先止崩，再谈 fence 语义），(b) 按 §6.7 唤醒研究实现 raise-to-wake SCP pickup type75 one-shot 准入。均 host 验证，设备复证需另行授权。
+**下一步**：按 §6.16 用诊断候选观察 SharedEvent 实际调用形态，继续追异常来源；唤醒另按 §6.7 推进。
 
 ## 7. 推荐下一步顺序
 
@@ -412,3 +412,9 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - PDP `c94ddc6d`：只对 native DPMAIF 的 `SIOCGIFMEDIA64` 聚合日志（前四次、随后 2 的幂），不改返回值或拨号/接口状态。worktree 执行 `PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/out/pdp-ifmedia-object-20261126/compile.py` exit 0；按原 recipe 单编译 `X9Baseband.cpp.o` 2,230,704 B，34 warnings；编译脚本/完整命令日志保留在主 checkout `x9/out/coordinator-pdp-ifmedia-20261126/`（脚本内固定原输出路径）。`python3 -I x9/baseband/test_cell_diag_policy.py` 3/3，exit 0。未量化热影响。
 - GPU `58296888`：现有 `shown_gpu_seq` 字段保留，说明改为 swap 时采样的全局 enqueue watermark；等待与采样语义不变。子代理静态断言与 `git diff --check` exit 0。不是逐帧 GPU fence 或高刷验收。
 - ALS `1fa6466b`：只读复核纠正 §6.13 日志解读；未改驱动、未翻转 PS 极性。AppSync 无新增设备会话/能力，仍见 §6.10。
+
+### 6.16 2026-11-26 SharedEvent 诊断候选（candidate_ready）
+
+- `4c555890` + `91c4e8dc` 合并至 `07dd9916`。新增默认关闭的 `x9_surf_event_diag=1`；启用后至多记录 64 条 SharedEvent 调用（AegirPoster 48 条专用额度、其余 16 条），只记录进程名、selector、端口存在与参数形状，不打印端口值或引用，不改变返回/同步行为。原生调用方 nil 处理、通知 payload/生命周期及异常原因未闭合。
+- `PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --boot-arg x9_surf_event_diag=1 --name x9-shared-event-diag-20261126-r1`：exit 0，104/104 overlay（3 prebuilt），`boot.img` 15,781,888 B、`kernel.development.sweet` 33,067,056 B，产物与 `build.log` 位于 `x9/out/x9-shared-event-diag-20261126-r1/`。allowlist 280 不变；无需 mailbox。未刷机、未重启、未写 root/mailbox、无 CI、未 push。
+- 该候选也包含 §6.15，不能当作相对 430 的严格单变量热 A/B。若另行授权上机，从 `SWEET SURF EVENT` 收集 AegirPoster 的 selector/async 形状，并与同一日志的 abort 首发和崩溃记录对齐；仅调用顺序不能证明异常因果。还需追异常名称和抛出点；本轮没有 stop-crash/runtime 验收。

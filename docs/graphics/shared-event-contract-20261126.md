@@ -31,4 +31,4 @@ sed -n '1513,1628p' x9/kernel/src/iokit/Kernel/arm/SweetSurface.cpp
 
 本地 XNU `IOUserClient.h` 定义独立的 `asyncWakePort`、`asyncReference`、`asyncReferenceCount`；`IOUserClient.cpp` 的异步入口将 wake port 和 reference 填入参数。它们不是证明 IOSurface 事件消息内容或生命周期的证据。现有 framebuffer `setAsyncReference64`/`sendAsyncResult64WithOptions` 仅示例 IOKit 发送机制，不能据此推导 IOSurface 的 payload、引用保活和 teardown。NativeBridge 的 `NBSharedEvent` 使用自有进程内实现，跨进程 `newSharedEventHandle` 返回 nil，也不能替代原生 SharedEvent 合同。
 
-Host 单对象构建：通过 `x9/build/build.py` 的 `Builder.compile_one` 编译 `SweetSurface.o`，exit 0，421344 B，12 warnings；日志在 `x9/out/shared-event-diag-host-20261126/build.log`（gitignored）。这是编译检查，非设备、功能或崩溃修复验证。是否需要此诊断候选、设备启动及日志采集均须另行授权。
+Host 单对象构建：通过 `x9/build/build.py` 的 `Builder.compile_one` 编译 `SweetSurface.o`，exit 0，421344 B，12 warnings；日志在 `x9/out/shared-event-diag-host-20261126/build.log`（gitignored）。这是编译检查，非设备、功能或崩溃修复验证。单对象结果对应初始诊断提交。整包候选及验证边界见 NOTES §6.16；设备启动及日志采集需另行授权。
