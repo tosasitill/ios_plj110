@@ -36,7 +36,7 @@ CASES = (
     'register_error_owner_retained', 'register_malformed_duplicate', 'register_codec', 'register_transition', 'register_sequence',
     'register_timeout', 'register_deleted', 'register_unsupported',
     'handover_codec', 'handover_concurrent_bootstrap',
-    'handover_subscription_fence', 'handover_pending_timeout', 'handover_rx_fence',
+    'handover_repeat_enable_cursor', 'handover_subscription_fence', 'handover_pending_timeout', 'handover_rx_fence',
     'handover_pending_overflow', 'handover_transport_loss', 'handover_request_identity',
 )
 

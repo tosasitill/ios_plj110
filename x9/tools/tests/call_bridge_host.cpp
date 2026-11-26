@@ -1261,6 +1261,18 @@ static void handover_concurrent_bootstrap(){
  handover_frame(p,2);x9mi_rx(p,32);x9c_poll();assert(qmi_indications==2);
  register_begin();x9c_poll();assert(!x9c_clients[0].handover); //13 alone never enables14
 }
+static void handover_repeat_enable_cursor(){
+ bind_voice();x9w_control_ready=true;x9c_cmd_init.confirmed=true;
+ x9c_init[1].stage=X9_CI_DONE;x9c_init[1].registered=1;
+ handover_begin();x9c_poll();assert(qmi_replies==1&&x9c_clients[0].handover);
+ call_batch_accept=false;handover_begin(0,1,92);x9c_poll();assert(qmi_replies==1);
+ uint8_t p[32];handover_frame(p,0);x9mi_rx(p,32);x9c_poll();
+ assert(x9c_clients[0].pending.count==1&&!qmi_indications);
+ call_batch_accept=true;x9c_poll();
+ assert(qmi_replies==3&&qmi_indications==1&&qmi_indication_states[0]==1);
+ handover_frame(p,1);x9mi_rx(p,32);x9c_poll();
+ assert(qmi_indications==2&&qmi_indication_states[1]==3);
+}
 static void handover_subscription_fence(){
  bind_voice();x9w_control_ready=true;
  x9c_cmd_init.confirmed=true;x9c_init[1].stage=X9_CI_DONE;x9c_init[1].registered=1;
@@ -1515,7 +1527,7 @@ int main(int argc,char **argv){
   {"register_error_owner_retained",register_error_owner_retained},{"register_malformed_duplicate",register_malformed_duplicate},{"register_codec",register_codec},{"register_transition",register_transition},{"register_sequence",register_sequence},
   {"register_timeout",register_timeout},{"register_deleted",register_deleted},{"register_unsupported",register_unsupported},
   {"handover_codec",handover_codec},{"handover_concurrent_bootstrap",handover_concurrent_bootstrap},
-  {"handover_subscription_fence",handover_subscription_fence},{"handover_pending_timeout",handover_pending_timeout},
+  {"handover_repeat_enable_cursor",handover_repeat_enable_cursor},{"handover_subscription_fence",handover_subscription_fence},{"handover_pending_timeout",handover_pending_timeout},
   {"handover_pending_overflow",handover_pending_overflow},{"handover_transport_loss",handover_transport_loss},
   {"handover_request_identity",handover_request_identity},{"handover_completed_changed",handover_completed_changed},
   {"handover_rx_fence",handover_rx_fence},
