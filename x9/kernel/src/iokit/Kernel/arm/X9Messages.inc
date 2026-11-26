@@ -181,8 +181,9 @@ static uint64_t x9m_store_submit(const x9m_job &j){
  /* 103=0 is permitted ONLY for a single indexed CMGR in ModifyTag step1;
   * never mark an entire CMGL enumeration read. CPMS is always explicit. */
  f.byte(0x103,j.op==X9M_TAG&&j.step==1?0:1);f.byte(0x104,storage.p[0]);
- /* 0x210000 is l5usms_get_l5_res_from_at's generic AT ERROR with no
-  * CMS/CME cause, not proof of an empty store. Log request/result shape only;
+ /* A CMGL failure conversion can produce 0x210000 from zero, but its
+  * provenance in a particular 0608 is unproved; it is not an empty store.
+  * Log request/result shape only;
   * never guess an empty list from a nonzero result or expose PDU/number bytes. */
  static unsigned diag_submits;
  if(diag_submits<8){
@@ -772,6 +773,10 @@ static void x9m_poll(){
     continue;
    }
    if(taken==1){
+    /* take may wait for the MD lock: recheck after it returns, before
+     * a storage CNF can publish success or start a later TAG stage. */
+    if(x9m_storage(j.op)&&!j.answered&&x9q_ms()>=j.deadline)
+     x9m_error(j,X9Q_NOT_READY);
     x9m_job_done(j,p,n);bzero(p,sizeof(p));
     if(j.hold){bzero(j.req+7,sizeof(j.req)-7);bzero(j.stored_pdu,sizeof(j.stored_pdu));
      printf("X9 SMS: SIM%u ambiguous operation %u CNF; owner retained until boot, payload erased\n",j.sim+1,j.op);}

@@ -1067,20 +1067,20 @@ static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
     return true;
    }else err=X9Q_NOT_READY;
   }else if(x9cw_u16(req+3)==0x21){
-   unsigned op,id;
    /* The live allocation's validated host transaction already owns its
-    * target. Even a changed ID cannot append BUSY then the original success,
+    * target. Even a malformed retry cannot append ARG or a changed ID BUSY
+    * before the original success,
     * or retarget its MD command. Keep identity after req is erased; actual
     * QMUX allocation is fenced by end_live, not only the local generation. */
-   if(x9cw_qmi_action(req,len,&op,&id)&&x9c_end_job.used&&
+   if(x9c_end_job.used&&
       x9c_end_job.slot==slot&&x9c_end_job.generation==x9q_clients[slot].generation&&
       x9c_end_job.transaction==x9cw_u16(req+1)&&x9c_end_live(x9c_end_job))return true;
    err=x9c_bind_pending(slot,true)?X9Q_BUSY:x9c_end_begin(slot,req,len);if(!err)return true; /* asynchronous owned reply */
   }else if(x9cw_u16(req+3)==0x22){
-   unsigned op,id;
    /* Same repeat-transaction fence as END: the live allocation owns its
-    * target; a changed ID cannot append BUSY then the original result. */
-   if(x9cw_qmi_action(req,len,&op,&id)&&x9c_answer_job.used&&
+    * target; malformed/changed retries cannot append ARG/BUSY before the
+    * original result. */
+   if(x9c_answer_job.used&&
       x9c_answer_job.slot==slot&&x9c_answer_job.generation==x9q_clients[slot].generation&&
       x9c_answer_job.transaction==x9cw_u16(req+1)&&x9c_answer_live(x9c_answer_job))return true;
    err=x9c_bind_pending(slot,true)?X9Q_BUSY:x9c_answer_begin(slot,req,len);if(!err)return true;

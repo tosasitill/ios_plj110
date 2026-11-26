@@ -987,6 +987,26 @@ static void ios_end_changed_duplicate(){
  x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
  assert(qmi_replies==1&&writes==2&&x9c_end_job.id==7&&x9c_end_job.epoch==epoch);
 }
+static void ios_end_malformed_duplicate(){
+ bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();
+ const uint64_t token=x9c_end_job.token;
+ uint8_t malformed[]={0,78,0,0x21,0,0,0};
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,malformed,sizeof(malformed));
+ assert(!qmi_replies&&!writes&&x9c_end_job.token==token&&x9c_end_job.id==7);
+ malformed[1]=80;x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,malformed,sizeof(malformed));
+ assert(qmi_replies==1&&qmi_error==X9Q_ARG&&!writes&&x9c_end_job.token==token);
+}
+static void ios_answer_malformed_duplicate(){
+ bind_voice();const auto &c=x9c_clients[0];
+ x9c_answer_job.used=true;x9c_answer_job.slot=0;x9c_answer_job.sim=c.sim;
+ x9c_answer_job.generation=c.generation;x9c_answer_job.binding=c.binding;
+ x9c_answer_job.transaction=79;x9c_answer_job.token=42;x9c_answer_job.id=7;
+ uint8_t malformed[]={0,79,0,0x22,0,0,0};
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,malformed,sizeof(malformed));
+ assert(!qmi_replies&&!writes&&x9c_answer_job.token==42&&x9c_answer_job.id==7);
+ malformed[1]=80;x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,malformed,sizeof(malformed));
+ assert(qmi_replies==1&&qmi_error==X9Q_ARG&&!writes&&x9c_answer_job.token==42);
+}
 static void ios_end_abandon(){
  bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();end_query_cnf();
  x9c_del(0);x9q_clients[0].generation++;x9mi_tick();x9c_poll();
@@ -1409,6 +1429,7 @@ int main(int argc,char **argv){
   {"ios_end_guard_selection_bb_deadline",ios_end_guard_selection_bb_deadline},
   {"ios_end_guard_selected_release",ios_end_guard_selected_release},
   {"ios_end_abandon",ios_end_abandon},{"ios_end_late_cnf",ios_end_late_cnf},
+  {"ios_end_malformed_duplicate",ios_end_malformed_duplicate},{"ios_answer_malformed_duplicate",ios_answer_malformed_duplicate},
   {"ios_end_duplicate",ios_end_duplicate},{"ios_end_changed_duplicate",ios_end_changed_duplicate},
   {"incoming_states",incoming_states},{"incoming_state_invalid",incoming_state_invalid},{"incoming_observer",incoming_observer},
   {"register_codec",register_codec},{"register_transition",register_transition},{"register_sequence",register_sequence},
