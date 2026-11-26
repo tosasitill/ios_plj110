@@ -515,3 +515,9 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 
 - 基线 `12ba36bb`，工具 `de73d45a`：`python3 -I x9/tools/shared-event/review_log.py <capture>` 从单次本地日志对齐入口/返回及首次 AegirPoster SIGABRT；重复/孤立诊断项或 boot-args 缺失/不唯一时不输出首次崩溃关联。只打印摘要，不判断止崩或功能通过。 `python3 -I x9/tools/shared-event/test_review_log.py` exit 0（2 项，合成解析 fixture，不是设备样本）。
 - 同工具读取已有 `~/430.txt` exit 0：实验/诊断 flags 均未出现，0 个新格式调用记录；44 个 SIGABRT，38 个在首个 display-off 之后；首次 30.682 s。摘要在 `x9/out/shared-event-log-review-20261126/430-summary.json`，不是 r6 trace。无新源码运行改动、构建、CI 或设备操作；r6 已存在，仍等待针对 r6 的写 boot_b、启动和采集明确授权（也可由用户提供已采日志）。通话/短信无新验收。
+
+### 6.31 2026-11-26 r6 写入 boot_b，等待启动
+
+- 操作前 HEAD `04d39b10`。`fastboot devices` 仅一个设备，`fastboot getvar product` 为 `k6993v1_64`、`is-userspace` 为 `no`、`current-slot` 为 `b`、`partition-size:boot_b` 为 `4000000`；查询均 exit 0。
+- 按用户要求执行 `fastboot -s "$id" flash boot_b x9/out/x9-native-event-wired-20261126-r6/boot.img`（`id` 取唯一 fastboot 设备，未记录序列号），Sending/Writing 均 OKAY，exit 0。镜像 15,806,464 B，构建源码 `25ac3353`。无新构建、CI、切槽、root/mailbox 或 push。
+- 已后台启动 `python3 x9/tools/usb-live/usb_log.py --output "$HOME/432.txt" --quiet`，PID 11980，stderr：`x9/out/x9-native-event-wired-20261126-r6/usb-log-432.Z6InnP`。已确认进程存活，等待 USB 1209:0001，日志当前 0 B。尚未重启；下一步单独确认后 `fastboot reboot`，再读新日志区分 r6 启动与功能验收。
