@@ -1020,6 +1020,8 @@ static void ios_end_roundtrip(){
 }
 static void ios_end_all_roundtrip(){
  bind_voice();rx_progress(130,7,0);rx_progress(132);
+ x9c_clients[0].calllist_valid=true;x9c_clients[0].calllist_epoch=x9_mc_outbound.epoch;
+ x9c_clients[0].calllist_id=7;
  uint8_t q[]={0,78,0,0x31,0,4,0,1,1,0,8};
  assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q))&&x9c_end_job.stage==1);
  uint64_t query=x9c_end_job.token;
@@ -1036,9 +1038,14 @@ static void ios_end_all_reject(){
  assert(qmi_replies==1&&qmi_error==X9Q_NOT_READY&&!writes&&!x9c_end_job.used);
  q[1]++;q[10]=1;x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
  assert(qmi_replies==2&&qmi_error==X9Q_UNSUPPORTED&&!writes);
+ rx_progress(130,7,0);rx_progress(132);
+ q[1]++;q[10]=8;x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
+ assert(qmi_replies==3&&qmi_error==X9Q_NOT_READY&&!writes&&!x9c_end_job.used);
 }
 static void ios_end_all_pending_incoming(){
  bind_voice();rx_progress(130,7,0);rx_progress(132);
+ x9c_clients[0].calllist_valid=true;x9c_clients[0].calllist_epoch=x9_mc_outbound.epoch;
+ x9c_clients[0].calllist_id=7;
  uint8_t q[]={0,78,0,0x31,0,4,0,1,1,0,8};
  x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
  x9mi_tick();end_query_cnf();x9_mc_inbound.pending=1;x9mi_tick();x9c_poll();

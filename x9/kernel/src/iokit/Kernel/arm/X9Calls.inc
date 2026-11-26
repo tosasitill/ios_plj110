@@ -605,7 +605,7 @@ static uint16_t x9c_reg_begin(unsigned slot,const uint8_t *req,unsigned len){
  w.options=r;w.floor=floor;
  w.deadline=deadline;memcpy(w.req,req,len);return 0;
 }
-/* This read-only query is caused ONLY by an explicit, bound VOICE21.
+/* This read-only query follows an explicit, bound VOICE21 or End All Calls.
  * No implicit ID/route adoption from a CNF, log prefix or another client.
  * MO targets the observed dial epoch; MT targets the owned CMD identity
  * after ECPI132/6 (CONVERSATION). Ending an still-INCOMING MT call is a
@@ -634,6 +634,18 @@ static uint16_t x9c_end_begin(unsigned slot,const uint8_t *req,unsigned len){
  if(outbound&&outbound_id==id){native_id=outbound_id;direction=0;epoch=state.epoch;}
  else if(inbound&&inbound_id==id){native_id=inbound_id;direction=1;epoch=in.epoch;}
  else return X9Q_NOT_READY;
+ if(op==0x31){
+  /* The implicit target must have been delivered to this binding in
+   * CallList or joined to its own confirmed dial. */
+  const bool listed=c.calllist_valid&&c.calllist_epoch==epoch&&
+                    c.calllist_direction==direction&&c.calllist_id==id;
+  const struct x9c_dial_job &dial=x9c_dial_job;
+  unsigned joined_id=0;
+  const bool dialed=!direction&&dial.used&&dial.slot==slot&&dial.sim==c.sim&&
+                    dial.generation==c.generation&&dial.binding==c.binding&&
+                    x9cw_dial_join_id(&dial.join,&state,&joined_id)==1&&joined_id==id;
+  if(!listed&&!dialed)return X9Q_NOT_READY;
+ }
  const uint64_t now=x9q_ms();if(now>UINT64_MAX-25000)return X9Q_BUSY;
  const uint64_t deadline=now+25000;
  uint64_t reply=x9c_response_reserve(slot,req,deadline);if(!reply)return X9Q_BUSY;
