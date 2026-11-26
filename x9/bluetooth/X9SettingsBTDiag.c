@@ -58,18 +58,32 @@ static int image_uuid(const void *base, const uint8_t expected[16])
     return 0;
 }
 
-static void *framework(const char *path, const char *symbol, const uint8_t expected[16])
+/* The audit VAs are preferred Mach-O VAs, not offsets from dli_fbase.
+ * Shared-cache images have nonzero __TEXT vmaddr values. Resolve dyld's slide
+ * for the exact image so each hook is slide+VA, never dli_fbase+VA. */
+struct native_image { uintptr_t base; intptr_t slide; };
+static int framework_image(const char *path, const char *symbol,
+                           const uint8_t expected[16], struct native_image *out)
 {
     void *handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-    if (!handle) { note("dlopen failed path=%s error=%s", path, dlerror()); return NULL; }
+    if (!handle) { note("dlopen failed path=%s error=%s", path, dlerror()); return -1; }
     void *address = dlsym(handle, symbol);
     Dl_info info = {0};
     if (!address || !dladdr(address, &info) || !info.dli_fbase ||
         !image_uuid(info.dli_fbase, expected)) {
         note("symbol/UUID mismatch path=%s symbol=%s", path, symbol);
-        return NULL;
+        return -1;
     }
-    return info.dli_fbase;
+    uint32_t count = _dyld_image_count();
+    for (uint32_t index = 0; index < count; index++) {
+        if (_dyld_get_image_header(index) == info.dli_fbase) {
+            out->base = (uintptr_t)info.dli_fbase;
+            out->slide = _dyld_get_image_vmaddr_slide(index);
+            return 0;
+        }
+    }
+    note("dyld slide unavailable path=%s symbol=%s; no text changed", path, symbol);
+    return -1;
 }
 
 typedef int (*service_callbacks_fn)(void *, void *, void *);
@@ -149,7 +163,7 @@ static struct hook hooks[] = {
     {"__btSessionEventCallback", CALLBACK_VA,
      {0xd10283ff,0xa90567fa,0xa9065ff8,0xa90757f6}, session_event},
 };
-static uintptr_t manager_base, mobile_base;
+static struct native_image manager_image, mobile_image;
 
 static void jump(uint32_t *out, uintptr_t target)
 {
@@ -180,11 +194,10 @@ static int install(void)
     if (!main_base || !image_uuid(main_base, prefs_uuid)) {
         note("Preferences UUID/header rejected; no text changed"); return -1;
     }
-    mobile_base = (uintptr_t)framework("/System/Library/PrivateFrameworks/MobileBluetooth.framework/MobileBluetooth",
-                                       "BTServiceAddCallbacks", mobile_uuid);
-    manager_base = (uintptr_t)framework("/System/Library/PrivateFrameworks/BluetoothManager.framework/BluetoothManager",
-                                        "_OBJC_CLASS_$_BluetoothManager", manager_uuid);
-    if (!mobile_base || !manager_base) return -1;
+    if (framework_image("/System/Library/PrivateFrameworks/MobileBluetooth.framework/MobileBluetooth",
+                        "BTServiceAddCallbacks", mobile_uuid, &mobile_image) ||
+        framework_image("/System/Library/PrivateFrameworks/BluetoothManager.framework/BluetoothManager",
+                        "_OBJC_CLASS_$_BluetoothManager", manager_uuid, &manager_image)) return -1;
     const char *exports[] = {
         "BTAccessoryManagerAddCallbacks", "BTAccessoryManagerGetDefault",
         "BTLocalDeviceAddCallbacks", "BTLocalDeviceGetDefault",
@@ -192,13 +205,14 @@ static int install(void)
     };
     Dl_info info = {0};
     for (size_t k = 0; k < sizeof(hooks)/sizeof(hooks[0]); k++) {
-        void *symbol = k < 6 ? dlsym(RTLD_DEFAULT, exports[k]) : (void *)(manager_base + CALLBACK_VA);
-        if (!symbol || !dladdr(symbol, &info) || (uintptr_t)info.dli_fbase !=
-                (k < 6 ? mobile_base : manager_base)) {
-            note("image mismatch %s; no text changed", hooks[k].name); return -1;
+        const struct native_image *image = k < 6 ? &mobile_image : &manager_image;
+        uintptr_t expected = (uintptr_t)(image->slide + (int64_t)hooks[k].va);
+        void *symbol = k < 6 ? dlsym(RTLD_DEFAULT, exports[k]) : (void *)expected;
+        if (!symbol || !dladdr(symbol, &info) ||
+            (uintptr_t)symbol != expected || (uintptr_t)info.dli_fbase != image->base) {
+            note("image/slide mismatch %s; no text changed", hooks[k].name); return -1;
         }
-        uintptr_t at = (k < 6 ? mobile_base : manager_base) + hooks[k].va;
-        if (memcmp((void *)at, hooks[k].words, sizeof(hooks[k].words))) {
+        if (memcmp((void *)expected, hooks[k].words, sizeof(hooks[k].words))) {
             note("instruction mismatch %s; no text changed", hooks[k].name); return -1;
         }
     }
@@ -211,15 +225,18 @@ static int install(void)
     kern_return_t kr = vm_protect(mach_task_self(), tramp, page, FALSE,
                                   VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY);
     if (kr) { note("trampoline COW failed kr=%d; no text changed", kr); return -1; }
-    for (size_t k = 0; k < sizeof(hooks)/sizeof(hooks[0]); k++)
+    for (size_t k = 0; k < sizeof(hooks)/sizeof(hooks[0]); k++) {
+        const struct native_image *image = k < 6 ? &mobile_image : &manager_image;
         originals[k] = trampoline(tramp + k*32, &hooks[k],
-                                  (k < 6 ? mobile_base : manager_base) + hooks[k].va);
+                                  (uintptr_t)(image->slide + (int64_t)hooks[k].va));
+    }
     sys_icache_invalidate((void *)tramp, sizeof(hooks)/sizeof(hooks[0]) * 32);
     kr = vm_protect(mach_task_self(), tramp, page, FALSE, VM_PROT_READ|VM_PROT_EXECUTE);
     if (kr) { note("trampoline R|X failed kr=%d; no text changed", kr); return -1; }
     uintptr_t pages[sizeof(hooks)/sizeof(hooks[0])]; size_t page_count = 0;
     for (size_t k = 0; k < sizeof(hooks)/sizeof(hooks[0]); k++) {
-        uintptr_t address = (k < 6 ? mobile_base : manager_base) + hooks[k].va;
+        const struct native_image *image = k < 6 ? &mobile_image : &manager_image;
+        uintptr_t address = (uintptr_t)(image->slide + (int64_t)hooks[k].va);
         uintptr_t target = address & ~(page-1);
         size_t j; for (j = 0; j < page_count && pages[j] != target; j++) {}
         if (j != page_count) continue;
@@ -234,7 +251,8 @@ static int install(void)
         pages[page_count++] = target;
     }
     for (size_t k = 0; k < sizeof(hooks)/sizeof(hooks[0]); k++) {
-        uintptr_t address = (k < 6 ? mobile_base : manager_base) + hooks[k].va;
+        const struct native_image *image = k < 6 ? &mobile_image : &manager_image;
+        uintptr_t address = (uintptr_t)(image->slide + (int64_t)hooks[k].va);
         uint32_t words[4]; jump(words, (uintptr_t)hooks[k].replacement);
         memcpy((void *)address, words, sizeof(words));
         sys_icache_invalidate((void *)address, sizeof(words));

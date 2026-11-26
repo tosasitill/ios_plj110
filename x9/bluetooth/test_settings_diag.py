@@ -20,6 +20,12 @@ spec = importlib.util.spec_from_file_location('launch_cache', HERE / 'launch_cac
 cache = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cache)
 
+# Preferred Mach-O VAs from the read-only 20H392 Settings audit. These are
+# already nonzero shared-cache VAs; dli_fbase must never be added to them.
+PREFERRED_TEXT = {
+    'MobileBluetooth': 0x1b08fc000,
+    'BluetoothManager': 0x1d4d0b000,
+}
 EXPECTED = {
     'BTAccessoryManagerAddCallbacks': (0x1b0900a78, [0xd10283ff, 0xa90567fa, 0xa9065ff8, 0xa90757f6]),
     'BTAccessoryManagerGetDefault': (0x1b08fdee8, [0xd10343ff, 0xa9095ff8, 0xa90a57f6, 0xa90b4ff4]),
@@ -44,12 +50,37 @@ class DiagnosticChecks(unittest.TestCase):
             body = re.search(r'static (?:int|void) ' + wrapper + r'\([^)]*\)\s*\{(.*?)\n\}', source, re.S)
             self.assertIsNotNone(body)
             self.assertIn('originals[', body.group(1))
-            self.assertIn('result=%d', body.group(1) if name != '__btSessionEventCallback' else source)
+            if name == '__btSessionEventCallback':
+                self.assertIn('((event_fn)originals[6])(service, first, second, manager);', body.group(1))
+            else:
+                self.assertRegex(body.group(1),
+                                 r'int result = .*originals\[\d\].*;\n.*result=%d.*\n\s*return result;')
         self.assertNotRegex(source, r'\+0x18\]|\+ 0x18\]|#0x18')
         self.assertIn('(first | second) ? "" : " setup-eligible"', source)
         self.assertEqual(source.count('sys_icache_invalidate'), 2)
         self.assertEqual(source.count('VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY'), 2)
         self.assertNotIn('VM_PROT_ALL', source)
+
+    def test_shared_cache_slide_and_exact_symbol_provenance(self):
+        source = (HERE / 'X9SettingsBTDiag.c').read_text()
+        self.assertIn('struct native_image { uintptr_t base; intptr_t slide; };', source)
+        self.assertIn('out->base = (uintptr_t)info.dli_fbase;', source)
+        self.assertIn('out->slide = _dyld_get_image_vmaddr_slide(index);', source)
+        self.assertIn('(uintptr_t)symbol != expected', source)
+        self.assertIn('(uintptr_t)info.dli_fbase != image->base', source)
+        self.assertNotIn('mobile_base', source)
+        self.assertNotIn('manager_base', source)
+        # Model the audited nonzero preferred bases and both zero/nonzero ASLR
+        # slides. Correct addresses are slide+VA, independent of dli_fbase+VA.
+        for preferred in PREFERRED_TEXT.values():
+            self.assertGreater(preferred, 0)
+            for slide in (0, 0x40000000):
+                actual_base = preferred + slide
+                for name, (va, _) in EXPECTED.items():
+                    if (name == '__btSessionEventCallback') != (preferred == PREFERRED_TEXT['BluetoothManager']):
+                        continue
+                    self.assertEqual(actual_base - preferred + va, slide + va)
+                    self.assertNotEqual(actual_base + va, slide + va)
 
     def test_preferences_only_default_off_hash_gate(self):
         injector = (ROOT / 'x9/kernel/src/bsd/kern/x9_bt_settings_exec_env.inc').read_text()
@@ -76,7 +107,9 @@ class DiagnosticChecks(unittest.TestCase):
         self.assertIn("'x9_bt_settings_diag defaults off", candidate)
 
     def test_payload_hash_order_and_modes(self):
-        scratch = Path(tempfile.mkdtemp(prefix='settings-diag-check-', dir=ROOT / 'x9/out'))
+        out = ROOT / 'x9/out'
+        out.mkdir(exist_ok=True)
+        scratch = Path(tempfile.mkdtemp(prefix='settings-diag-check-', dir=out))
         try:
             runtime, out = scratch / 'runtime', scratch / 'payload'
             runtime.mkdir()
