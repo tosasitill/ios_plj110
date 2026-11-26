@@ -80,7 +80,10 @@ static void connection_invalid(id object, SEL selector)
         ? observed_xpc_get_name(connection) : NULL;
     if (service && (!strcmp(service, "com.apple.bluetooth.xpc") ||
                     !strcmp(service, "com.apple.bluetoothuser.xpc") ||
-                    !strcmp(service, "com.apple.server.bluetooth")))
+                    !strcmp(service, "com.apple.server.bluetooth") ||
+                    !strcmp(service, "com.apple.server.bluetooth.le.pipe.xpc") ||
+                    !strcmp(service, "com.apple.server.bluetooth.classic.xpc") ||
+                    !strcmp(service, "com.apple.server.bluetooth.le.att.xpc")))
         note("CoreBluetooth invalidated Mach service %s", service);
     else
         note("CoreBluetooth invalidated connection has no recognized service name");
