@@ -116,6 +116,12 @@ int main()
 	assert(a.eventExternalMethod(36, &create) == kIOReturnBadArgument);
 	create.scalarOutputCount = 2;
 	assert(a.eventExternalMethod(36, &create) == kIOReturnSuccess);
+	uint64_t signal42[4] = {1, 0, out[0], 7};
+	IOExternalMethodArguments signal{};
+	signal.scalarInputCount = 4; signal.scalarInput = signal42;
+	assert(a.eventExternalMethod(42, &signal) == kIOReturnUnsupported);
+	signal.scalarInputCount = 3;
+	assert(a.eventExternalMethod(42, &signal) == kIOReturnBadArgument);
 	const uint64_t name = out[0], va = out[1];
 	assert(name == 42 && va && sweet_event_map_count == 1);
 	auto *event = a.eventCapabilityCopy(name);
