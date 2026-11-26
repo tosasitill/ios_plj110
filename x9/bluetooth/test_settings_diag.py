@@ -33,7 +33,7 @@ EXPECTED = {
     'BTLocalDeviceGetDefault': (0x1b08fdad4, [0xd10383ff, 0xa90967fa, 0xa90a5ff8, 0xa90b57f6]),
     'BTServiceAddCallbacks': (0x1b08fde4c, [0xa9bd57f6, 0xa9014ff4, 0xa9027bfd, 0x910083fd]),
     'BTSessionAttachWithQueue': (0x1b08fd88c, [0xd10183ff, 0xa9025ff8, 0xa90357f6, 0xa9044ff4]),
-    '__btSessionEventCallback': (0x1d4d0c380, [0xd10283ff, 0xa90567fa, 0xa9065ff8, 0xa90757f6]),
+    '__btSessionEventCallback': (0x1d4d0c380, [0xd10243ff, 0xa9055ff8, 0xa90657f6, 0xa9074ff4]),
 }
 
 
@@ -78,13 +78,23 @@ class DiagnosticChecks(unittest.TestCase):
 
     def test_shared_cache_slide_and_exact_symbol_provenance(self):
         source = (HERE / 'X9SettingsBTDiag.c').read_text()
+        self.assertNotIn('OBJC_CLASS_$_BluetoothManager', source)
+        self.assertIn('if (!name || strcmp(name, path)) continue;', source)
+        self.assertIn('if (!image_uuid(header, expected))', source)
         self.assertIn('struct native_image { uintptr_t base; intptr_t slide; };', source)
-        self.assertIn('out->base = (uintptr_t)info.dli_fbase;', source)
+        self.assertIn('out->base = (uintptr_t)header;', source)
         self.assertIn('out->slide = _dyld_get_image_vmaddr_slide(index);', source)
         self.assertIn('(uintptr_t)symbol != expected', source)
         self.assertIn('(uintptr_t)info.dli_fbase != image->base', source)
         self.assertNotIn('mobile_base', source)
         self.assertNotIn('manager_base', source)
+        for image, label in (('prefs', 'PREFS'), ('manager', 'MANAGER'), ('mobile', 'MOBILE_BT')):
+            declared = re.search(r'#define UUID_' + label + r' "([0-9A-F-]+)"', source)
+            encoded = re.search(r'\b' + image + r'_uuid\[16\] = \{([^}]+)\}', source)
+            self.assertIsNotNone(declared)
+            self.assertIsNotNone(encoded)
+            self.assertEqual(bytes(int(value, 16) for value in encoded[1].split(',')),
+                             bytes.fromhex(declared[1].replace('-', '')))
         # Model the audited nonzero preferred bases and both zero/nonzero ASLR
         # slides. Correct addresses are slide+VA, independent of dli_fbase+VA.
         for preferred in PREFERRED_TEXT.values():

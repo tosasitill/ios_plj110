@@ -106,7 +106,7 @@ def main():
     subprocess.run([str(clang), '-target', 'arm64-apple-ios16.0', '-isysroot', str(sdk),
                     '-Os', '-Wall', '-Wextra', '-Werror', '-dynamiclib',
                     '-install_name', '/usr/lib/X9SettingsBTDiag.dylib',
-                    str(HERE / 'X9SettingsBTDiag.c'), '-o', str(diagnostic)], check=True)
+                    str(HERE / 'X9SettingsBTDiag.c'), '-lobjc', '-o', str(diagnostic)], check=True)
     subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(diagnostic)], check=True)
     for name in ('X9BluetoothLaunch', 'X9BlueTool'):
         target = a.out / name

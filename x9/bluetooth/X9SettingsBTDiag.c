@@ -1,5 +1,6 @@
 /* Opt-in 20H392 Preferences diagnostic; native calls and manager state stay unchanged. */
 #include <dlfcn.h>
+#include <dispatch/dispatch.h>
 #include <errno.h>
 #include <libkern/OSCacheControl.h>
 #include <mach-o/dyld.h>
@@ -7,6 +8,7 @@
 #include <mach/mach.h>
 #include <mach/vm_map.h>
 #include <os/log.h>
+#include <objc/runtime.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -22,9 +24,10 @@
 #define CALLBACK_VA UINT64_C(0x1d4d0c380)
 
 static const uint8_t prefs_uuid[16] = {0xb2,0xed,0x18,0x30,0xfb,0x2b,0x37,0x02,0xb2,0x54,0x17,0x87,0x2b,0x2e,0x0a,0x97};
-static const uint8_t manager_uuid[16] = {0x54,0xfb,0x08,0xf7,0xfe,0x66,0x34,0x4d,0x7c,0xe3,0x18,0x38,0xcd,0xee,0x57,0x2d};
+static const uint8_t manager_uuid[16] = {0x54,0xfb,0x08,0xf7,0xfe,0x66,0x34,0x4d,0xb7,0xce,0x31,0x83,0x8c,0xde,0xe5,0x72};
 static const uint8_t mobile_uuid[16] = {0xfd,0xe5,0xb9,0x8e,0x22,0x57,0x35,0xc8,0xb3,0x23,0x92,0xb8,0x24,0x49,0x22,0x07};
 static _Atomic unsigned notes;
+static const uint8_t settings_uuid[16] = {0x43,0x3b,0xd2,0x2d,0x83,0x55,0x34,0x2f,0xba,0x34,0xd2,0x47,0x1d,0xc0,0x1c,0xb0};
 
 static void note(const char *format, ...)
 {
@@ -58,31 +61,74 @@ static int image_uuid(const void *base, const uint8_t expected[16])
     return 0;
 }
 
-/* The audit VAs are preferred Mach-O VAs, not offsets from dli_fbase.
+static id (*original_specifiers)(id, SEL);
+
+static int bool_ivar(id object, const char *name)
+{
+    Ivar variable = class_getInstanceVariable(object_getClass(object), name);
+    const char *type = variable ? ivar_getTypeEncoding(variable) : NULL;
+    if (!type || strcmp(type, "B")) return -1;
+    return *((const unsigned char *)object + ivar_getOffset(variable)) != 0;
+}
+
+static id settings_specifiers(id object, SEL selector)
+{
+    id result = original_specifiers(object, selector);
+    note("Settings specifiers restricted=%d busy=%d toggling=%d initialized=%d",
+         bool_ivar(object, "_bluetoothRestricted"),
+         bool_ivar(object, "_bluetoothIsBusy"),
+         bool_ivar(object, "_togglingPower"),
+         bool_ivar(object, "_bluetoothInitialized"));
+    return result;
+}
+
+static void settings_install_ui(void *context)
+{
+    const struct mach_header *header = context;
+    Class controller = objc_getClass("BTSDevicesController");
+    Method method = controller ? class_getInstanceMethod(controller, sel_registerName("specifiers")) : NULL;
+    Dl_info info = {0};
+    const char *type = method ? method_getTypeEncoding(method) : NULL;
+    if (!type || strcmp(type, "@16@0:8") ||
+        !dladdr((void *)method_getImplementation(method), &info) || info.dli_fbase != header) {
+        note("Settings UI method identity rejected");
+        return;
+    }
+    original_specifiers = (id (*)(id, SEL))method_getImplementation(method);
+    method_setImplementation(method, (IMP)settings_specifiers);
+    note("Settings UI specifiers diagnostic installed");
+}
+
+static void settings_image_added(const struct mach_header *header, intptr_t slide)
+{
+    (void)slide;
+    if (image_uuid(header, settings_uuid))
+        dispatch_async_f(dispatch_get_main_queue(), (void *)header, settings_install_ui);
+}
+
+/* The audit VAs are preferred Mach-O VAs, not offsets from the image header.
  * Shared-cache images have nonzero __TEXT vmaddr values. Resolve dyld's slide
  * for the exact image so each hook is slide+VA, never dli_fbase+VA. */
 struct native_image { uintptr_t base; intptr_t slide; };
-static int framework_image(const char *path, const char *symbol,
-                           const uint8_t expected[16], struct native_image *out)
+static int framework_image(const char *path, const uint8_t expected[16],
+                           struct native_image *out)
 {
     void *handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (!handle) { note("dlopen failed path=%s error=%s", path, dlerror()); return -1; }
-    void *address = dlsym(handle, symbol);
-    Dl_info info = {0};
-    if (!address || !dladdr(address, &info) || !info.dli_fbase ||
-        !image_uuid(info.dli_fbase, expected)) {
-        note("symbol/UUID mismatch path=%s symbol=%s", path, symbol);
-        return -1;
-    }
     uint32_t count = _dyld_image_count();
     for (uint32_t index = 0; index < count; index++) {
-        if (_dyld_get_image_header(index) == info.dli_fbase) {
-            out->base = (uintptr_t)info.dli_fbase;
-            out->slide = _dyld_get_image_vmaddr_slide(index);
-            return 0;
+        const char *name = _dyld_get_image_name(index);
+        if (!name || strcmp(name, path)) continue;
+        const struct mach_header *header = _dyld_get_image_header(index);
+        if (!image_uuid(header, expected)) {
+            note("loaded framework UUID rejected path=%s; no text changed", path);
+            return -1;
         }
+        out->base = (uintptr_t)header;
+        out->slide = _dyld_get_image_vmaddr_slide(index);
+        return 0;
     }
-    note("dyld slide unavailable path=%s symbol=%s; no text changed", path, symbol);
+    note("framework missing from dyld image list path=%s; no text changed", path);
     return -1;
 }
 
@@ -161,7 +207,7 @@ static struct hook hooks[] = {
     {"BTSessionAttachWithQueue", UINT64_C(0x1b08fd88c),
      {0xd10183ff,0xa9025ff8,0xa90357f6,0xa9044ff4}, session_attach},
     {"__btSessionEventCallback", CALLBACK_VA,
-     {0xd10283ff,0xa90567fa,0xa9065ff8,0xa90757f6}, session_event},
+     {0xd10243ff,0xa9055ff8,0xa90657f6,0xa9074ff4}, session_event},
 };
 static struct native_image manager_image, mobile_image;
 
@@ -195,9 +241,9 @@ static int install(void)
         note("Preferences UUID/header rejected; no text changed"); return -1;
     }
     if (framework_image("/System/Library/PrivateFrameworks/MobileBluetooth.framework/MobileBluetooth",
-                        "BTServiceAddCallbacks", mobile_uuid, &mobile_image) ||
+                        mobile_uuid, &mobile_image) ||
         framework_image("/System/Library/PrivateFrameworks/BluetoothManager.framework/BluetoothManager",
-                        "_OBJC_CLASS_$_BluetoothManager", manager_uuid, &manager_image)) return -1;
+                        manager_uuid, &manager_image)) return -1;
     const char *exports[] = {
         "BTAccessoryManagerAddCallbacks", "BTAccessoryManagerGetDefault",
         "BTLocalDeviceAddCallbacks", "BTLocalDeviceGetDefault",
@@ -271,4 +317,5 @@ __attribute__((constructor)) static void settings_bt_diagnostic(void)
     const char *enabled = getenv("X9_BT_SETTINGS_DIAG");
     if (!enabled || strcmp(enabled, "1")) return;
     (void)install();
+    _dyld_register_func_for_add_image(settings_image_added);
 }
