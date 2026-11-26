@@ -1,0 +1,118 @@
+diff --git a/crates/metal2vulkan-runtime/src/tests/device.rs b/crates/metal2vulkan-runtime/src/tests/device.rs
+index 58c96bdb..2cb6f01c 100644
+--- a/crates/metal2vulkan-runtime/src/tests/device.rs
++++ b/crates/metal2vulkan-runtime/src/tests/device.rs
+@@ -268,10 +268,8 @@ fn withheld_features_leave_the_rest_of_the_recommendation() {
+                 .insert(VkExtension::ExtExternalMemoryHost);
+         }
+         assert_eq!(enable_set(&description, &options), recommended, "{path:?}");
+-        let options = DeviceOptions {
+-            withheld_features: ROBUSTNESS.into_iter().collect(),
+-            ..DeviceOptions::default()
+-        };
++        let mut options = DeviceOptions::default();
++        options.withheld_features = ROBUSTNESS.into_iter().collect();
+         let set = enable_set(&description, &options);
+         let mut expected = recommended.clone();
+         expected
+@@ -305,10 +303,8 @@ fn withholding_a_required_feature_is_refused() {
+             && set.features.contains(&VkFeature::RobustBufferAccess2)
+     });
+     let (path, description) = both.expect("a committed profile recommends both");
+-    let options = DeviceOptions {
+-        withheld_features: [VkFeature::RobustBufferAccess].into_iter().collect(),
+-        ..DeviceOptions::default()
+-    };
++    let mut options = DeviceOptions::default();
++    options.withheld_features = [VkFeature::RobustBufferAccess].into_iter().collect();
+     let set = enable_set(&description, &options);
+     assert!(
+         description.with_enabled(&set).is_err(),
+@@ -325,10 +321,8 @@ fn withheld_extensions_leave_the_rest_of_the_recommendation() {
+     let mut had = 0;
+     for (path, description) in descriptions() {
+         let recommended = enable_set(&description, &DeviceOptions::default());
+-        let options = DeviceOptions {
+-            withheld_extensions: [stencil].into_iter().collect(),
+-            ..DeviceOptions::default()
+-        };
++        let mut options = DeviceOptions::default();
++        options.withheld_extensions = [stencil].into_iter().collect();
+         let set = enable_set(&description, &options);
+         let mut expected = recommended.clone();
+         expected.extensions.remove(&stencil);
+@@ -359,12 +353,8 @@ fn withholding_a_needed_extension_is_refused() {
+             .contains(&VkFeature::FragmentShaderPixelInterlock)
+     });
+     let (path, description) = interlock.expect("a committed profile recommends the interlock");
+-    let options = DeviceOptions {
+-        withheld_extensions: [VkExtension::ExtFragmentShaderInterlock]
+-            .into_iter()
+-            .collect(),
+-        ..DeviceOptions::default()
+-    };
++    let mut options = DeviceOptions::default();
++    options.withheld_extensions = [VkExtension::ExtFragmentShaderInterlock].into_iter().collect();
+     let set = enable_set(&description, &options);
+     assert!(
+         set.features
+diff --git a/crates/metal2vulkan-runtime/src/tests/exit_guard.rs b/crates/metal2vulkan-runtime/src/tests/exit_guard.rs
+index eaa8a2e2..e1131f8e 100644
+--- a/crates/metal2vulkan-runtime/src/tests/exit_guard.rs
++++ b/crates/metal2vulkan-runtime/src/tests/exit_guard.rs
+@@ -1135,7 +1135,7 @@ fn the_threads_that_take_command_buffers_to_their_handlers_run_at_the_user_inter
+             reaper.start().unwrap().reap(Box::new(Reaped(dropped)));
+             let reaped = drops.recv_timeout(WAIT).unwrap();
+             reaper.stop();
+-            let plain = exit_guard::spawn(std::thread::Builder::new(), qos_class_self)
++            let plain = exit_guard::spawn(std::thread::Builder::new(), || qos_class_self())
+                 .unwrap()
+                 .join()
+                 .unwrap();
+diff --git a/crates/metal2vulkan-runtime/src/tests/shadow.rs b/crates/metal2vulkan-runtime/src/tests/shadow.rs
+index 5ba5fbbb..ad75ad63 100644
+--- a/crates/metal2vulkan-runtime/src/tests/shadow.rs
++++ b/crates/metal2vulkan-runtime/src/tests/shadow.rs
+@@ -46,7 +46,7 @@ fn shadow_joined(
+     bytes: Range<u64>,
+ ) -> Arc<ShadowCopies> {
+     shadow_in(
+-        ShadowBuffer::Fixed(vk::Buffer::null(), 0),
++        ShadowBuffer::Fixed(vk::Buffer::null(), 0, None),
+         buffer,
+         alias,
+         bytes,
+@@ -82,6 +82,7 @@ fn shadow_in(
+                 staging: None,
+                 texel: Some(4),
+                 words: None,
++                raw: None,
+                 unorm: None,
+             },
+             alias,
+@@ -300,7 +301,7 @@ fn a_copy_back_covers_only_where_the_commands_wrote() {
+ /// A shadowed texture over `bytes` of the buffer `buffer` whose copies are cut to a rectangle
+ /// (`ShadowCopies::cuts`): one region of a 64x32 image, 4 bytes a texel, rows 320 bytes apart.
+ fn cut_shadow(buffer: ResourceKey, bytes: Range<u64>) -> Arc<ShadowCopies> {
+-    cut_shadow_in(ShadowBuffer::Fixed(vk::Buffer::null(), 0), buffer, bytes)
++    cut_shadow_in(ShadowBuffer::Fixed(vk::Buffer::null(), 0, None), buffer, bytes)
+ }
+
+ /// [`cut_shadow`]'s texture, its bytes in `raw`.
+@@ -1872,6 +1873,7 @@ fn a_copy_of_an_image_takes_the_regions_of_its_direction() {
+         staging: None,
+         texel: Some(4),
+         words: None,
++        raw: None,
+         unorm: None,
+     };
+     assert_eq!(
+@@ -1897,7 +1899,7 @@ const SURFACE_TEXELS: u64 = 3840 * 2160;
+ fn surface_shadow(plane: ResourceKey) -> Arc<ShadowCopies> {
+     let bytes = 0..4 * 4096 * SURFACE_TEXELS / 3840;
+     let mut copies = Arc::into_inner(shadow_in(
+-        ShadowBuffer::Fixed(vk::Buffer::null(), 0),
++        ShadowBuffer::Fixed(vk::Buffer::null(), 0, None),
+         plane,
+         None,
+         bytes,

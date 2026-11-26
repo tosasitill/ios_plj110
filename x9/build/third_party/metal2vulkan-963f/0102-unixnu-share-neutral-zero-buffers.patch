@@ -1,0 +1,94 @@
+diff --git a/crates/metal2vulkan-runtime/src/neutral.rs b/crates/metal2vulkan-runtime/src/neutral.rs
+index 947f1008..0090a6cb 100644
+--- a/crates/metal2vulkan-runtime/src/neutral.rs
++++ b/crates/metal2vulkan-runtime/src/neutral.rs
+@@ -298,7 +298,8 @@ impl Device {
+     }
+
+     /// The device's read-only zero buffer of `bytes` bytes, made at its first use and kept for
+-    /// the device's lifetime ([`Neutrals::zeros`]).
++    /// the device's lifetime ([`Neutrals::zeros`]): made under the neutrals' lock, as the other
++    /// neutrals are, so threads that first ask for one length at once make one buffer.
+     ///
+     /// Only a **read-only** binding may be served from it: every draw and dispatch of the device
+     /// binds the one buffer, so a shader that could store through the binding would be writing
+@@ -307,13 +308,15 @@ impl Device {
+     /// keeps its own region, as before.
+     pub(super) fn neutral_zero_buffer(&self, bytes: u64) -> Result<vk::Buffer, Error> {
+         let shared = self.shared();
+-        if let Some(zeros) = lock(&shared.textures.neutrals).zeros.get(&bytes) {
++        let mut neutrals = lock(&shared.textures.neutrals);
++        if let Some(zeros) = neutrals.zeros.get(&bytes) {
+             return Ok(zeros.buffer);
+         }
+         let zeros = self.new_neutral_zeros(bytes)?;
+-        let mut neutrals = lock(&shared.textures.neutrals);
++        let buffer = zeros.buffer;
+         neutrals.zeros_made += 1;
+-        Ok(neutrals.zeros.entry(bytes).or_insert(zeros).buffer)
++        neutrals.zeros.insert(bytes, zeros);
++        Ok(buffer)
+     }
+
+     /// How many zero buffers the device has made: one per length its plans ask for, however many
+diff --git a/crates/metal2vulkan-runtime/src/tests/neutral_zeros_shared.rs b/crates/metal2vulkan-runtime/src/tests/neutral_zeros_shared.rs
+index 978de1a3..168e14ae 100644
+--- a/crates/metal2vulkan-runtime/src/tests/neutral_zeros_shared.rs
++++ b/crates/metal2vulkan-runtime/src/tests/neutral_zeros_shared.rs
+@@ -55,6 +55,14 @@
+ //! whole. It is gone -- a chunk is made without a clear -- and `tests::upload_chunk_zeros` is
+ //! where that is held.
+ //!
++//! # First asks at once
++//!
++//! Threads that first ask for one length at the same moment share one buffer: the device makes it
++//! under its neutrals' lock. Made outside it, each racing thread made a buffer of its own and all
++//! but one were dropped unreleased, a `VkBuffer` and its memory leaked until the device was
++//! destroyed (the validation layer's `VUID-vkDestroyDevice-device-05137` on lavapipe, in
++//! `runtime_lane::cache::makings_on_several_threads_each_read_their_own_cache`).
++//!
+ //! What none of it covers: a draw or dispatch whose read-only slot is unbound **and** whose
+ //! length differs from `zero_buffer_bytes` on this device, since one device offers one length; and
+ //! the fully-bound case, which binds no neutral at all and whose per-draw work was already one
+@@ -108,6 +116,41 @@ fn device(cache: &Path) -> Device {
+     Device::system_default_with(&options).unwrap()
+ }
+
++/// Eight threads, released together, each first ask the device for a zero buffer of one length,
++/// a new length a round: each round makes one buffer, which every thread is handed.
++#[test]
++fn threads_that_first_ask_at_once_share_one_zero_buffer() {
++    const THREADS: usize = 8;
++    const ROUNDS: u64 = 16;
++    let scratch = Scratch::new();
++    let device = device(&scratch.0);
++    let made_before = device.neutral_zeros_made();
++    for round in 0..ROUNDS {
++        let bytes = 256 * (round + 1);
++        let start = std::sync::Barrier::new(THREADS);
++        let buffers: Vec<_> = std::thread::scope(|scope| {
++            let asks: Vec<_> = (0..THREADS)
++                .map(|_| {
++                    scope.spawn(|| {
++                        start.wait();
++                        device.neutral_zero_buffer(bytes).unwrap()
++                    })
++                })
++                .collect();
++            asks.into_iter().map(|ask| ask.join().unwrap()).collect()
++        });
++        assert!(
++            buffers.iter().all(|&buffer| buffer == buffers[0]),
++            "round {round}: the threads were handed different zero buffers of {bytes} bytes"
++        );
++        assert_eq!(
++            device.neutral_zeros_made() - made_before,
++            round + 1,
++            "round {round}: zero buffers made"
++        );
++    }
++}
++
+ fn state(device: &Device, fragment: &str) -> RenderPipelineState {
+     let ll = Path::new(env!("CARGO_MANIFEST_DIR"))
+         .join("../metal2vulkan-validation/fixtures/public/engine/tob_renders.ll");

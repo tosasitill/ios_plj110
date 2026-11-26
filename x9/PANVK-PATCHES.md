@@ -1,5 +1,26 @@
 # PanVK / metal2vulkan 补丁与诊断令牌参考
 
+## UniXNU Metal2Vulkan 热路径移植
+
+X9 继续使用 `963f0e64` 和原有 Mali/PanVK 补丁。在 `0100-x9-local-changes.patch` 后应用：
+
+- `0101`，移植 `d4a111c35`。Compute dispatch 从 command buffer 借用 device，省掉临时引用计数操作。当前命令和 encoder 都没有 shadow 时跳过 shadow 规划，空 copy 列表直接返回。已有 shadow、别名判定和资源保留仍走原路径。
+- `0102`，移植 `32fe7f9fd`。第一次创建指定大小的只读零缓冲区时持有 neutral 缓存锁，并发请求共享同一缓冲区。保留上游的并发回归。
+- `0103`，合入 `31b0f28ee` 和 `b707496d7`。Render encoder 优先查找上次命中的 heap part，先比较 plan，命中时复用原槽位，满时替换最久未用的一项。
+- `0104` 更新 X9 shadow 类型、DeviceOptions 和 Darwin QoS 的主机测试夹具，使现有测试能在当前补丁栈上编译。
+
+参考 fork 为 [UniXNU Metal2Vulkan `87a869f7`](https://github.com/UniXNU/Metal2Vulkan/tree/87a869f7fc4b73265d4812c40d8cccb6a83c7b17)。`963f0e64` 到该版本有 7,692 个提交；新版本的 native presentation、host import 和 shader tail floor 依赖新版接口，X9 仍使用当前已接入的提交和内存路径。
+
+补丁变化会改变源码 stamp。为插件构建准备新的 source 目录并显式传入，保留旧快照：
+
+```sh
+runtime=x9/out/metal2vulkan-963f-unixnu-source
+python3 -I x9/build/scripts/prepare-metal2vulkan-963f.py --dest "$runtime"
+python3 -I x9/build/build.py plugins --revision "$revision" --runtime-source "$runtime" --name "$name"
+```
+
+使用新的插件 revision 和候选名。插件打包会更新 kernel allowlist，需要与同版 mailbox 包配套。
+
 ## GPU277: portable upstream cache fixes and vertex padding (2026-11-11)
 
 Runtime stays pinned to metal2vulkan `963f0e64`; the original ce63701 series,

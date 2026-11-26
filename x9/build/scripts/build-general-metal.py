@@ -28,7 +28,13 @@ if source_head=='963f0e64f103d2e682cd0cc454a8fe50f52c8cbb' or (source/'crates/me
  patches=[series963/'adrenometal-ce63701'/(n+'.patch') for n in (series963/'adrenometal-ce63701'/'SERIES').read_text().split()]
  updates=series963/'adrenometal-20be9f9'
  patches.extend(updates/(n+'.patch') for n in (updates/'SERIES').read_text().split())
- patches.append(series963/'0100-x9-local-changes.patch')
+ patches.extend(series963/name for name in (
+  '0100-x9-local-changes.patch',
+  '0101-unixnu-compute-shadow-fast-path.patch',
+  '0102-unixnu-share-neutral-zero-buffers.patch',
+  '0103-unixnu-render-heap-cache.patch',
+  '0104-refresh-host-test-fixtures.patch',
+ ))
  want=''.join(hashlib.sha256(q.read_bytes()).hexdigest()+' '+q.name+'\n' for q in patches)
  stamp=source/'.x9-patches-applied'
  if not stamp.is_file() or stamp.read_text()!=want:

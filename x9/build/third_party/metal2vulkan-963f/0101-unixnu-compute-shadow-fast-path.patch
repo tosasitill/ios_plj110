@@ -1,0 +1,197 @@
+diff --git a/crates/metal2vulkan-runtime/src/compute.rs b/crates/metal2vulkan-runtime/src/compute.rs
+index 746cee23..478f1802 100644
+--- a/crates/metal2vulkan-runtime/src/compute.rs
++++ b/crates/metal2vulkan-runtime/src/compute.rs
+@@ -2375,12 +2375,11 @@ fn record(
+     // upload (16-aligned, as the variant reads it): the grid in threads is the call's, so nothing
+     // on the device writes it.
+     if let Some(bytes) = commands.region_record {
+-        let device = core.device().clone();
+         let record = {
+             let mut state = core.command_buffer().state();
+             state
+                 .uploads
+-                .upload_aligned(&device, &bytes, bytes.len() as u64, 16)?
++                .upload_aligned(core.device(), &bytes, bytes.len() as u64, 16)?
+         };
+         let Some(address) = record.device_address() else {
+             return Err(internal(
+@@ -2438,7 +2437,7 @@ fn record(
+         tables.table.retain(core);
+         return Ok(true);
+     }
+-    let device = core.device().clone();
++    // Borrow the command buffer's device at each use to avoid refcount churn.
+     // Inside a block of command predication, each command runs from its gate: the flat path's
+     // preprocess (whose command then stays zero), else each region's dispatch.
+     let gates = match own.is_some() {
+@@ -2454,7 +2453,7 @@ fn record(
+             let (further, gates) = {
+                 let mut state = core.command_buffer().state();
+                 let (predication, uploads) = state.predication_and_uploads();
+-                predication.gates(uploads, &device, &counts)?
++                predication.gates(uploads, core.device(), &counts)?
+             };
+             if let Some(step) = further {
+                 predication::record_further(core, &step)?;
+@@ -2468,7 +2467,7 @@ fn record(
+         let mut state = core.command_buffer().state();
+         binding::bind(
+             call,
+-            &device,
++            core.device(),
+             &mut state,
+             plan,
+             &command,
+@@ -2499,12 +2498,12 @@ fn record(
+     let kept_made = kept
+         .and_then(|kept| kept.made.get())
+         .or_else(|| planned.made_for(commands))
+-        .filter(|_| !apart_samplers(&device, &objects));
++        .filter(|_| !apart_samplers(core.device(), &objects));
+     // Inside a predicated loop's laying, it waits for them too, so the laying, which its check
+     // may submit again (`command_buffer/rerun.rs`), is not split for it; but where its variant
+     // records in one of its own.
+     let laying = core.command_buffer().state().predication_mut().laying();
+-    let waits = laying && !apart_samplers(&device, &objects);
++    let waits = laying && !apart_samplers(core.device(), &objects);
+     let (pipelines, pending) = match (own.filter(|_| !waits), kept_made) {
+         (Some(_), Some(made)) => {
+             if let Some(kept) = kept.filter(|kept| kept.made.get().is_none()) {
+@@ -2529,7 +2528,7 @@ fn record(
+                 })
+                 .collect();
+             match made {
+-                Some(made) if !apart_samplers(&device, &objects) => {
++                Some(made) if !apart_samplers(core.device(), &objects) => {
+                     // Kept with the entry, which the next dispatch of its inputs takes, and with
+                     // what it planned, which the next dispatch of its shape takes.
+                     if let Some(kept) = kept {
+@@ -2546,7 +2545,7 @@ fn record(
+                     (Cow::Owned(made), None)
+                 }
+                 Some(_) => {
+-                    device
++                    core.device()
+                         .shared()
+                         .counts
+                         .thread()
+@@ -2580,14 +2579,14 @@ fn record(
+     // The resident textures' shadows as the encoder keeps them (`compute/live.rs`).
+     let textures = tables.table.textures.values();
+     let shadows = match resident_shadows {
+-        Some(kept) => shadow::shadow_uses_of(textures, kept.of(&device, tables.residency), &uses),
++        Some(kept) => shadow::shadow_uses_of(textures, kept.of(core.device(), tables.residency), &uses),
+         None => shadow::shadow_uses(textures.chain(tables.residency.textures()), &uses),
+     };
+     let copies = core.plan_shadows(&shadows, &uses)?;
+     let heap_set = match heap {
+         Some(_) => Some(
+             heap_sets::bind(
+-                &device,
++                core.device(),
+                 &objects,
+                 &mut core.command_buffer().state().heaps,
+                 heap_writes,
+@@ -2609,7 +2608,7 @@ fn record(
+     }
+     core.shadow_copies(&copies);
+     if !pushed.is_empty() {
+-        device.shared().counts.thread().dispatch_pushing_set_zero();
++        core.device().shared().counts.thread().dispatch_pushing_set_zero();
+     }
+     let recording = Recording {
+         layout: objects.layout(),
+@@ -2681,7 +2680,7 @@ fn record(
+             .iter()
+             .all(|earlier| earlier.specialization != region.specialization)
+         {
+-            device.degrade_bound_values(
++            core.device().degrade_bound_values(
+                 std::slice::from_ref(&variant.pipeline().stage),
+                 &region.specialization,
+                 &|k| plan.specialized_value(k),
+@@ -2689,8 +2688,8 @@ fn record(
+             );
+         }
+     }
+-    device.degrade_cross_class(&plan.diagnostics, formats);
+-    device.degrade_astc_storage(&plan.diagnostics, formats);
++    core.device().degrade_cross_class(&plan.diagnostics, formats);
++    core.device().degrade_astc_storage(&plan.diagnostics, formats);
+     objects.announce_bound(
+         (
+             std::slice::from_ref(&variant.pipeline().stage),
+@@ -2720,16 +2719,16 @@ fn record(
+         core.retain(function_tables.clone());
+     }
+     let emulated = variant.emulates_simdgroups();
+-    degrade_dispatch(&device, kernel, &dispatch, regions.len(), emulated);
++    degrade_dispatch(core.device(), kernel, &dispatch, regions.len(), emulated);
+     if let Some(unlisted) = unlisted {
+         heap_sets::degrade_unlisted(
+-            &device,
++            core.device(),
+             unlisted,
+             &format!("kernel `{kernel}`'s dispatches"),
+         );
+         // It runs with the states its sampler arrays hold.
+         let mut held = core.command_buffer().state();
+-        held.unlisted_argument_sampler(&device);
++        held.unlisted_argument_sampler(core.device());
+     }
+     Ok(true)
+ }
+diff --git a/crates/metal2vulkan-runtime/src/encoder.rs b/crates/metal2vulkan-runtime/src/encoder.rs
+index de96ec2c..d32a0f39 100644
+--- a/crates/metal2vulkan-runtime/src/encoder.rs
++++ b/crates/metal2vulkan-runtime/src/encoder.rs
+@@ -1666,7 +1666,10 @@ impl EncoderCore {
+         shadows: &[ShadowUse],
+         uses: &[Use<ResourceKey>],
+     ) -> Result<Vec<ShadowCopy>, Error> {
+-        let device = self.device().clone();
++        if shadows.is_empty() && self.shadows.is_empty() {
++            return Ok(Vec::new());
++        }
++        let device = self.open.command_buffer.device();
+         let aliased = self.aliased(uses);
+         let uses = aliased.as_deref().unwrap_or(uses);
+         // The kept images its merges take are held to the encoder's end, those of a refused
+@@ -1681,7 +1684,7 @@ impl EncoderCore {
+             .shadows
+             .before(shadows, uses, |copies, made_for, area| {
+                 let merging = (made_for.two_ways, made_for.blocks, area);
+-                let made = ShadowMerge::new(&device, copies, merging, (images, pool), lent)?;
++                let made = ShadowMerge::new(device, copies, merging, (images, pool), lent)?;
+                 let (merge, lease) = (Arc::new(made.0), made.1);
+                 if let Some(lease) = lease {
+                     leases.push((Arc::downgrade(&merge), lease));
+@@ -1700,7 +1703,7 @@ impl EncoderCore {
+         // How this command's first copies in stood against their images' last standing, which
+         // sizes the carry on a run without a timing (`shadow::CarryTally`).
+         let tally = self.shadows.tally();
+-        (device.shared().counts).shadow_first_copies_in_tallied(tally);
++        (self.device().shared().counts).shadow_first_copies_in_tallied(tally);
+         let by = match Location::caller().file() {
+             file if file.ends_with("compute.rs") => KeepBy::Compute,
+             file if file.ends_with("blit.rs") => KeepBy::Blit,
+@@ -1708,7 +1711,7 @@ impl EncoderCore {
+         };
+         for copy in &copies {
+             if let Step::Keep(merge) = &copy.step {
+-                let churn = &device.shared().counts.churn;
++                let churn = &self.device().shared().counts.churn;
+                 churn.kept(by, merge.cuts(), merge.texels_kept());
+                 self.retain(Arc::clone(merge));
+             }
+@@ -1824,6 +1827,9 @@ impl EncoderCore {
+     /// moves out of a staging buffer are a copy of rows (`row_copies.rs`); the command buffer
+     /// retains each until it completes.
+     pub(super) fn shadow_copies(&mut self, copies: &[ShadowCopy]) {
++        if copies.is_empty() {
++            return;
++        }
+         let device = self.device().clone();
+         let mut run = ShadowRun::default();
+         // The keeps a dispatch at their copy in took, which record nothing, and those that copy

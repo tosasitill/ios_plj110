@@ -423,7 +423,7 @@ class Builder:
         return kernel
 
     # ---- Metal/PanVK plugins ---------------------------------------------------
-    def plugins(self, revision, panvk):
+    def plugins(self, revision, panvk, runtime_source=None):
         """Build X9PanVK<N> and X9GeneralMetal<N> from x9/metal/General and the
         .local third-party trees, package them for the mailbox into the output
         directory and rewrite the kernel allowlist, so a following kernel build
@@ -439,7 +439,8 @@ class Builder:
             self.run_or_exit(py + [str(scripts / 'build-panvk-incremental.py')], ROOT, env, 'PanVK incremental build', True)
         rev = ['--revision', str(revision)]
         self.run_or_exit(py + [str(scripts / 'package-panvk-native.py')] + rev, ROOT, env, 'package X9PanVK', True)
-        self.run_or_exit(py + [str(scripts / 'build-general-metal.py')] + rev, ROOT, env, 'build X9GeneralMetal', True)
+        metal_args = rev + (['--runtime-source', str(runtime_source.resolve())] if runtime_source else [])
+        self.run_or_exit(py + [str(scripts / 'build-general-metal.py')] + metal_args, ROOT, env, 'build X9GeneralMetal', True)
         self.run_or_exit(py + [str(scripts / 'package-plugins.py')] + rev + ['--out', str(self.out)], ROOT, env,
                          'package plugins + kernel allowlist', True)
 
@@ -495,6 +496,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('step', nargs='?', choices=['all', 'kernel', 'boot', 'plugins'], default='all')
     ap.add_argument('--revision', type=int, help='plugin revision (X9GeneralMetal<N>/X9PanVK<N>); with "all", build plugins first')
+    ap.add_argument('--runtime-source', type=Path, help='Metal2Vulkan source directory for the plugin build')
     ap.add_argument('--panvk', choices=['auto', 'incremental', 'full', 'skip'], default='auto',
                     help='PanVK rebuild: auto = incremental if already configured, else full')
     ap.add_argument('--config', type=Path, default=HERE / 'local.json')
@@ -518,10 +520,12 @@ def main():
     require_bluetooth_inputs(cfg, radio_args)
     if a.step == 'plugins' and a.revision is None:
         sys.exit('plugins needs --revision N')
+    if a.runtime_source is not None and (a.step not in ('plugins', 'all') or a.revision is None):
+        ap.error('--runtime-source requires a plugin build with --revision')
     if a.revision is not None and a.step in ('plugins', 'all'):
         if not 170 <= a.revision <= 9999:
             sys.exit('--revision must be 170..9999')
-        b.plugins(a.revision, a.panvk)
+        b.plugins(a.revision, a.panvk, a.runtime_source)
     if a.step == 'plugins':
         b.log(f'output: {out}')
         return
