@@ -1569,31 +1569,38 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 {
 	uint64_t arg0 = args->scalarInputCount > 0 ? args->scalarInput[0] : 0;
 
-	/* Opt-in observation only: never dereference or log async references. */
+	/* See NOTES: the short diagnostic flag fits alongside the experimental
+	 * flag in the full device command line. Never log addresses or values. */
 	if ((selector >= 36 && selector <= 42) || selector == 45) {
-		int enabled = 0;
-		PE_parse_boot_argn("x9_surf_event_diag", &enabled, sizeof(enabled));
-		if (enabled == 1) {
+		int diag = 0, experimental = 0;
+		if (!PE_parse_boot_argn("x9_surf_event_diag", &diag, sizeof(diag))) {
+			PE_parse_boot_argn("x9ed", &diag, sizeof(diag));
+		}
+		PE_parse_boot_argn("x9_surf_events", &experimental, sizeof(experimental));
+		SInt32 sample = 0;
+		char name[32] = {};
+		if (diag == 1) {
 			static volatile SInt32 samples[2];
-			char name[32] = { 0 };
 			proc_selfname(name, sizeof(name));
-			/* Early boot clients must not exhaust the Poster diagnostic budget. */
 			const bool poster = strcmp(name, "AegirPoster") == 0;
-			const SInt32 sample = OSIncrementAtomic(&samples[poster]);
-			if (sample > 0 && sample <= (poster ? 48 : 16)) {
-				IOLog("SWEET SURF EVENT: %s sel=%u async=%u refs=%u in=%u out=%u structin=%u structout=%u\n",
-				    name, selector, args->asyncWakePort != MACH_PORT_NULL,
+			sample = OSIncrementAtomic(&samples[poster]);
+			if (sample <= 0 || sample > (poster ? 48 : 16)) sample = 0;
+			if (sample) {
+				IOLog("SWEET SURF EVENT: %s pid=%d seq=%d sel=%u async=%u refs=%u in=%u out=%u structin=%u structout=%u\n",
+				    name, proc_selfpid(), sample, selector, args->asyncWakePort != MACH_PORT_NULL,
 				    args->asyncReferenceCount, args->scalarInputCount,
 				    args->scalarOutputCount, args->structureInputSize,
 				    args->structureOutputSize);
 			}
 		}
-	}
-
-	if ((selector >= 36 && selector <= 42) || selector == 45) {
-		int experimental = 0;
-		PE_parse_boot_argn("x9_surf_events", &experimental, sizeof(experimental));
-		if (experimental == 1) return eventExternalMethod(selector, args);
+		if (experimental == 1) {
+			const IOReturn result = eventExternalMethod(selector, args);
+			if (sample) {
+				IOLog("SWEET SURF EVENT RESULT: %s pid=%d seq=%d sel=%u kr=0x%x\n",
+				    name, proc_selfpid(), sample, selector, result);
+			}
+			return result;
+		}
 	}
 
 	switch (selector) {
