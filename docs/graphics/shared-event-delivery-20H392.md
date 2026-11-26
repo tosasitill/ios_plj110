@@ -60,3 +60,9 @@ Xcode 15 单对象编译 exit 0，`SweetSurface.o` 545488 B、12 warnings，日�
 显式 `x9_surf_events=1` 才把 36–41、45 接到事件实现；默认路径保持原行为。每个 Mach reference 独占一个 pending queue。36/38 通过任务内能力和只读映射返回实际 counter；37 经唯一队列推进，45 按实际 counter 等待；39 以本连接的 listener 注册，40/41 接管/撤销对应异步引用。撤销在 send lock 中标记 listener 后，跨活跃队列取消；已成功进入 Mach 队列的消息不能撤回。零超时发送遇队列满保留条目并延迟尝试，不能当成已投递。退役先从全局队列索引摘出，再关闭 worker，后释放映射与 counter。
 
 这是供设备复证的实验兼容层。未证明真实任务退出/no-senders、拥塞多 listener 公平性、42–44 特殊用途、Metal 前端自己的跨进程 handle 或 AegirPoster 止崩；不能从 host stub 推断这些结论。测试和候选见 NOTES §6.24。
+
+## 多 listener 背压公平性修复（2026-11-26）
+
+此前一个 listener 的 Mach 队列持续满会使 worker 遇到首个 timeout 即退出，阻塞其他 ready listener。本版每轮最多发送 64 次；一次 timeout 后在该轮保留 listener 引用并跳过该 listener，继续处理其他已就绪 listener；轮末对仍在队列中的 timeout 安排 10 ms 重试。订阅序号用于在物理槽重用时保持**同一 event queue、同一 listener 的已就绪通知**订阅顺序；未达到阈值的旧订阅不阻挡达到阈值的新订阅。跨 event queue 的全局排序未实现。序号耗尽时拒绝新订阅，不静默回绕。cancel 的在途和已发送边界、close 的 ONCE/cancel_wait 权属不变；这不是设备通知验收。
+
+固定 Xcode 15 host 测试 `xcrun clang++ -std=c++17 -Wall -Wextra -pthread x9/tools/tests/shared_event_pending_host.cpp -o x9/out/event-fair-20261126/pending && x9/out/event-fair-20261126/pending` exit 0：模拟 A 满、B 仍收到、A 恢复后按序、复用物理槽的先后顺序、满队列后取消，以及既有容量/close；Mach/线程调用由 stub 模拟。recipe 单对象编译 exit 0、`SweetSurface.o` 560904 B、12 warnings，日志 `x9/out/event-fair-20261126/compile-final.log`。未构建整包或操作设备。

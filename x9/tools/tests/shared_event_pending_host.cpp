@@ -36,12 +36,13 @@ struct OSObject {
  void release() { if (--count==0) { free(); delete this; } }
 };
 std::atomic<int> releases{0}, sends{0};
-int forcedResult=0;
+int forcedResult=0; uint64_t fullPort=0;
+std::vector<uint64_t> delivered;
 uint64_t sent[4], sentport;
 struct IOUserClient : OSObject {
  static int releaseAsyncReference64(OSAsyncReference64 ref) { assert(ref[0]); ++releases; return 0; }
  static int sendAsyncResult64WithOptions(OSAsyncReference64 ref, int result, io_user_reference_t *a, unsigned n, unsigned) {
-  assert(ref[0] && result==0 && n==4); sentport=ref[0]; std::memcpy(sent,a,sizeof(sent)); ++sends; return forcedResult;
+  assert(ref[0] && result==0 && n==4); sentport=ref[0]; std::memcpy(sent,a,sizeof(sent)); ++sends; if (ref[0]==fullPort) return 100; if (!forcedResult) delivered.push_back(a[0]); return forcedResult;
  }
 };
 constexpr int MACH_SEND_TIMED_OUT=100; constexpr unsigned kIOUserNotifyOptionCanDrop=1;
@@ -100,6 +101,32 @@ int main() {
  assert(lastCall->pending); forcedResult=0;
  lastCall->pending=false; lastCall->fn(lastCall->arg,nullptr);
  assert(!lastCall->pending && !q->drainOne(&ret));
+ // A full listener must not block another; reused slot must not reorder A.
+ uint64_t ref2[8]={0x5678,0x89,0x777}; IOExternalMethodArguments a2{0x5678,ref2,3};
+ assert(client.eventListenerAdd(&a2)==0);
+ auto *l2=client.eventListenerCopy(0x777); assert(l2);
+ fullPort=0x1234; delivered.clear();
+ assert(q->subscribe(l,101,2,5)==0);
+ assert(q->subscribe(l,102,2,5)==0);
+ assert(q->subscribe(l2,201,2,5)==0);
+ lastCall->pending=false; lastCall->fn(lastCall->arg,nullptr);
+ assert(lastCall->pending && delivered.size()==1 && delivered[0]==201);
+ fullPort=0; delivered.clear();
+ lastCall->pending=false; lastCall->fn(lastCall->arg,nullptr);
+ assert(delivered.size()==2 && delivered[0]==101 && delivered[1]==102);
+ // Reuse an earlier physical slot while an older item remains in another slot.
+ assert(q->subscribe(l2,301,2,5)==0); assert(q->subscribe(l,103,2,5)==0);
+ assert(q->drainOne(&ret)); assert(q->subscribe(l,104,2,5)==0);
+ delivered.clear(); lastCall->pending=false; lastCall->fn(lastCall->arg,nullptr);
+ assert(delivered.size()==2 && delivered[0]==103 && delivered[1]==104);
+ fullPort=0x1234; delivered.clear();
+ assert(q->subscribe(l,105,2,5)==0 && q->subscribe(l2,202,2,5)==0);
+ lastCall->pending=false; lastCall->fn(lastCall->arg,nullptr);
+ assert(delivered.size()==1 && delivered[0]==202 && lastCall->pending);
+ assert(q->cancelListener(l)==1); fullPort=0;
+ lastCall->pending=false; lastCall->fn(lastCall->arg,nullptr);
+ assert(delivered.size()==1 && !lastCall->pending);
+ l2->release(); assert(client.eventListenerRemove(0x777)==0);
  for(unsigned i=0;i<64;i++) assert(q->subscribe(l,1,2,100)==0);
  assert(q->subscribe(l,1,2,100)==kIOReturnNoResources);
  assert(q->cancelListener(l)==64 && q->cancelListener(l)==0);
@@ -108,6 +135,6 @@ int main() {
  sub.join(); adv.join(); assert(q->drainOne(&ret));
  assert(q->subscribe(l,1,2,12)==0); q->close();
  assert(q->subscribe(l,1,2,12)==kIOReturnNotOpen && !q->advance(12) && !q->drainOne(nullptr));
- q->release(); l->release(); assert(client.eventListenerRemove(0x456)==0 && releases==1);
+ q->release(); l->release(); assert(client.eventListenerRemove(0x456)==0 && releases==2);
  puts("PASS: pending threshold, ready, timeout retry, cancellation, capacity and close");
 }

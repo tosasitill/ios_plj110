@@ -6,16 +6,19 @@ class SweetSharedEventPending : public OSObject {
 	struct Entry {
 		SweetEventListener *listener;
 		io_user_reference_t block, event;
-		uint64_t target;
+		uint64_t target, sequence;
 		bool inFlight, canceled;
 	};
 	IOLock *fLock = NULL;
 	SweetSharedEventCounter *fCounter = NULL;
 	Entry fEntries[64] = {};
+	uint64_t fNextSequence = 0;
 	bool fClosed = false;
 	thread_call_t fWorker = NULL;
 	static void worker(thread_call_param_t arg, thread_call_param_t);
 	void scheduleLocked(bool delayed);
+	bool drainOneEx(IOReturn *sendResult, SweetEventListener *const *blocked,
+	    unsigned blockedCount, SweetEventListener **timedOutListener);
 public:
 	static SweetSharedEventPending *make(SweetSharedEventCounter *counter);
 	void free() APPLE_KEXT_OVERRIDE;
@@ -64,8 +67,10 @@ SweetSharedEventPending::subscribe(SweetEventListener *listener,
 	if (fClosed) ret = kIOReturnNotOpen;
 	else for (unsigned i = 0; i < 64; ++i) {
 		if (fEntries[i].listener == NULL) {
+			// Never wrap sequence while old entries may still exist.
+			if (fNextSequence == UINT64_MAX) break;
 			listener->retain();
-			fEntries[i] = {listener, block, event, target, false, false};
+			fEntries[i] = {listener, block, event, target, ++fNextSequence, false, false};
 			if (fCounter->value() >= target) scheduleLocked(false);
 			ret = kIOReturnSuccess;
 			break;
@@ -137,32 +142,59 @@ void
 SweetSharedEventPending::worker(thread_call_param_t arg, __unused thread_call_param_t ignored)
 {
 	auto *self = static_cast<SweetSharedEventPending *>(arg);
+	SweetEventListener *blocked[64] = {};
+	unsigned blockedCount = 0, attempts = 0;
 	IOReturn result;
-	while (self->drainOne(&result)) {
-		if (result == MACH_SEND_TIMED_OUT) {
-			IOLockLock(self->fLock);
-			self->scheduleLocked(true);
-			IOLockUnlock(self->fLock);
-			break;
+	SweetEventListener *timedOut = NULL;
+	while (attempts < 64 && self->drainOneEx(&result, blocked, blockedCount, &timedOut)) {
+		++attempts;
+		if (timedOut != NULL) {
+			blocked[blockedCount++] = timedOut; // retained until this pass ends
+			if (blockedCount == 64) break;
 		}
 	}
+	if (blockedCount != 0 || attempts == 64) {
+		IOLockLock(self->fLock);
+		self->scheduleLocked(blockedCount != 0);
+		IOLockUnlock(self->fLock);
+	}
+	for (unsigned i = 0; i < blockedCount; ++i) blocked[i]->release();
 }
 
 bool
 SweetSharedEventPending::drainOne(IOReturn *sendResult)
 {
+	return drainOneEx(sendResult, NULL, 0, NULL);
+}
+
+bool
+SweetSharedEventPending::drainOneEx(IOReturn *sendResult,
+    SweetEventListener *const *blocked, unsigned blockedCount,
+    SweetEventListener **timedOutListener)
+{
 	Entry ready = {};
 	unsigned index = 64;
+	if (timedOutListener != NULL) *timedOutListener = NULL;
 	IOLockLock(fLock);
 	if (!fClosed) for (unsigned i = 0; i < 64; ++i) {
-		if (fEntries[i].listener != NULL && !fEntries[i].inFlight &&
-		    fCounter->value() >= fEntries[i].target) {
-			index = i;
-			fEntries[i].inFlight = true;
-			ready = fEntries[i];
-			break;
+		Entry &candidate = fEntries[i];
+		if (candidate.listener == NULL || candidate.inFlight || candidate.canceled ||
+		    fCounter->value() < candidate.target) continue;
+		bool skip = false;
+		for (unsigned j = 0; j < blockedCount; ++j)
+			if (blocked[j] == candidate.listener) { skip = true; break; }
+		// Earlier ready notifications for this listener (including in-flight)
+		// must complete first, even when slots have been reused out of order.
+		for (unsigned j = 0; !skip && j < 64; ++j) {
+			Entry &other = fEntries[j];
+			if (other.listener == candidate.listener && !other.canceled &&
+			    other.sequence < candidate.sequence && fCounter->value() >= other.target)
+				skip = true;
 		}
+		if (!skip && (index == 64 || candidate.sequence < fEntries[index].sequence))
+			index = i;
 	}
+	if (index != 64) { fEntries[index].inFlight = true; ready = fEntries[index]; }
 	IOLockUnlock(fLock);
 	if (index == 64) return false;
 	const IOReturn ret = IOSurfaceRootUserClient::eventListenerDeliver(
@@ -172,12 +204,17 @@ SweetSharedEventPending::drainOne(IOReturn *sendResult)
 	if (ret != MACH_SEND_TIMED_OUT || fClosed || fEntries[index].canceled) {
 		fEntries[index] = {};
 		release = true;
-	} else fEntries[index].inFlight = false;
+	} else {
+		fEntries[index].inFlight = false;
+		if (timedOutListener != NULL) {
+			ready.listener->retain();
+			*timedOutListener = ready.listener;
+		}
+	}
 	IOLockUnlock(fLock);
 	if (release) ready.listener->release();
-	if (ret != kIOReturnSuccess && ret != MACH_SEND_TIMED_OUT) {
+	if (ret != kIOReturnSuccess && ret != MACH_SEND_TIMED_OUT)
 		IOLog("SWEET SURF EVENT: async send failed 0x%x\n", ret);
-	}
 	if (sendResult != NULL) *sendResult = ret;
 	return true;
 }
