@@ -191,6 +191,7 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 - `0xE0..0xFF` 厂商事件在 Apple H4 parser 前消费；普通 Command Complete 不过滤。log 425 证明已定位的 reason-607 崩溃消失。
 - 原生 HCI 扫描参数/开关与 advertising report 解析仍在 Apple 栈；没有 X9 自建发现引擎或伪造回调。
 - Settings 行可见不等于 `BluetoothManager.available`。后者要求 `[self+0x18]==2`，只有五个原生 setup 调用全部成功才写入。
+- 2026-11-26 Android 只读快照：Bluetooth State ON、crashed 0、Discovering false、Bonded devices 3（含 Technics EAH-AZ100 DUAL/LE 与 EDIFIER PK305），`A2dpOffloadEnabled=true`。这是 Android 适配器状态，不是 iOS `BluetoothManager.available` 或搜索验收。
 
 **未完成**
 
@@ -211,6 +212,7 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 - ALS wire type 116 → 整数 lux，HID `0x20/0x41`/event type 12；上限 200,000，当前 5 s 是**接收年龄**，不是测量年龄。
 - PROX wire type 8 → HID `ff00/8`、Placement=1、receiver mask `0x40`；当前 `latest.near = (oneshot == 0)`。
 - 历史 `~/428.txt` 有真实 LIST、ENABLE ACK、lux=232、`near=1/oneshot=0` 与匹配 DISABLE；没有 `near=0` 或 oneshot=1。
+- 2026-11-26 Android 只读快照（`x9/out/adb-snapshot-20261126/`）：sensorservice 列出 `tcs3720 ps` type 8 wakeUp/on-change、`OPLUS Fusion Light Sensor Next Gen` type 5 on-change/non-wakeUp，以及后置 `tcs3449 als/rgb/flicker/spectral`、`gesture_prox/phone_prox/pocket` wakeUp。近期 fusion lux 约 540–555，selected sampling 200 ms；logcat `HfLooper pwm_rgb` lux 约 500–513。power 为 Dozing、`mProximityPositive=false`。这是 Android 侧观察，未捕获 near/far 跳变，不能闭合 PS 极性。
 
 **推断 / 未完成**
 
@@ -295,15 +297,16 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 **观察**
 
 - `sweet_x9_touch.c` 明确不路由 touch IRQ；只处理普通 report `0x11`。没有 gesture 命令、decoder 或 wake key。当前 contact 进入普通 digitizer/HID 链。
-- S3910 厂商实现不在本地；现存 Goodix DT 不是本机 S3910 证据。
+- S3910 厂商源码已在固定参考树定位：`.local/references/oppo-modules-dt-mt6993/vendor/oplus/kernel/tp/hbp/hbp/chips/synaptics/s3910/` 与 `vendor/oplus/kernel/touchpanel/synaptics_hbp/`。旧“不在本地”结论作废。静态合同：`DTAP_DETECT=0x01`，`TOUCH_REPORT_GESTURE_ID=0x10`、`TOUCH_REPORT_GESTURE_DATA=0x1b`，`REPORT_DIFF` → `IRQ_REASON_GESTURE_DIFF`；`touchpanel_common_driver.c` 对普通 gesture 上报 `KEY_F4`（`KEY_POWER` 仅 `gesture_debug_sta` 调试路径），不是直接 `KEY_WAKEUP`。
+- Android 设置/传感器快照：`double_tap_to_wake=1`、`double_wake_status=1`、`ambient_touch_to_wake=1`、`ambient_tilt_to_wake=1`、`gesture_newdoubletap_support=1`、`sys.oplus.gesturewakeup=1`；sensorservice 有 `pickup_detect` type 65611 special-trigger/wakeUp、`significant_motion` type 17 one-shot/wakeUp。`hf_sensor_type.h` 中 `SENSOR_TYPE_PICKUP_DETECT=75`（`ID_OFFSET=1` → ID 74）。这些是 Android/OPLUS 路径证据，不等于 iOS SpringBoard 接受。
 - XNU 的 SCP 只保留 accelerometer type1、proximity type8、light type5；不消费 pickup/significant-motion one-shot。
 - `X9Accelerometer` 发布连续 type13 XYZ；orientation bridge 只做姿态滤波，不做 wake。
 - Android nanohub 会为一次性 wake gesture 发 250 ms PM wakeup，但那是传输恢复，不是 UI 亮屏。
 
 **未完成 / 下一步**
 
-- 点击亮屏需先找 S3910 gesture-mode 命令、report code 与 Android KEY_WAKEUP/HAL 映射，再证明 SpringBoard 接受标准 Consumer Power 或合格 wake 事件。
-- 抬腕唤醒先查完整 SCP LIST 是否有 pickup/wake ID，再定义 screen-off-only、one-shot rearm/cooldown/stationary veto；不能只增加加速度事件。
+- 点击亮屏需先沿已定位的 S3910 gesture-mode 命令/report code 与 `KEY_F4`/userspace notifier 映射，再证明 SpringBoard/doze 接受标准 Consumer Power、`ambient_touch_to_wake` 或合格 wake 事件；不能把 Android `KEY_F4` 直接当 iOS wake。
+- 抬腕唤醒先查完整 SCP LIST 是否有 pickup/wake ID（Android type 65611 / MTK type 75 已见），再定义 screen-off-only、one-shot rearm/cooldown/stationary veto；不能只增加加速度事件。
 - 当前没有 iOS 点击亮屏或抬腕唤醒工作链。
 - 2026-11-26 host boundary：`python3 -I x9/motion/test_wake_boundary.py` exit0（5 tests），直接编译真实 `sweet_x9_motion.c`，确认 ACK 前 DATA 拒绝、 stale 过期、disconnect 失效、晚 ACK 不能清 fault；source 检查确认 orientation bridge 无 wake/shake/touch/S3910 合成。功能仍未实现。
 
@@ -320,6 +323,7 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 - 蓝牙 SCO UART 边界转换与 Apple 标准 0c26 路径有静态证据；私有 BCM `shci`/WBS/VoiceConfig 不能伪造成 MTK 成功。实际 HFP/A2DP/SCO 路由、连接 suspend/FW wake 和吞吐均未验收。
 - `X9H4Transport` 只提供 HCI，不提供 PCM；kernel serial FIFO 也不是 codec。X9 自写 AudioServerPlugIn 只有 Speaker/Hawking，没有 Bluetooth PCM consumer。stock bluetoothd 则有 XPC audio publication、A2DP start/stop/data、HFP SCO completion、HFPAudioDevice 与 HCI send-thread 等候选消费者，但未证明在 X9 实例化。
 - Android 当前 traced HFP 使用标准 Enhanced Setup Synchronous Connection `0x043D`，payload offset 50/51 为 input/output data path；FC72 只是 MTK voice-interface 初始化，不是 per-codec route。X9 AP↔DSP/AFE ring 不属于这两条蓝牙 PCM 链。
+- 2026-11-26 Android 只读快照：audio_policy 配置为 `audio_policy_configuration_a2dp_offload_enable_cg_enable.xml`，`A2dpOffloadEnabled=true`；available output/input 含 Technics `BLE Headset Out/In`，supported/routable 列表含 BT SCO/A2DP。捕获时 `isBluetoothScoOn()=false`，`sco/a2dp/le_audio=false`，`active_acl_num=0`、`le_acl_num=1`。这是 Android 音频策略观察，不证明 iOS stock XPC/PCM consumer 已实例化。
 - 最小待证链：A2DP 为 CoreAudio route → stock XPC/audio device → mediaserverd PCM → encoder/offload → AVDTP/ACL → H4；HFP 为 CoreAudio HFP → stock HFPAudioDevice/Gateway → `0x0428/0x0429 + 0x0c26` → native H4 SCO → MTK UART 转换。
 - 2026-11-26 host boundary：`python3 -I x9/audio/test_bluetooth_boundary.py` exit0（2 tests），直接编译真实 `X9AudioPlugIn.c`；DeviceList 仅 Speaker/Hawking，Bluetooth/HFPAudioDevice UID 为 unknown，未知对象 StartIO/StopIO/DoIOOperation fail closed。标准 HCI SCO 链已有静态证据，但 stock HFPAudioDevice 的 XPC selector/序列化/publication descriptor 与真实实例化仍未建立，因此未添加 fake PCM endpoint/backend，audio_verified 不变。
 - 下一离线步骤：从既有原件/捕获确定 Bluetooth device/stream publication、Start/Stop/timestamp 与 ReadInput/WriteMix buffer 合同，并找到真实双向 AP PCM↔SCO supplier；不得把 serial FIFO/UART 长度转换当 codec。
@@ -349,6 +353,14 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 唤醒：`fix/wake-gestures` 已合并。见 §6.7 host boundary；点击/抬腕功能仍缺 S3910/SCP one-shot 合同。
 - 蓝牙 Settings 诊断：用户确认后已合并 `fix/bt-discovery`（含基线 `feat/bt-settings-root` `ab9828ea`）。dyld slide 地址修复 `e67688db`；合并后 `test_settings_diag.py` 4/4 OK，`x9/bluetooth/build.py --kernel-objects --out x9/out/bt-settings-merge-20261126` 构建/签名成功（仅 warnings）。诊断仍 Preferences-only、默认关闭、hash gate；未安装/未上机。基线同时带入 `x9_bt_init=1 x9_bt_fc=1` 默认开启，runtime ACK/profile gates 不变。
 
+### 6.12 2026-11-26 adb 只读快照
+
+用户授权“adb 已连接，一次性读完你要的”后，单次有界只读采集保存在 gitignored `x9/out/adb-snapshot-20261126/`（identity、sensorservice、bluetooth_manager、telecom、audio_policy/flinger、thermal、battery、power、input、filtered settings/getprop、logcat -d -t 1000）。未读 live sysfs，未写入/重启/刷机。
+
+- 观察：Android Dozing、`mProximityPositive=false`、`mLastSleepReason=power_button`；thermal HAL 当前 CPU/GPU/SOC 约 34.96°C、SKIN 28.624°C、Thermal Status 0（cached 85.144 与当前 HAL 不同，不混用）。telecom 无 active call，PhoneAccount sub1/sub2 存在。BT/audio/sensor/gesture 观察已并入 §6.1/6.2/6.7/6.9。
+- 缺口：`dumpsys sms` 返回 “Can't find service: sms”（sms.txt 空）；`/proc/bus/input/devices` Permission denied，但 `dumpsys input` 给出 `touchpanel` event2（KEYBOARD|TOUCH|TOUCH_MT，Generic.kl）及 pmic/gpio/fp/headset 设备。后续短信证据需另找 `isms`/telephony 有界计数或既有 Android 日志，不读消息正文/号码；不升级到 sysfs。
+- 标签：全部为 **Android 侧观察 / 静态源码定位**，不是 iOS device boot、runtime_verified 或 feature acceptance。S3910 源码定位修正了 §6.7 旧结论；PS 极性、iOS wake 接受、stock BT PCM consumer 仍未闭合。
+
 ## 7. 推荐下一步顺序
 
 1. 保持文档与源码标签一致；任何新候选使用唯一名并记录 source HEAD。
@@ -358,4 +370,4 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 5. GPU/调度：完成离线 evidence matrix 与 428 时间线关联，再申请单变量设备 A/B。
 6. 存储/USB：只读 IOMedia A0 与 AppSync session probe 分开推进。
 7. 相机：先证明主摄多帧非黑与稳定 retire，再接第二路/完整 iOS 预览。
-8. 点击/抬腕唤醒停留在离线来源追踪，不伪造 iOS 事件或样本。
+8. 点击/抬腕唤醒：S3910 源码已定位，先离线追 gesture report → `KEY_F4`/userspace notifier 与 SCP pickup/significant-motion LIST/one-shot 合同，再谈 iOS doze/SpringBoard 接受；不伪造 iOS 事件或样本。
