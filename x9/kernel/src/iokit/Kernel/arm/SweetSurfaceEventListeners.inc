@@ -94,6 +94,7 @@ IOSurfaceRootUserClient::eventListenerRemove(io_user_reference_t key)
 	}
 	IOLockUnlock(fLock);
 	if (listener == NULL) return kIOReturnBadArgument;
+	sweet_event_cancel_listener(listener);
 	listener->release();
 	return kIOReturnSuccess;
 }
@@ -107,7 +108,10 @@ IOSurfaceRootUserClient::eventListenersClose()
 	memcpy(removed, fEventListeners, sizeof(removed));
 	bzero(fEventListeners, sizeof(fEventListeners));
 	IOLockUnlock(fLock);
-	for (unsigned i = 0; i < 64; ++i) if (removed[i] != NULL) removed[i]->release();
+	for (auto *listener : removed) if (listener != NULL) {
+		sweet_event_cancel_listener(listener);
+		listener->release();
+	}
 }
 
 IOReturn
@@ -118,7 +122,7 @@ IOSurfaceRootUserClient::eventListenerDeliver(SweetEventListener *listener,
 	io_user_reference_t payload[4] = { block, event, value, value >> 32 };
 	/* A retained listener keeps the right alive; serialize ref[0] error flags. */
 	IOLockLock(listener->sendLock);
-	IOReturn result = sendAsyncResult64WithOptions(listener->ref, kIOReturnSuccess, payload, 4,
+	IOReturn result = listener->canceled ? kIOReturnAborted : sendAsyncResult64WithOptions(listener->ref, kIOReturnSuccess, payload, 4,
 	    kIOUserNotifyOptionCanDrop);
 	IOLockUnlock(listener->sendLock);
 	return result;

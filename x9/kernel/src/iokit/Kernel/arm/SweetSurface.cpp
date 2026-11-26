@@ -770,13 +770,15 @@ public:
 	OSAsyncReference64 ref;
 	IOLock *sendLock;
 	bool ownsRight;
+	bool canceled = false; /* protected by sendLock */
 	io_user_reference_t key;
 	bool initReference(IOExternalMethodArguments *args);
 	void free() APPLE_KEXT_OVERRIDE;
 };
 OSDefineMetaClassAndStructors(SweetEventListener, OSObject);
 
-#include "SweetSurfaceEventViews.inc"
+class SweetEventViewOwner;
+class SweetEventRight;
 
 class IOSurfaceRootUserClient : public IOUserClient {
 	OSDeclareDefaultStructors(IOSurfaceRootUserClient);
@@ -791,6 +793,7 @@ class IOSurfaceRootUserClient : public IOUserClient {
 	IOReturn eventCapabilityCreate(uint64_t *out);
 	SweetSharedEventCounter *eventCapabilityCopy(uint64_t name);
 	IOReturn eventCapabilityImport(uint64_t name, uint64_t *out);
+	IOReturn eventExternalMethod(uint32_t selector, IOExternalMethodArguments *args);
 	void eventMapsClose();
 
 	SweetSurfaceRef *findRef(uint32_t id, unsigned int *index, bool detached = false);
@@ -802,7 +805,7 @@ class IOSurfaceRootUserClient : public IOUserClient {
 	IOReturn bulkAttachments(IOExternalMethodArguments *args);
 
 public:
-	/* Infrastructure only; selectors remain unwired until event support exists. */
+	/* Event service is gated by the experimental boot argument. */
 	IOReturn eventListenerAdd(IOExternalMethodArguments *args);
 	IOReturn eventListenerRemove(io_user_reference_t key);
 	SweetEventListener *eventListenerCopy(io_user_reference_t key);
@@ -826,8 +829,10 @@ public:
 
 OSDefineMetaClassAndStructors(IOSurfaceRootUserClient, IOUserClient);
 
+static void sweet_event_cancel_listener(SweetEventListener *);
 #include "SweetSurfaceEventListeners.inc"
 #include "SweetSharedEventPending.inc"
+#include "SweetSurfaceEventViews.inc"
 #include "SweetSurfaceEventCapability.inc"
 
 static uint64_t sweet_surf_logged;      /* selectors / traps already logged (< 64) */
@@ -1583,6 +1588,12 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 				    args->structureOutputSize);
 			}
 		}
+	}
+
+	if ((selector >= 36 && selector <= 41) || selector == 45) {
+		int experimental = 0;
+		PE_parse_boot_argn("x9_surf_events", &experimental, sizeof(experimental));
+		if (experimental == 1) return eventExternalMethod(selector, args);
 	}
 
 	switch (selector) {

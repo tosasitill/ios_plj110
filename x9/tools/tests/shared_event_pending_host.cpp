@@ -11,7 +11,7 @@ using UInt32 = uint32_t;
 using io_user_reference_t = uint64_t;
 using IOReturn = int;
 constexpr IOReturn kIOReturnSuccess=0, kIOReturnBadArgument=1, kIOReturnNoMemory=2,
- kIOReturnNoResources=3, kIOReturnNotOpen=4;
+ kIOReturnNoResources=3, kIOReturnNotOpen=4, kIOReturnAborted=5;
 constexpr uint64_t MACH_PORT_NULL=0;
 constexpr unsigned kOSAsyncRef64Count=8, kIOAsyncCalloutRefconIndex=2;
 using OSAsyncReference64 = io_user_reference_t[8];
@@ -57,7 +57,7 @@ constexpr unsigned NSEC_PER_MSEC=1000000; void clock_interval_to_deadline(unsign
 struct IOExternalMethodArguments { uint64_t asyncWakePort; io_user_reference_t *asyncReference; uint32_t asyncReferenceCount; };
 class SweetEventListener : public OSObject {
 public:
- OSAsyncReference64 ref{}; IOLock *sendLock=nullptr; bool ownsRight=false; io_user_reference_t key=0;
+ OSAsyncReference64 ref{}; IOLock *sendLock=nullptr; bool ownsRight=false, canceled=false; io_user_reference_t key=0;
  bool initReference(IOExternalMethodArguments *args); void free() override;
 };
 class IOSurfaceRootUserClient : public IOUserClient {
@@ -70,6 +70,11 @@ public:
  static IOReturn eventListenerDeliver(SweetEventListener *, io_user_reference_t, io_user_reference_t, uint64_t);
  void eventListenersClose();
 };
+static void sweet_event_cancel_listener(SweetEventListener *listener) {
+ IOLockLock(listener->sendLock);
+ listener->canceled=true;
+ IOLockUnlock(listener->sendLock);
+}
 #include "../../kernel/src/iokit/Kernel/arm/SweetSurfaceEventListeners.inc"
 
 class SweetSharedEventCounter : public OSObject {

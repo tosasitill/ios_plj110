@@ -127,17 +127,72 @@ SweetEventViewOwner::free()
 	OSObject::free();
 }
 
+/* The registry owns one queue reference, removed only by the right's
+ * destructor. Snapshot references allow cancel to run without this lock. */
+static SweetSharedEventPending *sweet_event_queues[kSweetEventCounterLimit];
+
+static bool
+sweet_event_queue_register(SweetSharedEventPending *queue)
+{
+	bool added = false;
+	IOLockLock(sweet_surface_lock);
+	for (auto &slot : sweet_event_queues) if (slot == NULL) {
+		queue->retain();
+		slot = queue;
+		added = true;
+		break;
+	}
+	IOLockUnlock(sweet_surface_lock);
+	return added;
+}
+
+static void
+sweet_event_queue_unregister(SweetSharedEventPending *queue)
+{
+	bool removed = false;
+	IOLockLock(sweet_surface_lock);
+	for (auto &slot : sweet_event_queues) if (slot == queue) {
+		slot = NULL;
+		removed = true;
+		break;
+	}
+	IOLockUnlock(sweet_surface_lock);
+	if (removed) queue->release();
+}
+
+static void
+sweet_event_cancel_listener(SweetEventListener *listener)
+{
+	IOLockLock(listener->sendLock);
+	listener->canceled = true;
+	IOLockUnlock(listener->sendLock);
+	SweetSharedEventPending *snapshot[kSweetEventCounterLimit];
+	unsigned n = 0;
+	IOLockLock(sweet_surface_lock);
+	for (auto *queue : sweet_event_queues) if (queue != NULL) {
+		queue->retain();
+		snapshot[n++] = queue;
+	}
+	IOLockUnlock(sweet_surface_lock);
+	for (unsigned i = 0; i < n; ++i) {
+		snapshot[i]->cancelListener(listener);
+		snapshot[i]->release();
+	}
+}
+
 /* Mach names identify this object, not the counter. Last-right cleanup
  * can detach its views even if the long-lived IOSurface connection stays open. */
 class SweetEventRight : public OSObject {
 	OSDeclareDefaultStructors(SweetEventRight);
 	SweetSharedEventCounter *counter = NULL;
+	SweetSharedEventPending *pending = NULL;
 	SweetEventViewOwner *owners[kSweetEventViewsPerObject] = {};
 	IOLock *lock = NULL;
 public:
 	static SweetEventRight *make();
 	IOReturn attach(SweetEventViewOwner *owner, task_t task, uint64_t *va);
 	SweetSharedEventCounter *event() const { return counter; }
+	SweetSharedEventPending *queue() const { return pending; }
 	void free() APPLE_KEXT_OVERRIDE;
 };
 OSDefineMetaClassAndStructors(SweetEventRight, OSObject);
@@ -148,7 +203,9 @@ SweetEventRight::make()
 	auto *right = OSTypeAlloc(SweetEventRight);
 	if (right == NULL) return NULL;
 	if (!right->init() || (right->lock = IOLockAlloc()) == NULL ||
-	    (right->counter = SweetSharedEventCounter::make()) == NULL) {
+	    (right->counter = SweetSharedEventCounter::make()) == NULL ||
+	    (right->pending = SweetSharedEventPending::make(right->counter)) == NULL ||
+	    !sweet_event_queue_register(right->pending)) {
 		right->release();
 		return NULL;
 	}
@@ -178,6 +235,11 @@ SweetEventRight::attach(SweetEventViewOwner *owner, task_t task, uint64_t *va)
 void
 SweetEventRight::free()
 {
+	if (pending != NULL) {
+		sweet_event_queue_unregister(pending);
+		pending->close();
+		OSSafeReleaseNULL(pending);
+	}
 	/* Last reference: no attach can still be executing. Never hold a right
 	 * lock while releasing an owner or touching the task map at teardown. */
 	for (auto &owner : owners) {

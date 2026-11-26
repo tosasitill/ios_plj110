@@ -73,3 +73,52 @@ IOSurfaceRootUserClient::eventMapsClose()
 	if (fEventViews != NULL) fEventViews->close();
 	IOLockUnlock(fLock);
 }
+
+IOReturn
+IOSurfaceRootUserClient::eventExternalMethod(uint32_t selector, IOExternalMethodArguments *args)
+{
+	if (current_task() != fTask) return kIOReturnNotPermitted;
+	const unsigned input = selector == 37 ? 2 : selector == 39 ? 5 : selector == 45 ? 3 :
+	    (selector == 38 || selector == 41) ? 1 : 0;
+	const unsigned output = selector == 36 ? 2 : selector == 38 ? 3 : 0;
+	if (args->scalarInputCount != input || args->scalarOutputCount != output ||
+	    (input && args->scalarInput == NULL) || (output && args->scalarOutput == NULL) ||
+	    args->structureInputSize || args->structureOutputSize ||
+	    args->structureInputDescriptor != NULL || args->structureOutputDescriptor != NULL ||
+	    ((selector == 40) != (args->asyncWakePort != MACH_PORT_NULL))) {
+		return kIOReturnBadArgument;
+	}
+	const uint64_t *in = args->scalarInput;
+	switch (selector) {
+	case 36: return eventCapabilityCreate(args->scalarOutput);
+	case 38: return eventCapabilityImport(in[0], args->scalarOutput);
+	case 40: return eventListenerAdd(args);
+	case 41: return eventListenerRemove(in[0]);
+	case 37:
+	case 39:
+	case 45: break;
+	default: return kIOReturnUnsupported;
+	}
+	SweetEventRight *right = sweet_event_right_copy(fTask, in[0]);
+	if (right == NULL) return kIOReturnBadArgument;
+	IOReturn result = kIOReturnSuccess;
+	if (selector == 37) {
+		right->queue()->advance(in[1]);
+	} else if (selector == 45) {
+		result = right->event()->waitFor(in[1], static_cast<uint32_t>(in[2]));
+	} else {
+		SweetEventListener *listener = eventListenerCopy(in[1]);
+		if (listener == NULL) result = kIOReturnBadArgument;
+		else {
+			/* Serialize removal with registration. The worker takes sendLock
+			 * only after releasing its queue lock. */
+			IOLockLock(listener->sendLock);
+			result = listener->canceled ? kIOReturnAborted :
+			    right->queue()->subscribe(listener, in[3], in[2], in[4]);
+			IOLockUnlock(listener->sendLock);
+			listener->release();
+		}
+	}
+	right->release();
+	return result;
+}

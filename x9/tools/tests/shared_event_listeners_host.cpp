@@ -11,7 +11,7 @@ using UInt32 = uint32_t;
 using io_user_reference_t = uint64_t;
 using IOReturn = int;
 constexpr IOReturn kIOReturnSuccess=0, kIOReturnBadArgument=1, kIOReturnNoMemory=2,
- kIOReturnNoResources=3, kIOReturnNotOpen=4;
+ kIOReturnNoResources=3, kIOReturnNotOpen=4, kIOReturnAborted=5;
 constexpr uint64_t MACH_PORT_NULL=0;
 constexpr unsigned kOSAsyncRef64Count=8, kIOAsyncCalloutRefconIndex=2;
 using OSAsyncReference64 = io_user_reference_t[8];
@@ -44,7 +44,7 @@ constexpr unsigned kIOUserNotifyOptionCanDrop=1;
 struct IOExternalMethodArguments { uint64_t asyncWakePort; io_user_reference_t *asyncReference; uint32_t asyncReferenceCount; };
 class SweetEventListener : public OSObject {
 public:
- OSAsyncReference64 ref{}; IOLock *sendLock=nullptr; bool ownsRight=false; io_user_reference_t key=0;
+ OSAsyncReference64 ref{}; IOLock *sendLock=nullptr; bool ownsRight=false, canceled=false; io_user_reference_t key=0;
  bool initReference(IOExternalMethodArguments *args); void free() override;
 };
 class IOSurfaceRootUserClient : public IOUserClient {
@@ -57,6 +57,11 @@ public:
  static IOReturn eventListenerDeliver(SweetEventListener *, io_user_reference_t, io_user_reference_t, uint64_t);
  void eventListenersClose();
 };
+static void sweet_event_cancel_listener(SweetEventListener *listener) {
+ IOLockLock(listener->sendLock);
+ listener->canceled=true;
+ IOLockUnlock(listener->sendLock);
+}
 #include "../../kernel/src/iokit/Kernel/arm/SweetSurfaceEventListeners.inc"
 int main() {
  IOSurfaceRootUserClient client;
@@ -65,12 +70,13 @@ int main() {
  assert(client.eventListenerAdd(&a)==0);
  assert(client.eventListenerAdd(&a)==kIOReturnBadArgument && releases==0);
  SweetEventListener *hold=client.eventListenerCopy(0x456); assert(hold);
- assert(client.eventListenerRemove(0x456)==0 && releases==0);
- assert(client.eventListenerRemove(0x456)==kIOReturnBadArgument);
- assert(!client.eventListenerCopy(0x456));
  assert(client.eventListenerDeliver(hold,0x100,0x200,0x123456789abcdef0ULL)==0);
  assert(sends==1 && sentport==0x1234 && sent[0]==0x100 && sent[1]==0x200 && sent[2]==0x123456789abcdef0ULL && sent[3]==0x12345678);
  assert(client.eventListenerDeliver(hold,0,0,0)==kIOReturnBadArgument && sends==1);
+ assert(client.eventListenerRemove(0x456)==0 && releases==0);
+ assert(client.eventListenerRemove(0x456)==kIOReturnBadArgument);
+ assert(!client.eventListenerCopy(0x456));
+ assert(client.eventListenerDeliver(hold,1,2,3)==kIOReturnAborted && sends==1);
  hold->release(); assert(releases==1);
  for(unsigned i=0;i<64;i++) { ref[2]=i; assert(client.eventListenerAdd(&a)==0); }
  ref[2]=64; assert(client.eventListenerAdd(&a)==kIOReturnNoResources && releases==1);
