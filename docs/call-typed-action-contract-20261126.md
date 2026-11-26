@@ -26,3 +26,14 @@
 ## 下一条有界研究
 
 沿已资格的 driver incoming-record `+1e0` 入口向上找实际 dispatch caller 与 queue 边，再沿同一对象追 Model `+118` 动作发生时 record 与独立 Client 的捕获。优先证明可否建立同动作关联；找不到 barrier 时记录缺失，不把同 queue 参数当作证明。复用 `x9/out/call-action-owner/` 的既有原件及 `x9/tools/call_context_evidence.py`；任何新采样须使用新输出目录并单独记录命令和结果。
+
+## 可复用的同 controller 切入点与缺失的原子边（2026-11-26 离线复核）
+
+这次仅复核主 checkout 已保存的原件切片，不是新采样或新 ABI 资格。以下是同一个 **manager map lookup 路径**上的可验证切入点，不是建议直接 hook：
+
+- `1f2e61a3c..6c` 的 Client getter block 以 manager `+68` 树及传入 PersonalityID 查 node，retain node `+38/+40` 的 controller pair；`1f2e61a74..84` 对此 controller 调 virtual `+60`，`1f2e68b38..58` 只从该 controller `+d8/+e0` 复制并 retain Client pair。证据：主 checkout `x9/out/call-context-producer/qualified-client/{manager-strong-client-getter-block,controller-strong-client-getter}.original.asm` 及 `controller-client-ref-vtable-slot.original-data.bin`。
+- 同一个 manager added 已存在分支 `1f2e520cc..108` 用同一个 `manager+68` map 和同一 lookup `1f2e66404`、同一 node `+38/+40` retain controller；`1f2e528d8..8fc` 调 controller virtual `+38` 取 Model，再调用 Model virtual `+30` 更新 record。`1f2e421c8..1e8` 复制并 retain controller `+a0/+a8` Model pair；`1f2e77d7c..9c` 复制并 retain Model `+28/+30` record pair。证据：`x9/out/call-context-producer/qualified/{manager-personality-added,controller-model-getter,model-personality-update-getters}.original.asm` 及该目录 `original-producer-proof.json` 的 vtable/export 资格。
+- **推断，不是现成 caller 合同**：若后续能在同一个已证 controller、同一同步范围内安全捕获上述 Client pair 和 Model→record pair，可构建候选的强所有权快照；原 getter block 实际只返回 Client，没有同时执行 Model/record getter。map key 一致也不证明不同时刻的 controller、record、Client 一致。manager 的 `isPresent` 发生于 dispatch 之前；tracker 的独立 child queue 和 record 更新路径使该检查不是此复合快照的 barrier。
+- 下一步应资格化 getter block 的实际 queue 临界范围和 added/enabled 更新与该 queue 的交错，并证明 CallInfo 本次 slot→PersonalityID 到该 block 的唯一强关联；同时验证具体 controller/model 动态类型及 virtual slots。只有证实一致的串行化和 rebind/晚回调退休规则后，才能设计 capture。若 queue 或对象类型不能资格化，应继续 fail closed，而不是由 clientId、controller counter、PBI 或 getter 成功合成 epoch。
+
+本次未运行 reader、重新采样私有原件或设备操作；未写 typed provider、调用原 ABI、构建或声称语音验收。
