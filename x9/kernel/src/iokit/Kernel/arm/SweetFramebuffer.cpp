@@ -38,6 +38,7 @@
 #include "SweetBoard.h"
 #include "X9Desktop.h"
 #include "X9DisplayGeometry.h"
+#include "X9DisplayCadence.h"
 static uint64_t x9_fb_present_seq;
 
 /*
@@ -1060,7 +1061,7 @@ AppleCLCD::start(IOService *provider)
 	if (sweet_board_x9()) {
 		/*
 		 * 2026-11-05: measure what LK actually left (never measured before) and,
-		 * with x9_panel_hz=120|90|60, switch the panel with the stock oplus
+		 * with x9_panel_hz=120|60, switch the panel with the stock oplus
 		 * timing-switch DCS. Without sweetfb_hz the vsync/LK-submit cadence then
 		 * follows the measured panel rate (120 if the panel measures >= ~110 Hz).
 		 * If one frame push no longer fits the new refresh period, the panel is
@@ -1068,14 +1069,18 @@ AppleCLCD::start(IOService *provider)
 		 */
 		unsigned xfer0 = 0, xfer1 = 0, before = x9_panel_probe_log("as LK left it", &xfer0), after = before;
 		int want = sweet_x9_arg("x9_panel_hz", 0);
-		if (want == 120 || want == 90 || want == 60) {
+		if (want != 0 && !x9_display_cadence_supported((uint32_t)want)) {
+			IOLog("X9 PANEL: unsupported x9_panel_hz=%d; no DCS mode change\n", want);
+			want = 0;
+		}
+		if (want == 120 || want == 60) {
 			int r = 0;
 			for (unsigned tries = 0; tries < 200 && (r = x9_lk_panel_set_rate((unsigned)want)) == 0; tries++) IOSleep(1);
 			IOLog("X9 PANEL: switch to %d Hz via oplus timing-switch DCS (FF 5A A5 00; 60/7D) r=%d\n", want, r);
 			IOSleep(50);
 			if (r == 1) after = x9_panel_probe_log("after switch", &xfer1);
 			if (r == 1 && after && xfer1 >= after && before) {
-				unsigned back = before < 9500 ? 120 : before < 13000 ? 90 : 60;
+				unsigned back = before < 9100 ? 120 : 60;
 				int rb = x9_lk_panel_set_rate(back);
 				IOLog("X9 PANEL: frame push %u us >= refresh %u us; reverted to %u Hz r=%d\n", xfer1, after, back, rb);
 				IOSleep(50);
@@ -1084,8 +1089,11 @@ AppleCLCD::start(IOService *provider)
 		}
 		if (!hz_explicit && after && after < 9100) hz = 120;
 		// This paces notifications and LK submissions, not panel PHY timings.
-		// Keep the default >=60; 120 must be requested explicitly by boot arg.
-		fTickHz = hz == 120 ? 120 : 60;
+		fTickHz = x9_display_cadence_select(hz, hz_explicit, after);
+		if (fTickHz == 0) {
+			IOLog("X9 DISPLAY: unsupported sweetfb_hz=%u; using 60 Hz software cadence\n", hz);
+			fTickHz = 60;
+		}
 		fFlushTicks = 1;
 		fCadenceTicks=fCadenceCopies=fCadenceSubmits=fCadenceMissed=0;
 		fCadenceGpuBusy=fCadenceDisplayBusy=fCadenceCopyNs=fCadenceMaxCopyNs=fCadenceMaxLateNs=0;
@@ -1093,7 +1101,7 @@ AppleCLCD::start(IOService *provider)
 		fPendT = fReadyT = fReadySeq = 0;
 		fMetSwaps = fMetDropped = fMetPresents = fMetLatSum = fMetLatMax = fMetLastShownSeq = 0;
 		for (unsigned i = 0; i < 6; i++) fMetLatHist[i] = 0;
-		nanoseconds_to_absolutetime((1000000000ULL + fTickHz/2) / fTickHz, &fTickPeriod);
+		nanoseconds_to_absolutetime(x9_display_cadence_period_ns(fTickHz), &fTickPeriod);
 		fCadenceStart = mach_absolute_time();
 		fTickDeadline = fCadenceStart + fTickPeriod;
 		fVsync->wakeAtTime(fTickDeadline);
