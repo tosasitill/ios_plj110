@@ -280,7 +280,7 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 
 - governor 使用 busiest-core 累计 CPU time，不是 Linux PELT；40–50% load 对应 500 MHz 请求。peak≥5% 时 tick 保持 50 ms；1000 ms 还要求 dark、无 GPU work、peak<5% 且 retention idle。
 - dark display 不主动唤醒 GPU，使用非阻塞 try-lock；合法 render owner 会唤醒 MCU retention。retention sleep 保留 AS0/L2/images/GPUEB，不是 rail-off。
-- WDS 每 3 s CSCON/physical-channel 对是 `x9w_up_diag()` 诊断，不是蜂窝保活。
+- WDS 每 3 s CSCON/physical-channel 对是 `x9w_up_diag()` 诊断，不是蜂窝保活；2026-11-26 起默认关闭，仅 `x9_cell_diag=1` 启用。
 - `SIOCGIFMEDIA` 到 PDP default case，打印后返回 `EOPNOTSUPP`；caller 未证，不能直接返回 ACTIVE 改变拨号行为。
 - `x9_mdlog=0` 只去掉独立高吞吐 capture/save 线程；stage-1 DHL polling、打印与 ring 推进仍在。
 - `~/428.txt`：灭屏后 retention sleep，约 1 Hz dark 事件；PDP 每约 2 s 八个失败；WDS 每 3 s；little 40–50%/500 MHz；大量 MIPC/MDLOG。57°C 出现在 `dark=0`，**没有复证 dark 57°C**。
@@ -305,6 +305,7 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 - 点击亮屏需先找 S3910 gesture-mode 命令、report code 与 Android KEY_WAKEUP/HAL 映射，再证明 SpringBoard 接受标准 Consumer Power 或合格 wake 事件。
 - 抬腕唤醒先查完整 SCP LIST 是否有 pickup/wake ID，再定义 screen-off-only、one-shot rearm/cooldown/stationary veto；不能只增加加速度事件。
 - 当前没有 iOS 点击亮屏或抬腕唤醒工作链。
+- 2026-11-26 host boundary：`python3 -I x9/motion/test_wake_boundary.py` exit0（5 tests），直接编译真实 `sweet_x9_motion.c`，确认 ACK 前 DATA 拒绝、 stale 过期、disconnect 失效、晚 ACK 不能清 fault；source 检查确认 orientation bridge 无 wake/shake/touch/S3910 合成。功能仍未实现。
 
 ### 6.8 相机
 
@@ -334,6 +335,19 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 - 下一步先另出显式 `x9_usb=1` 单变量候选，过 `--session`/`--probe`，再谈 Mac 安装；不得把代码存在称为已能安装。
 
 参考：[`x9/appsync/README.md`](x9/appsync/README.md)、[`x9/usb/README.md`](x9/usb/README.md)。
+
+### 6.11 2026-11-26 八项离线修复合并
+
+main HEAD `91be5aff`。以下均为 **host 验证 / 源码边界**，不是设备 boot、runtime_verified 或 feature acceptance；未刷机、未写 root/mailbox、未 push。
+
+- SMS：`fix/sms-storage` 已合并。修正 SMS-DELIVER OA semi-octet 边界后的 DCS/class 解码；pinned Xcode 15 下 `test_sms_pdu_class.py` 2/2 OK，`X9Baseband.cpp.o` 单对象编译 True（2,229,712 B）。
+- GPU：`fix/gpu-pacing` 已合并。面板 DCS 与软件节拍只支持 60/120； unsupported explicit rate 拒绝/回退 60。`test_cadence.py` 2/2 OK，`SweetFramebuffer.o` 单对象编译 True（595,304 B）。
+- 暗屏调度：`fix/dark-sleep` 已合并。RRC 诊断默认关闭，`x9_cell_diag=1` opt-in；`test_cell_diag_policy.py` 3/3 OK，`X9Baseband.cpp.o` 单对象编译 True（2,229,968 B）。无设备温度/功耗 A/B。
+- 蓝牙音频：`fix/bt-audio-pcm` 已合并。仅固化 fail-closed publication/IO 边界；`test_bluetooth_boundary.py` 2/2 OK。真实 PCM consumer/XPC/supplier 仍未建立，audio_verified 不变。
+- 距离传感器：`fix/sensor-bridge` 已合并。`test_proximity_bridge.py` 8/8 OK，直接编译真实 `sweet_x9_proximity.c`；PS 极性 `oneshot==0 -> near` 仍是未验证假设，ALS 物理链未新增设备证据。
+- 通话：`fix/call-owner` 已合并。`test_call_owner_boundary.py` 8/8 OK，直接编译真实 `x9_call_state.h`；typed `ims::Call` owner/SIP/双向 PCM 仍缺。
+- 唤醒：`fix/wake-gestures` 已合并。见 §6.7 host boundary；点击/抬腕功能仍缺 S3910/SCP one-shot 合同。
+- 蓝牙 Settings 诊断：`fix/bt-discovery`  commit `e67688db` 已修复 dyld slide 地址并通过 `x9/bluetooth/build.py` 与 `test_settings_diag.py` 4/4，但 **未合并 main**：其基线是另一窗口 `feat/bt-settings-root` `ab9828ea`，main 尚无 `X9SettingsBTDiag.c`。需先确认该基线归属/合并，再 rebase 或合并本修复；不得自行覆盖另一窗口工作。
 
 ## 7. 推荐下一步顺序
 
