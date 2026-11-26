@@ -389,7 +389,13 @@ MD usr-slot/secondary引用未资格化，不能说main已有正lease。新代�
 **暗屏诊断负载（2026-11-26，源码/单对象编译）**：RRC CSCON 4409/physical-channel 4419
 注册及持有承载期间的 3 秒 `1151/04c7` 查询只用于诊断，不参与 WDS 准入；现默认关闭，
 仅 `x9_cell_diag=1` 启用。正常 ACT 后查询、EIF 与统计路径不变。尚无设备温度/功耗对比，
-不能据此声称降温幅度。
+不能据此声称降温幅度。WDS `site … why heartbeat` 是 `x9w_probe()` 的状态日志限频，
+不是 RRC 查询；历史 430 中未见 RRC 诊断命令/注册日志。
+
+X9 的 native DPMAIF PDP 对 `SIOCGIFMEDIA64`（`0xc02c6938`）仍返回
+`EOPNOTSUPP`，不写输出、不宣称链路 ACTIVE。该查询的日志跨 PDP unit 聚合，
+只打印前四次和之后的 2 的幂次；其他 ioctl 处理不变。该修复减少诊断打印，
+不减少请求本身；未知请求进程，未做暗屏功耗 A/B。
 
 ### 5. iOS 网络最终验证
 

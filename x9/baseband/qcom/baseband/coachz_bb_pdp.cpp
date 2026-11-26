@@ -119,6 +119,18 @@ static errno_t bb_pdp_ioctl(ifnet_t ifp, unsigned long cmd, void *data)
 #endif
     }
     case SIOCSIFFLAGS: case SIOCSIFADDR: case SIOCSIFDSTADDR: return 0;
+#if COACHZ_NATIVE_DPMAIF
+    case SIOCGIFMEDIA64: {
+      // Repeated 64-bit media queries span all PDP interfaces. Keep one
+      // aggregate counter; do not change the result or touch caller output.
+      static uint64_t count;
+      const uint64_t seen = __atomic_add_fetch(&count, uint64_t(1), __ATOMIC_RELAXED);
+      if (seen <= 4 || !(seen & (seen - 1)))
+        printf("COACHZ pdp: ioctl 0x%lx unit %u unsupported (aggregate seen %llu)\n",
+          cmd, ifnet_unit(ifp), seen);
+      return EOPNOTSUPP;
+    }
+#endif
     default:
       printf("COACHZ pdp: ioctl 0x%lx unit %u unsupported\n", cmd, ifnet_unit(ifp));
       return EOPNOTSUPP;
