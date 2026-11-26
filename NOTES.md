@@ -177,6 +177,7 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 | `x9-bt-settings-diag-20261125-r2` | `.worktrees/bt-default-on`，分支 `feat/bt-settings-root`，HEAD `ab9828ea` | 三项 focused host 检查、完整 boot/rollback/kernel/manifest 构建；`runtime_verified=false` | 未刷入、未安装 root、未观察 Preferences setup |
 | `x9-bootloader-reboot-psci-20261124` | `.worktrees/x9-bootloader-reboot`，分支 `feat/x9-bootloader-reboot` | log 421：PSCI 后实际进入 fastboot，helper PASS | 后续重启场景不据此自动重复 |
 | camera diag17 | 历史提交 `e125dbf0` | 仅 host 构建；首 boot 未到 retire | 未完成 retire/出帧验收；不声称仍在 boot_b |
+| `x9-eight-merge-20261126-r1` | main `2134b216`，主 checkout `x9/out/x9-eight-merge-20261126-r1/`；boot 15,761,408 B，kernel 33,066,848 B，104/104 overlay，allowlist 280 未变（无 mailbox） | `~/430.txt` device boot（内核时间 ~242 s）：shim、SCP stage1-9、GPU pan165 ownership、BT firmware-session+bluetoothd capabilities、CELL AT round3/4+CGCONTRDP IPv6、SMS 双卡 host-ready CNF 均到达；收取后已停回 fastboot | AegirPoster SharedEvent abort 循环（§6.13）；ALS 仅开机 1 次 dispatch、PROX 全程无 ENABLE/DATA、BT 11.4 s 后静默无 setup 注入；无 feature acceptance |
 
 本轮文档整理基于 `994d5fe0`，README/规则提交为 `d6f92195`；未构建、未刷机、未重启、未写 root/mailbox，也没有新 CI run。
 
@@ -290,6 +291,7 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 **推断 / 下一步**
 
 - 高置信：PDP/WDS/MDLOG 增加活动；中置信：render-owner 而非 dark timer 造成 GPU churn；低置信：MDLOG 本身造成测温差异。没有匹配 A/B。
+- 2026-11-26 log 430 已定位一个具体暗屏 GPU churn 源：AegirPoster SharedEvent abort 循环（§6.13），灭屏后每 ~10 s 重生渲染并触发 GPU PM awake/retention。先止崩再谈温度 A/B。
 - 下一步离线把 428 的 `X9 SAMPLE` 线程记录与 201.107 s PDP burst、201–203 s GPU transitions 对齐。未来 instrumentation 只用有界内核计数/返回地址和既有采样，不 live sysfs。
 
 ### 6.7 点击亮屏 / 抬腕唤醒
@@ -309,6 +311,8 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 - 抬腕唤醒先查完整 SCP LIST 是否有 pickup/wake ID（Android type 65611 / MTK type 75 已见），再定义 screen-off-only、one-shot rearm/cooldown/stationary veto；不能只增加加速度事件。
 - 当前没有 iOS 点击亮屏或抬腕唤醒工作链。
 - 2026-11-26 host boundary：`python3 -I x9/motion/test_wake_boundary.py` exit0（5 tests），直接编译真实 `sweet_x9_motion.c`，确认 ACK 前 DATA 拒绝、 stale 过期、disconnect 失效、晚 ACK 不能清 fault；source 检查确认 orientation bridge 无 wake/shake/touch/S3910 合成。功能仍未实现。
+- 2026-11-26 唤醒研究子代理（离线静态）结论：① S3910 两套栈（legacy `touchpanel/synaptics_hbp` 与新 `tp/hbp/hbp`）灭屏均经 DC `0xFE`/`0x09` 进 gesture mode、`enable_irq_wake`、suspended 上报 **KEY_F4**；PLJ110 实际加载哪套需 DT `device,chip_name`/cmdline 确认（未知）。② Android 普通 gesture 仅 KEY_F4，UI 亮屏推断在 userspace（touchDaemon/OPLUS gesture service→PowerManager），`tp_gesture_enable_notifier` 无在树调用者；APK 不可读。③ SCP wire 用 `SENSOR_TYPE_*`：significant=17、pickup=75、OPLUS stationary=83（`ID_OFFSET=1` 只作用于 Linux ID，不作用于 wire）；428 LIST 已见 type17/75/83/116；ENABLE=1 带 16B `{delay,latency}`，DATA 36B 共享 FIFO，pickup payload `{u32 value,u16 report_count}`；one-shot rearm/cooldown 在签名 SCP 固件内，AP 树只见重启 restore re-enable（未知）。④ iOS 接受侧：现有 wake 路径仅 PMIC keys→`sweet_hid_key(0)`→Consumer Power；**仓库无 SpringBoard/backboardd 接受 tap-to-wake/raise-to-wake 的 Apple RE 文档**，未知，不得猜。
+- 推荐最小修复序（后续子代理）：先 **raise-to-wake**（证据最强）——`x9_als_scp.inc` LIST install+drain 增 type75（可选 17），`sweet_x9_motion.c` 旁加 one-shot 准入模块，合同=匹配 ENABLE ACK 后才 DATA、screen-off-only gate、显式 rearm/cooldown + stationary(83) veto、stale/disconnect fail-closed，扩 `test_wake_boundary.py`；**不翻 PS 极性**。tap-to-wake 在 iOS 接受被静态证明前只做诊断、不发 wake。先闭合未知：活动 TP 栈、SCP one-shot rearm、dsc cache 的 backboardd/SpringBoard wake 接受。
 
 ### 6.8 相机
 
@@ -361,13 +365,36 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 缺口：`dumpsys sms` 返回 “Can't find service: sms”（sms.txt 空）；`/proc/bus/input/devices` Permission denied，但 `dumpsys input` 给出 `touchpanel` event2（KEYBOARD|TOUCH|TOUCH_MT，Generic.kl）及 pmic/gpio/fp/headset 设备。后续短信证据需另找 `isms`/telephony 有界计数或既有 Android 日志，不读消息正文/号码；不升级到 sysfs。
 - 标签：全部为 **Android 侧观察 / 静态源码定位**，不是 iOS device boot、runtime_verified 或 feature acceptance。S3910 源码定位修正了 §6.7 旧结论；PS 极性、iOS wake 接受、stock BT PCM consumer 仍未闭合。
 
+### 6.13 2026-11-26 log 430 设备启动观察与 AegirPoster 崩溃根因
+
+用户授权“重启 fb 刷入最新测试镜像启动日志收取新一轮日志，收取后停到 fb”后，刷入 `x9-eight-merge-20261126-r1` 到 `boot_b`（OKAY），启动并收取 `~/430.txt`（2.83 MB，内核时间 ~242 s），随后 `ios-reboot-bootloader-usb` PASS 停回 fastboot。未写 root/mailbox、未碰其它分区。
+
+**设备 boot 观察（~/430.txt）**
+
+- 启动链到达：shim ready、SCP ALS stage1-9 + READY channel22、GPU pan165 INIT→POWER_ON→ID→ownership acquired、BT complete firmware session chip=6653 + bluetoothd H4/vendor bridge + capabilities（11.435 s ext scan=1 adv=1 sets=16）、CELL AT round3/4 OK + CGCONTRDP 取得 IPv6、SMS SIM1/SIM2 real host-ready CNF + GSM handlers installed。55.388 s `SWEET FB: display off`（自动灭屏）。
+- **ALS**：全程仅 1 次 `dispatch seq=1 lux=824`（2.782 s），之后只有每 10 s `control type=0 cmd=10` 心跳；与 428 同为开机单样本，iOS 未触发连续 ALS。
+- **PROX**：LIST `tcs3720 ps` 命中，但 iOS 反复 `DetectionMode=0 interval=200000 requested -> 0`，全程 0 次 ENABLE ACK / DATA / near。428 在 157 s 有 ENABLE+near=1（疑似当时亮屏/交互），430 灭屏后无。PS 极性仍未闭合。
+- **BT**：11.435 s capabilities 后无任何 X9 BT 行；无 setup state2 / Preferences 注入观察。Settings 灰仍属未验证（设备已停 fb，无法交互）。
+- **CELL/SMS**：WDS 仍 `MD-session unobserved retire 0`（诊断默认关闭后仍见 site 轮询，需核对 `x9_cell_diag` 实际 boot-arg）；SMS stored list queued QMI txn22，无 0x210000 映射证据。
+
+**AegirPoster 崩溃循环（GPU / 灭屏热的已定位运行时根因）**
+
+- 观察：`CRASH AegirPoster` 每 ~10 s 双崩溃（launchd 重生→~0.5 s 再崩→节流 10 s），430 共 44 次、428 共 66 次，**灭屏（55 s）后持续到 242 s**。sig 6（SIGABRT），pc/lr/far 相对 slide 恒定。MapsSpotlightInd 27.4 s 同路径崩溃 1 次；driverkitd 7.9 s sig 9（重生，非异常）。
+- host 符号化（slide 0x2d8c0000，`/tmp/dsc-index.json` 重建自 `.local/apple/dsc-20H392/`，atos）：`__pthread_kill ← pthread_kill ← abort ← _objc_terminate ← _dispatch_client_callout ← _dispatch_block_invoke_direct ← __FBSSERIALQUEUE_IS_CALLING_OUT_TO_A_BLOCK__ ← -[FBSSerialQueue _targetQueue_performNextIfPossible]`。即 **FrontBoardServices 串行队列 block 内未捕获 ObjC 异常 → abort**。崩溃前最后动作：`X9 GENERAL METAL: factory caller=AegirPoster` + `SWEET SURF: AegirPoster sel 40`。
+- host 反汇编 IOSurface.framework（实测 host，非设备）：sel 40 = `_IOSurfaceSharedEventAddEventListener`/`AddListener`，sel 41 = `RemoveEventListener`/`RemoveListener`。完整 SharedEvent 族：36=create、37=setSignaledValue、38=initWithMachPort、39=NotifyListener、40=AddListener、41=RemoveListener、45=waitUntilSignaledValue。
+- 推断（高置信）：`SweetSurface.cpp` externalMethod 对这些 selector 走 default“接受并清零 scalar/struct 输出、返回 kIOReturnSuccess”，Metal 共享事件（MTLSharedEvent/fence 通知）拿到无效 listener 结果 → Poster 渲染回调抛未捕获异常 → abort 循环。灭屏后 Poster 仍重生渲染 → GPU PM 每 ~0.3–1 s awake/retention 循环（201 s 段可见）→ 暗屏热负载。这是 428/430 共有的**先前存在缺口**，不是八项修复引入的回归。
+- 边界：尚未证明实现 SharedEvent 族即可消除崩溃（需 host 合同 + 后续设备复证）；不得把 host 符号化/反汇编称为设备 runtime_verified。
+
+**下一步**：派子代理 (a) 按 IOSurface.framework ABI 在 SweetSurface 实现/安全处理 SharedEvent 族（先止崩，再谈 fence 语义），(b) 按 §6.7 唤醒研究实现 raise-to-wake SCP pickup type75 one-shot 准入。均 host 验证，设备复证需另行授权。
+
 ## 7. 推荐下一步顺序
 
 1. 保持文档与源码标签一致；任何新候选使用唯一名并记录 source HEAD。
-2. 蓝牙：完成 Settings/scan 静态合同；r2 诊断候选只有重新授权后才上机。
-3. 传感器：闭合 PS 极性与时间域；短信：独立确认 `0x210000`。
-4. 通话：typed-provider identity/action 契约；不要先补音频 hook。
-5. GPU/调度：完成离线 evidence matrix 与 428 时间线关联，再申请单变量设备 A/B。
-6. 存储/USB：只读 IOMedia A0 与 AppSync session probe 分开推进。
-7. 相机：先证明主摄多帧非黑与稳定 retire，再接第二路/完整 iOS 预览。
+2. **GPU/灭屏热（最高运行时优先）**：按 §6.13 在 SweetSurface 实现/安全处理 IOSurfaceSharedEvent 族（sel 36-41/45），先止 AegirPoster abort 循环；host 合同验证后申请设备复证。
+3. 蓝牙：完成 Settings/scan 静态合同；r2 诊断候选只有重新授权后才上机。
+4. 传感器：闭合 PS 极性与时间域；短信：独立确认 `0x210000`。
+5. 通话：typed-provider identity/action 契约；不要先补音频 hook。
+6. 唤醒：按 §6.7 先 raise-to-wake（SCP pickup type75 one-shot 准入），tap-to-wake 待 iOS 接受静态证明。
+7. 存储/USB：只读 IOMedia A0 与 AppSync session probe 分开推进。
+8. 相机：先证明主摄多帧非黑与稳定 retire，再接第二路/完整 iOS 预览。
 8. 点击/抬腕唤醒：S3910 源码已定位，先离线追 gesture report → `KEY_F4`/userspace notifier 与 SCP pickup/significant-motion LIST/one-shot 合同，再谈 iOS doze/SpringBoard 接受；不伪造 iOS 事件或样本。
