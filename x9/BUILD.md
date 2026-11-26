@@ -23,7 +23,7 @@ Inputs that live outside git: `EXTERNAL-DEPENDENCIES.md`.
 
 Plugin binaries are **not** in the boot partition. The kernel carries only an
 exact `path`/`size`/`SHA-256` allowlist (`kernel/generated/x9_render_external_manifest.h`,
-currently plugin revision **280**), checks the installed files at every boot,
+currently plugin revision **284**), checks the installed files at every boot,
 and disables Metal discovery when a file is missing or differs. Rebuilding the
 plugins means regenerating that header and staging the matching package.
 

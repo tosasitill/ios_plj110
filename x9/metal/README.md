@@ -9,8 +9,8 @@ sessions, CSG slots, parked render groups, async submission, live map/unmap and
 IOSurface-lock-driven CPU cache maintenance.
 
 Plugins ship through the [`../mailbox/README.md`](../mailbox/README.md); the current
-generated allowlist is revision **280**. That does not prove revision 280 is installed
-or that the current main branch has been retested. Historical 17–22 fps, fixed
+generated allowlist is revision **284**. Installation and rendering are verified
+on the device after boot. Historical 17–22 fps, fixed
 1716 MHz and 6–15 ms per-job figures belong to older captures and must not be
 presented as current performance.
 

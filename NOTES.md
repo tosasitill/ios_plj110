@@ -126,7 +126,7 @@ python3 -I x9/build/build.py --dry-run
 
 ### 3.4 插件 / mailbox
 
-- 当前 allowlist 为 **revision 280**，见 `x9/kernel/generated/x9_render_external_manifest.h`。
+- 当前 allowlist 为 **revision 284**，见 `x9/kernel/generated/x9_render_external_manifest.h`。
 - 插件不在 boot.img。内核校验精确 path/size/SHA-256；revision 或任一哈希变化都会改写 allowlist。
 - 新插件包需要匹配 mailbox 与 root 安装。纯内核改动且 allowlist 不变时无需 staging。
 - 只有获得明确授权后才运行：
@@ -271,7 +271,7 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 
 **观察**
 
-- 当前 allowlist 是 280；旧 rev249-lo/230/231 的性能数字不能外推到 280。
+- 旧 rev249-lo/230/231 的性能数字只适用于各自采集的配置。
 - 面板 vendor DT 有 60/90/120 timing，DCS 切换代码存在；但 DSI PLL/PHY 重配与 IOFB timing/mode 发布未建立。stock 120 使用不同 PLL。
 - 软件 cadence 只有 `hz==120 ? 120 : 60`，选择 90 不会排程 90 Hz；D22 CADisplayLink/用户态上限未知。
 - present 使用全局 enqueue watermark，不是 frame-specific fence；完成只表示 CPU 可见，不是校准 GPU 执行时间。
@@ -702,3 +702,11 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 源码 `36a2bdf1`，基于本地 `main` `044a0ae0`。对照 UniXNU fork `87a869f7fc4b73265d4812c40d8cccb6a83c7b17`，按现有 `963f0e64` 补丁栈移植 `d4a111c35`、`32fe7f9fd`、`31b0f28ee`、`b707496d7`。对照范围相差 7,692 个提交，保留 X9 已接入的提交、IOSurface 与 PanVK 路径。 `0101–0103` 分别减少 Compute 编码和空 shadow 开销、共享同尺寸只读零缓冲区、原地复用 Render heap 描述缓存。 `0104` 仅修补旧测试夹具以匹配 X9 类型和 Darwin QoS ABI。 `build.py plugins/all --runtime-source` 可显式选用新准备的源码目录，旧私有源树未修改。
 - **主机验证**：从干净 `963f0e64` 用 `/usr/bin/patch --batch --fuzz=0 --forward -p1` 应用原 30 补丁，再重放四个新增补丁，结果逐文件相等，exit 0。Rust 1.98.0 显式 `RUSTC/RUSTDOC` 和 Xcode 15 SDK 下，`cargo check --offline --manifest-path <scratch>/bridge-check/Cargo.toml --target aarch64-apple-ios --target-dir <scratch>/ios-check` exit 0。 `cargo test --offline --locked --manifest-path <scratch>/x9-runtime/Cargo.toml -p metal2vulkan-runtime --lib --target-dir <scratch>/cargo-test shadow::` 最终 34/34 exit 0，初轮暴露的旧测试编译错误由 0104 修正。 `build.py plugins --revision 284 --panvk skip --runtime-source <scratch>/replay --name x9-metal2vk-upstream-dry-run --dry-run` 验证参数传递 exit 0，284 只用于 dry run。日志留在 `x9/out/metal2vk-upstream-validation/`。
 - 未生产签名插件、mailbox 或 boot 镜像，无 CI 或设备操作。Android 保持上一轮确认状态，移动端 Vulkan 绘制、上游 GPU 并发测试及性能实测仍待验证。
+
+### 6.72 Revision 284 mailbox 与三项无线跟进
+
+- **构建与 stage**：源码基线 `2ee1b0d9`，在新 worktree 从本地固定 `963f0e64` 另建 pristine runtime，应用 34 个补丁。 `PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/build/build.py all --revision 284 --panvk incremental --runtime-source <scratch>/runtime --boot-config x9/out/metal2vk-mailbox284-inputs/boot/boot-install.json --name x9-metal2vk-mailbox284-20261126` exit 0。Metal 34,890,576 B，PanVK 18,424,064 B，首个 boot 15,417,344 B，kernel 32,128,128 B。allowlist 提交 `cd4afeb1`，仅列标准 Metal/PanVK 包的 10 个文件，未写 HFS 根盘。验证唯一在线 PLJ110、`_b`、`sys.boot_completed=1` 后，经用户授权运行 `X9_SERIAL="$device_id" python3 x9/mailbox/update.py x9/out/x9-metal2vk-mailbox284-20261126`，root 和 mailbox 预检通过，exit 0，marker 最后提交，53,411,840 B 每段读回确认。私有日志 `stage-local.log` 同目录。手机保持 Android，无刷写 boot、重启、切槽或 CI，iOS 安装和 GPU 性能未验。
+- **通话**：固定 20H392 `libCommCenterMCommandDrivers.dylib` 中 `QMIAudioRoutingCommandDriver::setTtyEnabled` 的 block 在 `0x1f1abaaf8` 构造 `VOICE 0x40`，`0x1f1abab04..08` 选择 TTY mode tag `0x13`； `tlv::writeV` 在 `0x1f1948418` 写一字节。444 的两次 11 B 请求吻合该形状，旧日志未打印 tag 13 的值。仍需 MTK TTY 设置与音频链证据，未增加成功响应，TTY 请求也不能解释未接通。
+- **短信**：默认关闭的 CPMS/CMGR 诊断在未发起下个 token 时也曾阻塞同 SIM 的生产列表，而它自身又等列表清空，形成互等。 `701b8532` 让两阶段诊断均等待生产存储，诊断仅在已有 token 时拦同 SIM 列表，跨 SIM 互不阻塞。保留 CMGR 读标志、native CNF 和错误语义。显式 Xcode 15 SDK 下逐项 `python3 -I x9/baseband/test_sms_*.py` 合计 11/11，exit 0；`0x210000` 根因仍待实机 CPMS/CMGR 样本。
+- **蓝牙**：用 LLVM 22 `llvm-objdump -d` 和 20H392 Mach-O segment 映射核对 `CBXpcConnection initWithDelegate:queue:options:sessionType:`。原件按 session type 选择 `com.apple.server.bluetooth.le.pipe.xpc`（2）、`com.apple.server.bluetooth.classic.xpc`（3）或 `com.apple.server.bluetooth.le.att.xpc`（默认）。三者均在 launchd cache，旧探针过滤名单遗漏；`b43910cc` 加入精确名字，仍只采现有连接。 `test_settings_diag.py` 5/5、iOS arm64 编译、签名及校验 exit 0。新 121,392 B dylib 使用 444 已安装的 120,800 B predecessor；连接失效原因仍待采证。
+- **下一候选**：`cd4afeb1` 使用与已 stage 的包相同的 284 allowlist。生成配置时增加 `x9_sms_diag=1`，省略 `x9_wifi_power=6`、`x9pl=1`两个与板级默认一致的显式值。首次在 scoped 配置末尾增加 SMS 参数超上限，改在生成前加以便 compaction；最终 606 B。 `PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/build/build.py all --boot-config x9/out/radio-rev284-diag-inputs/boot-with-sms/boot-install.json --name x9-radio-284-diag-20261126` exit 0，boot 15,417,344 B，kernel 32,128,128 B。未刷入；本候选复用已 stage 的 284 包。

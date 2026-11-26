@@ -45,8 +45,7 @@ marker, writes only mapped slices with old-content checks and raw readback, then
 publishes the marker. It never scans the iOS root volume or writes a boot
 partition. The owner then boots the candidate's `boot.img` by hand.
 
-The repository's current generated allowlist names plugin revision **280**
-(`X9GeneralMetal280`, `X9PanVK280`). This is a source/build fact, not proof that
-revision 280 is currently installed on the phone. Confirm the candidate's
-`mailbox.json` and the live installed files before staging or booting; historical
-revisions 275/276 and their output directories are not the current contract.
+The repository's current generated allowlist names plugin revision **284**
+(`X9GeneralMetal284`, `X9PanVK284`). The latest staging status is in
+[`NOTES.md`](../../NOTES.md). Confirm the candidate's `mailbox.json` and
+check the installed files when verifying the iOS boot.
