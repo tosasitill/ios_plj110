@@ -21,7 +21,7 @@ class StorageDeadline(unittest.TestCase):
 #define bzero(p,n) std::memset(p,0,n)
 #define X9Q_NOT_READY 7
 #define X9M_SEND 3
-struct Job { unsigned op, sim; bool answered, hold, follow; uint64_t deadline; unsigned char req[16], stored_pdu[16]; };
+struct Job { unsigned op, sim; bool answered, hold, follow; uint64_t deadline; unsigned char req[16], stored_pdu[16]; uint64_t token=0; bool receipt_pending=false; };
 static uint64_t clock_ms; static int error_count, done_count; static bool answered_at_done;
 static bool x9m_storage(unsigned op) { return op==1; }
 static uint64_t x9q_ms() { return clock_ms; }
