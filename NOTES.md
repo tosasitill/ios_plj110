@@ -538,3 +538,8 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 
 - HEAD `7f7f7498`，按用户确认执行 `python3 -u x9/tools/ios-reboot-bootloader-usb`：USB 控制请求完成，helper 观察到 fastboot，exit 0；随后 `fastboot getvar is-userspace` 为 `no`、`fastboot getvar current-slot` 为 `b`，均 exit 0。
 - 旧 logger 以 SIGINT 停止，`~/432.txt` 保留 2,280,528 B。执行 `python3 x9/tools/usb-live/usb_log.py --output "$HOME/433.txt" --quiet`（常驻会话 99876），等待 USB 1209:0001。没有刷写、切槽、启动 iOS、root/mailbox、新构建、CI 或 push；下一步获确认后不换镜像启动 r6，比较新日志首个 S3910 TCM header。
+
+### 6.35 2026-11-26 同一 r6 重启复测触摸
+
+- HEAD `f63f99ec`；经用户确认，唯一 fastboot 设备经 `fastboot -s "$id" getvar is-userspace` / `getvar current-slot` 确认为 bootloader、b 槽，`fastboot -s "$id" reboot` exit 0 / Rebooting OKAY。未重刷、未切槽、未新建构建、CI、root/mailbox 或 push。
+- `~/433.txt`：2.166 s 首个 TCM header 为 `a5 10 1c 00`，2.173 s 识别 `S3910VA0A0-15.20`，2.177 s application status 0000，2.216 s LBP reporting enabled；SpringBoard 8.341 s，SweetHIDTouch 8.561 s 打开。694,900 B 快照中 21.405 s 仍为 reports=0。与 432 对照证明同一镜像重启后识别阶段未复现失败，不等于根因修复、实际触点或解锁验收。原 99876 logger 继续采集，等用户滑动实测。
