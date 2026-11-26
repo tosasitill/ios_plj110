@@ -591,10 +591,17 @@ static void outbound_end_reason(){
  }
  for(unsigned which=0;which<5;which++){
   begin();unsigned n=reason_frame(p,133);assert(x9cw_progress(p,n,&c));
-  if(which==0)c.id=8;else if(which==1)c.direction=1;else if(which==2)c.mode=0;
+  if(which==0)c.id=8;else if(which==1)c.direction=1;else if(which==2)c.mode=22;
   else if(which==3)c.mask=1;else s.revision=UINT64_MAX;
   int result=x9cw_outbound_apply(&s,&c);
   assert(result==(which==3?0:-1)&&!s.end_reason.known&&!s.end_reason.apple);
+ }
+ {
+  begin();
+  unsigned n=reason_frame(p,129,0,0,true,7,0);assert(x9cw_progress(p,n,&c));
+  assert(x9cw_outbound_apply(&s,&c)==0&&!s.blocked&&!s.ended&&s.ios_state==1);
+  n=reason_frame(p,133,0,2174,true,7,0);assert(x9cw_progress(p,n,&c));
+  assert(x9cw_outbound_apply(&s,&c)==1&&!s.blocked&&s.ended&&s.ios_state==9&&!s.end_reason.known);
  }
 }
 static void incoming_end_reason(){

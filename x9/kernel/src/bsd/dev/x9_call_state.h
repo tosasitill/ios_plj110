@@ -212,7 +212,8 @@ static inline int x9cw_outbound_apply(struct x9cw_outbound_state *s,
   /* A foreign/unsupported event invalidates completeness but cannot adopt
    * an arbitrary ID as our MO, or complete a pending dial with it. */
   if(!s->seen||s->native_id!=c->id){s->count_known=0;s->blocked=1;return -1;}
-  if(c->direction||c->mode!=20){s->blocked=1;return -1;}
+  if(c->direction||(c->mode!=20&&c->mode!=0)){s->blocked=1;return -1;}
+  if(c->event==129)return 0; /* RIL handleCallProgressIndicationMessage ignores ECPI 129 */
   if(s->ended){
    if(c->event==2||c->event==132||c->event==6||c->event==133)return 0;
    s->count_known=0;s->blocked=1;return -1;
@@ -273,6 +274,7 @@ static inline int x9cw_inbound_apply(struct x9cw_inbound_state *s,
  if(!s||!c||s->blocked||!c->id)return -1;
  if(c->mask!=2||c->direction!=1)return 0;
  if(c->mode!=20||s->native_id!=c->id||(!s->pending&&!s->seen)){s->blocked=1;return -1;}
+ if(c->event==129)return 0;
  if(s->ended){
   /* Late progress never creates a new epoch or resurrects an ended id. */
   if(c->event==0||c->event==132||c->event==6||c->event==133)return 0;
@@ -380,9 +382,10 @@ static inline int x9cw_end_target(const struct x9cw_outbound_state *s,
                                   struct x9cw_end_target *out){
  unsigned id;
  if(!out||!s||!c||!x9cw_outbound_id(s,&id)||!s->epoch||
-    !s->count_known||s->native_count!=1||c->result||c->count!=1||s->mode!=20)return 0;
+    !s->count_known||s->native_count!=1||c->result||c->count!=1||
+    (s->mode!=20&&s->mode!=0))return 0;
  const struct x9cw_current_call *r=&c->calls[0];
- if(r->id!=id||r->direction||r->mode!=20||(r->flags&1u)||
+ if(r->id!=id||r->direction||(r->mode!=20&&r->mode!=0)||(r->flags&1u)||
     !((s->ios_state==5&&r->state==3)||
       (s->ios_state==3&&r->state==0)))return 0;
  out->epoch=s->epoch;out->revision=s->revision;out->native_id=id;out->sim=1;out->direction=0;return 1;

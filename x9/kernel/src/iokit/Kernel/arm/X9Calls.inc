@@ -298,7 +298,7 @@ static struct {uint64_t token,deadline;bool confirmed,held;} x9c_cmd_init;
  * technology gate stays fail-closed while invalid. One query per SIM per
  * registration epoch, issued only after CS registration is confirmed. */
 static struct {unsigned networkType;bool valid;} x9c_voice_rat[2];
-static struct {uint64_t token,deadline;bool done,held;} x9c_rat_query[2];
+static struct {uint64_t token,deadline,next_ms;unsigned retries;bool done,held;} x9c_rat_query[2];
 static bool x9c_reg_live(unsigned slot,const struct x9c_reg_wait &w){
  return x9c_bound_live(slot,w.sim,w.generation,w.binding)&&
   x9c_clients[slot].bridge_generation==w.bridge_generation;
@@ -523,8 +523,12 @@ static void x9c_init_poll(uint8_t *frame){
     unsigned networkType=0;
     bool good=n>=16&&x9cw_u16(frame+12)==q.token&&x9cw_voice_rat(frame,n,&networkType);
     q.token=0;
-    if(!q.held&&good){x9c_voice_rat[sim].networkType=networkType;x9c_voice_rat[sim].valid=true;q.done=true;
-     printf("X9 CALL: SIM%u voice RAT networkType %u cached (042f)\n",sim+1,networkType);}
+    if(!q.held&&good){
+     x9c_voice_rat[sim].networkType=networkType;x9c_voice_rat[sim].valid=true;
+     if(networkType==0&&q.retries<6){q.retries++;q.next_ms=now+10000;}
+     else q.done=true;
+     printf("X9 CALL: SIM%u voice RAT networkType %u cached (042f)\n",sim+1,networkType);
+    }
     else if(!q.held){
      /* One 042f per SIM. A delivered but unusable 0430 is terminal for this
       * boot; resubmitting on the same gate spins 042f/0430 without a log and
@@ -536,6 +540,7 @@ static void x9c_init_poll(uint8_t *frame){
    }else if(rc<0)q.held=true;
   }
   if(!online||q.held||q.done||q.token||!x9c_cmd_init.confirmed||
+     (q.next_ms&&now<q.next_ms)||
      x9c_init[sim].held||x9c_init[sim].stage!=X9_CI_DONE)continue;
   q.token=x9c_voice_rat_submit(sim);
   if(q.token)q.deadline=now+25000;else q.held=true;
@@ -591,7 +596,7 @@ static uint16_t x9c_end_begin(unsigned slot,const uint8_t *req,unsigned len){
  struct x9cw_outbound_state state;struct x9cw_inbound_state in;
  unsigned native_id,direction;uint64_t epoch;
  if(x9_md_mipc_call_snapshot(&state)==1&&x9cw_outbound_id(&state,&native_id)&&
-    native_id==id&&state.mode==20){direction=0;epoch=state.epoch;}
+    native_id==id&&(state.mode==20||state.mode==0)){direction=0;epoch=state.epoch;}
  else if(x9_md_mipc_call_incoming_snapshot(&in)==1&&x9cw_inbound_id(&in,&native_id)&&
     native_id==id&&in.ios_state==3&&in.mode==20){direction=1;epoch=in.epoch;}
  else return X9Q_NOT_READY;
@@ -903,7 +908,10 @@ static void x9c_calllist_flush(unsigned slot){
  int rc=x9_md_mipc_call_publish_state(floor,x9c_calllist_publish_callback,&p);
  if(rc!=1){bzero(p.frame.owned,CBQ_HDR+size);IOFreeData(p.frame.owned,CBQ_HDR+size);}
  else{c.calllist_valid=true;c.calllist_epoch=epoch;c.calllist_revision=revision;
-  c.calllist_direction=direction;c.calllist_id=id;}
+  c.calllist_direction=direction;c.calllist_id=id;
+  printf("X9 CALL: CallList46 sim=%u id=%u state=%u dir=%u ct=%u ep=%llu rev=%llu\n",
+         c.sim+1,id,ios_state,direction,technology,(unsigned long long)epoch,
+         (unsigned long long)revision);}
  bzero(sdu,sizeof(sdu));
 }
 static void x9c_error(struct x9c_dial_job &j,uint16_t err){
