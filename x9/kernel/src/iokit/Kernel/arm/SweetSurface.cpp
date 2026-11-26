@@ -39,6 +39,8 @@
 #include <IOKit/IOLocks.h>
 #include <IOKit/system.h>
 #include <pexpert/pexpert.h>
+#include <kern/clock.h>
+#include <kern/sched_prim.h>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSNumber.h>
@@ -701,6 +703,8 @@ sweet_surface_layout(SweetSurface *s, OSDictionary *props)
 	s->allocSize = (uint32_t)alloc;
 	return kIOReturnSuccess;
 }
+
+#include "SweetSharedEventCounter.inc"
 
 /* Per-client mapping of one surface. */
 class SweetSurfaceRef : public OSObject {
