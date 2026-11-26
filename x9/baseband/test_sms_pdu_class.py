@@ -32,23 +32,30 @@ int main(void) {
     pdu[3] = 0x81; /* international, digit semi-octets */
     pdu[4] = 0x21;
     for (unsigned cls = 0; cls <= 3; cls++) {
-        pdu[5] = 0x10 | cls;
-        assert(x9ms_pdu_class(pdu, 6) == cls);
+        pdu[5] = 0x7f;
+        pdu[6] = 0x10 | cls;
+        assert(x9ms_pdu_class(pdu, 7) == cls);
     }
-    pdu[5] = 0x00;
-    assert(x9ms_pdu_class(pdu, 6) == 4);
+    pdu[5] = 0x10;
+    pdu[6] = 0x00;
+    assert(x9ms_pdu_class(pdu, 7) == 4);
+    assert(x9ms_pdu_class(pdu, 6) == 6);
+    pdu[6] = 0xc8;
+    assert(x9ms_pdu_class(pdu, 7) == 4);
 
     pdu[2] = 3;
     pdu[4] = 0x21;
     pdu[5] = 0xf3;
-    pdu[6] = 0xf2;
-    assert(x9ms_pdu_class(pdu, 7) == 2);
+    pdu[6] = 0x00;
+    pdu[7] = 0xf2;
+    assert(x9ms_pdu_class(pdu, 8) == 2);
 
     pdu[2] = 10;
     pdu[3] = 0xd0; /* alphanumeric */
     pdu[8] = 0x00;
-    pdu[9] = 0x11;
-    assert(x9ms_pdu_class(pdu, 10) == 1);
+    pdu[9] = 0x00;
+    pdu[10] = 0x11;
+    assert(x9ms_pdu_class(pdu, 11) == 1);
 
     assert(x9ms_pdu_class(NULL, 6) == 6);
     assert(x9ms_pdu_class(pdu, 2) == 6);
@@ -71,7 +78,6 @@ int main(void) {
         source = SOURCE.read_text()
         self.assertIn('unsigned cls=mti==2?4:x9ms_pdu_class(in.pdu,in.len);', source)
         self.assertNotIn('x9m_class(', source)
-        self.assertNotIn('start+4+(addr+1)/2', SOURCE.read_text() + HEADER.read_text())
 
 
 if __name__ == '__main__':

@@ -55,7 +55,7 @@ static inline unsigned x9ms_pdu_class(const uint8_t *p,unsigned n){
  unsigned start=p[0]+1;
  if(n-start<3)return 6;
  unsigned address=p[start+1];
- unsigned dcs=start+3+(address+1)/2;
+ unsigned dcs=start+4+(address+1)/2;
  if(address>20||dcs>=n)return 6;
  unsigned value=p[dcs];
  return (((value&0xc0)==0&&(value&0x10))||(value&0xf0)==0xf0)?value&3:4;
