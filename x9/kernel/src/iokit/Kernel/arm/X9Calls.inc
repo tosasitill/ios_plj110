@@ -1,8 +1,7 @@
 /* iOS20H392 VOICE bridge staging. Wire translation lives in the shared codec
  * and is tested against the original formatters / MD consumers. No call
- * state is invented here. Do not add service9 to X9Baseband's announcement
- * until dial/status/SIM routing and voice audio are reconciled. There is
- * deliberately NO bootarg to override this boundary.
+ * state is invented here. X9Baseband announces service9; publication does
+ * not establish typed call routing, voice audio, or feature acceptance.
  * MD-layer receive now runs at boot, mirroring Android RIL init: once the
  * CALL transport is ready, the Android-derived registration subset (global
  * CMD8901, per-SIM IND4901/4902, owned GET_STATUS baseline) starts without
@@ -10,7 +9,7 @@
  * subset is auto-approved with the live-captured 8902 shape (approve=1, no
  * cause, RIL-converted RSP mask, original txid, echoed id/seq). Approval is
  * the RIL indication acknowledgement, NOT answer; the MD layer never sends
- * ANSWER on its own, and VOICE09 stays unannounced, so iOS shows no call UI.
+ * ANSWER on its own; this does not establish iOS call UI acceptance.
  * Outside that subset (SIM1, other modes, multi-call, quarantine) approval
  * is withheld fail-closed. Registration/approval are terminal for this boot
  * on timeout or transport loss; no retry.
@@ -25,8 +24,8 @@
  * dispatch. Bound VOICE03 explicit disables reuse the same
  * Android-derived registration and owned initial snapshot; handover14
  * enables actual, ordered Android SRVCC -> Apple54 events; extra
- * CallEventsNotify13=1 remains unsupported. None of this publishes VOICE,
- * admits a DIAL profile, or reports network/call/audio readiness. */
+ * CallEventsNotify13=1 remains unsupported. None of this reports
+ * network/call/audio readiness. */
 #include "../../../bsd/dev/x9_call_state.h"
 #include "../../../bsd/dev/x9_call_init.h"
 #include "../../../bsd/dev/x9_call_handover.h"
@@ -440,7 +439,7 @@ static void x9c_init_poll(uint8_t *frame){
  bool online=x9c_event_transport_ready();
  if(online&&!x9c_boot_started){
   x9c_boot_started=true;
-  printf("X9 CALL: boot registration start (Android RIL init subset; VOICE09 still unannounced)\n");
+  printf("X9 CALL: boot registration start (Android RIL init subset; not voice readiness)\n");
  }
  if(x9c_boot_started){
   if(!x9c_cmd_init.confirmed&&!x9c_cmd_init.held){wanted[0]=true;wanted[1]=true;}
@@ -799,8 +798,8 @@ static void x9c_approve_poll(){
   }else if(rc<0)bzero(&o,sizeof(o));
  }
 }
-/* Observation only: the MD reducer already owns MT state. No CallList, no
- * VOICE publication, no number. Logged on change so a boot log can verify
+/* Observation only: the MD reducer already owns MT state. This log is not
+ * a CallList receipt and contains no number. Logged on change so a boot log can verify
  * the incoming signalling chain without a probe image. */
 static void x9c_mt_observe(const struct x9cw_inbound_state &in){
  static bool valid;static unsigned pending,seen,ended,blocked,state;static uint32_t id;
@@ -811,7 +810,7 @@ static void x9c_mt_observe(const struct x9cw_inbound_state &in){
  if(in.blocked){printf("X9 CALL: MT reducer blocked; incoming approval/publication fail-closed\n");return;}
  if(!in.pending&&!in.seen)return;
  const char *s=in.ended?"END":in.ios_state==3?"CONVERSATION":in.ios_state==2?"INCOMING":"pending";
- printf("X9 CALL: SIM%u MT id %u %s (MD observation only; VOICE09 unannounced, no iOS call UI)\n",
+ printf("X9 CALL: SIM%u MT id %u %s (MD observation only; not iOS call UI acceptance)\n",
         in.sim+1,in.native_id,s);
 }
 /* CallTechnology provenance for the CallList46 item+4 byte. The proven source
