@@ -19,6 +19,7 @@
 #include <kern/clock.h>
 #ifdef COACHZ_NATIVE_DPMAIF
 #include "../../../kernel/src/bsd/dev/x9_modem_bridge.h"
+#include "../../../kernel/src/bsd/dev/x9_sms_receipt.h"
 #endif
 
 #include "coachz_bb_qmux.h"
@@ -1501,6 +1502,33 @@ static bool bb_x9_sms_ack_result(uint32_t dst_port,uint32_t src_node,uint64_t ge
   bool admitted=false;IOLockLock(bb_lock);
   const cbq_client &c=bb_qmux.client[slot];
   if(c.used&&!c.release_pending&&!c.private_service&&c.service==5&&c.channel<2&&c.generation==generation){
+    const cbq_result r=cbq_from_modem(&bb_qmux,dst_port,src_node,sdu,size,owned,room);
+    if(r.kind==CBQ_TO_HOST&&r.service==5&&r.len==room){
+      bb_channel *ch=&bb_ch[r.channel==0?CBH_QMUX1:CBH_QMUX2];
+      if(ch->count<BB_QUEUE){
+        ch->frames[(ch->head+ch->count++)%BB_QUEUE]={r.len,owned};ch->frames_out++;ch->bytes_out+=r.len;
+        IOLockWakeup(bb_lock,ch,false);
+        if(ch->reads_waiting&&bb_complete_call)thread_call_enter(bb_complete_call);
+        admitted=true;
+      }else ch->frames_dropped++;
+    }
+  }
+  IOLockUnlock(bb_lock);return admitted;
+}
+// Storage receipt infrastructure only: caller retains response and allocation
+// until queue admission succeeds. No MD replay and no persistence implication.
+// Not wired to x9m storage jobs yet; caller must supply the original identity.
+static __attribute__((unused)) bool bb_x9_sms_storage_result(uint32_t dst_port,uint32_t src_node,uint64_t generation,
+                                const uint8_t *sdu,uint32_t size,uint8_t *owned,uint32_t room)
+{
+  const uint32_t slot=dst_port-CBQ_PORT_BASE;
+  if(!bb_lock||!generation||!owned||dst_port<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS||
+     room!=CBQ_HDR+size||room>BB_FRAME_MAX||!x9sr_storage_response(sdu,size))return false;
+  bool admitted=false;IOLockLock(bb_lock);
+  const cbq_client &c=bb_qmux.client[slot];
+  const cbq_server *srv=cbq_server_find(&bb_qmux,5);
+  if(c.used&&!c.release_pending&&!c.private_service&&c.service==5&&c.channel<2&&
+     c.generation==generation&&srv&&srv->node==src_node){
     const cbq_result r=cbq_from_modem(&bb_qmux,dst_port,src_node,sdu,size,owned,room);
     if(r.kind==CBQ_TO_HOST&&r.service==5&&r.len==room){
       bb_channel *ch=&bb_ch[r.channel==0?CBH_QMUX1:CBH_QMUX2];
