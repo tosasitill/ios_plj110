@@ -320,7 +320,8 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 - `X9H4Transport` 只提供 HCI，不提供 PCM；kernel serial FIFO 也不是 codec。X9 自写 AudioServerPlugIn 只有 Speaker/Hawking，没有 Bluetooth PCM consumer。stock bluetoothd 则有 XPC audio publication、A2DP start/stop/data、HFP SCO completion、HFPAudioDevice 与 HCI send-thread 等候选消费者，但未证明在 X9 实例化。
 - Android 当前 traced HFP 使用标准 Enhanced Setup Synchronous Connection `0x043D`，payload offset 50/51 为 input/output data path；FC72 只是 MTK voice-interface 初始化，不是 per-codec route。X9 AP↔DSP/AFE ring 不属于这两条蓝牙 PCM 链。
 - 最小待证链：A2DP 为 CoreAudio route → stock XPC/audio device → mediaserverd PCM → encoder/offload → AVDTP/ACL → H4；HFP 为 CoreAudio HFP → stock HFPAudioDevice/Gateway → `0x0428/0x0429 + 0x0c26` → native H4 SCO → MTK UART 转换。
-- 下一步离线追 stock HFP 的 HCI data-source 选择、SCO buffer read/send callback 与 payload/codec 合同，定位首个 MT6653 mismatch；不提取新二进制。
+- 2026-11-26 host boundary：`python3 -I x9/audio/test_bluetooth_boundary.py` exit0（2 tests），直接编译真实 `X9AudioPlugIn.c`；DeviceList 仅 Speaker/Hawking，Bluetooth/HFPAudioDevice UID 为 unknown，未知对象 StartIO/StopIO/DoIOOperation fail closed。标准 HCI SCO 链已有静态证据，但 stock HFPAudioDevice 的 XPC selector/序列化/publication descriptor 与真实实例化仍未建立，因此未添加 fake PCM endpoint/backend，audio_verified 不变。
+- 下一离线步骤：从既有原件/捕获确定 Bluetooth device/stream publication、Start/Stop/timestamp 与 ReadInput/WriteMix buffer 合同，并找到真实双向 AP PCM↔SCO supplier；不得把 serial FIFO/UART 长度转换当 codec。
 - 参考：[`x9/audio/README-speaker.md`](x9/audio/README-speaker.md)、[`x9/bluetooth/README.md`](x9/bluetooth/README.md)。
 
 ### 6.10 USB / AppSync / 存储用户态

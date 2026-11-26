@@ -237,8 +237,21 @@ payload 上限251按原模块声明 maxlen255/四字节wire头的安全预算设
 - A2DP 最小验收链：真实 controller/ACL → Apple A2DP 初始化与编码器 → start/stop/suspend →
   media payload → 对端实际声音；HFP 最小验收链：SCO/voice-setting → `0x043D` 与连接状态 →
   双向 PCM callback → 对端与 X9 实际声音。
-- 下一离线步骤是追 HFP HCI data-source 选择与 SCO buffer callbacks，再对照 X9 AudioServer
-  缺少的 consumer；不得伪造 route state、PCM callback 或 audio_verified。
+- **PCM consumer ABI 尚未建立（2026-11-26）**：现有静态证据已闭合标准 HCI 的
+  SCO send/receive 与 Android `0x043D` data-path 链，但没有建立 stock
+  `HFPAudioDevice` 的 XPC selector、请求/回复序列化或 audio-device publication
+  descriptor；符号存在不能证明 X9 上实例化。host 测试直接编译真实
+  `X9AudioPlugIn.c`，确认 `DeviceList` 仅发布 Speaker/Hawking，Bluetooth/
+  HFPAudioDevice UID 翻译为 unknown，未知对象的 StartIO/StopIO/DoIOOperation
+  全部 fail closed。测试不初始化 IOKit、不模拟 callback 或 route。
+- 实现真实 consumer 前仍缺的合同是：稳定的 Bluetooth device UID/transport/
+  input/output stream 与 ASBD/timing publication；Start/Stop/zero-timestamp 与
+  ReadInput/WriteMix 的 buffer 生命周期；把双向 AP PCM 实际绑定到 SCO TX/RX 的
+  codec/ring supplier；以及 stock XPC peer 的真实实例化证据。kernel serial FIFO
+  和 UART 长度转换均不能充当该 supplier。
+- 下一离线步骤是从既有原件/捕获追上述 XPC selector、序列化和 publication 字段，
+  先证明首个消费者合同，再决定是否需要 X9 PCM endpoint；不得伪造 route state、
+  PCM callback 或 audio_verified。
 
 `python3 -I x9/tools/bluetooth_vendor.py --required` 是纯标准库的原件移植构建入口，生成gitignored
 `x9/kernel/generated/x9_bt_vendor.inc`。`build.py all`也接此生成器；显式`x9_bt_init=1`时要求完整原件，

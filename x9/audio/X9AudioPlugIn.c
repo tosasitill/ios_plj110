@@ -25,6 +25,11 @@ _Static_assert(sizeof(X9AudioControl) == 112, "PCM ABI v1 size");
 
 enum { kPlugIn = kAudioObjectPlugInObject, kDevice = 2, kOutStream = 3, kInStream = 4, kVolume = 5,
        kHawking = 6, kHawkingIn = 7, kLastObject = kHawkingIn };
+/* kLastObject is the publication/admission boundary: there is deliberately no
+ * Bluetooth AudioObject here. H4 and the UART SCO length adapter carry HCI,
+ * not PCM. Add an endpoint only after the stock XPC consumer contract and a
+ * real bidirectional PCM supplier/sink are established; unknown IDs fail
+ * closed in StartIO/StopIO/DoIOOperation below. */
 /* iOS 16 VirtualAudio (DeviceFactory_Aspen) picks the device class by HAL
  * device UID. Under our D22AP identity it builds the iPhone X speaker route
  * from "Speaker" (stereo output + stereo input, the amplifier feedback on a
