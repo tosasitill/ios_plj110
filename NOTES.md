@@ -177,7 +177,7 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 | `x9-bt-settings-diag-20261125-r2` | `.worktrees/bt-default-on`，分支 `feat/bt-settings-root`，HEAD `ab9828ea` | 三项 focused host 检查、完整 boot/rollback/kernel/manifest 构建；`runtime_verified=false` | 未刷入、未安装 root、未观察 Preferences setup |
 | `x9-bootloader-reboot-psci-20261124` | `.worktrees/x9-bootloader-reboot`，分支 `feat/x9-bootloader-reboot` | log 421：PSCI 后实际进入 fastboot，helper PASS | 后续重启场景不据此自动重复 |
 | camera diag17 | 历史提交 `e125dbf0` | 仅 host 构建；首 boot 未到 retire | 未完成 retire/出帧验收；不声称仍在 boot_b |
-| `x9-eight-merge-20261126-r1` | main `2134b216`，主 checkout `x9/out/x9-eight-merge-20261126-r1/`；boot 15,761,408 B，kernel 33,066,848 B，104/104 overlay，allowlist 280 未变（无 mailbox） | `~/430.txt` device boot（内核时间 ~242 s）：shim、SCP stage1-9、GPU pan165 ownership、BT firmware-session+bluetoothd capabilities、CELL AT round3/4+CGCONTRDP IPv6、SMS 双卡 host-ready CNF 均到达；收取后已停回 fastboot | AegirPoster SharedEvent abort 循环（§6.13）；ALS 仅开机 1 次 dispatch、PROX 全程无 ENABLE/DATA、BT 11.4 s 后静默无 setup 注入；无 feature acceptance |
+| `x9-eight-merge-20261126-r1` | main `2134b216`，主 checkout `x9/out/x9-eight-merge-20261126-r1/`；boot 15,761,408 B，kernel 33,066,848 B，104/104 overlay，allowlist 280 未变（无 mailbox） | `~/430.txt` device boot（内核时间 ~242 s）：shim、SCP stage1-9、GPU pan165 ownership、BT firmware-session+bluetoothd capabilities、CELL AT round3/4+CGCONTRDP IPv6、SMS 双卡 host-ready CNF 均到达；收取后已停回 fastboot | AegirPoster SharedEvent abort 循环（§6.13）；ALS 只记录首个 dispatch（其后未常规打印）、PROX 全程无 ENABLE/DATA、BT 11.4 s 后静默无 setup 注入；无 feature acceptance |
 
 本轮文档整理基于 `994d5fe0`，README/规则提交为 `d6f92195`；未构建、未刷机、未重启、未写 root/mailbox，也没有新 CI run。
 
@@ -284,7 +284,7 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 - governor 使用 busiest-core 累计 CPU time，不是 Linux PELT；40–50% load 对应 500 MHz 请求。peak≥5% 时 tick 保持 50 ms；1000 ms 还要求 dark、无 GPU work、peak<5% 且 retention idle。
 - dark display 不主动唤醒 GPU，使用非阻塞 try-lock；合法 render owner 会唤醒 MCU retention。retention sleep 保留 AS0/L2/images/GPUEB，不是 rail-off。
 - WDS 每 3 s CSCON/physical-channel 对是 `x9w_up_diag()` 诊断，不是蜂窝保活；2026-11-26 起默认关闭，仅 `x9_cell_diag=1` 启用。
-- `SIOCGIFMEDIA` 到 PDP default case，打印后返回 `EOPNOTSUPP`；caller 未证，不能直接返回 ACTIVE 改变拨号行为。
+- 历史 `SIOCGIFMEDIA64`（`0xc02c6938`）到 PDP default，430/428 分别打印 1,940/5,024 行；`c94ddc6d` 对该命令聚合并稀疏打印，保持 `EOPNOTSUPP` 和输出不变。caller 未证、查询本身未减少。
 - `x9_mdlog=0` 只去掉独立高吞吐 capture/save 线程；stage-1 DHL polling、打印与 ring 推进仍在。
 - `~/428.txt`：灭屏后 retention sleep，约 1 Hz dark 事件；PDP 每约 2 s 八个失败；WDS 每 3 s；little 40–50%/500 MHz；大量 MIPC/MDLOG。57°C 出现在 `dark=0`，**没有复证 dark 57°C**。
 
@@ -372,10 +372,10 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 **设备 boot 观察（~/430.txt）**
 
 - 启动链到达：shim ready、SCP ALS stage1-9 + READY channel22、GPU pan165 INIT→POWER_ON→ID→ownership acquired、BT complete firmware session chip=6653 + bluetoothd H4/vendor bridge + capabilities（11.435 s ext scan=1 adv=1 sets=16）、CELL AT round3/4 OK + CGCONTRDP 取得 IPv6、SMS SIM1/SIM2 real host-ready CNF + GSM handlers installed。55.388 s `SWEET FB: display off`（自动灭屏）。
-- **ALS**：全程仅 1 次 `dispatch seq=1 lux=824`（2.782 s），之后只有每 10 s `control type=0 cmd=10` 心跳；与 428 同为开机单样本，iOS 未触发连续 ALS。
+- **ALS**：2.677 s 有 type 116 ENABLE 成功响应，2.782 s 记录首次 `dispatch seq=1 lux=824`。源码仅打印首个物理 dispatch 或诊断样本，不能由日志条数推断后续没有采样/分发；type 0 cmd 10 心跳也不能证明采样。见 [ALS 离线复核](docs/sensors/als-observability-20261126.md)。
 - **PROX**：LIST `tcs3720 ps` 命中，但 iOS 反复 `DetectionMode=0 interval=200000 requested -> 0`，全程 0 次 ENABLE ACK / DATA / near。428 在 157 s 有 ENABLE+near=1（疑似当时亮屏/交互），430 灭屏后无。PS 极性仍未闭合。
 - **BT**：11.435 s capabilities 后无任何 X9 BT 行；无 setup state2 / Preferences 注入观察。Settings 灰仍属未验证（设备已停 fb，无法交互）。
-- **CELL/SMS**：WDS 仍 `MD-session unobserved retire 0`（诊断默认关闭后仍见 site 轮询，需核对 `x9_cell_diag` 实际 boot-arg）；SMS stored list queued QMI txn22，无 0x210000 映射证据。
+- **CELL/SMS**：WDS `MD-session unobserved` 属 `x9w_probe()` 的状态日志，不是 RRC 查询。430 无 `x9_cell_diag=1` boot-arg，也无 CSCON/PCH 诊断命令或注册日志；SMS stored list queued QMI txn22，无 0x210000 映射证据。
 
 **AegirPoster 崩溃循环（GPU / 灭屏热的已定位运行时根因）**
 
@@ -404,3 +404,11 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 基线 `bc6a83d615014f39b6cc3eab80839466a5fb2bab`。host 反汇编复核：selector 40 是以 notification port 和 async reference 注册 listener，而不是已证的 event ID 加普通 struct；listener 初始化独立于 selector 36。selector 36 失败使 `IOSurfaceSharedEvent init` 返回 nil，但不能据此证明 listener 不执行或上层安全降级。selector 40 的零端口 cold 路径在调用之前，不能解释调用后崩溃。详见 [`docs/graphics/shared-event-contract-20261126.md`](docs/graphics/shared-event-contract-20261126.md)。
 - 上一会话落盘的四条只读研究位于 gitignored `x9/out/research-{sensor-ps,gpu-hz,appsync-usb,dark-thermal}-20261126/report.md`：PS 极性仍未闭合；GPU 有 mode/cadence/queue/copy/TE 验收矩阵；AppSync 缺真实 USB/session/install；灭屏日志显示 Poster churn 和 PDP/WDS/MDLOG 并存，功耗贡献未量化。
 - 本轮 `sed` 复核 exit 0；未改驱动、未构建、无 CI、无设备操作或新设备日志。无新候选或产物大小。下一步追上层 nil/异常处理及 IOKit async 消息 ABI，不把局部 nil 路径或伪成功当作止崩修复。
+
+### 6.15 2026-11-26 并行离线修复：PDP / GPU / ALS
+
+基线 `f239883c`，本地并行合并 `fa21661d`。无 CI、无设备操作、无 push。
+
+- PDP `c94ddc6d`：只对 native DPMAIF 的 `SIOCGIFMEDIA64` 聚合日志（前四次、随后 2 的幂），不改返回值或拨号/接口状态。worktree 执行 `PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/out/pdp-ifmedia-object-20261126/compile.py` exit 0；按原 recipe 单编译 `X9Baseband.cpp.o` 2,230,704 B，34 warnings；编译脚本/完整命令日志保留在主 checkout `x9/out/coordinator-pdp-ifmedia-20261126/`（脚本内固定原输出路径）。`python3 -I x9/baseband/test_cell_diag_policy.py` 3/3，exit 0。未量化热影响。
+- GPU `58296888`：现有 `shown_gpu_seq` 字段保留，说明改为 swap 时采样的全局 enqueue watermark；等待与采样语义不变。子代理静态断言与 `git diff --check` exit 0。不是逐帧 GPU fence 或高刷验收。
+- ALS `1fa6466b`：只读复核纠正 §6.13 日志解读；未改驱动、未翻转 PS 极性。AppSync 无新增设备会话/能力，仍见 §6.10。
