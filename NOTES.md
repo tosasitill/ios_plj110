@@ -600,3 +600,8 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 6.1 Terra 独立复核 433：仍仅证 VOICE20→0901 TX；已有 Android 记录明确 0902 成功结果不含 call ID，需同一事务后续的完整 4901 作为 ID/epoch 证据。无新证据支持改变通话状态机或音频；r2 的实机事务诊断是下一道验证。
 - 当前无新整包或 CI，无设备操作、root/mailbox 或 push。最后一次已验证设备状态仍为 Android；未验收蓝牙、通话、短信。
 - 蓝牙诊断准备 `97507016`：`python3 -I x9/bluetooth/test_settings_header.py` 2/2 exit 0。实际 fixture 之外，`python3 -I x9/bluetooth/settings_header.py --payload .worktrees/bt-default-on/x9/out/x9-bt-settings-diag-20261125-r2/root-payload --apple-originals .worktrees/bt-default-on/x9/out/bt-settings-inputs-20261125/apple-originals --out x9/out/x9-bt-settings-scope-20261126/x9_bt_root.inc` exit 0；离线 header 仅含 118,416 B 的诊断 dylib，不含 H4/jobs/cache/Settings plist，未覆盖当前 generated header。完整 payload 的 hash/mode 和 Apple 原件校验仍执行。这不证明现机前序安装或足以上机：原 stage_targeted 无单文件模式，通用 PID1 installer/restore 会按临时文件名清理 regular 文件，尚需收窄或验证所有权，再构建独立诊断镜像与 root preflight。标准配置加 root+诊断为 615 B，超过 607 B；脱离标准配置的变更必须保持现有语义。
+
+### 6.43 2026-11-26 SMS 入站 owner 静态边界复核
+
+- 基线 `2370e2fd`；只读源码。`coachz_baseband_poll()` 与 `x9q_poll()`/`x9m_poll()` 由同一 worker 顺序调用；QMUX slot 在 `release_pending` 清零前不可复用，而清零前先调用 `x9m_del()` 清除订阅。因此未证旧 routes 在正常顺序下转移给复用 slot；单次 admission generation 栅栏实验已撤回，不称为修复。transport/adapter 各为 16 slots；不能仅因 `x9m_event` 的 full 分支就断言正常流丢失 owner，尚需证明容量关系失效的可达路径。
+- 实际入队收执只证明 host 队列接纳，不是 WMS37、物理 ACK、持久化或对端投递；队列满保留原 PDU，成功入队擦除 PDU 并等待同 SIM/slot/local generation 的 WMS37。MD ACK TX 失败保留 owner 不重试。未新增 host 测试、构建、设备操作或 push；真实 8601/8603 事务及最终接收仍未验收。
