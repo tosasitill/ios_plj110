@@ -612,3 +612,27 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 交接文件：[X9 AI 账号迁移](docs/2026-11-26_x9-ai-handoff.md)。当前功能分支 `feat/bt-settings-offline-candidate`，文档前源码 `03e6f889`，main 仍 `2370e2fd`；保留当前分支和本轮 worktrees，未合入/推送。
 - `e7c401c8` 生成 verify/install/rollback 各 601 B，命令 `python3 -I x9/bluetooth/settings_boot.py --out x9/out/x9-bt-settings-boot-config-20261126` exit 0；`55a444ff` 添加通话 QMI→MD CNF 关联，Terra 针对 host 5/5；`03e6f889` 限定蓝牙单文件并拒绝预存临时名，`python3 -I x9/bluetooth/test_settings_<boot|temp|header|diag>.py` 10/10 exit 0（Xcode 15 SDK）。
 - 中断前只建了 `.worktrees/bt-settings-candidate-host`，HEAD `55a444ff`、`.local` 链及私有 config 就绪，`prepare-local.py --check` exit 0；未生成该工作树的 scoped header 或完整候选，无活动构建、logger、设备操作或 CI。最新完整候选仍为 §6.41 r2；最后已验证手机状态仍是 §6.37 Android。恢复后先按交接文档核对并快进专用 build worktree；任何上机动作重新确认授权。
+
+### 6.46 2026-11-26 SMS 入站 owner 静态边界复核（补录 `87ca29cb`）
+
+- 来源：`.worktrees/sms-inbound`（分支 `fix/sms-inbound`，HEAD `87ca29cb`，基线 `2370e2fd`，纯文档无代码改动）。
+- 只读源码：`coachz_baseband_poll()` 与 `x9q_poll()`/`x9m_poll()` 由同一 worker 顺序调用；QMUX slot 在 `release_pending` 清零前不可复用，而清零前先调用 `x9m_del()` 清除订阅。因此未证旧 routes 在正常顺序下转移给复用 slot；单次 admission generation 栅栏实验已撤回，不称为修复。transport/adapter 各为 16 slots；不能仅因 `x9m_event` 的 full 分支就断言正常流丢失 owner，尚需证明容量关系失效的可达路径。
+- 实际入队收执只证明 host 队列接纳，不是 WMS37、物理 ACK、持久化或对端投递；队列满保留原 PDU，成功入队擦除 PDU 并等待同 SIM/slot/local generation 的 WMS37。MD ACK TX 失败保留 owner 不重试。真实 8601/8603 事务及最终接收仍未验收。
+
+### 6.47 2026-11-26 恢复推进：scoped BT verify 候选、194 s teardown 根因与 Call/SMS 非 PII 诊断
+
+- **01a216b2 对话恢复与首版 verify 候选（`candidate_ready`，未上机）**：
+  - `.worktrees/bt-settings-candidate-host` 快进至 `03e6f889`，`prepare-local.py --check` exit 0；生成 `x9/out/x9-bt-settings-radio-plan-20261126/boot-{verify,install,rollback}.json`（各 601 B）与含 `#define X9_BT_ROOT_SETTINGS_ONLY 1` 的 `x9/kernel/generated/x9_bt_root.inc`（嵌入 118,416 B `X9SettingsBTDiag.dylib`）。
+  - 构建 `x9-bt-settings-radio-verify-20261126` exit 0：104/104 overlay（3 prebuilt），`boot.img` 15,409,152 B，`kernel.development.sweet` 32,095,296 B，`kernel.development.sweet.unstripped` 38,195,464 B，allowlist 280 未变。
+- **433 ~194 s `bluetoothd` PC/FAR=0 teardown 崩溃离线根因（静态分析，未改生产 dylib）**：
+  - 直接外部诱因是 194.325 s USB reboot-bootloader 触发关机，`bluetoothd` 进入异步关机路径并经 `0x1000f3b4c` 调用 `0x1000e6aac`（另一处调用点 `0x1003ca25c` 在 halt 路径）。
+  - `0x1000e6aac` 读取 HCI Transport 表 `*0x100844850 + 0x60`（`H4BC`/`APPLEBT`/`PCIE`/`PCIESW` 实现为 pre-close halting mark），但 Apple 仅豁免 `type==0`（USB），漏判通用 `H4` 表（`0x100844228`）`+0x60 == NULL` 导致空跳转。与 Settings 灰按钮无直接因果；与 `X9Vendor16.c` 管理的 type-0 vendor 表分离。
+- **Call / SMS 零行为变更可观测性补强与只读单文件 BT preflight（源码 `515fd28b`，`host-verified`）**：
+  - `x9_call_state.h` / `X9Calls.inc` / `x9_mipc_calls.inc`：补录 `0902` CNF 的 32-bit `result`、`MO epoch joined` 的 `id`/`epoch`，以及 `x9mc_rx` 处理 `0x4901` 时的受限无 PII 摘要（`mask/id/dir/mode/ev/cause/apply/ep/blk`）与 parse/frame 毒化日志；不打号码/PAU/detail，不改状态机。
+  - `X9Messages.inc`：将受限失败 TLV 摘要扩展到 `X9M_SEND`（`0606`）与 `stored`（`0608`），对 `tag < 0x8000 && 1..4 B` 短标量打印 `tag/len=0xval`，对 `>=0x8000` 或长载荷只打 `tag/len`。
+  - 新增 `x9/bluetooth/preflight_settings_diag.py` 与 `x9/bluetooth/test_preflight_settings_diag.py`（严格只读，禁止 write，校验 clean journal、`/usr/lib` 非 symlink、`.x9-bt-temp` 不存在、单文件前提及 Apple `bluetoothd`/`BlueTool` 哈希）。
+  - Xcode 15 SDK host 回归全部 exit 0：Call `voice20_dispatch ios_timeout ios_deleted ios_join dial_tx_failure` 5/5；SMS `test_sms_*.py` 8 文件 10/10；Bluetooth `test_preflight_settings_diag.py`（6）+ `test_settings_{boot,temp,header,diag}.py`（10）合计 16/16；离线 CLI preflight 校验 r2 payload exit 0（`device_probed=false`）。
+- **最新 verify 候选 `x9-bt-settings-radio-verify-20261126-r2`（源码 `515fd28b`，`candidate_ready`，未上机）**：
+  - 在 `.worktrees/bt-settings-candidate-host` 快进至 `515fd28b` 执行 `PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/build/build.py all --boot-config x9/out/x9-bt-settings-radio-plan-20261126/boot-verify.json --name x9-bt-settings-radio-verify-20261126-r2` exit 0。
+  - 104/104 overlay（3 prebuilt），`boot.img` 15,409,152 B，`kernel.development.sweet` 32,095,336 B，`kernel.development.sweet.unstripped` 38,195,856 B，allowlist 280 未变。
+- **设备边界与未完成**：未触碰设备，无刷写、无重启、无 root/mailbox 写入、无 CI、无 push；最后已验证设备状态仍为 §6.37 Android。下一步需分别向用户确认：① 是否将 `x9-bt-settings-radio-verify-20261126-r2` 写入 `boot_b` 并采集新 USB 日志；② 若 root 尚未装 `X9SettingsBTDiag.dylib`，是否另行授权只读 HFSX preflight 与单文件安装。
