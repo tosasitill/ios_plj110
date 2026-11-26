@@ -707,7 +707,8 @@ static void x9m_poll(){
    x9w_frame f(j.step?0x607:0x60b,1u<<j.sim);
    if(j.step){
     const uint8_t index[2]={1,0};f.byte(0x100,3);f.byte(0x101,5);f.tlv(0x102,index,2);
-    f.byte(0x103,0);f.byte(0x104,0);
+    /* Diagnostic CMGR observes record shape only; preserve its read tag. */
+    f.byte(0x103,1);f.byte(0x104,0);
    }
    j.token=f.submit();if(!j.token)continue;j.follow=false;
    printf("X9 SMS DIAG: SIM%u %s submitted token %llu\n",j.sim+1,j.step?"CMGR":"CPMS",
