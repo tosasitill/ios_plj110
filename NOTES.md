@@ -636,3 +636,19 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
   - 在 `.worktrees/bt-settings-candidate-host` 快进至 `515fd28b` 执行 `PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/build/build.py all --boot-config x9/out/x9-bt-settings-radio-plan-20261126/boot-verify.json --name x9-bt-settings-radio-verify-20261126-r2` exit 0。
   - 104/104 overlay（3 prebuilt），`boot.img` 15,409,152 B，`kernel.development.sweet` 32,095,336 B，`kernel.development.sweet.unstripped` 38,195,856 B，allowlist 280 未变。
 - **设备边界与未完成**：未触碰设备，无刷写、无重启、无 root/mailbox 写入、无 CI、无 push；最后已验证设备状态仍为 §6.37 Android。下一步需分别向用户确认：① 是否将 `x9-bt-settings-radio-verify-20261126-r2` 写入 `boot_b` 并采集新 USB 日志；② 若 root 尚未装 `X9SettingsBTDiag.dylib`，是否另行授权只读 HFSX preflight 与单文件安装。
+
+### 6.48 2026-11-26 r2 上机实测（`~/434.txt`）、Android 恢复与 Call CS/ECPI129 修复
+
+- **r2 上机实测（`device-verified` 仅限观察范围）**：
+  - 唯一设备 `PLJ110`/`OP5E17L1` 在 fastboot `b` 槽（`is-userspace: no`、`partition-size:boot_b: 4000000`）写入 `x9-bt-settings-radio-verify-20261126-r2/boot.img`（`15,409,152` B）并启动采集 `~/434.txt`（29,998 行，>158 s）。
+  - **Call 观察**：`68.115s` `VOICE20 txn 5` 下发 SIM2 `0x0901`，`68.120s` `0902 result=0x0`，`68.122s` `4901 mask=0x2 id=1 dir=0 mode=0 ev=130 apply=1 ep=1 blk=0`；`141.457s` 收到同通话 `4901 mode=0 ev=129 cause=1/0 apply=-1 ep=1 blk=1` 与 `ev=133 cause=1/2174 apply=-1 ep=1 blk=1`（`x9_mc_outbound` 被 `ev=129` 与 `mode!=20` 永久阻断，未到 `END`）；`24.415/24.418s` `042f` 查询一次返回 `networkType=0` 后即锁定。
+  - **SMS 观察**：`53.014/53.017s` 双卡 `0608 op 5` 返回 `tlvs 0/4=0x210000 103/2=0x0`；SIM2 `0605`（txn 676/1396）收到 modem CNF `result=0x0`（非投递回执）；SIM1 `0605`（txn 1233）返回 `result=0x21014b`（`tlvs 0/4=0x21014b 103/1=0x0 106/1=0x3`）。
+  - **BT 观察**：`bluetoothd[87]` 完成 18 条 vendor 命令、section 2 重载（`71104` B）、LE host prelude（`status=0`）与扩展能力发布且未崩溃；`32.120s` `X9 BT SETTINGS: installed diagnostic rejected errno=2; Preferences left unmodified`（root 未安装 `X9SettingsBTDiag.dylib`）。
+- **回 Android 恢复成功（`device-verified`）**：
+  - 执行 `python3 -u x9/tools/ios-reboot-bootloader-usb` 进 fastboot（`is-userspace: no`、`current-slot: b`、`partition-size:boot_b: 4000000`），刷写 `/Users/tosasitill/boot.img`（`67,108,864` B）至 `boot_b` 并重启；`adb` 唯一设备确认 `PLJ110`、`_b`、`sys.boot_completed=1`。
+- **Call CS (`mode=0`) / ECPI 129 修复与新候选（`host-verified` / `candidate_ready`）**：
+  - 离线对照 `.local/x9/modem/vendor-bin/x9b/libmtkmipc-ril.so` 确认：`RmmCallControlUrcHandler::handleCallProgressIndicationMessage`（`0x37cbe4..0x37cc10`）忽略 ECPI `129`，且 `RtmCallController::handleCsCallInfoUpdate`（`0x269dd0`）以同套 `130->2->6->133` 处理 CS（`mode=0`）通话。
+  - 提交 `f19fdb05`（`x9_call_state.h`、`X9Calls.inc`、`call_bridge_host.cpp`）：在 `x9cw_outbound_apply` / `x9cw_inbound_apply` 忽略 `ev=129`（不置 `blocked`）；在 `x9cw_outbound_apply` / `x9cw_end_target` / `x9c_end_begin` 允许 `mode==0 || mode==20`（保留 `x9cw_end_reason_metadata` 仅对已证 `mode==20 && cause==16` 映射 Apple 145）；为 `CallList46` 增加无 PII 发布日志；`042f` 返回 `networkType==0` 时允许最多 6 次 10s 间隔重试。
+  - 主机验证：`python3 -I x9/baseband/test_call_owner_boundary.py`（8/8 OK）与 `call_bridge_host` 11 项场景（含新增 `ev=129` + `mode=0` 回归）全部 exit 0。
+  - `.worktrees/bt-settings-candidate-host` 快进至 `f19fdb05` 构建 `x9-bt-call-cs-fix-20261126` exit 0：`boot.img` `15,405,056` B、`kernel.development.sweet` `32,095,392` B、`kernel.development.sweet.unstripped` `38,194,624` B，allowlist 280 未变。
+- **未完成**：尚未刷写 `x9-bt-call-cs-fix-20261126`；Preferences Bluetooth 灰按钮仍需另行授权只读 HFSX preflight + 单文件安装 `X9SettingsBTDiag.dylib`；Call Audio（`3D00`/VirtualAudio）与 BT SCO/A2DP 音频仍未接通。
