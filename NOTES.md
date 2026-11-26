@@ -510,3 +510,8 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 基线 `e75ddb50`，构建源码 `25ac3353`。`x9ed=1` 是 `x9_surf_event_diag=1` 的短别名（长名优先）；与 `x9_surf_events=1` 并用时 argv 604 B（不含 NUL）。诊断按原 48/16 额度记录 selector 入口，并仅在实验路径记录对应返回码；以 comm/PID/seq/selector 对齐，不输出地址、端口值、scalar 值、用户引用。未改变协议返回行为。r6 还包含 §6.27–6.28 的调度及 WMS 收执退休修复。
 - `PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --boot-arg x9_surf_events=1 --boot-arg x9ed=1 --name x9-native-event-wired-20261126-r6` exit 0（104/104 overlay，含 3 prebuilt），boot 15,806,464 B、kernel 33,095,048 B；候选目录含 `build.log`，allowlist 280 未改。无 CI、刷机、重启、root/mailbox、push。子代理仍因额度不可用。
 - 若明确授权写入 r6 的 boot_b、启动及只读 USB 采集（采集后动作另行确认），先以同一日志的 boot-args、`SWEET SURF EVENT` 与 `SWEET SURF EVENT RESULT` 确定实际分支，按 PID 对齐首个 AegirPoster abort。selector 42 Unsupported 仅覆盖有静态依据的普通 present 回退，不等于 stop-crash；调用日志没有回调交付或通话/短信对端/持久化证据。当前设备观察仍只有 430，不标记全流程完成。
+
+### 6.30 2026-11-26 r6 日志离线判读工具
+
+- 基线 `12ba36bb`，工具 `de73d45a`：`python3 -I x9/tools/shared-event/review_log.py <capture>` 从单次本地日志对齐入口/返回及首次 AegirPoster SIGABRT；重复/孤立诊断项或 boot-args 缺失/不唯一时不输出首次崩溃关联。只打印摘要，不判断止崩或功能通过。 `python3 -I x9/tools/shared-event/test_review_log.py` exit 0（2 项，合成解析 fixture，不是设备样本）。
+- 同工具读取已有 `~/430.txt` exit 0：实验/诊断 flags 均未出现，0 个新格式调用记录；44 个 SIGABRT，38 个在首个 display-off 之后；首次 30.682 s。摘要在 `x9/out/shared-event-log-review-20261126/430-summary.json`，不是 r6 trace。无新源码运行改动、构建、CI 或设备操作；r6 已存在，仍等待针对 r6 的写 boot_b、启动和采集明确授权（也可由用户提供已采日志）。通话/短信无新验收。
