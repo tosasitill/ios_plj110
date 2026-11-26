@@ -1521,11 +1521,13 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 		int enabled = 0;
 		PE_parse_boot_argn("x9_surf_event_diag", &enabled, sizeof(enabled));
 		if (enabled == 1) {
-			static volatile SInt32 samples;
-			SInt32 sample = OSIncrementAtomic(&samples);
-			if (sample > 0 && sample <= 64) {
-				char name[32] = { 0 };
-				proc_selfname(name, sizeof(name));
+			static volatile SInt32 samples[2];
+			char name[32] = { 0 };
+			proc_selfname(name, sizeof(name));
+			/* Early boot clients must not exhaust the Poster diagnostic budget. */
+			const bool poster = strcmp(name, "AegirPoster") == 0;
+			const SInt32 sample = OSIncrementAtomic(&samples[poster]);
+			if (sample > 0 && sample <= (poster ? 48 : 16)) {
 				IOLog("SWEET SURF EVENT: %s sel=%u async=%u refs=%u in=%u out=%u structin=%u structout=%u\n",
 				    name, selector, args->asyncWakePort != MACH_PORT_NULL,
 				    args->asyncReferenceCount, args->scalarInputCount,

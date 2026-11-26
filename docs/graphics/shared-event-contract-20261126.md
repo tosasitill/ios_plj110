@@ -27,7 +27,7 @@ sed -n '1513,1628p' x9/kernel/src/iokit/Kernel/arm/SweetSurface.cpp
 
 ## 有界观察候选（2026-11-26）
 
-未能证明 consumer 对 nil 的处理或完整异步通知及跨进程 event 合同，因此没有更改 selector 返回值，也没有实现事件或声称止崩。默认关闭的 `x9_surf_event_diag=1` 仅记录 selector 36–41、45 的前 64 次全局调用：进程名、selector、是否存在 async wake port、async reference 数量、scalar 输入/输出容量和 struct 输入/输出大小；不记录或解引用 reference、端口、scalar 值或用户指针。计数有并发原子保护，跨进程共享上限，可能被其他进程耗尽；不能推断缺失调用或返回值，更不能从调用顺序证明异常因果。没有该参数或其值不是 1 时不产生新增日志；原有默认分支语义不变。
+未能证明 consumer 对 nil 的处理或完整异步通知及跨进程 event 合同，因此没有更改 selector 返回值，也没有实现事件或声称止崩。默认关闭的 `x9_surf_event_diag=1` 仅记录 selector 36–41、45 的至多 64 条调用：AegirPoster 的前 48 次、其余调用方合计前 16 次：进程名、selector、是否存在 async wake port、async reference 数量、scalar 输入/输出容量和 struct 输入/输出大小；不记录或解引用 reference、端口、scalar 值或用户指针。计数有并发原子保护，其余进程不消耗 AegirPoster 的专用额度；不能推断缺失调用或返回值，更不能从调用顺序证明异常因果。没有该参数或其值不是 1 时不产生新增日志；原有默认分支语义不变。
 
 本地 XNU `IOUserClient.h` 定义独立的 `asyncWakePort`、`asyncReference`、`asyncReferenceCount`；`IOUserClient.cpp` 的异步入口将 wake port 和 reference 填入参数。它们不是证明 IOSurface 事件消息内容或生命周期的证据。现有 framebuffer `setAsyncReference64`/`sendAsyncResult64WithOptions` 仅示例 IOKit 发送机制，不能据此推导 IOSurface 的 payload、引用保活和 teardown。NativeBridge 的 `NBSharedEvent` 使用自有进程内实现，跨进程 `newSharedEventHandle` 返回 nil，也不能替代原生 SharedEvent 合同。
 
