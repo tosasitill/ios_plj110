@@ -22,4 +22,4 @@ x9/out/call-ios-bridge/tools/md-dis .local/x9/modem/parts/modem_a.img 0x91408eec
 x9/out/call-ios-bridge/tools/md-dis .local/x9/modem/parts/modem_a.img 0x91408f70 0x91408fba
 ```
 
-以上命令 exit 0；现有 decoder 的 VA→文件偏移为 `VA - 0x90000000 + 512`。本轮反汇编输出保存在工作树 gitignored `x9/out/x9-sms-storage-followup/l5usms-result.asm`。未修改驱动、未构建、无 CI 或设备操作；未进行运行时或持久化验收。
+以上命令 exit 0；现有 decoder 的 VA→文件偏移为 `VA - 0x90000000 + 512`。本轮反汇编输出保存在主 checkout 的 gitignored `x9/out/x9-sms-storage-followup/l5usms-result.asm`。未修改驱动、未构建、无 CI 或设备操作；未进行运行时或持久化验收。

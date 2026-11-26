@@ -56,3 +56,7 @@ sed -n '8448,8517p;8675,8820p' /tmp/iosurface.dis
 ```
 
 上述命令 exit 0；没有修改驱动、插件、root 或设备，没有构建新候选。下一步需取得实际异常名称/抛出点或已证明运行路径，及对 event 的真实所有权、Mach rights、并发、销毁与 callback payload 合同；此前不适合声称存在小范围可安全修复。
+
+### 430 日志的区分证据
+
+首次 AegirPoster SIGABRT 之前，实际 Metal factory 返回 `X9GeneralMetalDevice`，M2V prime 成功，而且启动日志显示 CSG slot steal 已开启；不能沿用旧候选“device 为 nil”的归因。相同日志内 MapsSpotlightInd 的终止例程相似，但较深的帧经过 `objc_exception_throw`、CoreFoundation/PlugInKit，而 AegirPoster 经 libdispatch/FrontBoardServices。仅凭共同终止帧不能将两者归为同一异常。两份首次栈以 430 的 slide 和现有原件索引经 `atos -arch arm64e -o <dylib> -l <unslid-base> <unslid-pc>` 离线符号化，节选存于主 checkout `x9/out/shared-event-log430-review-20261126/stack.txt`；不是异常抛出点、前置 selector 或消息协议的证据。

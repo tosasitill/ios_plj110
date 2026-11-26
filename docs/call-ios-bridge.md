@@ -1,8 +1,12 @@
 # 通话 iOS 桥：已核实子集与启用边界
 
-## 目前交付什么
+## 当前源码边界（2026-11-26）
 
-这是**信令桥基础，不是已可使用的通话服务**。现有 WMS/IMSA 短信实现保持独立。
+当前源码发布一次 VOICE09，受限 VOICE20 和 CallList46 已接入，仍要求真实 SIM/承载状态和 owner fencing。MD 来电许可不等于接听；typed dial/answer 与同动作的 record、Client、UUID、native epoch 关联，以及双向音频均未验收。见 [typed action 合同](call-typed-action-contract-20261126.md) 与 [baseband README](../x9/baseband/README.md)。现有 WMS/IMSA 短信实现保持独立。
+
+## 历史交付状态（截至 2026-11-20）
+
+下表及当时的文字是历史记录；其中“VOICE09 未公布、未发布 CallList、无 VOICE20 生产准入”已不是当前内核状态。
 
 | 部分 | 实现 / 验证 |
 | --- | --- |

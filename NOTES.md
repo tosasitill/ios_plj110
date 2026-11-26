@@ -255,10 +255,10 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 
 **未完成**
 
-- `0x210000` 现归于 `l5usms_get_l5_res_from_at` 通用 AT ERROR，但缺独立反汇编确认；不能解释为空收件箱。
+- 已独立反汇编确认 CMGL AT fail 路径调用 `l5usms_get_l5_res_from_at`，input=0 时可产出 `0x210000`；还未证明历史 `0608` 实际经过该路径，不能解释为空收件箱。见 [SMS AT 结果复核](docs/baseband/sms-at-result-20261126.md)。
 - query-all/filter、混合异常 status、CDMA type4、durable SIM storage 与 Messages UI 持久化未验收。
 
-**下一步（离线）**：反汇编 `md-symbols.json` 中 bounded `l5usms_get_l5_res_from_at`（2436915934..2436916060）及 caller，确认/否决 0x210000 归因。
+**下一步（离线）**：追 CMGL fail 写入的结果槽到 `0608` packer，并区分真实输入零与其他同码来源；不能借静态转换确认历史运行态。
 
 ### 6.5 GPU / 高刷：先定义证据矩阵，再做单变量 A/B
 
@@ -392,7 +392,7 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 1. 保持文档与源码标签一致；任何新候选使用唯一名并记录 source HEAD。
 2. **GPU/灭屏热（最高运行时优先）**：按 §6.13 在 SweetSurface 实现/安全处理 IOSurfaceSharedEvent 族（sel 36-41/45），先止 AegirPoster abort 循环；host 合同验证后申请设备复证。
 3. 蓝牙：完成 Settings/scan 静态合同；r2 诊断候选只有重新授权后才上机。
-4. 传感器：闭合 PS 极性与时间域；短信：独立确认 `0x210000`。
+4. 传感器：闭合 PS 极性与时间域；短信：追 CMGL fail 结果到 `0608` packer。
 5. 通话：typed-provider identity/action 契约；不要先补音频 hook。
 6. 唤醒：按 §6.7 先 raise-to-wake（SCP pickup type75 one-shot 准入），tap-to-wake 待 iOS 接受静态证明。
 7. 存储/USB：只读 IOMedia A0 与 AppSync session probe 分开推进。
@@ -418,3 +418,12 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - `4c555890` + `91c4e8dc` 合并至 `07dd9916`。新增默认关闭的 `x9_surf_event_diag=1`；启用后至多记录 64 条 SharedEvent 调用（AegirPoster 48 条专用额度、其余 16 条），只记录进程名、selector、端口存在与参数形状，不打印端口值或引用，不改变返回/同步行为。原生调用方 nil 处理、通知 payload/生命周期及异常原因未闭合。
 - `PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --boot-arg x9_surf_event_diag=1 --name x9-shared-event-diag-20261126-r1`：exit 0，104/104 overlay（3 prebuilt），`boot.img` 15,781,888 B、`kernel.development.sweet` 33,067,056 B，产物与 `build.log` 位于 `x9/out/x9-shared-event-diag-20261126-r1/`。allowlist 280 不变；无需 mailbox。未刷机、未重启、未写 root/mailbox、无 CI、未 push。
 - 该候选也包含 §6.15，不能当作相对 430 的严格单变量热 A/B。若另行授权上机，从 `SWEET SURF EVENT` 收集 AegirPoster 的 selector/async 形状，并与同一日志的 abort 首发和崩溃记录对齐；仅调用顺序不能证明异常因果。还需追异常名称和抛出点；本轮没有 stop-crash/runtime 验收。
+
+### 6.17 2026-11-26 SharedEvent / 通话 / 短信并行续查
+
+基线 `15f75087`；整合源码 `d9f48a25`。仅离线；无新完整候选、CI、设备操作或 push，§6.16 诊断镜像仍是此前构建，不含本轮通话日志修正。
+
+- SharedEvent：`d04e6f55`（复核子分支 `746921d1`）补齐 native Metal notify 的非零返回抛异常链；不能直接拒绝 selector 39。原生 getter 的共享地址读取只是另一静态边界，不是 430 SIGABRT 根因。Metal 窄反汇编命令见合同文档；430 两进程首栈 `atos` 复核 exit 0，首次 AegirPoster 见非 nil Metal device，MapsSpotlightInd 与其深层栈不同。下一决定点是实际异常名/抛出点及运行 selector 序列；未改 SharedEvent 驱动语义。
+- 通话：`caa75676` 更正 VOICE09 与 MT 观察日志，未改变准入、队列、动作或音频。新增 [typed action 合同](docs/call-typed-action-contract-20261126.md)，下一步闭合同一动作捕获的 record/Client/CallInfo 与更新/退休 barrier。合并后 `python3 -I x9/tools/tests/test_call_observation_labels.py` 2/2、`python3 -I x9/baseband/test_call_owner_boundary.py` 8/8，均 exit 0。
+- 短信：`2636ac42` 的三个限定 `md-dis` 切片 exit 0；CMGL fail 转换证据见 §6.4。未改存储处理；`python3 -I x9/baseband/test_sms_pdu_class.py` 2/2、exit 0。未验证真实收发、存储或 UI。
+- Host 单对象：`PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/out/x9-call-observation-object-20261126/compile.py` 的 `Builder.compile_one` 成功，`X9Baseband.cpp.o` 2,224,768 B，34 warnings；外层 zsh 在编译后因保留变量 `status` 报错 exit 1，不是编译错误。原始输出与产物保留在上述目录；未重编或上机。
