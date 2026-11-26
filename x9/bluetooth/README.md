@@ -186,13 +186,13 @@ python3 -I x9/bluetooth/candidate.py --name <全新简单名字> \
 ### 首次启动由内核安装（推荐，替代 Android 侧定点写）
 
 `--boot-arg x9_bt_root=1 --apple-originals x9/out/bluetooth-native/apple-originals20h392-stage`
-让 candidate 先建用户态/root payload，再由 `root_header.py` 把七个文件（约1.03 MB）嵌入内核
+让 candidate 先建用户态/root payload，再由 `root_header.py` 把全部文件（约1.04 MB）嵌入内核
 （gitignored `x9/kernel/generated/x9_bt_root.inc`），然后编译内核和 boot.img，并额外生成
 `boot-rollback/boot.img`（同一内核，`x9_bt_root=2`）。PID1 在原 launchd 读 cache 之前
 （`x9_bluetooth_root.inc`，与 torch/camera/HAL 安装器同一位置）：
 
 1. 核对 `/usr/sbin/bluetoothd`、`/usr/sbin/BlueTool` 与构建原件一致，嵌入数据 SHA 正确；
-2. 先把七个目标全部分类（已安装 / 待装 / 未知），任何未知内容即整体不写；
+2. 先把全部目标分类（已安装 / 待装 / 未知），任何未知内容即整体不写；
 3. 四个新文件：temp→fsync→校验→`link` 发布（不覆盖已存在目标）；
 4. 两 jobs 与 launchd cache：当前必须是 Apple 原件，先硬链接保留 `<path>.x9-orig`，
    新文件校验后 `rename` 原子替换；cache 最后替换，中断后 launchd 总拿到完整新或旧 cache；

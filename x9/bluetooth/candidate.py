@@ -3,7 +3,7 @@
 
 Native userland/jobs -> offline root payload -> (optional) kernel-embedded
 root payload -> full overlay kernel -> ONE boot.img. With boot-arg
-x9_bt_root=1 the kernel's PID1 installs the seven root files itself before
+x9_bt_root=1 the kernel's PID1 installs the root payload files itself before
 launchd starts (x9_bluetooth_root.inc); a second boot-rollback/boot.img with
 x9_bt_root=2 restores the Apple originals. Completion is published only after every normal build command exits
 zero. There is no new-artifact hash, unpack, disassembly or test-suite pass.
@@ -35,6 +35,7 @@ LIMITATIONS = [
     'sleep/resume is closed-transport-only; no active-link idle sleep, wake-enhance or system-suspend claim',
     'SSPM/profile/ownership, UART PIO/escape throughput and Android vendor completions remain hardware-unverified on XNU',
     '20H392 native injection, initialization, scan, pairing, BLE, A2DP, HFP and SCO require actual iOS validation',
+    'x9_bt_settings_diag defaults off; =1 injects only Preferences after exact root-payload hash verification; rollback disables it',
     'MTK SCO framing is implemented; native voice-route/WBS vendor equivalence still requires real MT6653 evidence',
     'boot image alone does not install the H4 bridge or independent/cached Program-only launch job overrides',
     'keep bootloaders/recovery/modem/persist/partition backups intact; device boot is performed by the user',
@@ -159,6 +160,9 @@ def build(a):
     root_args = [t for t in opts['boot_args'] if t.partition('=')[0] == 'x9_bt_root']
     if root_args not in ([], ['x9_bt_root=1']):
         raise ValueError('only x9_bt_root=1 selects the kernel root installer (=2 is the generated rollback image)')
+    diagnostic_args = [t for t in opts['boot_args'] if t.partition('=')[0] == 'x9_bt_settings_diag']
+    if diagnostic_args not in ([], ['x9_bt_settings_diag=0'], ['x9_bt_settings_diag=1']):
+        raise ValueError('x9_bt_settings_diag accepts only one explicit 0 or 1')
     embed_root = bool(root_args)
     if embed_root != bool(a.apple_originals):
         raise ValueError('x9_bt_root=1 and --apple-originals must be given together')
@@ -251,7 +255,8 @@ def build(a):
                 # boots before any root payload existed.
                 rollback = dict(opts, boot_args=['x9_bt_root=2' if t == 'x9_bt_root=1' else t
                                                  for t in opts['boot_args']
-                                                 if t not in ('x9_bt_init=1', 'x9_bt_fc=1')])
+                                                 if t not in ('x9_bt_init=1', 'x9_bt_fc=1',
+                                                              'x9_bt_settings_diag=1')])
                 rollback_snapshot = inputs / 'boot-rollback.json'
                 write_json(rollback_snapshot, rollback)
                 run([sys.executable, '-I', X9 / 'build/build.py', 'boot', '--config', config_snapshot,
@@ -288,7 +293,7 @@ def build(a):
                                           'root_payload': 0, 'boot_image': 0},
                 'limitations': LIMITATIONS + ([
                     'x9_bt_root=1: PID1 installs the root files on first boot; the log line X9 BT ROOT is the only receipt',
-                    'boot-rollback/boot.img (x9_bt_root=2) restores the .x9-orig Apple files and removes the four own files',
+                    'boot-rollback/boot.img (x9_bt_root=2) restores the .x9-orig Apple files and removes the embedded own files',
                 ] if embed_root else []),
             })
             complete = True

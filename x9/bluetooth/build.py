@@ -102,6 +102,12 @@ def main():
                     '-framework', 'CoreFoundation', '-framework', 'IOKit',
                     '-o', str(bridge)], check=True)
     subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(bridge)], check=True)
+    diagnostic = a.out / 'X9SettingsBTDiag.dylib'
+    subprocess.run([str(clang), '-target', 'arm64-apple-ios16.0', '-isysroot', str(sdk),
+                    '-Os', '-Wall', '-Wextra', '-Werror', '-dynamiclib',
+                    '-install_name', '/usr/lib/X9SettingsBTDiag.dylib',
+                    str(HERE / 'X9SettingsBTDiag.c'), '-o', str(diagnostic)], check=True)
+    subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(diagnostic)], check=True)
     for name in ('X9BluetoothLaunch', 'X9BlueTool'):
         target = a.out / name
         subprocess.run([str(clang), '-target', 'arm64-apple-ios16.0', '-isysroot', str(sdk),
@@ -116,6 +122,14 @@ def main():
     (a.out / 'build.json').write_text(json.dumps({
         'schema': 1, 'client': 'btctl', 'bridge': 'X9H4Transport.dylib',
         'launch_gate': 'X9BluetoothLaunch', 'bluetool_adapter': 'X9BlueTool',
+        'settings_diagnostic': 'X9SettingsBTDiag.dylib', 'settings_diagnostic_default': False,
+        'settings_diagnostic_contract': {
+            'preferences_uuid': 'B2ED1830-FB2B-3702-B254-17872B2E0A97',
+            'manager_uuid': '54FB08F7-FE66-344D-B7CE-31838CDEE572',
+            'mobile_bluetooth_uuid': 'FDE5B98E-2257-35C8-B323-92B824492207',
+            'hook_count': 7, 'boot_arg': 'x9_bt_settings_diag=1',
+            'log_interface': 'kern.x9_bt_note', 'manager_state_modified': False,
+        },
         'launchd': launchd,
         'ios_build': '20H392',
         'bluetoothd_uuid': 'AA9424E8-0648-34E2-B3CF-E6C793B9D471',
@@ -169,7 +183,7 @@ def main():
                     raise SystemExit(f'Bluetooth object compile failed: {result}')
         finally:
             builder.logfile.close()
-    print(f'BT client, 20H392 H4/vendor adapter, launch gate and BlueTool built: {a.out}; not installed or hardware-tested')
+    print(f'BT client, 20H392 H4/vendor adapter, launch gate, BlueTool and opt-in Settings diagnostic built: {a.out}; not installed or hardware-tested')
 
 
 if __name__ == '__main__':

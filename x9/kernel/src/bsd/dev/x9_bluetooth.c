@@ -439,16 +439,12 @@ static int calibration(struct x9_bt_session_board *board)
 {
     static const char *const names[]={"x9_wifi_xo0","x9_wifi_xo1","x9_wifi_xo2",
         "x9_wifi_xo3","x9_wifi_xo4","x9_wifi_xo5","x9_wifi_xo6"};
-    uint32_t flow;
+    uint32_t flow = sweet_x9_arg("x9_bt_fc", 0);
     /* uart_launcher -f and HCIUARTSETBAUD supply the production selection;
      * its CLI default is not proof of this device's effective config. This
      * value is the Android UART_FC enum, not the WMT flow-control byte.
      * Never silently choose NONE, or start power/download for an AP flow
      * mode whose IRQ/escape implementation is not available yet. */
-    if(!PE_parse_boot_argn("x9_bt_fc",&flow,sizeof(flow))) {
-        printf("X9 BT: effective Android UART flow-control selection required\n");
-        return ENOENT;
-    }
     if(flow>3) return EINVAL;
     if(flow!=0 && flow!=1) return ENOTSUP; /* Linux=2/HW=3 still lack backend. */
     uint8_t record[28];
@@ -978,8 +974,8 @@ void x9_bluetooth_start(void)
     lck_mtx_lock(&bt_lock); bs.state=X9_BT_PASSIVE; bs.firmware_bytes=X9_BT_FW_BYTES;
     bs.firmware_sections=X9_BT_FW_SECTIONS; lck_mtx_unlock(&bt_lock);
     printf("X9 BT: complete-session backend; old x9_bt_probe/raw paths removed, firmware-ready=0\n");
-    /* Stock boot-device stays passive. Only an explicit complete candidate
-     * enables initialization; runtime ACK/profile gates remain mandatory. */
+    /* X9 defaults enable initialization; x9_bt_init=0 keeps the radio passive.
+     * Runtime ACK/profile gates remain mandatory. */
     if(sweet_x9_arg("x9_bt_init",0)!=1) return;
     thread_t thread;
     if(kernel_thread_start(worker,NULL,&thread)==KERN_SUCCESS) thread_deallocate(thread);
