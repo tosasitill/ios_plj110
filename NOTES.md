@@ -498,3 +498,9 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 基线 `547b4b5d`，修复 `bda953ac`。counter 仍单调更新并唤醒真实 waiter，但 selector 37 仅在有 pending 通知首次跨过阈值时安排 worker。没有通知、尚未达标或只是继续推进已达标 counter 时不安排额外 worker，也不把现有的 Mach 队列满延时重试挤成立即尝试。新订阅若已达标仍立即调度。
 - Xcode 15 `DEVELOPER_DIR`/SDKROOT 下 `clang++ -std=c++17 -O1 -Wall -Wextra -pthread x9/tools/tests/shared_event_pending_host.cpp -o x9/out/x9-event-ready-schedule-20261126/pending`，编译与执行均 exit 0，含无订阅推进、未达阈值、跨阈值和不覆盖已安排重试。新回归在旧实现 exit 134（预期断言），不是设备崩溃。 `PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/out/x9-event-ready-schedule-20261126/compile.py` exit 0，`SweetSurface.o` 560,016 B/12 warnings。
 - 本轮 6.1terra 三条续查均因额度未产出；通话与短信不新增完成证据。无新整包/CI/设备或 push。r5 不含这次调度改动；不影响用现有 r5 收集实验接线与 selector42 回退的首份设备证据。实际止崩、typed 通话及 SMS 全流程验收仍缺。
+
+### 6.28 2026-11-26 WMS storage 收执退休边界
+
+- 基线 `879c95c2`，修复 `96a53adb`。收执入队失败时若已观察到同 slot 的另一个非零 WMS QMUX allocation generation，退休旧终态并清理缓存，不再用旧身份重试；零身份不等于替换，仍保留收执。真正入队仍由 bridge 锁内原始身份校验；客户端本地失效也清除长度、内容及 pending。上述退休不取消 MD token 或解除 TAG hold。没有声称在设备上观察到该竞争。
+- Xcode 15 `DEVELOPER_DIR` + `SDKROOT=$(xcrun --sdk macosx --show-sdk-path)` 下，`python3 -I x9/baseband/test_sms_storage_<unit>.py` 的 terminal/deadline/receipt/poll_hold 4/4 exit 0，合成测试覆盖 replacement、暂时零身份、原 token/hold 不变。本轮 baseline fixture 编译成功，执行在 client-loss 未清长度断言 exit 4（外层 unittest exit 1）。`PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/out/x9-sms-receipt-generation-20261126/compile.py` exit 0，`X9Baseband.cpp.o` 2,233,424 B/34 warnings，同目录保存日志。
+- 本轮未增加通话或 SharedEvent 的设备证据。无整包、CI、刷机、重启、root/mailbox 或推送；r5 不含 §6.27–6.28 的变更。目标仍要求真实 SharedEvent/AegirPoster、原生拨接与双向音频、短信收发及持久化验收。
