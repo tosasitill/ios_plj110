@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause
-// Unwired. All advances of an attached counter MUST go through this object.
+// All advances of an attached counter MUST go through this object.
 // A caller must retain this object throughout each method, including drainOne.
 class SweetSharedEventPending : public OSObject {
 	OSDeclareDefaultStructors(SweetSharedEventPending);
@@ -84,8 +84,19 @@ bool
 SweetSharedEventPending::advance(uint64_t next)
 {
 	IOLockLock(fLock);
+	const uint64_t previous = fCounter->value();
 	const bool changed = !fClosed && fCounter->advance(next);
-	if (changed) scheduleLocked(false);
+	if (changed) {
+		// Already-ready entries were scheduled by subscribe, a previous
+		// advance, or the worker's delayed retry. Leave that backoff intact.
+		for (const auto &entry : fEntries) {
+			if (entry.listener != NULL && !entry.canceled &&
+			    previous < entry.target && entry.target <= next) {
+				scheduleLocked(false);
+				break;
+			}
+		}
+	}
 	IOLockUnlock(fLock);
 	return changed;
 }
