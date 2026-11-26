@@ -1000,8 +1000,8 @@ static void x9c_dial_poll(uint8_t *frame){
   if(rc==1){
    j.token=0;j.cnf=true;
    const bool parsed=x9cw_dial_join_cnf(&j.join,frame,n);
-   printf("X9 CALL: VOICE20 txn %u owned CNF parsed=%u failed=%u bytes=%u; awaiting MO join if valid\n",
-          j.transaction,parsed?1:0,j.join.failed,n);
+   printf("X9 CALL: VOICE20 txn %u owned CNF parsed=%u failed=%u result=0x%x bytes=%u; awaiting MO join if valid\n",
+          j.transaction,parsed?1:0,j.join.failed,j.join.cnf_result,n);
    if(!parsed){j.held=true;x9c_error(j,X9Q_INTERNAL);}
    bzero(frame,X9_MIPC_FRAME_MAX);
   }else if(rc<0){
@@ -1030,7 +1030,8 @@ static void x9c_dial_poll(uint8_t *frame){
  unsigned id;int ready=x9cw_dial_join_id(&j.join,&x9c_outbound,&id);
  if(!ready)return;
  if(ready<0){printf("X9 CALL: VOICE20 txn %u MO join rejected\n",j.transaction);j.held=true;x9c_error(j,X9Q_INTERNAL);return;}
- printf("X9 CALL: VOICE20 txn %u owned CNF and MO epoch joined; not connected/audio evidence\n",j.transaction);
+ printf("X9 CALL: VOICE20 txn %u owned CNF and MO epoch joined id=%u epoch=%llu; not connected/audio evidence\n",
+        j.transaction,id,(unsigned long long)x9c_outbound.epoch);
  if(!j.answered&&x9c_live(j)){
   uint8_t response[18];unsigned size=x9cw_dial_join_response(&j.join,&x9c_outbound,j.req,j.len,response,sizeof(response));
   if(!size){j.held=true;x9c_error(j,X9Q_INTERNAL);return;}

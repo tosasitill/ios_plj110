@@ -99,16 +99,31 @@ int x9_md_mipc_call_incoming_snapshot(struct x9cw_inbound_state *out){
 static int x9mc_id(unsigned id){return id==0x8901||id==0x4901||id==0x4902||id==0x4904;}
 static void x9mc_rx(const uint8_t *p,unsigned n,unsigned id,unsigned tx){
  if(!x9mc_id(id)||x9_mc_poisoned)return;
- if(!x9cw_frame(p,n,id)){x9_mc_poisoned=1;return;}
+ if(!x9cw_frame(p,n,id)){
+  printf("X9 CALL: rx frame invalid id=0x%04x tx=%u bytes=%u; poisoned\n",id,tx,n);
+  x9_mc_poisoned=1;return;
+ }
  if(id==0x4901){
   struct x9cw_progress c;
-  if(!x9cw_progress(p,n,&c)){x9_mc_outbound.blocked=1;x9_mc_poisoned=1;return;}
+  if(!x9cw_progress(p,n,&c)){
+   printf("X9 CALL: 4901 parse failed tx=%u mask=0x%02x bytes=%u; poisoned\n",tx,(unsigned)p[8],n);
+   x9_mc_outbound.blocked=1;x9_mc_poisoned=1;return;
+  }
+  int rc;
   if(c.mask==2&&c.direction==1){
    /* MT is not the next MO epoch; it must never complete an owned DIAL.
     * Its real identity must already exist from the complete incoming CMD. */
    x9_mc_outbound.count_known=0;x9_mc_outbound.blocked=1;
-   (void)x9cw_inbound_apply(&x9_mc_inbound,&c);
-  }else (void)x9cw_outbound_apply(&x9_mc_outbound,&c);
+   rc=x9cw_inbound_apply(&x9_mc_inbound,&c);
+  }else rc=x9cw_outbound_apply(&x9_mc_outbound,&c);
+  static unsigned progress_logged;
+  if(progress_logged<32){
+   progress_logged++;
+   /* Metadata only; never log phone numbers, PAU strings or binary detail. */
+   printf("X9 CALL: 4901 mask=0x%x id=%u dir=%u mode=%u ev=%u cause=%u/%u apply=%d ep=%llu blk=%u\n",
+          (unsigned)c.mask,c.id,c.direction,c.mode,c.event,c.has_cause,c.cause,rc,
+          (unsigned long long)x9_mc_outbound.epoch,x9_mc_outbound.blocked);
+  }
  }
  if(id==0x4902){
   struct x9cw_handover c;int rc=x9cw_handover(p,n,&c);

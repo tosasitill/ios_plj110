@@ -674,14 +674,21 @@ static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
  }
  if(!known||result){j.hold=(j.op==X9M_SEND&&!known)||(j.op==X9M_TAG&&j.step!=0);
   static unsigned diag_failures;
-  if(stored&&diag_failures<8){
+  if((stored||j.op==X9M_SEND)&&diag_failures<16){
    diag_failures++;
-   printf("X9 SMS DIAG: 0608 SIM%u op %u known %u result 0x%x id 0x%04x tx %u tlvs",
-    j.sim+1,j.op,known?1:0,result,known?(unsigned)x9q_u16(p+10):0u,known?(unsigned)x9q_u16(p+12):0u);
-   for(unsigned at=16;known&&at<n;){
-    unsigned k=x9q_u16(p+at+2);
-    printf(" %x/%u",(unsigned)x9q_u16(p+at)&0x7fffu,k);
-    if(k>n-at-4)break;
+   bool wire=x9w_wire(p,n);
+   printf("X9 SMS DIAG: %s SIM%u op %u known %u result 0x%x id 0x%04x tx %u mask 0x%02x bytes %u tlvs",
+    stored?"0608":"0606",j.sim+1,j.op,known?1:0,result,
+    n>=16?(unsigned)x9q_u16(p+10):0u,n>=16?(unsigned)x9q_u16(p+12):0u,
+    n>=16?(unsigned)p[8]:0u,n);
+   /* Print short non-payload scalar TLV values (<0x8000, <=4B) only; never log PDU/address payloads. */
+   for(unsigned at=16;wire&&at+4<=n;){
+    unsigned raw_tag=x9q_u16(p+at),tag=raw_tag&0x7fffu,k=x9q_u16(p+at+2);
+    if(k>n-at-4){printf(" %x/%u!",tag,k);break;}
+    if(raw_tag<0x8000u&&k>0&&k<=4){
+     unsigned v=0;for(unsigned i=0;i<k;i++)v|=(unsigned)p[at+4+i]<<(8u*i);
+     printf(" %x/%u=0x%x",tag,k,v);
+    }else printf(" %x/%u",tag,k);
     at+=k?((k+11)&~7u):16;
    }
    printf("\n");

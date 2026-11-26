@@ -426,13 +426,13 @@ static inline int x9cw_end_matches(const struct x9cw_end_target *a,
  * next observed MO epoch. Capture's0902 has no ID. Caller retains its real
  * transport token independently through timeout/client loss/late CNF.
  * No fallback to ID1, no casting an out-of-range native ID, no retry. */
-struct x9cw_dial_join {uint64_t epoch_floor,token;unsigned started,confirmed,failed;};
+struct x9cw_dial_join {uint64_t epoch_floor,token;unsigned started,confirmed,failed;uint32_t cnf_result;};
 static inline int x9cw_dial_join_begin(struct x9cw_dial_join *j,
                                       const struct x9cw_outbound_state *s,
                                       const struct x9cw_dial_profile *profile){
  if(!j||!s||j->started||!x9cw_dial_profile_valid(profile)||s->blocked||
     !s->count_known||s->native_count||(s->seen&&!s->ended)||s->epoch==UINT64_MAX)return 0;
- j->epoch_floor=s->epoch;j->token=0;j->started=1;j->confirmed=j->failed=0;return 1;
+ j->epoch_floor=s->epoch;j->token=0;j->started=1;j->confirmed=j->failed=0;j->cnf_result=0;return 1;
 }
 /* Existing MD owner allocates token=txid in1..65534; bind only its accepted
  * token, not a transaction supplied by iOS or parsed from an indication. */
@@ -445,7 +445,7 @@ static inline int x9cw_dial_join_cnf(struct x9cw_dial_join *j,const uint8_t *p,u
  if(!j||!j->started||!j->token||j->confirmed||j->failed||!p||n<16||
     x9cw_u16(p+10)!=0x902||x9cw_u16(p+12)!=j->token)return 0;
  if(!x9cw_dial_cnf(p,n,&result)){j->failed=1;return 0;}
- j->confirmed=1;j->failed=result!=0;return 1;
+ j->cnf_result=result;j->confirmed=1;j->failed=result!=0;return 1;
 }
 static inline int x9cw_dial_join_id(const struct x9cw_dial_join *j,
                                    const struct x9cw_outbound_state *s,unsigned *id){
