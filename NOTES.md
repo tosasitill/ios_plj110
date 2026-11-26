@@ -593,3 +593,9 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 基线 `32bd65144f0b964d0e41762d2c9565bab2246782`，仅检查现有源码与 §6.38/6.39 证据；无设备操作、构建或 push。`0x21014b` 已知可由 CMGS fail helper 的输入 `0x14b` 形成，输入含义和 433 实际调用未证明，不能据此更改 SIM1 路由或错误码。
 - 静态观察：`X9Messages.inc` 的 `8603` 接受 TLV `8100` 且验证 SMSC 偏移及 TP-MTI=2；仅单 SIM mask，发送给同 SIM 的 WMS client，要求 MT events、routes、class 4 和 status_reports 均启用。队列未接纳则保留 PDU 重试；接纳后保留 token 等待 WMS37 ACK；`x9_mipc_messages.inc` 的 publication 和 reply 重新校验原 token/mask/MTI。重试从原 PDU 的 TP-MTI 重新计算，状态报告仍走 class 4。上述仅源码路径，不是实际状态报告或投递验收。
 - 433 无可关联 delivery report；已有 Android 快照无短信正文或状态报告 wire。尚缺真实 8603 / Android 同事务的非敏感 shape、route/subscription、WMS ACK 及最终对端结果，无法证明该路由与设备实际合同一致；不合成回执、不改行为。下一次授权采样应优先核对这些边界及 SIM1 modem 实际拒绝上下文。
+
+### 6.43 2026-11-26 Terra 后续：蓝牙回滚与通话复核
+
+- 基线 `32bd6514`。蓝牙候选构建器 `ee1d1453` 先前从回滚 argv 删除 `x9_bt_init=1 x9_bt_fc=1`，但设备板级默认两者均为 1；删除不等于关。现在原位改成 `x9_bt_init=0 x9_bt_fc=0`，若有诊断选择项则改成 0，保留其它 token 和长度。 `python3 -I x9/bluetooth/test_settings_diag.py` 5/5 exit 0，含有/无诊断的回滚配置。此项是主机构建器修复，不会改写已存在的 r1/r2 或旧回滚镜像。
+- 6.1 Terra 独立复核 433：仍仅证 VOICE20→0901 TX；已有 Android 记录明确 0902 成功结果不含 call ID，需同一事务后续的完整 4901 作为 ID/epoch 证据。无新证据支持改变通话状态机或音频；r2 的实机事务诊断是下一道验证。
+- 当前无新整包或 CI，无设备操作、root/mailbox 或 push。最后一次已验证设备状态仍为 Android；未验收蓝牙、通话、短信。
