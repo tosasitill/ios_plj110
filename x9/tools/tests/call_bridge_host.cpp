@@ -1165,6 +1165,20 @@ static void register_malformed_duplicate(){
  x9c_cmd_init.confirmed=true;x9c_init[1].stage=X9_CI_DONE;x9c_init[1].registered=1;
  x9c_poll();assert(qmi_replies==1&&!x9c_clients[0].registered);
 }
+static void register_error_owner_retained(){
+ bind_voice();register_begin();call_batch_accept=false;
+ uint8_t malformed[]={0,90,0,3,0,0,0};
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,malformed,sizeof(malformed));
+ assert(!qmi_replies&&x9c_reg_wait[0][0].answered);
+ uint8_t next[]={0,91,0,3,0,4,0,0x14,1,0,1};
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,next,sizeof(next));
+ assert(x9c_reg_wait[0][1].used&&x9c_reg_wait[0][0].transaction==90);
+ next[1]=92;x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,next,sizeof(next));
+ assert(qmi_replies==1&&qmi_error==X9Q_BUSY&&x9c_reg_wait[0][0].transaction==90);
+ qmi_replies=0;x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,malformed,sizeof(malformed));
+ assert(!qmi_replies);call_batch_accept=true;x9c_response_poll();
+ assert(qmi_replies==1&&qmi_error==X9Q_ARG);
+}
 static void register_sequence(){
  bind_voice();x9c_poll();x9mi_tick();assert(!writes&&!x9c_cmd_init.token); //44 alone sends nothing
  register_begin();x9c_poll();uint64_t token=x9c_cmd_init.token;assert(token&&!qmi_replies);
@@ -1498,7 +1512,7 @@ int main(int argc,char **argv){
   {"ios_answer_receipt",ios_answer_receipt},{"ios_end_malformed_duplicate",ios_end_malformed_duplicate},{"ios_answer_malformed_duplicate",ios_answer_malformed_duplicate},
   {"ios_end_duplicate",ios_end_duplicate},{"ios_end_changed_duplicate",ios_end_changed_duplicate},
   {"incoming_states",incoming_states},{"incoming_state_invalid",incoming_state_invalid},{"incoming_observer",incoming_observer},
-  {"register_malformed_duplicate",register_malformed_duplicate},{"register_codec",register_codec},{"register_transition",register_transition},{"register_sequence",register_sequence},
+  {"register_error_owner_retained",register_error_owner_retained},{"register_malformed_duplicate",register_malformed_duplicate},{"register_codec",register_codec},{"register_transition",register_transition},{"register_sequence",register_sequence},
   {"register_timeout",register_timeout},{"register_deleted",register_deleted},{"register_unsupported",register_unsupported},
   {"handover_codec",handover_codec},{"handover_concurrent_bootstrap",handover_concurrent_bootstrap},
   {"handover_subscription_fence",handover_subscription_fence},{"handover_pending_timeout",handover_pending_timeout},

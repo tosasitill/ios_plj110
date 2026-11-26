@@ -826,6 +826,7 @@ public:
 OSDefineMetaClassAndStructors(IOSurfaceRootUserClient, IOUserClient);
 
 #include "SweetSurfaceEventListeners.inc"
+#include "SweetSharedEventPending.inc"
 #include "SweetSurfaceEventCapability.inc"
 
 static uint64_t sweet_surf_logged;      /* selectors / traps already logged (< 64) */
