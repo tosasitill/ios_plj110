@@ -1586,7 +1586,7 @@ static bool bb_x9_call_result(uint32_t dst_port,uint32_t src_node,uint64_t gener
      cbq_rd16(sdu+5)!=size-7||sdu[7]!=2||cbq_rd16(sdu+8)!=4||cbq_rd16(sdu+10)>1||
      (!!cbq_rd16(sdu+10))!=(!!cbq_rd16(sdu+12)))return false;
   const unsigned id=cbq_rd16(sdu+3);
-  if(id!=3&&id!=0x20&&id!=0x21&&id!=0x22&&id!=0x44)return false;
+  if(id!=3&&id!=0x20&&id!=0x21&&id!=0x22&&id!=0x31&&id!=0x44)return false;
   if(size==18&&(id!=0x20||cbq_rd16(sdu+10)||sdu[14]!=0x10||cbq_rd16(sdu+15)!=1||!sdu[17]))return false;
   if(size==14&&id==0x20&&!cbq_rd16(sdu+10))return false; // success requires the real call ID
   bool admitted=false;IOLockLock(bb_lock);

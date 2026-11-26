@@ -190,7 +190,7 @@ static void x9c_response_poll(){
 }
 struct x9c_end_job {
  bool used,answered;unsigned slot,sim,stage,id,direction;
- uint16_t transaction;
+ uint16_t transaction,operation;
  uint64_t generation,bridge_generation,deadline,token,epoch,reply,binding;
  uint8_t req[11];
 };
@@ -611,18 +611,28 @@ static uint16_t x9c_reg_begin(unsigned slot,const uint8_t *req,unsigned len){
  * after ECPI132/6 (CONVERSATION). Ending an still-INCOMING MT call is a
  * different, unobserved Android action and is not admitted here. */
 static uint16_t x9c_end_begin(unsigned slot,const uint8_t *req,unsigned len){
- unsigned op,id;
- if(!x9cw_qmi_action(req,len,&op,&id)||op!=0x21||!id)return X9Q_ARG;
+ unsigned op=x9cw_u16(req+3),id=0;
+ if(op==0x21){if(!x9cw_qmi_action(req,len,&op,&id)||!id)return X9Q_ARG;}
+ else if(op==0x31){
+  if(len!=11||req[0]||x9cw_u16(req+5)!=4||req[7]!=1||x9cw_u16(req+8)!=1)return X9Q_ARG;
+  if(req[10]!=8)return X9Q_UNSUPPORTED;
+ }else return X9Q_ARG;
  const struct x9c_client &c=x9c_clients[slot];
  if(!c.bound||c.generation!=x9q_clients[slot].generation)return X9Q_NOT_READY;
  if(c.sim!=1)return X9Q_UNSUPPORTED; /* only the measured SIM2 mode20 subset */
  if(x9c_end_job.used||x9c_answer_job.used)return X9Q_BUSY;
  struct x9cw_outbound_state state;struct x9cw_inbound_state in;
  unsigned native_id,direction;uint64_t epoch;
- if(x9_md_mipc_call_snapshot(&state)==1&&x9cw_outbound_id(&state,&native_id)&&
-    native_id==id&&(state.mode==20||state.mode==0)){direction=0;epoch=state.epoch;}
- else if(x9_md_mipc_call_incoming_snapshot(&in)==1&&x9cw_inbound_id(&in,&native_id)&&
-    native_id==id&&in.ios_state==3&&in.mode==20){direction=1;epoch=in.epoch;}
+ if(x9_md_mipc_call_snapshot(&state)!=1||x9_md_mipc_call_incoming_snapshot(&in)!=1)return X9Q_NOT_READY;
+ unsigned outbound_id=0,inbound_id=0;
+ bool outbound=x9cw_outbound_id(&state,&outbound_id)&&(state.mode==20||state.mode==0);
+ bool inbound=x9cw_inbound_id(&in,&inbound_id)&&in.ios_state==3&&in.mode==20;
+ if(op==0x31){
+  if(outbound==inbound||state.blocked||in.blocked||in.pending)return X9Q_NOT_READY;
+  id=outbound?outbound_id:inbound_id;
+ }
+ if(outbound&&outbound_id==id){native_id=outbound_id;direction=0;epoch=state.epoch;}
+ else if(inbound&&inbound_id==id){native_id=inbound_id;direction=1;epoch=in.epoch;}
  else return X9Q_NOT_READY;
  const uint64_t now=x9q_ms();if(now>UINT64_MAX-25000)return X9Q_BUSY;
  const uint64_t deadline=now+25000;
@@ -633,7 +643,9 @@ static uint16_t x9c_end_begin(unsigned slot,const uint8_t *req,unsigned len){
  j.binding=c.binding;j.epoch=epoch;j.id=id;j.direction=direction;j.stage=1;j.token=token;j.reply=reply;
  /* Apple createEndThisCallReq19a00d4: explicit25000ms request guard. */
  j.deadline=deadline;j.transaction=(uint16_t)x9cw_u16(req+1);
- memcpy(j.req,req,sizeof(j.req));return 0;
+ j.operation=(uint16_t)op;memcpy(j.req,req,sizeof(j.req));
+ if(op==0x31){j.req[3]=0x21;j.req[4]=0;j.req[10]=(uint8_t)native_id;}
+ return 0;
 }
 static void x9c_end_poll(uint8_t *frame){
  struct x9c_end_job &j=x9c_end_job;if(!j.used)return;
@@ -1137,7 +1149,7 @@ static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
      x9cw_u16(req+1),dial.length);
     return true;
    }else err=X9Q_NOT_READY;
-  }else if(x9cw_u16(req+3)==0x21){
+  }else if(x9cw_u16(req+3)==0x21||x9cw_u16(req+3)==0x31){
    /* The live allocation's validated host transaction already owns its
     * target. Even a malformed retry cannot append ARG or a changed ID BUSY
     * before the original success,
@@ -1145,6 +1157,7 @@ static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
     * QMUX allocation is fenced by end_live, not only the local generation. */
    if(x9c_end_job.used&&
       x9c_end_job.slot==slot&&x9c_end_job.generation==x9q_clients[slot].generation&&
+      x9c_end_job.operation==x9cw_u16(req+3)&&
       x9c_end_job.transaction==x9cw_u16(req+1)&&x9c_end_live(x9c_end_job))return true;
    err=x9c_bind_pending(slot,true)?X9Q_BUSY:x9c_end_begin(slot,req,len);if(!err)return true; /* asynchronous owned reply */
   }else if(x9cw_u16(req+3)==0x22){

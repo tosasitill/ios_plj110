@@ -270,6 +270,7 @@ static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbou
   struct x9cw_end_target current;
   int ok=end->direction?x9cw_end_target_inbound(&x9_mc_inbound,&x9_mc_current,&current):
    x9cw_end_target(&x9_mc_outbound,&x9_mc_current,&current);
+  if(!end->direction&&x9_mc_inbound.pending)ok=0;
   if(baseline||answer||id!=0x905||p[8]!=2||x9_mc_poisoned||x9mi_call_busy()||
      !ok||!x9cw_end_matches(end,&current)||x9cw_u32(p+28)!=end->native_id){
    lck_mtx_unlock(&x9_mi_lock);return 0;
@@ -594,6 +595,7 @@ static void x9mi_tick(void){
    if(s->call_guard==2){
     int ok=s->call_direction?x9cw_end_target_inbound(&x9_mc_inbound,&x9_mc_current,&current):
      x9cw_end_target(&x9_mc_outbound,&x9_mc_current,&current);
+    if(!s->call_direction&&x9_mc_inbound.pending)ok=0;
     if(x9_mc_poisoned||!ok||!x9cw_end_matches(&target,&current))rejected=1;
    }
    if(s->call_guard==3&&(x9_mc_poisoned||

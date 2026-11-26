@@ -95,7 +95,7 @@ static bool bb_x9_call_result(uint32_t local,uint32_t node,uint64_t generation,c
                               unsigned size,uint8_t *owned,unsigned room,uint64_t deadline){
  assert(!lock_depth&&owned&&room==CBQ_HDR+size&&(size==14||size==18));
  const unsigned id=x9cw_u16(sdu+3);
- assert(id==3||id==0x20||id==0x21||id==0x22||id==0x44);
+ assert(id==3||id==0x20||id==0x21||id==0x22||id==0x31||id==0x44);
  assert(size!=18||id==0x20);
  if(call_bb_expire)fake_ms=deadline;
  if(!call_batch_accept||generation!=bb_x9_call_identity(local,node)||
@@ -1018,6 +1018,32 @@ static void ios_end_roundtrip(){
  unsigned n=current_frame(p,0);x9cw_put16(p+12,(unsigned)token);x9mi_rx(p,n);x9c_poll();
  assert(qmi_replies==1&&!x9c_end_job.used&&!x9_mc_end_token&&x9_mc_outbound.ended&&x9_mc_outbound.count_known);
 }
+static void ios_end_all_roundtrip(){
+ bind_voice();rx_progress(130,7,0);rx_progress(132);
+ uint8_t q[]={0,78,0,0x31,0,4,0,1,1,0,8};
+ assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q))&&x9c_end_job.stage==1);
+ uint64_t query=x9c_end_job.token;
+ q[5]=0;x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,7);
+ assert(x9c_end_job.token==query&&!qmi_replies);
+ x9mi_tick();end_query_cnf();uint64_t token=x9c_end_job.token;x9mi_tick();
+ assert(writes==2&&x9cw_u16(last_frame+10)==0x905&&x9cw_u32(last_frame+20)==0&&x9cw_u32(last_frame+28)==7);
+ uint8_t p[24];x9cw_header(p,24,0x906,2,(unsigned)token);x9cw_scalar(p+16,0,0,4);
+ x9mi_rx(p,sizeof(p));x9c_poll();assert(qmi_replies==1&&!qmi_error&&qmi_response_len==14&&x9cw_u16(qmi_response+3)==0x31);
+}
+static void ios_end_all_reject(){
+ bind_voice();uint8_t q[]={0,78,0,0x31,0,4,0,1,1,0,8};
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
+ assert(qmi_replies==1&&qmi_error==X9Q_NOT_READY&&!writes&&!x9c_end_job.used);
+ q[1]++;q[10]=1;x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
+ assert(qmi_replies==2&&qmi_error==X9Q_UNSUPPORTED&&!writes);
+}
+static void ios_end_all_pending_incoming(){
+ bind_voice();rx_progress(130,7,0);rx_progress(132);
+ uint8_t q[]={0,78,0,0x31,0,4,0,1,1,0,8};
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
+ x9mi_tick();end_query_cnf();x9_mc_inbound.pending=1;x9mi_tick();x9c_poll();
+ assert(writes==1&&qmi_replies==1&&qmi_error==X9Q_NOT_READY&&!x9_mc_end_token);
+}
 static void ios_end_stale_query(){
  bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();uint64_t token=x9c_end_job.token;x9mi_tick();
  rx_progress(6);uint8_t p[704];unsigned n=current_frame(p,1);x9cw_put16(p+12,(unsigned)token);
@@ -1606,6 +1632,8 @@ int main(int argc,char **argv){
   {"dial_guard_writer_release",dial_guard_writer_release},{"dial_guard_writer_timeout",dial_guard_writer_timeout},
   {"dial_guard_selected_release",dial_guard_selected_release},{"dial_guard_selected_timeout",dial_guard_selected_timeout},
   {"voice_bind_codec",voice_bind_codec},{"end_target_codec",end_target_codec},{"ios_end_roundtrip",ios_end_roundtrip},
+  {"ios_end_all_roundtrip",ios_end_all_roundtrip},{"ios_end_all_reject",ios_end_all_reject},
+  {"ios_end_all_pending_incoming",ios_end_all_pending_incoming},
   {"current_metadata",current_metadata},
   {"current_number_owner",current_number_owner},{"progress_number_owner",progress_number_owner},
   {"progress_identity_mo",progress_identity_mo},{"progress_identity_mt",progress_identity_mt},
