@@ -73,6 +73,21 @@ def readiness(path, ready):
     write_json(path, value)
 
 
+def rollback_boot_options(opts):
+    """Disable BT init even when omitted selectors default on in the kernel."""
+    replacements = {
+        'x9_bt_root': 'x9_bt_root=2',
+        'x9_bt_init': 'x9_bt_init=0',
+        'x9_bt_fc': 'x9_bt_fc=0',
+        'x9_bt_settings_diag': 'x9_bt_settings_diag=0',
+    }
+    # The install candidate preflight requires explicit root/init/fc.
+    # Leave an absent diagnostic selector absent (kernel default is off);
+    # do not expand the command line just to state that default.
+    return dict(opts, boot_args=[replacements.get(token.partition('=')[0], token)
+                                 for token in opts['boot_args']])
+
+
 def run(command, log):
     shown = '+ ' + shlex.join(map(str, command))
     print(shown, flush=True)
@@ -251,12 +266,7 @@ def build(a):
                  '--kernel', out / 'kernel/kernel.development.sweet', '--name', a.name + '/boot'], log)
             if embed_root:
                 stage = 'rollback-boot-image'
-                # Restore only: Bluetooth stays passive (no native init), like the
-                # boots before any root payload existed.
-                rollback = dict(opts, boot_args=['x9_bt_root=2' if t == 'x9_bt_root=1' else t
-                                                 for t in opts['boot_args']
-                                                 if t not in ('x9_bt_init=1', 'x9_bt_fc=1',
-                                                              'x9_bt_settings_diag=1')])
+                rollback = rollback_boot_options(opts)
                 rollback_snapshot = inputs / 'boot-rollback.json'
                 write_json(rollback_snapshot, rollback)
                 run([sys.executable, '-I', X9 / 'build/build.py', 'boot', '--config', config_snapshot,

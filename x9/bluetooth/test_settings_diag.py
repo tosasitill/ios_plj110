@@ -38,6 +38,21 @@ EXPECTED = {
 
 
 class DiagnosticChecks(unittest.TestCase):
+    def test_rollback_explicitly_disables_default_on_init(self):
+        spec = importlib.util.spec_from_file_location('bt_candidate', HERE / 'candidate.py')
+        candidate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(candidate)
+        for diag in ([], ['x9_bt_settings_diag=0'], ['x9_bt_settings_diag=1']):
+            tokens = ['-v', 'x9_bt=1', 'x9_bt_init=1', 'x9_bt_fc=1', 'x9_bt_root=1', *diag]
+            opts = {'boot_args': tokens, 'options': ['--pstore-mirror']}
+            rollback = candidate.rollback_boot_options(opts)
+            self.assertEqual(rollback['boot_args'],
+                             ['-v', 'x9_bt=1', 'x9_bt_init=0', 'x9_bt_fc=0', 'x9_bt_root=2',
+                              *(['x9_bt_settings_diag=0'] if diag else [])])
+            self.assertEqual(rollback['options'], opts['options'])
+            self.assertIn('x9_bt_root=1', opts['boot_args'])
+            self.assertEqual(len(' '.join(rollback['boot_args'])), len(' '.join(tokens)))
+
     def test_pinned_abi_and_forwarding(self):
         source = (HERE / 'X9SettingsBTDiag.c').read_text()
         found = re.findall(r'\{"([A-Za-z_]+)", (?:UINT64_C\((0x[0-9a-f]+)\)|(CALLBACK_VA)),\s*'

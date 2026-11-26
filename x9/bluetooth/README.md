@@ -202,6 +202,8 @@ python3 -I x9/bluetooth/candidate.py --name <全新简单名字> \
 原子 rename 升级（被替换的 Apple 文件要求 `.x9-orig` 已核对存在）；其它未知内容仍整体拒绝。
 
 `boot-rollback/boot.img` 反序恢复：cache 先回 `.x9-orig`，再删四个自有文件；不需要 Android。
+回滚镜像显式传 `x9_bt_init=0 x9_bt_fc=0`；省略这两个 token 会触发当前板级默认开启。
+若安装候选显式指定 Settings 诊断，回滚将其替换为 `x9_bt_settings_diag=0`。
 不读整个根盘、不 macFUSE/COW、不需要 Android 侧 owner 修正（内核以 0:0 创建）。
 
 `stage_targeted.py` 是当前许可下的定点 root 安装器。用户禁止全盘读/备份：不运行旧
