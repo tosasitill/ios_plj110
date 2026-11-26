@@ -386,6 +386,11 @@ MD usr-slot/secondary引用未资格化，不能说main已有正lease。新代�
 `cell-chain-protocol-20261110/`、`cell-chain-modem-options-20261110/`、
 `cell-chain-state-review-20261110/`；最终验收仍以下节真实联网/重连/双卡为准。
 
+**暗屏诊断负载（2026-11-26，源码/单对象编译）**：RRC CSCON 4409/physical-channel 4419
+注册及持有承载期间的 3 秒 `1151/04c7` 查询只用于诊断，不参与 WDS 准入；现默认关闭，
+仅 `x9_cell_diag=1` 启用。正常 ACT 后查询、EIF 与统计路径不变。尚无设备温度/功耗对比，
+不能据此声称降温幅度。
+
 ### 5. iOS 网络最终验证
 
 源码已有 raw-IP send/receiver 和经 WDS 证据门控制的 route；仍需实机验证 Apple traffic gate 与 PDP unit/family。
