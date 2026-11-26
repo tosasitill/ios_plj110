@@ -141,6 +141,13 @@ python3 -I x9/build/build.py --dry-run
 4. 按最早失败阶段判读；构建、启动、画面和功能验收分别记录。
 5. mailbox、root、Android 侧操作也分别确认，不从一次刷机授权推导出来。
 
+**回 Android（保留 b 槽，不切槽）**
+
+1. iOS 正在运行时，经确认执行 `python3 -u x9/tools/ios-reboot-bootloader-usb`。脚本通过 USB 发重启请求并等待 fastboot；如果已在 fastboot 则跳过。遇失败停下，不盲重试。保留原 iOS 日志；需要新一轮 iOS 采集时，另用未存在的 `~/NNN.txt`，重启前启动唯一 USB logger。
+2. `fastboot devices` 必须只列出一台设备，以其序列号作为 `$id` 定向命令（不把序列号写入 git）。`fastboot -s "$id" getvar is-userspace`、`getvar current-slot`、`getvar partition-size:boot_b` 分别确认 `no`、`b`、`4000000`（十六进制 64 MiB）。
+3. 本机用户指定的 Android 恢复镜像是 `/Users/tosasitill/boot.img`，64 MiB，只作设备恢复输入，不是构建输入。确认文件、大小以及本次刷写与重启授权后执行 `fastboot -s "$id" flash boot_b /Users/tosasitill/boot.img && fastboot -s "$id" reboot`；只有 Sending/Writing 成功才自动重启。不要执行 `set_active`，不改其它分区；若只获准刷写就留在 fastboot。
+4. 使用唯一 online adb 设备确认 `ro.product.model=PLJ110`、`ro.boot.slot_suffix=_b`、`sys.boot_completed=1`，才记录 Android 启动。刷写 OKAY、重启 OKAY 或 adb 上线均不能替代 boot-completed。若未观察到，不自动重刷、切槽或再次重启。
+
 ## 4. 工作流
 
 - 一个功能/实验一个分支：`feat/<topic>` 或 `fix/<topic>`。
@@ -549,3 +556,9 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 
 - 用户确认触摸恢复；蓝牙按钮灰、通话/短信未通过。433 中蓝牙固件 session 和 HCI 扩展能力均到达，未见 Preferences setup 诊断。82.118 s VOICE20 进入已测 SIM2 路径，82.120 s 实际提交 0901，当前捕获未见 0902 或接通证据。SIM2 MO 两次收到 modem CNF（不是对端投递）；SIM1 有拒绝 CNF；双卡 SIM 列表 0608 返回 0x210000。不要把这三项判成未初始化或已修复。后续先用精确事务追 CNF/超时与短信回执，蓝牙仍需 Preferences 诊断。
 - HEAD `e231e6fe`；用户要求先回 Android。执行 `python3 -u x9/tools/ios-reboot-bootloader-usb` exit 0，重新进入 bootloader fastboot。只读 `fastboot getvar` 均 exit 0：is-userspace=no、current-slot=b、slot-successful:b=yes、slot-successful:a=no、slot-unbootable:a=no、slot-retry-count:a=0。历史有 Android active-b 记录，不能推定当前 a 是已验证的 Android 启动槽。停止原 USB logger，保留 `~/433.txt` 3,108,681 B。未切槽、未刷写、未启动 Android、无构建/CI/root/mailbox/push；等确认 Android 启动路径。
+
+### 6.37 2026-11-26 Android 恢复成功
+
+- 基线 `d1b76aa2`。用户指定 `/Users/tosasitill/boot.img`；`file` 识别 Android bootimg，`stat -f %z` 为 67,108,864 B。唯一设备处于 bootloader fastboot、b 槽，`boot_b` 大小 `4000000`，预检 exit 0。
+- `fastboot -s "$id" flash boot_b /Users/tosasitill/boot.img && fastboot -s "$id" reboot` exit 0，Sending/Writing/Rebooting 均 OKAY。未切槽或改写其它分区。唯一 online adb 设备执行 `adb -s "$id" shell 'getprop ro.product.model; getprop ro.boot.slot_suffix; getprop sys.boot_completed'` exit 0，依次返回 PLJ110、_b、1，确认 Android 已在 b 槽启动。
+- `boot_b` 现为 Android 恢复镜像；r6 仍保留在原主机候选路径。流程收录在 §3.5 和 AGENTS.md；无构建、CI、root/mailbox 或 push。蓝牙、通话、短信仍待按 §6.36 继续定位。

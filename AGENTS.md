@@ -67,6 +67,23 @@
 - Read the exact new log before drawing conclusions. “No log” does not mean “did
   not boot”; a visible desktop does not prove GPU rendering; a process staying
   alive does not prove Bluetooth discovery or audio.
+- On an authorized X9 iOS → fastboot reboot, use
+  `python3 -u x9/tools/ios-reboot-bootloader-usb` if not already in fastboot.
+  A USB request ACK is not the endpoint; require the helper's fastboot detection
+  and independently confirm exactly one device, `is-userspace: no`, and slot
+  `b`. Do not auto-retry a failed reboot or run `set_active`.
+- To return to Android on this phone, use the user-designated host restore image
+  `/Users/tosasitill/boot.img` (64 MiB), not an iOS candidate. This file is only
+  a device restore input, not a build dependency. After explicit authorization
+  to flash that image and reboot, verify the device and partition size, run
+  `fastboot -s "$id" flash boot_b /Users/tosasitill/boot.img`, and only after
+  success automatically run `fastboot -s "$id" reboot`. Check Android boot
+  with the unique adb device, PLJ110, `ro.boot.slot_suffix=_b`, and
+  `sys.boot_completed=1`. If any check fails, stop; do not switch slots,
+  reflash, or reset automatically.
+- For an authorized iOS boot, start one USB logger before reboot with a fresh
+  output path, preserve previous captures, and confirm the exact new log. See
+  `NOTES.md` §3.5 for the device workflows.
 
 ## Research and documentation
 
