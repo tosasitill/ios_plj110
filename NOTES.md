@@ -380,9 +380,9 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 **AegirPoster 崩溃循环（GPU / 灭屏热的已定位运行时根因）**
 
 - 观察：`CRASH AegirPoster` 每 ~10 s 双崩溃（launchd 重生→~0.5 s 再崩→节流 10 s），430 共 44 次、428 共 66 次，**灭屏（55 s）后持续到 242 s**。sig 6（SIGABRT），pc/lr/far 相对 slide 恒定。MapsSpotlightInd 27.4 s 同路径崩溃 1 次；driverkitd 7.9 s sig 9（重生，非异常）。
-- host 符号化（slide 0x2d8c0000，`/tmp/dsc-index.json` 重建自 `.local/apple/dsc-20H392/`，atos）：`__pthread_kill ← pthread_kill ← abort ← _objc_terminate ← _dispatch_client_callout ← _dispatch_block_invoke_direct ← __FBSSERIALQUEUE_IS_CALLING_OUT_TO_A_BLOCK__ ← -[FBSSerialQueue _targetQueue_performNextIfPossible]`。即 **FrontBoardServices 串行队列 block 内未捕获 ObjC 异常 → abort**。崩溃前最后动作：`X9 GENERAL METAL: factory caller=AegirPoster` + `SWEET SURF: AegirPoster sel 40`。
+- host 符号化（slide 0x2d8c0000，`/tmp/dsc-index.json` 重建自 `.local/apple/dsc-20H392/`，atos）：`__pthread_kill ← pthread_kill ← abort ← _objc_terminate ← _dispatch_client_callout ← _dispatch_block_invoke_direct ← __FBSSERIALQUEUE_IS_CALLING_OUT_TO_A_BLOCK__ ← -[FBSSerialQueue _targetQueue_performNextIfPossible]`。即 **FrontBoardServices 串行队列 block 内未捕获 ObjC 异常 → abort**。首次崩溃附近有 `X9 GENERAL METAL: factory caller=AegirPoster` + `SWEET SURF: AegirPoster sel 40`；selector 日志有 log-once 限制，不能断定每次崩溃前的最后动作。
 - host 反汇编 IOSurface.framework（实测 host，非设备）：sel 40 = `_IOSurfaceSharedEventAddEventListener`/`AddListener`，sel 41 = `RemoveEventListener`/`RemoveListener`。完整 SharedEvent 族：36=create、37=setSignaledValue、38=initWithMachPort、39=NotifyListener、40=AddListener、41=RemoveListener、45=waitUntilSignaledValue。
-- 推断（高置信）：`SweetSurface.cpp` externalMethod 对这些 selector 走 default“接受并清零 scalar/struct 输出、返回 kIOReturnSuccess”，Metal 共享事件（MTLSharedEvent/fence 通知）拿到无效 listener 结果 → Poster 渲染回调抛未捕获异常 → abort 循环。灭屏后 Poster 仍重生渲染 → GPU PM 每 ~0.3–1 s awake/retention 循环（201 s 段可见）→ 暗屏热负载。这是 428/430 共有的**先前存在缺口**，不是八项修复引入的回归。
+- 推断（待验证）：`SweetSurface.cpp` 对这些 selector 默认返回成功但不实现共享事件/通知，可能与 Poster 异常有关；现有日志没有异常名称或完整抛出栈，不能证明因果。灭屏后 Poster 重生与 GPU PM awake/retention 在 201 s 段相邻，支持存在 churn，但不能归因全部 wake 或量化热负载。这是 428/430 共有的**先前存在缺口**，不是八项修复引入的回归。
 - 边界：尚未证明实现 SharedEvent 族即可消除崩溃（需 host 合同 + 后续设备复证）；不得把 host 符号化/反汇编称为设备 runtime_verified。
 
 **下一步**：派子代理 (a) 按 IOSurface.framework ABI 在 SweetSurface 实现/安全处理 SharedEvent 族（先止崩，再谈 fence 语义），(b) 按 §6.7 唤醒研究实现 raise-to-wake SCP pickup type75 one-shot 准入。均 host 验证，设备复证需另行授权。
@@ -398,3 +398,9 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 7. 存储/USB：只读 IOMedia A0 与 AppSync session probe 分开推进。
 8. 相机：先证明主摄多帧非黑与稳定 retire，再接第二路/完整 iOS 预览。
 8. 点击/抬腕唤醒：S3910 源码已定位，先离线追 gesture report → `KEY_F4`/userspace notifier 与 SCP pickup/significant-motion LIST/one-shot 合同，再谈 iOS doze/SpringBoard 接受；不伪造 iOS 事件或样本。
+
+### 6.14 2026-11-26 SharedEvent 合同复核与离线研究交接
+
+- 基线 `bc6a83d615014f39b6cc3eab80839466a5fb2bab`。host 反汇编复核：selector 40 是以 notification port 和 async reference 注册 listener，而不是已证的 event ID 加普通 struct；listener 初始化独立于 selector 36。selector 36 失败使 `IOSurfaceSharedEvent init` 返回 nil，但不能据此证明 listener 不执行或上层安全降级。selector 40 的零端口 cold 路径在调用之前，不能解释调用后崩溃。详见 [`docs/graphics/shared-event-contract-20261126.md`](docs/graphics/shared-event-contract-20261126.md)。
+- 上一会话落盘的四条只读研究位于 gitignored `x9/out/research-{sensor-ps,gpu-hz,appsync-usb,dark-thermal}-20261126/report.md`：PS 极性仍未闭合；GPU 有 mode/cadence/queue/copy/TE 验收矩阵；AppSync 缺真实 USB/session/install；灭屏日志显示 Poster churn 和 PDP/WDS/MDLOG 并存，功耗贡献未量化。
+- 本轮 `sed` 复核 exit 0；未改驱动、未构建、无 CI、无设备操作或新设备日志。无新候选或产物大小。下一步追上层 nil/异常处理及 IOKit async 消息 ABI，不把局部 nil 路径或伪成功当作止崩修复。
