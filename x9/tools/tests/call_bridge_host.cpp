@@ -489,6 +489,11 @@ static void voice20_dispatch(){
  assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,n)&&!qmi_replies);
  assert(x9c_dial_job.used&&x9c_dial_job.transaction==0x1234&&x9c_dial_job.len==n);
  const uint64_t token=x9c_dial_job.token;assert(token);
+ uint8_t malformed[]={0,0x34,0x12,0x20,0,8,0,0xff};
+ assert(x9c_dial_repeated_wire(CBQ_PORT_BASE,X9BB_NODE,X9BB_PORT_BASE+9,malformed,sizeof(malformed)));
+ assert(!x9c_dial_repeated_wire(CBQ_PORT_BASE,X9BB_NODE+1,X9BB_PORT_BASE+9,malformed,sizeof(malformed)));
+ assert(!x9c_dial_repeated_wire(CBQ_PORT_BASE+1,X9BB_NODE,X9BB_PORT_BASE+9,malformed,sizeof(malformed)));
+ malformed[1]++;assert(!x9c_dial_repeated_wire(CBQ_PORT_BASE,X9BB_NODE,X9BB_PORT_BASE+9,malformed,sizeof(malformed)));
  assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,n)&&!qmi_replies);
  q[10]='9';assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,n)&&!qmi_replies);
  q[10]='*';assert(x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,n)&&!qmi_replies);

@@ -1036,6 +1036,16 @@ static void x9c_dial_poll(uint8_t *frame){
  }
  j.answered=true;j.held=true;bzero(j.req,sizeof(j.req));
 }
+/* Fence the original VOICE20 owner before generic TLV validation so a
+ * malformed retry cannot publish BAD ahead of the real pending terminal. */
+static bool x9c_dial_repeated_wire(uint32_t local,uint32_t node,uint32_t port,const uint8_t *req,unsigned len){
+ const unsigned slot=local-CBQ_PORT_BASE;
+ if(node!=X9BB_NODE||local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS||port!=X9BB_PORT_BASE+9||
+  !req||len<7||req[0]!=0||x9cw_u16(req+3)!=0x20)return false;
+ const struct x9c_dial_job &j=x9c_dial_job;
+ return (j.used&&j.slot==slot&&j.transaction==x9cw_u16(req+1)&&x9c_live(j))||
+        x9c_response_pending(slot,req);
+}
 static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned len){
  if(port!=X9BB_PORT_BASE+9)return false;
  if(!req||len<7)return true;
