@@ -415,6 +415,11 @@ X9 的 native DPMAIF PDP 对 `SIOCGIFMEDIA64`（`0xc02c6938`）仍返回
 - SMS `0606` 是 modem 接受；`0607` 诊断硬编码 index 1，只记录 shape/status/index。
   storage flag 固定 `{2,1,3,4}`；query-all/filter、混合异常 status、durable SIM storage 与
   Messages UI 持久化未验收。`0x210000` 不能当作空 inbox。
+- RawSend20 在 QMUX 启用原 allocation generation 的终态收执：队列满时只重试入队，
+  不重发 `0605`；超时后晚到的 `0606` 不覆盖首个终态。日志
+  `RawSend … terminal host queue receipt` 只证明结果入队，不证明客户端读取或短信投递。
+  活跃事务的 RawSend20/VOICE20 同 ID 重试在通用 TLV 校验前由原 owner 接管，
+  不允许畸形重试抢先返回 BAD；这个保护不是跨已退休事务的永久去重。
 
 只能在真实请求、状态、投递/存储与双向音频闭环通过后报告可通话或短信已送达，不能用 LTE/5G
 注册、VOICE20 可构造或 ACK 替代。
