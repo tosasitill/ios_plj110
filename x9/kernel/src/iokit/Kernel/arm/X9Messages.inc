@@ -26,6 +26,7 @@ struct x9m_job {
  bool answered,background,hold,follow; uint8_t req[X9Q_REQ];
  unsigned step,stored_len; uint64_t store_order; uint8_t stored_pdu[200];
  bool ack_done,ack_reply_pending;uint16_t ack_error;uint64_t bridge_generation;
+ bool receipt_pending; unsigned receipt_len; uint8_t receipt[1536];
 };
 static x9m_job x9m_jobs[X9M_JOBS];
 static uint64_t x9m_store_order;
@@ -102,9 +103,31 @@ static bool x9m_ack_response(const x9m_job &j){
  if(!admitted&&owned){bzero(owned,room);IOFreeData(owned,room);}
  bzero(p.p,sizeof(p.p));return admitted;
 }
+/* First terminal SDU is immutable until admitted or original client loss. */
+static void x9m_storage_receipt_retry(x9m_job &j){
+ if(!j.receipt_pending)return;
+ if(!x9m_live(j.slot,j.generation)){j.receipt_pending=false;bzero(j.receipt,sizeof(j.receipt));return;}
+ unsigned room=CBQ_HDR+j.receipt_len;
+ uint8_t *owned=static_cast<uint8_t *>(IOMallocData(room));
+ bool admitted=owned&&bb_x9_sms_storage_result(CBQ_PORT_BASE+j.slot,X9BB_NODE,j.bridge_generation,
+   j.receipt,j.receipt_len,owned,room);
+ if(!admitted&&owned){bzero(owned,room);IOFreeData(owned,room);}
+ if(admitted){j.receipt_pending=false;bzero(j.receipt,sizeof(j.receipt));j.receipt_len=0;}
+}
+static void x9m_storage_terminal(x9m_job &j,x9q_packet &p){
+ if(j.answered)return;
+ j.answered=true;
+ if(!x9m_live(j.slot,j.generation)||!p.good)return;
+ p.p[5]=(uint8_t)(p.n-7);p.p[6]=(uint8_t)((p.n-7)>>8);
+ memcpy(j.receipt,p.p,p.n);j.receipt_len=p.n;j.receipt_pending=true;
+ x9m_storage_receipt_retry(j);
+}
 static void x9m_error(x9m_job &j,uint16_t err){
  if(j.op==X9M_DIAG){
   j.answered=true;if(j.sim<2)x9m_sims[j.sim].diag_stage=2;return;
+ }
+ if(x9m_storage(j.op)){
+  x9q_packet p(j.req,err);x9m_storage_terminal(j,p);bzero(p.p,sizeof(p.p));return;
  }
  if(j.op==X9M_ACK){
   if(j.answered)return;
@@ -158,7 +181,7 @@ static x9m_job *x9m_new(unsigned op,unsigned slot,unsigned sim,const uint8_t *re
  for(x9m_job &j:x9m_jobs)if(!j.op){
   bzero(&j,sizeof(j));j.op=op;j.slot=slot;j.sim=sim;j.len=len;j.background=background;
   j.generation=x9q_clients[slot].generation;memcpy(j.req,req,len);j.deadline=x9q_ms()+60000;
-  if(op==X9M_ACK)j.bridge_generation=bb_x9_sms_ack_identity(CBQ_PORT_BASE+slot,X9BB_NODE);
+  if(op==X9M_ACK||x9m_storage(op))j.bridge_generation=bb_x9_sms_ack_identity(CBQ_PORT_BASE+slot,X9BB_NODE);
   return &j;
  }
  return nullptr;
@@ -504,6 +527,7 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   if(!err){
    x9m_job *j=x9m_new(storage.list?X9M_LIST:storage.modify?X9M_TAG:X9M_READ,slot,sim,req,len);
    if(!j)err=X9Q_BUSY;
+   else if(!j->bridge_generation){bzero(j,sizeof(*j));err=X9Q_NOT_READY;}
    else{
     j->store_order=++x9m_store_order;j->follow=true;
     printf("X9 SMS: SIM%u stored %s queued QMI txn %u; native per-SIM serialization\n",
@@ -692,7 +716,8 @@ static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
   uint8_t value[24]={'1',(uint8_t)(intl?'4':'2'),(uint8_t)(intl?'5':'9'),(uint8_t)k};
   memcpy(value+4,text.p+start,k);response.tlv(1,value,k+4);bzero(value,sizeof(value));
  }
- if(!j.answered&&!j.background&&x9m_live(j.slot,j.generation))response.send(CBQ_PORT_BASE+j.slot,X9BB_PORT_BASE+x9m_service(j));
+ if(x9m_storage(j.op))x9m_storage_terminal(j,response);
+ else if(!j.answered&&!j.background&&x9m_live(j.slot,j.generation))response.send(CBQ_PORT_BASE+j.slot,X9BB_PORT_BASE+x9m_service(j));
  bzero(response.p,sizeof(response.p));
 }
 static void x9m_del(unsigned slot){
@@ -701,7 +726,7 @@ static void x9m_del(unsigned slot){
  for(x9m_job &j:x9m_jobs)if(j.op&&j.op!=X9M_DIAG&&j.slot==slot){
   if(j.op==X9M_TAG&&j.step==1&&j.token)
    x9_md_mipc_message_mark_read_abandon(j.token,j.slot,j.generation);
-  j.answered=true;
+  j.answered=true;j.receipt_pending=false;j.receipt_len=0;bzero(j.receipt,sizeof(j.receipt));
  }
  /* No successful auto-ACK on client loss. Commands remain bound to the old
   * generation, so a reused port/SIM cannot acknowledge someone else's SMS. */
@@ -714,6 +739,10 @@ static void x9m_poll(){
   x9m_sims[sim].reg_valid=false;
  }
  for(x9m_job &j:x9m_jobs)if(j.op){
+  if(x9m_storage(j.op)){
+   x9m_storage_receipt_retry(j);
+   if(j.answered&&!j.token&&!j.follow&&!j.hold&&!j.receipt_pending){bzero(&j,sizeof(j));continue;}
+  }
   if(j.hold)continue;
   /* Host guard is not a delivery timeout or cancellation of MD side
    * effects. Reply once before taking a late result, then keep/drain every
@@ -741,7 +770,7 @@ static void x9m_poll(){
    if(!j.follow||now>=j.deadline||j.answered||!x9m_live(j.slot,j.generation)){
     x9m_error(j,X9Q_NOT_READY);
     if(j.op==X9M_TAG&&j.step==2){j.hold=true;bzero(j.stored_pdu,sizeof(j.stored_pdu));}
-    else bzero(&j,sizeof(j));
+    else {j.follow=false;if(!j.receipt_pending)bzero(&j,sizeof(j));}
     continue; // A lost/expired client may not start a delayed mutation.
    }
    if(x9m_store_blocked(j)||!x9m_sims[j.sim].ready||!x9w_control_ready||!x9_md_mipc_message_online())continue;
@@ -786,14 +815,14 @@ static void x9m_poll(){
     x9m_error(j,X9Q_NOT_READY);j.token=0;
     printf("X9 SMS: SIM%u operation %u step %u locally rejected before TX\n",j.sim+1,j.op,j.step);
     if(j.op==X9M_TAG&&j.step==2){j.hold=true;bzero(j.stored_pdu,sizeof(j.stored_pdu));}
-    else bzero(&j,sizeof(j));
+    else if(!j.receipt_pending)bzero(&j,sizeof(j));
     continue;
    }
    if(taken==-2){
     x9m_error(j,X9Q_INTERNAL);
     printf("X9 SMS: SIM%u operation %u oversized CNF fully drained; no partial list\n",j.sim+1,j.op);
     if(j.op==X9M_TAG&&j.step!=0){j.hold=true;bzero(j.stored_pdu,sizeof(j.stored_pdu));}
-    else bzero(&j,sizeof(j));
+    else {j.token=0;if(!j.receipt_pending)bzero(&j,sizeof(j));}
     continue;
    }
    if(taken==1){
@@ -806,7 +835,7 @@ static void x9m_poll(){
     if(j.hold){bzero(j.req+7,sizeof(j.req)-7);bzero(j.stored_pdu,sizeof(j.stored_pdu));
      printf("X9 SMS: SIM%u ambiguous operation %u CNF; owner retained until boot, payload erased\n",j.sim+1,j.op);}
     else if(j.follow)continue;
-    else bzero(&j,sizeof(j));continue;
+    else {j.token=0;if(!j.receipt_pending)bzero(&j,sizeof(j));}continue;
    }
   }
  }
