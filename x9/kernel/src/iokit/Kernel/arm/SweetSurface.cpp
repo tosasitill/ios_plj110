@@ -784,6 +784,15 @@ class IOSurfaceRootUserClient : public IOUserClient {
 	OSArray *fZombies;      /* released views whose state page is still mapped, oldest first */
 	SweetEventListener *fEventListeners[64]; /* protected by fLock */
 	bool fEventListenersClosed;
+	struct EventMap { SweetSharedEventCounter *event; IOMemoryMap *map; };
+	EventMap fEventMaps[64]; /* protected by fLock */
+	bool fEventMapsClosed;
+	static void eventMapDrop(EventMap &record);
+	IOReturn eventMapFindOrCreate(SweetSharedEventCounter *event, EventMap **out, bool *created);
+	IOReturn eventCapabilityCreate(uint64_t *out);
+	SweetSharedEventCounter *eventCapabilityCopy(uint64_t name);
+	IOReturn eventCapabilityImport(uint64_t name, uint64_t *out);
+	void eventMapsClose();
 
 	SweetSurfaceRef *findRef(uint32_t id, unsigned int *index, bool detached = false);
 	IOReturn addRef(SweetSurface *s, SweetSurfaceRef **refOut, bool *existing);
@@ -819,6 +828,7 @@ public:
 OSDefineMetaClassAndStructors(IOSurfaceRootUserClient, IOUserClient);
 
 #include "SweetSurfaceEventListeners.inc"
+#include "SweetSurfaceEventCapability.inc"
 
 static uint64_t sweet_surf_logged;      /* selectors / traps already logged (< 64) */
 
@@ -844,6 +854,8 @@ IOSurfaceRootUserClient::initWithTask(task_t owningTask, void *securityID, UInt3
 	fTask = owningTask;
 	bzero(fEventListeners, sizeof(fEventListeners));
 	fEventListenersClosed = false;
+	bzero(fEventMaps, sizeof(fEventMaps));
+	fEventMapsClosed = false;
 	fLock = IOLockAlloc();
 	fRefs = OSArray::withCapacity(16);
 	fZombies = OSArray::withCapacity(16);
@@ -855,6 +867,7 @@ IOSurfaceRootUserClient::free()
 {
 	if (fLock != NULL) {
 		eventListenersClose();
+		eventMapsClose();
 	}
 	OSSafeReleaseNULL(fRefs);
 	OSSafeReleaseNULL(fZombies);
@@ -869,6 +882,7 @@ IOReturn
 IOSurfaceRootUserClient::clientClose(void)
 {
 	eventListenersClose();
+	eventMapsClose();
 	IOLockLock(fLock);
 	fRefs->flushCollection();
 	if (fZombies != NULL) {

@@ -12,10 +12,12 @@
 #define OSSafeReleaseNULL(p) do { if (p) { (p)->release(); (p) = nullptr; } } while (0)
 
 struct OSObject {
+	unsigned refs = 1;
 	virtual ~OSObject() = default;
 	virtual void free() {}
 	bool init() { return true; }
-	void release() { free(); delete this; }
+	void retain() { ++refs; }
+	void release() { if (!--refs) { free(); delete this; } }
 };
 using task_t = void *;
 using IOReturn = int;
@@ -52,6 +54,7 @@ static void clock_interval_to_deadline(uint32_t interval, uint32_t scale, uint64
 struct IOMemoryMap : OSObject {
 	unsigned options = 0;
 	const uint64_t *bytes = nullptr;
+	uint64_t getAddress() const { return reinterpret_cast<uintptr_t>(bytes); }
 };
 
 static bool failPage;
@@ -110,4 +113,5 @@ int main()
 	assert(!SweetSharedEventCounter::make());
 	for (auto e : held) e->release();
 	assert(sweet_event_counter_objects == 0);
+	return 0;
 }

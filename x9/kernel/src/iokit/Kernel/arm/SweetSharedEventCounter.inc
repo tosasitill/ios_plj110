@@ -8,6 +8,7 @@ class SweetSharedEventCounter : public OSObject {
 	IOLock *fCounterLock = NULL;
 	uint64_t *fCounter = NULL;
 	bool fCharged = false;
+	uint64_t fTraceID = 0;
 
 public:
 	static SweetSharedEventCounter *make();
@@ -15,12 +16,14 @@ public:
 	// Return an owned map; the caller must retain the event until unmapping.
 	IOMemoryMap *mapReadOnly(task_t task);
 	uint64_t value() const;
+	uint64_t traceID() const { return fTraceID; }
 	bool advance(uint64_t next);
 	IOReturn waitFor(uint64_t target, uint32_t timeoutMs);
 };
 OSDefineMetaClassAndStructors(SweetSharedEventCounter, OSObject);
 
 static unsigned sweet_event_counter_objects;
+static uint64_t sweet_event_trace_id;
 static constexpr unsigned kSweetEventCounterLimit = 128;
 
 SweetSharedEventCounter *
@@ -54,6 +57,7 @@ SweetSharedEventCounter::make()
 	// The mapping contains only this counter; never expose neighboring data.
 	bzero(bytes, page_size);
 	event->fCounter = static_cast<uint64_t *>(bytes);
+	event->fTraceID = __atomic_add_fetch(&sweet_event_trace_id, 1, __ATOMIC_RELAXED);
 	return event;
 }
 
