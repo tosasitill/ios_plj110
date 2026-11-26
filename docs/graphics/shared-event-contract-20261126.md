@@ -24,3 +24,11 @@ sed -n '1513,1628p' x9/kernel/src/iokit/Kernel/arm/SweetSurface.cpp
 ```
 
 上述命令 exit 0；`/tmp/iosurface.dis` 为既有可丢失 host scratch，文件行号仅适用于该次生成。未编译、未构建候选、未进行设备测试。
+
+## 有界观察候选（2026-11-26）
+
+未能证明 consumer 对 nil 的处理或完整异步通知及跨进程 event 合同，因此没有更改 selector 返回值，也没有实现事件或声称止崩。默认关闭的 `x9_surf_event_diag=1` 仅记录 selector 36–41、45 的前 64 次全局调用：进程名、selector、是否存在 async wake port、async reference 数量、scalar 输入/输出容量和 struct 输入/输出大小；不记录或解引用 reference、端口、scalar 值或用户指针。计数有并发原子保护，跨进程共享上限，可能被其他进程耗尽；不能推断缺失调用或返回值，更不能从调用顺序证明异常因果。没有该参数或其值不是 1 时不产生新增日志；原有默认分支语义不变。
+
+本地 XNU `IOUserClient.h` 定义独立的 `asyncWakePort`、`asyncReference`、`asyncReferenceCount`；`IOUserClient.cpp` 的异步入口将 wake port 和 reference 填入参数。它们不是证明 IOSurface 事件消息内容或生命周期的证据。现有 framebuffer `setAsyncReference64`/`sendAsyncResult64WithOptions` 仅示例 IOKit 发送机制，不能据此推导 IOSurface 的 payload、引用保活和 teardown。NativeBridge 的 `NBSharedEvent` 使用自有进程内实现，跨进程 `newSharedEventHandle` 返回 nil，也不能替代原生 SharedEvent 合同。
+
+Host 单对象构建：通过 `x9/build/build.py` 的 `Builder.compile_one` 编译 `SweetSurface.o`，exit 0，421344 B，12 warnings；日志在 `x9/out/shared-event-diag-host-20261126/build.log`（gitignored）。这是编译检查，非设备、功能或崩溃修复验证。是否需要此诊断候选、设备启动及日志采集均须另行授权。
