@@ -40,3 +40,25 @@ Host fixture: compile `x9/tools/tests/shared_event_counter_host.cpp` with Xcode 
 The X9 capability helpers now implement task-local Mach export and import via the XNU IOKit identity APIs, with an event-class check and explicit owning-task check. Create maps before publishing the right; an invalid export rolls back the mapping. Import reuses an existing map for the same event on that client and returns value/VA/trace ID. There are at most 64 views per client and 512 system-wide; closing a client releases its maps before releasing the retained event objects. These helpers are **not exposed through selectors**. Cached views currently retire on client close, not on last right deallocation; this is bounded but must not be mistaken for stock long-lived-client behavior. The capability host fixture simulates task ports and maps and checks rollback, wrong-class/foreign-task rejection, reuse and close; it does not prove Mach/VM lifecycle on the phone.
 
 **Supersedes the earlier close-only cache behavior (3f829d17).** The Mach name now identifies a separate reference object owning the counter and bounded references to per-client view owners. The view owner does not retain the client or the right; there is no right→owner→right cycle. Closing a client detaches its maps; destruction of the Mach identity object can detach views before connection close. Local XNU `IOMachPort::noMoreSendersForObject` drops the registry's tagged object reference after unlocking the registry, so cleanup is driven by the last retained object reference (including any in-progress import). The host fixture simulates last-right reclamation and two-client close; real Mach topology, task death and map teardown remain device verification. A right may retain closed owner objects up to its finite owner-array capacity; do not expose this infrastructure until that capacity behavior, wait/delivery ordering and selector integration are addressed.
+
+## Selector 42：surface ordering 与 QuartzCore 回退（2026-11-26）
+
+Stock wrapper `0xfffffff005a5d928` 使用四个 scalar：`u32 surface ID, u64 mode, u32 event port, u64 value`。匹配用户态 `_IOSurfaceClientSignalEvent` `0x1a3986f80..6fe8` 从 surface client、event port 和其余两参组成此顺序；`_IOSurfaceSignalEvent` 取得 event port 后转调它。stock handler `0xfffffff005a604f8` 先在本 client 查 surface、再以当前 task 解析并检查 event reference，最终调用 `0xfffffff005a4dae4`。后者对 mode==1 返回非零，等待 surface 某状态解除后：surface `+0x40` 有绑定对象时调用 `0xfffffff005a56944`（向绑定回调提交 operation 9），无绑定才调用 `0xfffffff005a44c84` 直接推进 counter。不能把 callback 提交、返回、GPU 完成和物理 scanout 混为一谈；尚未证明绑定对象的完成与信号顺序，也未证明 X9 不需要该顺序。
+
+匹配 QuartzCore `layer_private_present` `0x18829e100..164` 以 `(surface, event, drawableID, 0)` 调用优化 stub `0x18dbcc748`，其 dyld cache 实际机器码直接跳转 `0x1a3988a30`，即 `_IOSurfaceSignalEvent`。非零返回转到 `0x18829e1ac` 的普通 `layer_private_present_impl`，不会走随后 `notifyListener`；零返回才可能注册通知。该证据说明此**有条件路径**需要真实 42 才能走 fence 分支，不证明 AegirPoster 曾走到它，也不证明其他消费者能处理错误。
+
+X9 之前在 `x9_surf_events=1` 下 selector 42 会落入默认分支并伪成功，即没有更新计数器却可能让 QuartzCore 等待通知。现改为仅在该显式实验开关下路由 42，执行 stock 4-in/0-out 形状校验后返回 `kIOReturnUnsupported`；不写 event、不执行虚假的直接 signal。默认不开启时的行为不变。这是本地 QuartzCore 有证据的回退策略，不是 selector 42 实现、GPU fence 或设备止崩验收；其他上层对 unsupported 的反应仍未知。
+
+复核：
+
+```sh
+python3 -I x9/tools/tests/inspect_shared_event_42.py \
+ /private/tmp/x9sys/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.04
+python3 -I x9/out/native-event-abi-20261126/inspect.py fffffff005a5d928 18
+python3 -I x9/out/native-event-abi-20261126/inspect.py fffffff005a604f8 d4
+python3 -I x9/out/native-event-abi-20261126/inspect.py fffffff005a4dae4 e8
+sed -n '7195,7230p;9067,9088p' /tmp/iosurface.dis
+sed -n '25110,25208p' x9/out/shared-event-consumer-20261126/quartz.dis
+```
+
+上述命令 exit 0（既有固定 SystemOS DMG 只读挂载；无新挂载或设备操作）。Xcode 15 的 `shared_event_capability_host.cpp` 编译运行 exit 0，覆盖 42 合法形状 Unsupported 与错误形状 BadArgument；recipe `SweetSurface.o` 单对象编译 exit 0，560920 B、12 warnings，日志 `x9/out/event42-host-20261126/compile.log`（worktree gitignored）。静态 stub 脚本另检查外层 selector 42 被实验 gate 包含；不模拟实际 caller、GPU 或 Mach。

@@ -78,7 +78,7 @@ IOReturn
 IOSurfaceRootUserClient::eventExternalMethod(uint32_t selector, IOExternalMethodArguments *args)
 {
 	if (current_task() != fTask) return kIOReturnNotPermitted;
-	const unsigned input = selector == 37 ? 2 : selector == 39 ? 5 : selector == 45 ? 3 :
+	const unsigned input = selector == 37 ? 2 : selector == 39 ? 5 : selector == 42 ? 4 : selector == 45 ? 3 :
 	    (selector == 38 || selector == 41) ? 1 : 0;
 	const unsigned output = selector == 36 ? 2 : selector == 38 ? 3 : 0;
 	if (args->scalarInputCount != input || args->scalarOutputCount != output ||
@@ -94,6 +94,9 @@ IOSurfaceRootUserClient::eventExternalMethod(uint32_t selector, IOExternalMethod
 	case 38: return eventCapabilityImport(in[0], args->scalarOutput);
 	case 40: return eventListenerAdd(args);
 	case 41: return eventListenerRemove(in[0]);
+	/* Surface-bound GPU ordering is not implemented. Never report signal
+	 * success: QuartzCore's caller falls back on a nonzero result. */
+	case 42: return kIOReturnUnsupported;
 	case 37:
 	case 39:
 	case 45: break;

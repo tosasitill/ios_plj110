@@ -1570,7 +1570,7 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 	uint64_t arg0 = args->scalarInputCount > 0 ? args->scalarInput[0] : 0;
 
 	/* Opt-in observation only: never dereference or log async references. */
-	if ((selector >= 36 && selector <= 41) || selector == 45) {
+	if ((selector >= 36 && selector <= 42) || selector == 45) {
 		int enabled = 0;
 		PE_parse_boot_argn("x9_surf_event_diag", &enabled, sizeof(enabled));
 		if (enabled == 1) {
@@ -1590,7 +1590,7 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 		}
 	}
 
-	if ((selector >= 36 && selector <= 41) || selector == 45) {
+	if ((selector >= 36 && selector <= 42) || selector == 45) {
 		int experimental = 0;
 		PE_parse_boot_argn("x9_surf_events", &experimental, sizeof(experimental));
 		if (experimental == 1) return eventExternalMethod(selector, args);
