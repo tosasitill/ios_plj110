@@ -48,4 +48,16 @@ static inline unsigned x9ms_storage_decode(const uint8_t *p,unsigned n,
  if(!(seen&1))return X9MS_ARG;
  *out=r;return X9MS_OK;
 }
+/* SMS-DELIVER originator-address length is in semi-octets. DCS follows its
+ * type-of-address and packed digits; class 6 means no explicit class. */
+static inline unsigned x9ms_pdu_class(const uint8_t *p,unsigned n){
+ if(!p||n<3||p[0]>12)return 6;
+ unsigned start=p[0]+1;
+ if(n-start<3)return 6;
+ unsigned address=p[start+1];
+ unsigned dcs=start+3+(address+1)/2;
+ if(address>20||dcs>=n)return 6;
+ unsigned value=p[dcs];
+ return (((value&0xc0)==0&&(value&0x10))||(value&0xf0)==0xf0)?value&3:4;
+}
 #endif

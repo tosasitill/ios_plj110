@@ -143,16 +143,6 @@ static x9m_job *x9m_new(unsigned op,unsigned slot,unsigned sim,const uint8_t *re
 static bool x9m_pdu(const uint8_t *p,unsigned n,unsigned mti){
  return p&&n>=3&&n<=255&&p[0]<=12&&p[0]+2u<n&&(p[p[0]+1]&3)==mti;
 }
-static unsigned x9m_class(const uint8_t *p,unsigned n){
- unsigned start=p[0]+1;
- if(n-start<3)return 6;
- unsigned addr=p[start+1];
- /* TP-OA alphanumeric length is in semi-octets too (23.040 9.1.2.5). */
- unsigned dcs=start+4+(addr+1)/2;
- if(addr>20||dcs>=n)return 6;
- unsigned v=p[dcs];
- return (((v&0xc0)==0&&(v&0x10))||(v&0xf0)==0xf0)?v&3:4;
-}
 /* MD 91367a2a: 0608/103 is the count, 8104 is count * 264 bytes.
  * Each record is native index/u16, TPDU length/u8, AT storage tag/u8,
  * class/u8, reserved[3], SMSC+TPDU. Never publish a partial/truncated list.
@@ -335,7 +325,7 @@ static void x9m_deliver(x9m_incoming &in,unsigned mti){
  /* The QMI owner alone changes control-ready. Native publish below holds
   * the MD mutex through queue admission, closing event->poison->retry. */
  if(!x9w_control_ready||x9q_ms()<in.next_delivery||!x9_md_mipc_message_online())return;
- unsigned cls=mti==2?4:x9m_class(in.pdu,in.len);
+ unsigned cls=mti==2?4:x9ms_pdu_class(in.pdu,in.len);
  if(cls>5)return;
  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){
   x9m_client &c=x9m_clients[i];
