@@ -338,7 +338,7 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 
 ### 6.11 2026-11-26 八项离线修复合并
 
-main HEAD `91be5aff`。以下均为 **host 验证 / 源码边界**，不是设备 boot、runtime_verified 或 feature acceptance；未刷机、未写 root/mailbox、未 push。
+main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设备 boot、runtime_verified 或 feature acceptance；未刷机、未写 root/mailbox、未 push。
 
 - SMS：`fix/sms-storage` 已合并。修正 SMS-DELIVER OA semi-octet 边界后的 DCS/class 解码；pinned Xcode 15 下 `test_sms_pdu_class.py` 2/2 OK，`X9Baseband.cpp.o` 单对象编译 True（2,229,712 B）。
 - GPU：`fix/gpu-pacing` 已合并。面板 DCS 与软件节拍只支持 60/120； unsupported explicit rate 拒绝/回退 60。`test_cadence.py` 2/2 OK，`SweetFramebuffer.o` 单对象编译 True（595,304 B）。
@@ -347,7 +347,7 @@ main HEAD `91be5aff`。以下均为 **host 验证 / 源码边界**，不是设�
 - 距离传感器：`fix/sensor-bridge` 已合并。`test_proximity_bridge.py` 8/8 OK，直接编译真实 `sweet_x9_proximity.c`；PS 极性 `oneshot==0 -> near` 仍是未验证假设，ALS 物理链未新增设备证据。
 - 通话：`fix/call-owner` 已合并。`test_call_owner_boundary.py` 8/8 OK，直接编译真实 `x9_call_state.h`；typed `ims::Call` owner/SIP/双向 PCM 仍缺。
 - 唤醒：`fix/wake-gestures` 已合并。见 §6.7 host boundary；点击/抬腕功能仍缺 S3910/SCP one-shot 合同。
-- 蓝牙 Settings 诊断：`fix/bt-discovery`  commit `e67688db` 已修复 dyld slide 地址并通过 `x9/bluetooth/build.py` 与 `test_settings_diag.py` 4/4，但 **未合并 main**：其基线是另一窗口 `feat/bt-settings-root` `ab9828ea`，main 尚无 `X9SettingsBTDiag.c`。需先确认该基线归属/合并，再 rebase 或合并本修复；不得自行覆盖另一窗口工作。
+- 蓝牙 Settings 诊断：用户确认后已合并 `fix/bt-discovery`（含基线 `feat/bt-settings-root` `ab9828ea`）。dyld slide 地址修复 `e67688db`；合并后 `test_settings_diag.py` 4/4 OK，`x9/bluetooth/build.py --kernel-objects --out x9/out/bt-settings-merge-20261126` 构建/签名成功（仅 warnings）。诊断仍 Preferences-only、默认关闭、hash gate；未安装/未上机。基线同时带入 `x9_bt_init=1 x9_bt_fc=1` 默认开启，runtime ACK/profile gates 不变。
 
 ## 7. 推荐下一步顺序
 
