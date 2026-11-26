@@ -562,3 +562,8 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 基线 `d1b76aa2`。用户指定 `/Users/tosasitill/boot.img`；`file` 识别 Android bootimg，`stat -f %z` 为 67,108,864 B。唯一设备处于 bootloader fastboot、b 槽，`boot_b` 大小 `4000000`，预检 exit 0。
 - `fastboot -s "$id" flash boot_b /Users/tosasitill/boot.img && fastboot -s "$id" reboot` exit 0，Sending/Writing/Rebooting 均 OKAY。未切槽或改写其它分区。唯一 online adb 设备执行 `adb -s "$id" shell 'getprop ro.product.model; getprop ro.boot.slot_suffix; getprop sys.boot_completed'` exit 0，依次返回 PLJ110、_b、1，确认 Android 已在 b 槽启动。
 - `boot_b` 现为 Android 恢复镜像；r6 仍保留在原主机候选路径。流程收录在 §3.5 和 AGENTS.md；无构建、CI、root/mailbox 或 push。蓝牙、通话、短信仍待按 §6.36 继续定位。
+
+### 6.38 2026-11-26 SMS 433 离线跟踪
+
+- 基线 `e9a51543`。433 中 SIM2 0605 token 640/QMI txn 27 在 53.410 s 提交，59.269 s 返回 modem accepted；token 1386/QMI txn 29 在 155.096 s 提交，159.457 s 返回 accepted。均非对端投递；日志无可关联 delivery report 的证据。SIM1 token 1242/QMI txn 26 在 121.551 s 提交，121.554 s CNF result `0x21014b`，QMI error 3；不能仅凭结果码声称根因。双卡 0608 均 `0x210000`，未证明来源是 CMGL fail helper 或空存储。
+- 为后续真实采样加 0606 关联诊断，记录 SIM、MD token、QMI txn、known 和结果，不记录 PDU、号码或 message reference，不改变返回逻辑。无错误码猜测或行为修复。Xcode 15 `DEVELOPER_DIR=$(xcode-select -p)` 和 macOS SDK 下 `python3 -I x9/baseband/test_sms_storage_{terminal,deadline,receipt,poll_hold}.py` 各 exit 0；`PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/out/sms-433-verification/compile.py` exit 0，X9Baseband.cpp.o 2,232,632 B，34 warnings。首次错误指定 `/Applications/Xcode.app` 路径导致四个测试 exit 1，改为实际 Xcode 路径后通过；日志在该 worktree 的 `x9/out/sms-433-verification/`。未构建完整候选、运行 CI、设备操作、发送短信或 push。短信收发、真实回执及持久化均未验收。

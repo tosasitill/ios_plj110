@@ -649,6 +649,12 @@ static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
  bool stored=x9m_storage(j.op);
  bool known=x9w_wire(p,n)&&x9q_u16(p+10)==(stored?0x608:j.op==X9M_SEND?0x606:j.op==X9M_REG?0xa05:0x602)&&
   p[8]==(1u<<j.sim)&&x9w_word(p,n,0,result);
+ if(j.op==X9M_SEND){
+  /* Correlate the real 0606 with the submitted 0605 and WMS request.
+   * Do not print TPDU, address, message reference or infer delivery. */
+  printf("X9 SMS: send CNF SIM%u token %llu QMI txn %u known %u result 0x%x; not delivery\n",
+   j.sim+1,(unsigned long long)j.token,(unsigned)x9q_u16(j.req+1),known?1:0,result);
+ }
  if(!known||result){j.hold=(j.op==X9M_SEND&&!known)||(j.op==X9M_TAG&&j.step!=0);
   static unsigned diag_failures;
   if(stored&&diag_failures<8){
