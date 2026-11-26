@@ -194,7 +194,7 @@ cp x9/build/local.json .worktrees/<topic>/x9/build/
 
 **观察**
 
-- `boot-device.json` 只有 `x9_bt=1`；`x9_bt_init=1` 才启动 worker，`x9_bt_fc=1` 才配置流控。完整初始化候选必须显式追加两者。
+- 当前 `boot-device.json` 已包含 `x9_bt=1 x9_bt_init=1 x9_bt_fc=1`；勿在此配置上重复追加。433 已到 firmware session 和 HCI 扩展能力，不代表 Settings 可用。
 - FE01 是 connac3 动态固件 section 请求，不是普通 Command Complete 错误。内核消费它并按 section 重载；Android `btmtk_main.c` 是参考。
 - `0xE0..0xFF` 厂商事件在 Apple H4 parser 前消费；普通 Command Complete 不过滤。log 425 证明已定位的 reason-607 崩溃消失。
 - 原生 HCI 扫描参数/开关与 advertising report 解析仍在 Apple 栈；没有 X9 自建发现引擎或伪造回调。
@@ -566,4 +566,17 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 ### 6.38 2026-11-26 SMS 433 离线跟踪
 
 - 基线 `e9a51543`。433 中 SIM2 0605 token 640/QMI txn 27 在 53.410 s 提交，59.269 s 返回 modem accepted；token 1386/QMI txn 29 在 155.096 s 提交，159.457 s 返回 accepted。均非对端投递；日志无可关联 delivery report 的证据。SIM1 token 1242/QMI txn 26 在 121.551 s 提交，121.554 s CNF result `0x21014b`，QMI error 3；不能仅凭结果码声称根因。双卡 0608 均 `0x210000`，未证明来源是 CMGL fail helper 或空存储。
-- 为后续真实采样加 0606 关联诊断，记录 SIM、MD token、QMI txn、known 和结果，不记录 PDU、号码或 message reference，不改变返回逻辑。无错误码猜测或行为修复。Xcode 15 `DEVELOPER_DIR=$(xcode-select -p)` 和 macOS SDK 下 `python3 -I x9/baseband/test_sms_storage_{terminal,deadline,receipt,poll_hold}.py` 各 exit 0；`PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/out/sms-433-verification/compile.py` exit 0，X9Baseband.cpp.o 2,232,632 B，34 warnings。首次错误指定 `/Applications/Xcode.app` 路径导致四个测试 exit 1，改为实际 Xcode 路径后通过；日志在该 worktree 的 `x9/out/sms-433-verification/`。未构建完整候选、运行 CI、设备操作、发送短信或 push。短信收发、真实回执及持久化均未验收。
+- 为后续真实采样加 0606 关联诊断，记录 SIM、MD token、QMI txn、known 和结果，不记录 PDU、号码或 message reference，不改变返回逻辑。无错误码猜测或行为修复。Xcode 15 `DEVELOPER_DIR=$(xcode-select -p)` 和 macOS SDK 下 `python3 -I x9/baseband/test_sms_storage_{terminal,deadline,receipt,poll_hold}.py` 各 exit 0；`PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/out/sms-433-verification/compile.py` exit 0，X9Baseband.cpp.o 2,232,632 B，34 warnings。首次错误指定 `/Applications/Xcode.app` 路径导致四个测试 exit 1，改为实际 Xcode 路径后通过；单文件日志原在 worktree 的 `x9/out/sms-433-verification/`，现归档至 §6.39 候选目录的同名子目录。该步骤无完整候选构建、CI、设备操作、发送短信或 push。短信收发、真实回执及持久化均未验收。
+
+### 6.39 2026-11-26 433 通话终态诊断与内核候选
+
+- 使用 6.1 Terra 分析 433。VOICE20 txn 5 在 82.118 s 入桥，82.120 s MIPC 0901 txid 1042 发送返回 0；433 没有可关联的 QMI 给主机终态。MIPC 没有通用 RX 消息打印，**不应推断没有收到 0902**。不能据此断言拨号超时、接通或有音频。
+- 通话源码 `31b04115` 增加 owned CNF 解析、take 返回、本地 60 s deadline、MO join 和队列终态/owner 退出日志，不输出号码、不改变处理逻辑。Terra 用 Xcode 15 编译 `x9/tools/tests/call_bridge_host.cpp`，并运行 `dial_roundtrip ios_timeout ios_deleted ios_join dial_tx_failure`，5/5 exit 0。首次错误指定 `/Applications/Xcode.app` 编译失败，后用实际 `/Users/tosasitill/Downloads/Xcode.app/Contents/Developer` 通过。
+- 短信补证：`x9/out/call-ios-bridge/tools/md-dis .local/x9/modem/parts/modem_a.img 0x91409380 0x914093a0` exit 0，CMGS fail 读入 +6 半字，调用与 CMGL fail 相同的 AT 结果 helper，在结果槽为 0 时写回。输入 0x14b 可以形成 0x21014b；这不是 433 的运行时调用路径，也未证输入含义。原切片同下候选目录 `sms-cmgs-fail.asm`。
+- 构建源码 `31b04115`（含短信诊断 `b20c752c`）：`PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --boot-arg x9_surf_events=1 --boot-arg x9ed=1 --name x9-radio-followup-20261126-r1` exit 0，104/104 overlay（含 3 prebuilt），boot 15,806,464 B / kernel 33,111,432 B，`build.log` 在同目录。无 CI、设备操作或 push；手机留在 Android。此镜像只新增通话/SMS 诊断，不更新蓝牙 root dylib、不宣称功能修复。
+
+### 6.40 2026-11-26 433 蓝牙崩溃与下次采样
+
+- 6.1 Terra 在 433 定位 194.615 s `bluetoothd` SIGSEGV（PC/FAR=0），晚于 10.582 s controller capabilities。只读 `llvm-objdump -d --start-address=0x1000e6a8c --stop-address=0x1000e6ac8 /private/tmp/x9os/usr/sbin/bluetoothd` exit 0，和去 slide 的 LR 一起支持 H4 transport 的可选 teardown 回调空跳转；与 Vendor16 表分离。两个静态直接调用者，不能推定全局填槽安全，亦不能由这次晚崩溃解释较早的灰按钮。证据见 [Bluetooth README](x9/bluetooth/README.md)。
+- 全局填槽实验虽通过 host 条件测试及 iOS arm64 编译/签名（122,912 B），已撤回，**未合并，不安装**。隔离产物在 `x9/out/radio-bt-h4-rejected-20261126/`；集成只含蓝牙文档 `f54f225d`。本轮无蓝牙生产改动。
+- r1 未启用 Preferences setup 诊断；当前主树生成的旧 BT root header 不含 `X9SettingsBTDiag.dylib`。下一次独立候选应保留当前 kernel，配匹配的 Preferences-only 诊断 root payload；确认确切已装 predecessor、原件 hash、root preflight 和单独安装授权后，记录每项 setup 调用与真实返回，同时确认退出前首个 teardown 的触发条件。不能只加 boot-arg 就当采样生效。通话/SMS 则可先用 §6.39 r1 捕获新事务。手机仍在 Android，未刷写、重启或安装 root，三项未验收。
