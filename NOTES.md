@@ -600,3 +600,9 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 6.1 Terra 独立复核 433：仍仅证 VOICE20→0901 TX；已有 Android 记录明确 0902 成功结果不含 call ID，需同一事务后续的完整 4901 作为 ID/epoch 证据。无新证据支持改变通话状态机或音频；r2 的实机事务诊断是下一道验证。
 - 当前无新整包或 CI，无设备操作、root/mailbox 或 push。最后一次已验证设备状态仍为 Android；未验收蓝牙、通话、短信。
 - 蓝牙诊断准备 `97507016`：`python3 -I x9/bluetooth/test_settings_header.py` 2/2 exit 0。实际 fixture 之外，`python3 -I x9/bluetooth/settings_header.py --payload .worktrees/bt-default-on/x9/out/x9-bt-settings-diag-20261125-r2/root-payload --apple-originals .worktrees/bt-default-on/x9/out/bt-settings-inputs-20261125/apple-originals --out x9/out/x9-bt-settings-scope-20261126/x9_bt_root.inc` exit 0；离线 header 仅含 118,416 B 的诊断 dylib，不含 H4/jobs/cache/Settings plist，未覆盖当前 generated header。完整 payload 的 hash/mode 和 Apple 原件校验仍执行。这不证明现机前序安装或足以上机：原 stage_targeted 无单文件模式，通用 PID1 installer/restore 会按临时文件名清理 regular 文件，尚需收窄或验证所有权，再构建独立诊断镜像与 root preflight。标准配置加 root+诊断为 615 B，超过 607 B；脱离标准配置的变更必须保持现有语义。
+
+### 6.44 2026-11-26 通话 MD token 关联诊断（隔离分支）
+
+- 基线 `2370e2fde87e2d9137fdf1f2d7111c75d3eb59fb`。源码观察：分配时内部 token 同时写为 16-bit MIPC txid；CNF 必须在 state 2 按 txid 和 request id + 1 匹配，才转 state 3 给 `take`。r2 的 VOICE20 日志只打印 QMI txn，无法稳定关联并发的 MD TX/CNF。
+- 最小诊断分别在 VOICE20 接纳时打印 QMI txn / MD token / SIM，以及守护 DIAL 的 0902 成功匹配时打印 token / txid / 长度 / cancelled；不打印号码或帧内容，不改线协议、状态机或拨号行为。未匹配 CNF 已有通用 no owner 日志；不代表无日志必然没有物理 RX（流可能提前失败）。
+- `DEVELOPER_DIR=$(xcode-select -p) SDKROOT=$(xcrun --sdk macosx --show-sdk-path)` 下 `xcrun clang++ -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-function -Wno-unused-variable x9/tools/tests/call_bridge_host.cpp -o x9/out/call-md-correlation/call` exit 0；依次运行 `voice20_dispatch ios_timeout ios_deleted ios_join dial_tx_failure` 均 exit 0。仅 host 测试，不是设备结果；无完整构建、CI、设备操作或 push。后续需以新候选和真实采样确认；不声称通话或音频已修复。

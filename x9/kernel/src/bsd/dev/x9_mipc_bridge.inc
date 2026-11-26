@@ -518,6 +518,8 @@ static void x9mi_rx(const uint8_t *p,unsigned n){
    for(;i<X9_MI_SLOTS;i++){
     struct x9_mi_slot *s=&x9_mi_slots[i];
     if(s->state==2&&s->txid==tx&&id==(unsigned)s->id+1){
+     if(s->call_guard==1)printf("X9 CALL: MD dial CNF matched token %llu txid %u bytes %u cancelled %u\n",
+       (unsigned long long)s->token,tx,need,s->cancelled);
      if(!s->cancelled&&s->id==0x909&&s->mask==2&&!x9mi_call_busy())
       x9mc_current(x9_mi_stream,need,s->call_revision);
      if(s->cancelled)bzero(s,sizeof(*s));

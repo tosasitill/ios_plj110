@@ -939,6 +939,8 @@ static bool x9c_dial_submit(unsigned slot,const uint8_t *req,unsigned len,
  j.slot=slot;j.sim=profile.sim;j.generation=x9q_clients[slot].generation;
  j.binding=x9c_clients[slot].binding;j.len=len;j.transaction=x9cw_u16(req+1);memcpy(j.req,req,len);
  j.join=join;j.token=token;j.deadline=deadline;j.reply=reply;
+ printf("X9 CALL: VOICE20 txn %u MD token %llu admitted sim %u\n",
+        j.transaction,(unsigned long long)token,j.sim);
  if(!x9cw_dial_join_sent(&j.join,token)){j.held=true;x9c_error(j,X9Q_INTERNAL);}
  return true;
 }
