@@ -24,7 +24,7 @@ CASES = (
     'dial_golden', 'dial_invalid', 'dial_whitelist',
     'dial_roundtrip', 'dial_tx_failure', 'dial_cnf_invalid',
     'progress_framing', 'outbound_states', 'current_arrays', 'status_fence',
-    'dial_join_order', 'ios_join', 'ios_timeout', 'ios_deleted', 'dial_presend_fence',
+    'dial_join_order', 'ios_join', 'ios_timeout', 'ios_deleted', 'dial_presend_fence', 'dial_presend_release',
     'incoming_states', 'incoming_state_invalid', 'incoming_observer',
     'voice_bind_codec', 'end_target_codec', 'ios_end_roundtrip',
     'current_metadata', 'current_number_owner', 'progress_number_owner',

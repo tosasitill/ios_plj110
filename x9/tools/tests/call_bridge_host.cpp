@@ -805,7 +805,18 @@ static void dial_presend_fence(){
  assert(x9c_dial_submit(0,q,n,measured_route));uint64_t t=x9c_dial_job.token;unsigned before=writes;
  rx_progress(130,7,0);x9mi_tick();assert(writes==before);uint32_t k;
  assert(x9_md_mipc_take(t,out,sizeof(out),&k)==-3&&!k);
- assert(x9_md_mipc_take(t,out,sizeof(out),&k)==-1&&x9_mc_dial_token==t);
+ assert(x9_md_mipc_take(t,out,sizeof(out),&k)==-1&&!x9_mc_dial_token);
+}
+/* A rejected, never-selected DIAL has no wire-side mutation to retire. */
+static void dial_presend_release(){
+ empty_baseline();uint8_t q[64];unsigned n=dial_qmi(q);dial_owner_fixture();
+ assert(x9c_dial_submit(0,q,n,measured_route));uint64_t token=x9c_dial_job.token;unsigned before=writes;
+ rx_progress(130,7,0);x9mi_tick();assert(writes==before);
+ assert(!x9_mc_dial_token&&token);call_batch_accept=false;x9c_poll();
+ assert(!x9c_dial_job.used&&!qmi_replies&&writes==before);
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,n);assert(!qmi_replies&&writes==before);
+ call_batch_accept=true;x9c_response_poll();
+ assert(qmi_replies==1&&qmi_error==X9Q_NOT_READY&&writes==before);
 }
 /* Manual vectors compiled with the real production adapter/MD writer.
  * No device identifiers or fixtures; execution is not part of the build. */
@@ -1440,7 +1451,7 @@ int main(int argc,char **argv){
   {"dial_roundtrip",dial_roundtrip},{"dial_tx_failure",dial_tx_failure},{"dial_cnf_invalid",dial_cnf_invalid},
   {"progress_framing",progress_framing},{"outbound_states",outbound_states},{"current_arrays",current_arrays},
   {"status_fence",status_fence},{"dial_join_order",dial_join_order},{"ios_join",ios_join},
-  {"ios_timeout",ios_timeout},{"ios_deleted",ios_deleted},{"dial_presend_fence",dial_presend_fence},
+  {"ios_timeout",ios_timeout},{"ios_deleted",ios_deleted},{"dial_presend_fence",dial_presend_fence},{"dial_presend_release",dial_presend_release},
   {"voice_bind_codec",voice_bind_codec},{"end_target_codec",end_target_codec},{"ios_end_roundtrip",ios_end_roundtrip},
   {"current_metadata",current_metadata},
   {"current_number_owner",current_number_owner},{"progress_number_owner",progress_number_owner},
