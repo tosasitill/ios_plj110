@@ -33,7 +33,7 @@ CASES = (
     'current_metadata', 'current_number_owner', 'progress_number_owner',
     'ios_end_stale_query', 'ios_end_presend', 'ios_end_abandon',
     'ios_answer_receipt', 'ios_end_late_cnf', 'ios_end_duplicate', 'ios_end_malformed_duplicate', 'ios_answer_malformed_duplicate',
-    'register_malformed_duplicate', 'register_codec', 'register_transition', 'register_sequence',
+    'register_error_owner_retained', 'register_malformed_duplicate', 'register_codec', 'register_transition', 'register_sequence',
     'register_timeout', 'register_deleted', 'register_unsupported',
     'handover_codec', 'handover_concurrent_bootstrap',
     'handover_subscription_fence', 'handover_pending_timeout', 'handover_rx_fence',

@@ -557,7 +557,7 @@ static uint16_t x9c_reg_begin(unsigned slot,const uint8_t *req,unsigned len){
  for(unsigned i=0;i<X9_C_REG_WAITS;i++){
   const struct x9c_reg_wait &w=x9c_reg_wait[slot][i];
   if(w.used&&!w.answered){if(w.options.present&r.present)return X9Q_BUSY;}
-  else if(index==X9_C_REG_WAITS)index=i;
+  else if(index==X9_C_REG_WAITS&&(!w.used||!x9c_response_find(w.reply)))index=i;
  }
  if(index==X9_C_REG_WAITS)return X9Q_BUSY;
  uint32_t floor;
