@@ -1172,7 +1172,7 @@ AppleCLCD::scheduleVsync(IOTimerEventSource *sender)
 			IOLog("X9 METRICS latency: avg_ms=%llu.%llu max_ms=%llu.%llu lt8=%llu lt17=%llu lt34=%llu lt50=%llu lt100=%llu ge100=%llu stutter_ge50=%llu;swap arrival to present done\n",
 			 avg10/10,avg10%10,max10/10,max10%10,fMetLatHist[0],fMetLatHist[1],fMetLatHist[2],fMetLatHist[3],fMetLatHist[4],fMetLatHist[5],
 			 fMetLatHist[4]+fMetLatHist[5]);
-			IOLog("X9 METRICS join: shown_gpu_seq=%llu gpu_enqueued=%llu gpu_completed=%llu;shown seq is the frame's GPU fence seq at swap, FIFO state at window end\n",
+			IOLog("X9 METRICS join: shown_gpu_seq=%llu gpu_enqueued=%llu gpu_completed=%llu;shown seq is the global enqueue watermark sampled at swap, not a per-frame fence; FIFO state at window end\n",
 			 fMetLastShownSeq,
 			 sweet_x9_render_async_on()?sweet_x9_render_async_enqueued():0,
 			 sweet_x9_render_async_on()?sweet_x9_render_async_completed():0);
@@ -1371,10 +1371,10 @@ AppleCLCD::x9TryPresentLocked(bool tick, uint64_t count)
 		static int lockFree=-1;
 		if(lockFree<0){int v=0;lockFree=PE_parse_boot_argn("x9qd",&v,sizeof(v))||sweet_x9_render_async_on()?1:0;
 			IOLog("X9 DISPLAY: present %s the GPU owner lock (x9qd / async submission %s)\n",lockFree?"without":"with",
-			 sweet_x9_render_async_on()?"on: present fence = GPU enqueue sequence at swap":"off");}
-		/* Async submission: the owner lock no longer tells whether the frame is
-		 * rendered; the present fence does (rev246 x9qd lacked it and showed
-		 * incomplete surfaces). Not-yet-complete frames stay pending. */
+			 sweet_x9_render_async_on()?"on: present waits on global enqueue watermark sampled at swap":"off");}
+		/* Async submission: the owner lock no longer orders queued work. Wait
+		 * for the global enqueue watermark sampled at swap; this is not a
+		 * frame-specific fence and cannot prove that the frame is rendered. */
 		fenced=sweet_x9_render_async_on()&&fb->fPendSeq>sweet_x9_render_async_completed();
 		useReady=fenced&&fb->fReadyValid;
 		displayOwner=(lockFree||fenced)?0:sweet_x9_render_display_try_enter();
@@ -1800,8 +1800,8 @@ AppleCLCD::swap(const uint8_t *rec)
 	fPendT = mach_absolute_time();
 	fMetSwaps++;
 	if (sweet_board_x9()) sweet_x9_ui_swap();
-	/* Async submission: everything this frame's producers queued is already in
-	 * the global FIFO (they enqueue before committing to CoreAnimation). */
+	/* Sample the global FIFO watermark at swap. It is not a per-frame fence:
+	 * this snapshot alone cannot prove which jobs belong to this frame. */
 	fPendSeq = sweet_x9_render_async_on() ? sweet_x9_render_async_enqueued() : 0;
 	memcpy(fPendHold, held, sizeof(held));
 	IOLockUnlock(fLock);
