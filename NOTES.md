@@ -520,4 +520,4 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 
 - 操作前 HEAD `04d39b10`。`fastboot devices` 仅一个设备，`fastboot getvar product` 为 `k6993v1_64`、`is-userspace` 为 `no`、`current-slot` 为 `b`、`partition-size:boot_b` 为 `4000000`；查询均 exit 0。
 - 按用户要求执行 `fastboot -s "$id" flash boot_b x9/out/x9-native-event-wired-20261126-r6/boot.img`（`id` 取唯一 fastboot 设备，未记录序列号），Sending/Writing 均 OKAY，exit 0。镜像 15,806,464 B，构建源码 `25ac3353`。无新构建、CI、切槽、root/mailbox 或 push。
-- 已后台启动 `python3 x9/tools/usb-live/usb_log.py --output "$HOME/432.txt" --quiet`，PID 11980，stderr：`x9/out/x9-native-event-wired-20261126-r6/usb-log-432.Z6InnP`。已确认进程存活，等待 USB 1209:0001，日志当前 0 B。尚未重启；下一步单独确认后 `fastboot reboot`，再读新日志区分 r6 启动与功能验收。
+- 首次以 nohup 启动的 logger 未在执行会话退出后保留；确认其日志 0 B 后，用常驻执行会话 49582 运行 `python3 x9/tools/usb-live/usb_log.py --output "$HOME/432.txt" --quiet`。等待 USB 1209:0001，日志当前 0 B。尚未重启；下一步单独确认后 `fastboot reboot`，再读新日志区分 r6 启动与功能验收。
