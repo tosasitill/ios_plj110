@@ -59,6 +59,8 @@ int main(void) {
 
     assert(x9ms_pdu_class(NULL, 6) == 6);
     assert(x9ms_pdu_class(pdu, 2) == 6);
+    pdu[0] = 12;
+    assert(x9ms_pdu_class(pdu, 3) == 6);
     pdu[0] = 13;
     assert(x9ms_pdu_class(pdu, 24) == 6);
     pdu[0] = 0;

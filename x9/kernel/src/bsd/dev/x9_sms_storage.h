@@ -53,7 +53,7 @@ static inline unsigned x9ms_storage_decode(const uint8_t *p,unsigned n,
 static inline unsigned x9ms_pdu_class(const uint8_t *p,unsigned n){
  if(!p||n<3||p[0]>12)return 6;
  unsigned start=p[0]+1;
- if(n-start<3)return 6;
+ if(start>n||n-start<3)return 6;
  unsigned address=p[start+1];
  unsigned dcs=start+4+(address+1)/2;
  if(address>20||dcs>=n)return 6;
