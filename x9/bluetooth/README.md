@@ -318,3 +318,5 @@ SSPM索引/提取仅验证原容器，不把静态分段匹配当成当前LK移�
 首个调用点、调用时 transport 与生命周期，谨慎设计诊断或局部 guard。
 单独 kernel 更新不能更换已安装的 H4 dylib；root 安装须另行授权及
 确认确切 predecessor 与 preflight。未声称扫描、配对或设备修复。
+
+单文件 Settings 诊断 header 使用 `X9_BT_ROOT_SETTINGS_ONLY`：安装和回滚前要求唯一诊断目标且其 `.x9-bt-temp` 路径不存在；已有文件、符号链接或目录均拒绝，不能自动清理。写入以 `O_EXCL` 创建临时文件；通用 root header 不改变。中断后遗留临时文件须另行核实，不能将主机测试当作设备状态或安装验收。

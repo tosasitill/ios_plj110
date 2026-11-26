@@ -23,7 +23,8 @@ def generate(payload, apple, out):
         raise ValueError('output already exists')
     out.parent.mkdir(parents=True, exist_ok=True)
     # No previous versions: an unknown installed diagnostic fails closed.
-    root_header.write(out, root_header.render(selected, requires, {PATH: []}))
+    root_header.write(out, "#define X9_BT_ROOT_SETTINGS_ONLY 1\n" +
+                      root_header.render(selected, requires, {PATH: []}))
     print(f'embedded one diagnostic file ({len(selected[0][1])} bytes); no device operation: {out}')
 
 

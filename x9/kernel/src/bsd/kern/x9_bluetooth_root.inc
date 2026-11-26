@@ -33,6 +33,10 @@ struct x9_btr_require {const char *path;uint32_t bytes;uint8_t sha[32];};
 #define X9_BT_ROOT_PRESENT 0
 #endif
 
+#ifndef X9_BT_ROOT_SETTINGS_ONLY
+#define X9_BT_ROOT_SETTINGS_ONLY 0
+#endif
+
 #if X9_BT_ROOT_PRESENT
 #define X9_BTR_READ_LIMIT (16u<<20)
 struct x9_btr_user {user_addr_t at,end;};
@@ -124,7 +128,11 @@ static int x9_btr_name(char *out,size_t size,const char *path,const char *suffix
 /* Write the embedded bytes to a fresh temp file: mode, root:wheel, fsync. */
 static int x9_btr_write(proc_t p,struct x9_btr_user u,const char *tmp,const struct x9_btr_file *f)
 {
+#if X9_BT_ROOT_SETTINGS_ONLY
+ int e=0; /* O_EXCL below: never discard an existing diagnostic temp. */
+#else
  int e=x9_btr_drop(p,u,tmp);if(e)return e;
+#endif
  user_addr_t path;e=x9_btr_str(&u,tmp,&path);if(e)return e;
  if(u.at>u.end||4096>u.end-u.at)return E2BIG;
  user_addr_t buffer=u.at;int32_t rv=0;
@@ -193,10 +201,29 @@ static int x9_btr_apply(proc_t p,struct x9_btr_user u,const struct x9_btr_file *
  return e;
 }
 
+/* For the single-file diagnostic header, reject any existing temporary path,
+ * including symlinks and directories, before either install or restore. */
+#if X9_BT_ROOT_SETTINGS_ONLY
+static int x9_btr_diag_temp_absent(void)
+{
+ if(sizeof(x9_btr_files)/sizeof(x9_btr_files[0])!=1 ||
+    strcmp(x9_btr_files[0].path,"/usr/lib/X9SettingsBTDiag.dylib") ||
+    x9_btr_files[0].orig_bytes || x9_btr_files[0].prev_count)return EINVAL;
+ char tmp[320];int e=x9_btr_name(tmp,sizeof(tmp),x9_btr_files[0].path,".x9-bt-temp");
+ if(e)return e;
+ vnode_t vp=NULLVP;e=vnode_lookup(tmp,VNODE_LOOKUP_NOFOLLOW,&vp,vfs_context_kernel());
+ if(!e){vnode_put(vp);return EEXIST;}
+ return e==ENOENT?0:e;
+}
+#endif
+
 static int x9_btr_install(proc_t p,struct x9_btr_user u)
 {
  const unsigned count=sizeof(x9_btr_files)/sizeof(x9_btr_files[0]);
  int e,state[sizeof(x9_btr_files)/sizeof(x9_btr_files[0])];
+#if X9_BT_ROOT_SETTINGS_ONLY
+ e=x9_btr_diag_temp_absent();if(e){printf("X9 BT ROOT: diagnostic temp not absent errno=%d; nothing written\n",e);return e;}
+#endif
  for(unsigned i=0;i<sizeof(x9_btr_requires)/sizeof(x9_btr_requires[0]);i++){
   const struct x9_btr_require *r=&x9_btr_requires[i];
   e=x9_btr_check(r->path,r->bytes,r->sha,-1);
@@ -221,8 +248,10 @@ static int x9_btr_install(proc_t p,struct x9_btr_user u)
   if(e){printf("X9 BT ROOT: stopped at file=%u; launchd cache %s\n",i,
                i+1<count?"still original":"not replaced");return e;}
  }
+#if !X9_BT_ROOT_SETTINGS_ONLY
  for(unsigned i=0;i<count;i++){char tmp[320];
   if(!x9_btr_name(tmp,sizeof(tmp),x9_btr_files[i].path,".x9-bt-temp"))(void)x9_btr_drop(p,u,tmp);}
+#endif
  printf("X9 BT ROOT: installed %u/%u files (originals kept as .x9-orig)\n",todo,count);return 0;
 }
 
@@ -230,9 +259,15 @@ static int x9_btr_restore(proc_t p,struct x9_btr_user u)
 {
  const unsigned count=sizeof(x9_btr_files)/sizeof(x9_btr_files[0]);
  unsigned changed=0;
+#if X9_BT_ROOT_SETTINGS_ONLY
+ int preflight=x9_btr_diag_temp_absent();if(preflight){printf("X9 BT ROOT: diagnostic temp not absent errno=%d; nothing written\n",preflight);return preflight;}
+#endif
  for(unsigned k=count;k-->0;){
   const struct x9_btr_file *f=&x9_btr_files[k];char tmp[320],bak[320];
-  int e=x9_btr_name(tmp,sizeof(tmp),f->path,".x9-bt-temp");if(!e)e=x9_btr_drop(p,u,tmp);
+  int e=x9_btr_name(tmp,sizeof(tmp),f->path,".x9-bt-temp");
+#if !X9_BT_ROOT_SETTINGS_ONLY
+  if(!e)e=x9_btr_drop(p,u,tmp);
+#endif
   if(!e&&f->orig_bytes)e=x9_btr_name(bak,sizeof(bak),f->path,".x9-orig");
   if(!e&&f->orig_bytes){
    int b=x9_btr_check(bak,f->orig_bytes,f->orig_sha,-1);
