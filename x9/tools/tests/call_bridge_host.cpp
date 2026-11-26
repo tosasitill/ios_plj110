@@ -818,6 +818,28 @@ static void dial_presend_release(){
  call_batch_accept=true;x9c_response_poll();
  assert(qmi_replies==1&&qmi_error==X9Q_NOT_READY&&writes==before);
 }
+static void dial_host_guard(unsigned phase,bool expire){
+ empty_baseline();uint8_t q[64],p[24];unsigned n=dial_qmi(q);dial_owner_fixture();
+ const unsigned before=writes;const uint64_t next=x9_mi_next;
+ auto invalidate=[](){call_bridge_generation[0]=0;};
+ auto timeout=[](){fake_ms=60000;};
+ if(phase==0)during_bb_guard=expire?timeout:invalidate;
+ bool admitted=x9c_dial_submit(0,q,n,measured_route);
+ if(!phase){assert(!admitted&&x9_mi_next==next&&!x9_mc_dial_token&&writes==before);return;}
+ assert(admitted);uint64_t token=x9c_dial_job.token;
+ if(phase==1){during_bb_guard=expire?timeout:invalidate;x9mi_tick();
+  assert(writes==before&&!x9_mc_dial_token);x9c_poll();assert(!x9c_dial_job.used);return;}
+ x9mi_tick();assert(writes==before+1&&x9_mc_dial_token==token);
+ if(expire)timeout();else invalidate();
+ x9c_poll();x9cw_header(p,24,0x902,2,(unsigned)token);x9cw_scalar(p+16,0,0,4);
+ x9mi_rx(p,24);x9c_poll();assert(writes==before+1&&x9_mc_dial_token==token&&x9c_dial_job.used);
+}
+static void dial_guard_admission_release(){dial_host_guard(0,false);}
+static void dial_guard_admission_timeout(){dial_host_guard(0,true);}
+static void dial_guard_writer_release(){dial_host_guard(1,false);}
+static void dial_guard_writer_timeout(){dial_host_guard(1,true);}
+static void dial_guard_selected_release(){dial_host_guard(2,false);}
+static void dial_guard_selected_timeout(){dial_host_guard(2,true);}
 /* Manual vectors compiled with the real production adapter/MD writer.
  * No device identifiers or fixtures; execution is not part of the build. */
 static void voice_bind_codec(){
@@ -1452,6 +1474,9 @@ int main(int argc,char **argv){
   {"progress_framing",progress_framing},{"outbound_states",outbound_states},{"current_arrays",current_arrays},
   {"status_fence",status_fence},{"dial_join_order",dial_join_order},{"ios_join",ios_join},
   {"ios_timeout",ios_timeout},{"ios_deleted",ios_deleted},{"dial_presend_fence",dial_presend_fence},{"dial_presend_release",dial_presend_release},
+  {"dial_guard_admission_release",dial_guard_admission_release},{"dial_guard_admission_timeout",dial_guard_admission_timeout},
+  {"dial_guard_writer_release",dial_guard_writer_release},{"dial_guard_writer_timeout",dial_guard_writer_timeout},
+  {"dial_guard_selected_release",dial_guard_selected_release},{"dial_guard_selected_timeout",dial_guard_selected_timeout},
   {"voice_bind_codec",voice_bind_codec},{"end_target_codec",end_target_codec},{"ios_end_roundtrip",ios_end_roundtrip},
   {"current_metadata",current_metadata},
   {"current_number_owner",current_number_owner},{"progress_number_owner",progress_number_owner},

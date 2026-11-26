@@ -926,7 +926,8 @@ static bool x9c_dial_submit(unsigned slot,const uint8_t *req,unsigned len,
  const uint64_t deadline=now+60000;
  uint64_t reply=x9c_response_reserve(slot,req,deadline);
  if(!reply){bzero(frame,sizeof(frame));return false;}
- uint64_t token=x9_md_mipc_call_dial_submit(frame,n,&state);bzero(frame,sizeof(frame));
+ const struct x9_mipc_call_owner owner={CBQ_PORT_BASE+slot,X9BB_NODE,x9c_clients[slot].bridge_generation,deadline};
+ uint64_t token=x9_md_mipc_call_dial_submit(frame,n,&state,&owner);bzero(frame,sizeof(frame));
  if(!token){x9c_response_release(reply);return false;}
  /* Accepted mutations retain ownership across client deletion/timeouts.
   * No cancellation, automatic hangup, retry, or request-token reuse. */

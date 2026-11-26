@@ -113,7 +113,7 @@ struct x9mi_admission {
  const struct x9cw_end_target *end,*answer;const struct x9mi_sms_mutation *sms;
  const struct x9_mipc_call_owner *owner;uint64_t token;
 };
-/* Trusted commit only: caller holds MD lock, and guarded END also bb_lock.
+/* Trusted commit only: caller holds MD lock, and guarded CALL also bb_lock.
  * No allocation, API callback, transport write or QMI state access here. */
 static int x9mi_allocate(void *context){
  struct x9mi_admission *a=(struct x9mi_admission *)context;
@@ -121,7 +121,7 @@ static int x9mi_allocate(void *context){
   struct x9_mi_slot *s=&x9_mi_slots[i];bzero(s,sizeof(*s));
   a->token=++x9_mi_next;s->token=a->token;s->txid=(uint16_t)a->token;s->id=(uint16_t)a->id;s->mask=a->frame[8];s->len=a->len;
   if(a->sms){s->sms_guard=1;s->sms_owner=a->sms->owner;s->sms_generation=a->sms->generation;s->sms_deadline_ms=a->sms->deadline_ms;}
-  if(a->baseline){s->call_guard=1;s->call_revision=a->baseline->revision;x9_mc_dial_token=a->token;x9_mc_dial_floor=a->baseline->epoch;}
+  if(a->baseline){s->call_guard=1;s->call_revision=a->baseline->revision;s->call_owner=*a->owner;x9_mc_dial_token=a->token;x9_mc_dial_floor=a->baseline->epoch;}
   else if(a->end){s->call_guard=2;s->call_revision=a->end->revision;s->call_epoch=a->end->epoch;s->call_id=a->end->native_id;
    s->call_direction=a->end->direction;s->call_owner=*a->owner;x9_mc_end_token=a->token;x9_mc_end_epoch=a->end->epoch;x9_mc_end_direction=a->end->direction;}
   else if(a->answer){s->call_guard=3;s->call_revision=a->answer->revision;s->call_epoch=a->answer->epoch;s->call_id=a->answer->native_id;
@@ -251,7 +251,7 @@ static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbou
  }
  else if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||
     (id!=0x201&&id!=0x203&&id!=0x205&&id!=0x219&&id!=0x307))return 0;
- if(((end||answer)&&!owner)||(owner&&((!end&&!answer)||baseline||sms||!owner->generation||!owner->deadline_ms)))return 0;
+ if(((baseline||end||answer)&&!owner)||(owner&&((!baseline&&!end&&!answer)||sms||!owner->generation||!owner->deadline_ms)))return 0;
  lck_mtx_lock(&x9_mi_lock);
  /* A live generic mailbox is not a usable SMS inbox. Recheck under the
   * allocator lock: poison may follow the adapter's readiness snapshot. */
@@ -312,10 +312,10 @@ void x9_md_mipc_message_mark_read_abandon(uint64_t token,unsigned owner,uint64_t
  lck_mtx_unlock(&x9_mi_lock);
 }
 uint64_t x9_md_mipc_call_dial_submit(const uint8_t *p,uint32_t n,
-                                   const struct x9cw_outbound_state *baseline){
- if(!baseline||!baseline->count_known||baseline->native_count||baseline->blocked||
+                                   const struct x9cw_outbound_state *baseline,const struct x9_mipc_call_owner *owner){
+ if(!owner||!baseline||!baseline->count_known||baseline->native_count||baseline->blocked||
     !p||n<16||x9mi_u16(p+10)!=0x901)return 0;
- return x9mi_submit(p,n,baseline,NULL,NULL,NULL,NULL);
+ return x9mi_submit(p,n,baseline,NULL,NULL,NULL,owner);
 }
 uint64_t x9_md_mipc_call_end_submit(const uint8_t *p,uint32_t n,
  const struct x9cw_end_target *target,const struct x9_mipc_call_owner *owner){
@@ -589,7 +589,7 @@ static void x9mi_tick(void){
       !x9cw_answer_target(&x9_mc_inbound,&x9_mc_current,&current)||!x9cw_end_matches(&target,&current)))rejected=1;
    if(!rejected){
     struct x9mi_selection selection={s,frame,&len,&id,&tx};
-    if(s->call_guard==2||s->call_guard==3){
+    if(s->call_guard==1||s->call_guard==2||s->call_guard==3){
      if(!coachz_baseband_call_guard(&s->call_owner,x9mi_select,&selection))rejected=1;
     }else x9mi_select(&selection);
    }
