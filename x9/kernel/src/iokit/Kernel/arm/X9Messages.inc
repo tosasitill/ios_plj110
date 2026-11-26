@@ -106,13 +106,23 @@ static bool x9m_ack_response(const x9m_job &j){
 /* First terminal SDU is immutable until admitted or original client loss. */
 static void x9m_storage_receipt_retry(x9m_job &j){
  if(!j.receipt_pending)return;
- if(!x9m_live(j.slot,j.generation)){j.receipt_pending=false;bzero(j.receipt,sizeof(j.receipt));return;}
- unsigned room=CBQ_HDR+j.receipt_len;
- uint8_t *owned=static_cast<uint8_t *>(IOMallocData(room));
- bool admitted=owned&&bb_x9_sms_storage_result(CBQ_PORT_BASE+j.slot,X9BB_NODE,j.bridge_generation,
-   j.receipt,j.receipt_len,owned,room);
- if(!admitted&&owned){bzero(owned,room);IOFreeData(owned,room);}
- if(admitted){j.receipt_pending=false;bzero(j.receipt,sizeof(j.receipt));j.receipt_len=0;}
+ bool retired=!x9m_live(j.slot,j.generation);
+ if(!retired){
+  const unsigned room=CBQ_HDR+j.receipt_len;
+  uint8_t *owned=static_cast<uint8_t *>(IOMallocData(room));
+  const unsigned port=CBQ_PORT_BASE+j.slot;
+  const bool admitted=owned&&bb_x9_sms_storage_result(port,X9BB_NODE,j.bridge_generation,
+    j.receipt,j.receipt_len,owned,room);
+  if(!admitted&&owned){bzero(owned,room);IOFreeData(owned,room);}
+  if(admitted)retired=true;
+  else{
+   // Allocation changed before a local DEL was observed. A new positive
+   // identity is decisive; zero can also mean temporarily unavailable.
+   const uint64_t current=bb_x9_sms_ack_identity(port,X9BB_NODE);
+   retired=current&&current!=j.bridge_generation;
+  }
+ }
+ if(retired){j.receipt_pending=false;bzero(j.receipt,sizeof(j.receipt));j.receipt_len=0;}
 }
 static void x9m_storage_terminal(x9m_job &j,x9q_packet &p){
  if(j.answered)return;
