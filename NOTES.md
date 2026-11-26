@@ -544,3 +544,8 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - HEAD `f63f99ec`；经用户确认，唯一 fastboot 设备经 `fastboot -s "$id" getvar is-userspace` / `getvar current-slot` 确认为 bootloader、b 槽，`fastboot -s "$id" reboot` exit 0 / Rebooting OKAY。未重刷、未切槽、未新建构建、CI、root/mailbox 或 push。
 - `~/433.txt`：2.166 s 首个 TCM header 为 `a5 10 1c 00`，2.173 s 识别 `S3910VA0A0-15.20`，2.177 s application status 0000，2.216 s LBP reporting enabled；SpringBoard 8.341 s，SweetHIDTouch 8.561 s 打开。694,900 B 快照中 21.405 s 仍为 reports=0。与 432 对照证明同一镜像重启后识别阶段未复现失败，不等于根因修复、实际触点或解锁验收。原 99876 logger 继续采集，等用户滑动实测。
 - 后续同一日志 1,248,692 B 时已见真实触点：26.813 s report 1 contacts=001，26.883 s report 10 contacts=000，27.124–27.199 s 再有按下/抬起，均 HID dispatched。已证实内核触点上报恢复，未确认锁屏 UI 接受或解锁；采集保持运行。
+
+### 6.36 2026-11-26 433 功能反馈与返回 Android 前检查
+
+- 用户确认触摸恢复；蓝牙按钮灰、通话/短信未通过。433 中蓝牙固件 session 和 HCI 扩展能力均到达，未见 Preferences setup 诊断。82.118 s VOICE20 进入已测 SIM2 路径，82.120 s 实际提交 0901，当前捕获未见 0902 或接通证据。SIM2 MO 两次收到 modem CNF（不是对端投递）；SIM1 有拒绝 CNF；双卡 SIM 列表 0608 返回 0x210000。不要把这三项判成未初始化或已修复。后续先用精确事务追 CNF/超时与短信回执，蓝牙仍需 Preferences 诊断。
+- HEAD `e231e6fe`；用户要求先回 Android。执行 `python3 -u x9/tools/ios-reboot-bootloader-usb` exit 0，重新进入 bootloader fastboot。只读 `fastboot getvar` 均 exit 0：is-userspace=no、current-slot=b、slot-successful:b=yes、slot-successful:a=no、slot-unbootable:a=no、slot-retry-count:a=0。历史有 Android active-b 记录，不能推定当前 a 是已验证的 Android 启动槽。停止原 USB logger，保留 `~/433.txt` 3,108,681 B。未切槽、未刷写、未启动 Android、无构建/CI/root/mailbox/push；等确认 Android 启动路径。
