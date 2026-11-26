@@ -32,3 +32,27 @@ sed -n '1513,1628p' x9/kernel/src/iokit/Kernel/arm/SweetSurface.cpp
 本地 XNU `IOUserClient.h` 定义独立的 `asyncWakePort`、`asyncReference`、`asyncReferenceCount`；`IOUserClient.cpp` 的异步入口将 wake port 和 reference 填入参数。它们不是证明 IOSurface 事件消息内容或生命周期的证据。现有 framebuffer `setAsyncReference64`/`sendAsyncResult64WithOptions` 仅示例 IOKit 发送机制，不能据此推导 IOSurface 的 payload、引用保活和 teardown。NativeBridge 的 `NBSharedEvent` 使用自有进程内实现，跨进程 `newSharedEventHandle` 返回 nil，也不能替代原生 SharedEvent 合同。
 
 Host 单对象构建：通过 `x9/build/build.py` 的 `Builder.compile_one` 编译 `SweetSurface.o`，exit 0，421344 B，12 warnings；日志在 `x9/out/shared-event-diag-host-20261126/build.log`（gitignored）。这是编译检查，非设备、功能或崩溃修复验证。单对象结果对应初始诊断提交。整包候选及验证边界见 NOTES §6.16；设备启动及日志采集需另行授权。
+
+## Metal consumer / IOSurface 进一步静态边界（2026-11-26）
+
+固定输入 `.local/apple/dsc-20H392/System/Library/Frameworks/Metal.framework/Metal`，`xcrun llvm-objdump --macho --disassemble --no-show-raw-insn` 输出到 gitignored `x9/out/shared-event-research-20261126/metal.dis`；IOSurface 输入仍为 `/tmp/iosurface.dis`。这些是离线静态观察，未证明设备进程执行到所述路径。
+
+- `-[MTLSharedEventListenerInternal init]` `0x181b1cd24..cd88` 与 `initWithDispatchQueue:` `0x181b1cdd8..ce34` 分别建立通知端口、绑定队列并注册 listener；端口或注册失败释放并返回 nil。它们是 Metal listener 的独立注册，不能由 event 创建失败推断不会发生 selector 40。
+- `-[MTLSharedEventListenerInternal _notifyEventPort:event:atValue:block:]` `0x181b1cef4..cf2c` 调用一个外部入口，非零结果进入 `raise:format:`。Metal 的 indirect-symbol 表依次为 `_IOSurfaceSharedEventAddEventListener`、`_IOSurfaceSharedEventNotifyEventListener`、`_IOSurfaceSharedEventRemoveEventListener`，与这三个 12-byte 间隔外部调用的顺序及参数流一致；故将 `0x186d85fac` 识别为 NotifyEventListener 是基于 stub 顺序和参数流的推断。IOSurface 的该函数 `0x1a39885d0..8670` 在 selector 39 前保存 block；selector 39 返回非零时移除 block 并返回错误。**故在该 consumer 路径下无条件拒绝 39 会使 Metal 显式抛异常，不是已证明的止崩修复**。现有默认成功则未建立发送机制，可能留下未触发的 block；无法据此估计泄漏或断定崩溃原因。
+- `-[IOSurfaceSharedEvent signaledValue]` `0x1a3988518..8520` 解引用 initializer 保存的共享地址；initializer 36/38 的两个成功返回会消费输出。现有 fallback 清零输出并返回成功，若原生对象经此路径创建并读取该值，静态上存在零地址解引用风险；日志中的 SIGABRT 不是零地址解引用的直接证据，也未证明 AegirPoster 执行了这个 getter。
+- `NBSharedEvent` 是 X9 自有 Metal frontend 的不同实现，其 `notifyListener` 经 Rust 的进程内 shared event 注册，`newSharedEventHandle` 返回 nil；原生 Metal listener 则仍可能被独立创建。因此不能把 Metal listener 的 selector 40 记录视为证明特定 event 是原生对象或 bridge 对象。
+
+复核命令：
+
+```sh
+xcrun llvm-objdump --macho --disassemble --no-show-raw-insn \
+  .local/apple/dsc-20H392/System/Library/Frameworks/Metal.framework/Metal \
+  > x9/out/shared-event-research-20261126/metal.dis
+rg -n 'MTLSharedEventListener|_MTLSharedEvent' x9/out/shared-event-research-20261126/metal.dis
+sed -n '276565,276820p' x9/out/shared-event-research-20261126/metal.dis
+xcrun llvm-objdump --macho --indirect-symbols \
+  .local/apple/dsc-20H392/System/Library/Frameworks/Metal.framework/Metal | grep IOSurfaceSharedEvent
+sed -n '8448,8517p;8675,8820p' /tmp/iosurface.dis
+```
+
+上述命令 exit 0；没有修改驱动、插件、root 或设备，没有构建新候选。下一步需取得实际异常名称/抛出点或已证明运行路径，及对 event 的真实所有权、Mach rights、并发、销毁与 callback payload 合同；此前不适合声称存在小范围可安全修复。
