@@ -54,3 +54,9 @@ Host：在固定 Xcode 15/SDKROOT 环境编译运行 `x9/tools/tests/shared_even
 `close` 设置关闭标志后 `thread_call_cancel_wait`，再清理条目；要求外部先阻止新调用且串行化 close/free，绝不从该 worker 中 close。XNU `thread_call.c` 中普通 call 的 cancel_wait 在同时取消 pending 时不保证等待在途调用；本实现刻意使用 ONCE，源码该分支同时取消 pending 并等待在途；不能退回普通 allocate。Mach 发送使用 timeout 0 以避免等待满队列，但仍会等待 listener `sendLock`；未来取消/关闭实现不得在持有该锁时等待 worker。队列容量 64 是有界资源上限，不是消息耗尽保证；长期满端口会持续 10 ms 重试直到取消/关闭。该 worker 仍未连接 selector：每 counter 唯一 queue、跨 client 的 listener 取消、task death、事件锁顺序与真实 Mach timeout/死端口行为均待集成验证。
 
 Xcode 15 单对象编译 exit 0，`SweetSurface.o` 545488 B、12 warnings，日志 `x9/out/event-worker-host-20261126/compile-final.log`。`shared_event_pending_host.cpp` 和 `shared_event_listeners_host.cpp` 的 host stub 测试 exit 0；包含 timeout→延期→成功的脚本化 worker 测试，stub 不证明真实线程/Mach 行为。未做设备操作或构建整机。
+
+## 实验接线（r3）
+
+显式 `x9_surf_events=1` 才把 36–41、45 接到事件实现；默认路径保持原行为。每个 Mach reference 独占一个 pending queue。36/38 通过任务内能力和只读映射返回实际 counter；37 经唯一队列推进，45 按实际 counter 等待；39 以本连接的 listener 注册，40/41 接管/撤销对应异步引用。撤销在 send lock 中标记 listener 后，跨活跃队列取消；已成功进入 Mach 队列的消息不能撤回。零超时发送遇队列满保留条目并延迟尝试，不能当成已投递。退役先从全局队列索引摘出，再关闭 worker，后释放映射与 counter。
+
+这是供设备复证的实验兼容层。未证明真实任务退出/no-senders、拥塞多 listener 公平性、42–44 特殊用途、Metal 前端自己的跨进程 handle 或 AegirPoster 止崩；不能从 host stub 推断这些结论。测试和候选见 NOTES §6.24。
