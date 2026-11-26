@@ -38,3 +38,11 @@ python3 -I x9/tools/tests/inspect_shared_event_delivery.py
 **这些方法尚未接到 selector 40/41/39，也未连接 counter/事件或 pending/worker，因此不改变现有 selector 行为，不能声称已支持通知。** 将来接线须在调用 `eventListenerAdd` 前实施原生 selector 40 完整参数形状校验，保证错误回复没有提前释放；待证明 selector 41 移除、队列在 close/task death 期间的取消与释放顺序、事件 lock 和发送锁的顺序，以及排队失败/死端口的处理。移除表项不会撤销其他对象已持有的 retained 引用。单事件通知仍必须在 signal/subscribe 锁下完成两次比较与 ownership 交接，不能在 event lock 发送。仅用于规划的 API：`eventListenerAdd(args)`、`eventListenerCopy(refcon)`（返回 retained）、`eventListenerRemove(refcon)`、`eventListenerDeliver(listener, block, event, value)`、`eventListenersClose()`。
 
 Host 检查（不是内核/Mach 运行时证明）：`SweetSurface.o` 按 `Builder.compile_one` exit 0、445312 B、12 warnings；在 Xcode 15 设置 `DEVELOPER_DIR=/Users/tosasitill/Downloads/Xcode.app/Contents/Developer`、`SDKROOT=$(xcrun --sdk macosx --show-sdk-path)` 后，`xcrun clang++ -std=c++17 -Wall -Wextra -pthread x9/tools/tests/shared_event_listeners_host.cpp -o x9/out/event-listener-host-20261126/listeners-test && x9/out/event-listener-host-20261126/listeners-test` exit 0。host harness 编译生产 `.inc` 并以 stub 模拟 right，覆盖重复/容量、移除后 retained 发送、四项 payload、close 与注册竞争；不模拟真实 MIG、Mach、设备。首次使用系统默认 SDK 编译失败（旧 clang 与新 SDK 的 builtin 不匹配）；切换上述固定 Xcode 后通过。
+
+## 未接线 pending 状态机（2026-11-26）
+
+`SweetSharedEventPending` 为一个 counter 持有 64 项上限的待发记录，每项 retain listener。队列自己的 lock 使 `subscribe`、`advance`、`cancelListener`、`close` 和 `drainOne` 的索引变化串行；`drainOne` 在锁内检查真实 counter、原子取出达到目标值的记录，锁外发送并释放 listener。已 claim 的记录不能取消；`cancelListener` 只移除当前队列中该 listener 的条目；`close` 禁止新操作并释放未 claim 项。四项消息中的 value 使用订阅 target，匹配 stock 通知对象保存值的静态切片。queue retain counter，counter 不 retain queue，无环；方法调用者须在整个调用期间 retain queue。
+
+**该状态机未接 selector，也没有 worker 或自动调度。** 每个 event 必须由外部保证唯一 queue，并让所有 counter advance 经此 queue，否则调度和取消的完整性不成立。`subscribe` 即使目标已达到也仅入队；调用方必须安排 drain。未来 worker 必须在注册和 advance 后可恢复地安排 drain，处理关闭/claim 竞争、持有 queue 的权属以及 Mach 发送可能阻塞的退出策略。listener registry remove 必须先取得 retained listener，对所属所有 event queue 撤销，且定义已 claim 消息能否在 remove 后发送；当前尚无跨 queue registry 或原版语义证明。故不可直接接线，不声称通知可用或资源自动清理。
+
+Host：在固定 Xcode 15/SDKROOT 环境编译运行 `x9/tools/tests/shared_event_pending_host.cpp`，exit 0，模拟 counter/listener/Mach，编译真实 queue `.inc`；覆盖阈值、先 signal、满 64、取消、关闭、注册/advance 竞争。recipe 单对象编译 `SweetSurface.o` exit 0、502488 B、12 warnings，完整日志 `x9/out/event-pending-host-20261126/compile.log`（gitignored）。未验证真实 Mach/线程调度、设备或功能。
