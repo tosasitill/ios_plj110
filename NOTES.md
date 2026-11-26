@@ -527,3 +527,4 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 操作前 HEAD `79273b8c`。确认唯一 fastboot 设备、槽位 b、`is-userspace: no`，用户确认后执行 `fastboot -s "$id" reboot`，exit 0 / Rebooting OKAY；未再次写分区或切槽，无构建、CI、root/mailbox 或 push。
 - 原采集会话 49582 保持运行。`~/432.txt` 初始空，随后收到 36,648 B；读到 `USB shim log ready`、`x9 shim: direct XNU loader`、保留 LK scanout 与 LK 记录。文件在数次检查中未继续增长。当前只证实到 shim，未见 XNU 交接、boot-args 或 launchd；不据此判断死机。
 - `python3 -I x9/tools/shared-event/review_log.py "$HOME/432.txt"` exit 0，首段无 boot-args、SharedEvent 调用或 AegirPoster SIGABRT。保持 logger，不重启；下一步读取同一捕获的新字节并核对启动阶段。无功能验收。
+- 同一捕获随后继续增长；复读时 426,793 B，`review_log.py` exit 0，唯一 boot-args 同时含 `x9_surf_events=1`、`x9ed=1`。设备已到 iOS 用户态：launchd 8.088 s 完成 early boot，SpringBoard 9.141 s 输出进程日志。日志尾部约 11.99 s；该快照尚无 SharedEvent 调用或 AegirPoster SIGABRT，时间窗不足以判断止崩。采集继续。
