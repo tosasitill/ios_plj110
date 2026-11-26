@@ -154,6 +154,30 @@ int main()
 	assert(sweet_event_map_count == 2); // One authorized foreign right still exists.
 	a.eventMapsClose();
 	assert(sweet_event_map_count == 1);
+	// A live event can outlast more sequential clients than its concurrent cap.
+	auto *lifetime = static_cast<SweetEventRight *>(sharedRight);
+	for (unsigned i = 0; i < 96; ++i) {
+		auto *transient = SweetEventViewOwner::make();
+		uint64_t address = 0;
+		assert(lifetime->attach(transient, &taskB, &address) == kIOReturnSuccess && address);
+		assert(sweet_event_map_count == 2);
+		transient->close();
+		assert(sweet_event_map_count == 1);
+		transient->release();
+	}
+	// The concurrent cap remains enforced; closed and live owners differ.
+	SweetEventViewOwner *held[kSweetEventViewsPerObject - 1];
+	for (auto &owner : held) {
+		owner = SweetEventViewOwner::make();
+		uint64_t address = 0;
+		assert(lifetime->attach(owner, &taskB, &address) == kIOReturnSuccess && address);
+	}
+	uint64_t address = 0;
+	auto *overCap = SweetEventViewOwner::make();
+	assert(lifetime->attach(overCap, &taskB, &address) == kIOReturnNoResources && !address);
+	overCap->release();
+	for (auto *owner : held) { owner->close(); owner->release(); }
+	assert(sweet_event_map_count == 1);
 	IOUserClient::rights.erase({&taskB, 44});
 	sharedRight->release();
 	assert(!sweet_event_map_count); // Last right detached B's view while B is still open.

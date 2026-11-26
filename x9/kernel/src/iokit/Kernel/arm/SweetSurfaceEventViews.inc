@@ -28,6 +28,7 @@ public:
 	static SweetEventViewOwner *make();
 	IOReturn map(SweetSharedEventCounter *event, task_t task, uint64_t *va);
 	void unmap(SweetSharedEventCounter *event);
+	bool isClosed() const { return __atomic_load_n(&closed, __ATOMIC_ACQUIRE); }
 	void close();
 	void free() APPLE_KEXT_OVERRIDE;
 };
@@ -61,7 +62,7 @@ SweetEventViewOwner::map(SweetSharedEventCounter *event, task_t task, uint64_t *
 	IOLockLock(lock);
 	IOReturn result = kIOReturnNotOpen;
 	Record *slot = NULL;
-	if (!closed) {
+	if (!isClosed()) {
 		result = kIOReturnNoResources;
 		for (auto &entry : views) {
 			if (entry.event == event) {
@@ -110,7 +111,7 @@ SweetEventViewOwner::close()
 {
 	Record detached[kSweetEventViewsPerObject];
 	IOLockLock(lock);
-	closed = true;
+	__atomic_store_n(&closed, true, __ATOMIC_RELEASE);
 	memcpy(detached, views, sizeof(detached));
 	bzero(views, sizeof(views));
 	IOLockUnlock(lock);
@@ -216,11 +217,20 @@ IOReturn
 SweetEventRight::attach(SweetEventViewOwner *owner, task_t task, uint64_t *va)
 {
 	if (owner == NULL) return kIOReturnNoResources;
+	if (owner->isClosed()) return kIOReturnNotOpen;
+	SweetEventViewOwner *retired[kSweetEventViewsPerObject];
+	unsigned retiredCount = 0;
 	IOLockLock(lock);
 	SweetEventViewOwner **slot = NULL;
 	bool known = false;
 	for (auto &entry : owners) {
-		if (entry == owner) { known = true; break; }
+		// close() permanently detaches a view owner. Drop its reference
+		// outside the right lock so long-lived events do not exhaust slots.
+		if (entry != NULL && entry->isClosed()) {
+			retired[retiredCount++] = entry;
+			entry = NULL;
+		}
+		if (entry == owner) known = true;
 		if (entry == NULL && slot == NULL) slot = &entry;
 	}
 	const IOReturn result = (known || slot != NULL) ? owner->map(counter, task, va) : kIOReturnNoResources;
@@ -229,6 +239,7 @@ SweetEventRight::attach(SweetEventViewOwner *owner, task_t task, uint64_t *va)
 		*slot = owner;
 	}
 	IOLockUnlock(lock);
+	for (unsigned i = 0; i < retiredCount; ++i) retired[i]->release();
 	return result;
 }
 
