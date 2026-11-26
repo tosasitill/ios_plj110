@@ -758,6 +758,19 @@ IOCoreSurfaceRoot::start(IOService *provider)
 	return true;
 }
 
+/* Retained registration: callback/refcon are opaque, never invoked in kernel. */
+class SweetEventListener : public OSObject {
+	OSDeclareDefaultStructors(SweetEventListener);
+public:
+	OSAsyncReference64 ref;
+	IOLock *sendLock;
+	bool ownsRight;
+	io_user_reference_t key;
+	bool initReference(IOExternalMethodArguments *args);
+	void free() APPLE_KEXT_OVERRIDE;
+};
+OSDefineMetaClassAndStructors(SweetEventListener, OSObject);
+
 class IOSurfaceRootUserClient : public IOUserClient {
 	OSDeclareDefaultStructors(IOSurfaceRootUserClient);
 
@@ -765,6 +778,8 @@ class IOSurfaceRootUserClient : public IOUserClient {
 	IOLock  *fLock;
 	OSArray *fRefs;
 	OSArray *fZombies;      /* released views whose state page is still mapped, oldest first */
+	SweetEventListener *fEventListeners[64]; /* protected by fLock */
+	bool fEventListenersClosed;
 
 	SweetSurfaceRef *findRef(uint32_t id, unsigned int *index, bool detached = false);
 	IOReturn addRef(SweetSurface *s, SweetSurfaceRef **refOut, bool *existing);
@@ -775,6 +790,13 @@ class IOSurfaceRootUserClient : public IOUserClient {
 	IOReturn bulkAttachments(IOExternalMethodArguments *args);
 
 public:
+	/* Infrastructure only; selectors remain unwired until event support exists. */
+	IOReturn eventListenerAdd(IOExternalMethodArguments *args);
+	IOReturn eventListenerRemove(io_user_reference_t key);
+	SweetEventListener *eventListenerCopy(io_user_reference_t key);
+	static IOReturn eventListenerDeliver(SweetEventListener *listener,
+	    io_user_reference_t block, io_user_reference_t event, uint64_t value);
+	void eventListenersClose();
 	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
 	void free() APPLE_KEXT_OVERRIDE;
 	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
@@ -791,6 +813,8 @@ public:
 };
 
 OSDefineMetaClassAndStructors(IOSurfaceRootUserClient, IOUserClient);
+
+#include "SweetSurfaceEventListeners.inc"
 
 static uint64_t sweet_surf_logged;      /* selectors / traps already logged (< 64) */
 
@@ -814,6 +838,8 @@ IOSurfaceRootUserClient::initWithTask(task_t owningTask, void *securityID, UInt3
 		return false;
 	}
 	fTask = owningTask;
+	bzero(fEventListeners, sizeof(fEventListeners));
+	fEventListenersClosed = false;
 	fLock = IOLockAlloc();
 	fRefs = OSArray::withCapacity(16);
 	fZombies = OSArray::withCapacity(16);
@@ -823,6 +849,9 @@ IOSurfaceRootUserClient::initWithTask(task_t owningTask, void *securityID, UInt3
 void
 IOSurfaceRootUserClient::free()
 {
+	if (fLock != NULL) {
+		eventListenersClose();
+	}
 	OSSafeReleaseNULL(fRefs);
 	OSSafeReleaseNULL(fZombies);
 	if (fLock != NULL) {
@@ -835,6 +864,7 @@ IOSurfaceRootUserClient::free()
 IOReturn
 IOSurfaceRootUserClient::clientClose(void)
 {
+	eventListenersClose();
 	IOLockLock(fLock);
 	fRefs->flushCollection();
 	if (fZombies != NULL) {

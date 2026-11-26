@@ -30,3 +30,11 @@ python3 -I x9/tools/tests/inspect_shared_event_delivery.py
 该脚本读取固定原版 kernelcache，使用 `x9/usb/prepare_native.py:MachO`、Python capstone 检查指定指令及 GOT 符号，输出地址和 PASS；是静态 ABI 断言，不运行内核或模拟收发。2026-11-26 在分支 `feat/shared-event-delivery` 基线 `16cc7c53` 执行 exit 0，输出 `x9/out/shared-delivery-20261126/check.log`（gitignored）。对 stock 代码范围的可重查切片可用既有 `x9/out/native-event-abi-20261126/inspect.py <VA> <hex-length>`；关键入口分别为 `fffffff005a5d8f0`、`fffffff005a601c0`、`fffffff005a453a4`、`fffffff005a459e0`、`fffffff005a444d4`、`fffffff005a447f8`、`fffffff005a4484c`、`fffffff005a442bc`、`fffffff005a44400`。
 
 本次未修改驱动、构建候选、操作设备或验证收发。上面脚本需要现有 capstone；不属于构建依赖。
+
+## 未接线 listener 基础设施（2026-11-26）
+
+`SweetSurfaceEventListeners.inc` 为每个 `IOSurfaceRootUserClient` 加入最多 64 个 listener 槽，以客户端 `fLock` 保护注册、按 opaque refcon 查找/移除与 close；重复 refcon 拒绝。`eventListenerAdd` 只有在成功占槽时接管 MIG 成功回复所转移的 send right；失败不释放，由 MIG 清理。`eventListenerCopy` 返回 retained 对象：即使从表移除，只要 pending notifier 仍保留对象，发送使用的 right 仍有效；最后一次 release 才释放。close 先关闭新注册并摘除全部槽，再在锁外 release。`eventListenerDeliver` 用 retained 对象与专用发送锁调用原生 `sendAsyncResult64`，传入前述四个 opaque 值；不解析或调用用户地址，不在客户端表锁中发送。该调用可能等待 Mach 队列，不能在事件锁或其他不能阻塞的锁内使用。
+
+**这些方法尚未接到 selector 40/41/39，也未连接 counter/事件或 pending/worker，因此不改变现有 selector 行为，不能声称已支持通知。** 将来接线须在调用 `eventListenerAdd` 前实施原生 selector 40 完整参数形状校验，保证错误回复没有提前释放；待证明 selector 41 移除、队列在 close/task death 期间的取消与释放顺序、事件 lock 和发送锁的顺序，以及排队失败/死端口的处理。移除表项不会撤销其他对象已持有的 retained 引用。单事件通知仍必须在 signal/subscribe 锁下完成两次比较与 ownership 交接，不能在 event lock 发送。仅用于规划的 API：`eventListenerAdd(args)`、`eventListenerCopy(refcon)`（返回 retained）、`eventListenerRemove(refcon)`、`eventListenerDeliver(listener, block, event, value)`、`eventListenersClose()`。
+
+Host 检查（不是内核/Mach 运行时证明）：`SweetSurface.o` 按 `Builder.compile_one` exit 0、445312 B、12 warnings；在 Xcode 15 设置 `DEVELOPER_DIR=/Users/tosasitill/Downloads/Xcode.app/Contents/Developer`、`SDKROOT=$(xcrun --sdk macosx --show-sdk-path)` 后，`xcrun clang++ -std=c++17 -Wall -Wextra -pthread x9/tools/tests/shared_event_listeners_host.cpp -o x9/out/event-listener-host-20261126/listeners-test && x9/out/event-listener-host-20261126/listeners-test` exit 0。host harness 编译生产 `.inc` 并以 stub 模拟 right，覆盖重复/容量、移除后 retained 发送、四项 payload、close 与注册竞争；不模拟真实 MIG、Mach、设备。首次使用系统默认 SDK 编译失败（旧 clang 与新 SDK 的 builtin 不匹配）；切换上述固定 Xcode 后通过。
