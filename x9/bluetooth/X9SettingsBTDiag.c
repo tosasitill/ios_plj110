@@ -67,6 +67,52 @@ static id (*original_specifiers)(id, SEL);
 static void (*original_central_state)(id, SEL, id);
 static void (*original_xpc_invalid)(id, SEL);
 static void (*original_handle_state)(id, SEL, id);
+static void (*original_connection_invalid)(id, SEL);
+static Ivar xpc_connection_ivar;
+static const void *xpc_connection_type;
+static const void *(*observed_xpc_get_type)(id);
+static const char *(*observed_xpc_get_name)(id);
+
+static void connection_invalid(id object, SEL selector)
+{
+    id connection = object_getIvar(object, xpc_connection_ivar);
+    const char *service = connection && observed_xpc_get_type(connection) == xpc_connection_type
+        ? observed_xpc_get_name(connection) : NULL;
+    if (service && (!strcmp(service, "com.apple.bluetooth.xpc") ||
+                    !strcmp(service, "com.apple.bluetoothuser.xpc") ||
+                    !strcmp(service, "com.apple.server.bluetooth")))
+        note("CoreBluetooth invalidated Mach service %s", service);
+    else
+        note("CoreBluetooth invalidated connection has no recognized service name");
+    original_connection_invalid(object, selector);
+}
+
+static void settings_install_connection(const struct mach_header *header)
+{
+    Class cls = objc_getClass("CBXpcConnection");
+    Method method = cls ? class_getInstanceMethod(cls, sel_registerName("_handleInvalid")) : NULL;
+    Ivar ivar = cls ? class_getInstanceVariable(cls, "_xpcConnection") : NULL;
+    const char *method_type = method ? method_getTypeEncoding(method) : NULL;
+    const char *ivar_type = ivar ? ivar_getTypeEncoding(ivar) : NULL;
+    Dl_info info = {0};
+    if (!method_type || strcmp(method_type, "v16@0:8") ||
+        !ivar_type || ivar_type[0] != '@' || ivar_type[1] == '?' ||
+        !dladdr((void *)method_getImplementation(method), &info) || info.dli_fbase != header) {
+        note("CoreBluetooth XPC endpoint diagnostic identity rejected");
+        return;
+    }
+    observed_xpc_get_type = dlsym(RTLD_DEFAULT, "xpc_get_type");
+    observed_xpc_get_name = dlsym(RTLD_DEFAULT, "xpc_connection_get_name");
+    xpc_connection_type = dlsym(RTLD_DEFAULT, "_xpc_type_connection");
+    if (!observed_xpc_get_type || !observed_xpc_get_name || !xpc_connection_type) {
+        note("CoreBluetooth XPC endpoint diagnostic symbols unavailable");
+        return;
+    }
+    xpc_connection_ivar = ivar;
+    original_connection_invalid = (void (*)(id, SEL))method_getImplementation(method);
+    method_setImplementation(method, (IMP)connection_invalid);
+    note("CoreBluetooth XPC endpoint diagnostic installed");
+}
 
 static void manager_xpc_invalid(id object, SEL selector)
 {
@@ -83,6 +129,7 @@ static void manager_handle_state(id object, SEL selector, id args)
 static void settings_install_xpc(void *context)
 {
     const struct mach_header *header = context;
+    settings_install_connection(header);
     Class manager = objc_getClass("CBManager");
     if (!manager) return;
     Method invalid = class_getInstanceMethod(manager, sel_registerName("xpcConnectionIsInvalid"));

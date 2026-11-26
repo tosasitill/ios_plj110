@@ -1030,8 +1030,16 @@ static void ios_end_all_roundtrip(){
  assert(x9c_end_job.token==query&&!qmi_replies);
  x9mi_tick();end_query_cnf(0,2);uint64_t token=x9c_end_job.token;x9mi_tick();
  assert(writes==2&&x9cw_u16(last_frame+10)==0x905&&x9cw_u32(last_frame+20)==0&&x9cw_u32(last_frame+28)==7);
+ for(unsigned event:{134u,1u,129u}){
+  rx_progress(event,7,0);
+  assert(!x9_mc_outbound.blocked&&!x9_mc_outbound.ended&&x9_mc_outbound.ios_state==1);
+ }
+ rx_progress(133,7,0);assert(!x9_mc_outbound.blocked&&x9_mc_outbound.ended&&x9_mc_outbound.ios_state==9);
  uint8_t p[24];x9cw_header(p,24,0x906,2,(unsigned)token);x9cw_scalar(p+16,0,0,4);
  x9mi_rx(p,sizeof(p));x9c_poll();assert(qmi_replies==1&&!qmi_error&&qmi_response_len==14&&x9cw_u16(qmi_response+3)==0x31);
+ token=x9c_end_job.token;x9mi_tick();assert(writes==3&&x9cw_u16(last_frame+10)==0x909);
+ uint8_t empty[704];unsigned n=current_frame(empty,0);x9cw_put16(empty+12,(unsigned)token);
+ x9mi_rx(empty,n);x9c_poll();assert(!x9c_end_job.used&&!x9_mc_end_token);
 }
 static void ios_end_all_reject(){
  bind_voice();uint8_t q[]={0,78,0,0x31,0,4,0,1,1,0,8};

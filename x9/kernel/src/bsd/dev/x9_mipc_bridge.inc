@@ -565,6 +565,7 @@ static int x9mi_select(void *context){
  struct x9mi_selection *a=(struct x9mi_selection *)context;struct x9_mi_slot *s=a->slot;
  if(s->id==0x909&&s->mask==2)s->call_revision=x9_mc_outbound.revision;
  if(x9mi_call_mutation(s->id))x9cw_outbound_invalidate(&x9_mc_outbound);
+ if(s->call_guard==2)x9_mc_end_selected=s->token;
  s->state=2;*a->len=s->len;*a->id=s->id;*a->tx=s->txid;memcpy(a->frame,s->frame,s->len);return 1;
 }
 static void x9mi_tick(void){

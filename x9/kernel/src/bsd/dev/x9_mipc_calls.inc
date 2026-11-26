@@ -26,7 +26,7 @@ static uint64_t x9_mc_dial_token;
  * Retirement requires real END + a fresh owned empty snapshot and all
  * CALL mutations drained, not a timer or hangup result0. direction records
  * which reducer's epoch the leased end belongs to (0 MO, 1 MT). */
-static uint64_t x9_mc_end_token;
+static uint64_t x9_mc_end_token,x9_mc_end_selected;
 /* One answer attempt per MT epoch, same conservative lease: a missing or
  * failed0908 never releases it; only real MT END + owned empty retires it.
  * END stays admissible while this lease is held, mirroring the dial lease. */
@@ -115,6 +115,13 @@ static void x9mc_rx(const uint8_t *p,unsigned n,unsigned id,unsigned tx){
     * Its real identity must already exist from the complete incoming CMD. */
    x9_mc_outbound.count_known=0;x9_mc_outbound.blocked=1;
    rc=x9cw_inbound_apply(&x9_mc_inbound,&c);
+  }else if(c.mask==2&&!c.direction&&!c.mode&&(c.event==134||c.event==1)&&
+           x9_mc_end_token&&x9_mc_end_token==x9_mc_end_selected&&!x9_mc_end_direction&&
+           x9_mc_end_epoch==x9_mc_outbound.epoch&&!x9_mc_outbound.blocked&&
+           x9_mc_outbound.ios_state==1&&x9_mc_outbound.native_id==c.id){
+   /* Log 444 observed 134 -> 1 -> 129 -> 133 after selecting 0905
+    * for the same dialing CS call. Only 133 publishes END. */
+   rc=0;
   }else rc=x9cw_outbound_apply(&x9_mc_outbound,&c);
   static unsigned progress_logged;
   if(progress_logged<32){
