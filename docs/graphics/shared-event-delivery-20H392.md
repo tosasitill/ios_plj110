@@ -46,3 +46,11 @@ Host 检查（不是内核/Mach 运行时证明）：`SweetSurface.o` 按 `Build
 **该状态机未接 selector，也没有 worker 或自动调度。** 每个 event 必须由外部保证唯一 queue，并让所有 counter advance 经此 queue，否则调度和取消的完整性不成立。`subscribe` 即使目标已达到也仅入队；调用方必须安排 drain。未来 worker 必须在注册和 advance 后可恢复地安排 drain，处理关闭/claim 竞争、持有 queue 的权属以及 Mach 发送可能阻塞的退出策略。listener registry remove 必须先取得 retained listener，对所属所有 event queue 撤销，且定义已 claim 消息能否在 remove 后发送；当前尚无跨 queue registry 或原版语义证明。故不可直接接线，不声称通知可用或资源自动清理。
 
 Host：在固定 Xcode 15/SDKROOT 环境编译运行 `x9/tools/tests/shared_event_pending_host.cpp`，exit 0，模拟 counter/listener/Mach，编译真实 queue `.inc`；覆盖阈值、先 signal、满 64、取消、关闭、注册/advance 竞争。recipe 单对象编译 `SweetSurface.o` exit 0、502488 B、12 warnings，完整日志 `x9/out/event-pending-host-20261126/compile.log`（gitignored）。未验证真实 Mach/线程调度、设备或功能。
+
+## 未接线 thread_call 投递候选（2026-11-26）
+
+以上“没有 worker”仅指上一版。当前 pending 对象创建 `THREAD_CALL_PRIORITY_KERNEL | THREAD_CALL_OPTIONS_ONCE` thread call：达到目标的 subscribe 和 counter advance 均安排执行，线程逐条在 queue 锁外以 `sendAsyncResult64WithOptions(..., kIOUserNotifyOptionCanDrop)` 发送；只有 `MACH_SEND_TIMED_OUT`（消息未排入）保留条目并延迟 10 ms 重试，其他错误记录错误码并释放该条，不报告成功。取消可移除未 claim 项，也可标记发送中的项禁止超时重试；已发出消息无法撤回。持有 right 和数据的 listener 引用在发送结束前保留。
+
+`close` 设置关闭标志后 `thread_call_cancel_wait`，再清理条目；要求外部先阻止新调用且串行化 close/free，绝不从该 worker 中 close。XNU `thread_call.c` 中普通 call 的 cancel_wait 在同时取消 pending 时不保证等待在途调用；本实现刻意使用 ONCE，源码该分支同时取消 pending 并等待在途；不能退回普通 allocate。Mach 发送使用 timeout 0 以避免等待满队列，但仍会等待 listener `sendLock`；未来取消/关闭实现不得在持有该锁时等待 worker。队列容量 64 是有界资源上限，不是消息耗尽保证；长期满端口会持续 10 ms 重试直到取消/关闭。该 worker 仍未连接 selector：每 counter 唯一 queue、跨 client 的 listener 取消、task death、事件锁顺序与真实 Mach timeout/死端口行为均待集成验证。
+
+Xcode 15 单对象编译 exit 0，`SweetSurface.o` 545488 B、12 warnings，日志 `x9/out/event-worker-host-20261126/compile-final.log`。`shared_event_pending_host.cpp` 和 `shared_event_listeners_host.cpp` 的 host stub 测试 exit 0；包含 timeout→延期→成功的脚本化 worker 测试，stub 不证明真实线程/Mach 行为。未做设备操作或构建整机。

@@ -118,7 +118,8 @@ IOSurfaceRootUserClient::eventListenerDeliver(SweetEventListener *listener,
 	io_user_reference_t payload[4] = { block, event, value, value >> 32 };
 	/* A retained listener keeps the right alive; serialize ref[0] error flags. */
 	IOLockLock(listener->sendLock);
-	IOReturn result = sendAsyncResult64(listener->ref, kIOReturnSuccess, payload, 4);
+	IOReturn result = sendAsyncResult64WithOptions(listener->ref, kIOReturnSuccess, payload, 4,
+	    kIOUserNotifyOptionCanDrop);
 	IOLockUnlock(listener->sendLock);
 	return result;
 }

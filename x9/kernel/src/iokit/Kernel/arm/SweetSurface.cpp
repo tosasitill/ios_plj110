@@ -33,6 +33,7 @@
 
 #if defined(SWEET)
 #include <IOKit/IOService.h>
+#include <kern/thread_call.h>
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOKitKeys.h>
 #include <IOKit/IOLib.h>

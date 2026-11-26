@@ -36,10 +36,11 @@ std::atomic<int> releases{0}, sends{0};
 uint64_t sent[4], sentport;
 struct IOUserClient : OSObject {
  static int releaseAsyncReference64(OSAsyncReference64 ref) { assert(ref[0]); ++releases; return 0; }
- static int sendAsyncResult64(OSAsyncReference64 ref, int result, io_user_reference_t *a, unsigned n) {
+ static int sendAsyncResult64WithOptions(OSAsyncReference64 ref, int result, io_user_reference_t *a, unsigned n, unsigned) {
   assert(ref[0] && result==0 && n==4); sentport=ref[0]; std::memcpy(sent,a,sizeof(sent)); ++sends; return 0;
  }
 };
+constexpr unsigned kIOUserNotifyOptionCanDrop=1;
 struct IOExternalMethodArguments { uint64_t asyncWakePort; io_user_reference_t *asyncReference; uint32_t asyncReferenceCount; };
 class SweetEventListener : public OSObject {
 public:

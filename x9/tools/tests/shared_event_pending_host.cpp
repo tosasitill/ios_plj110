@@ -15,6 +15,7 @@ constexpr IOReturn kIOReturnSuccess=0, kIOReturnBadArgument=1, kIOReturnNoMemory
 constexpr uint64_t MACH_PORT_NULL=0;
 constexpr unsigned kOSAsyncRef64Count=8, kIOAsyncCalloutRefconIndex=2;
 using OSAsyncReference64 = io_user_reference_t[8];
+#define IOLog(...) ((void)0)
 #define bzero(p,n) std::memset((p),0,(n))
 #define APPLE_KEXT_OVERRIDE override
 #define OSTypeAlloc(x) new x
@@ -35,13 +36,24 @@ struct OSObject {
  void release() { if (--count==0) { free(); delete this; } }
 };
 std::atomic<int> releases{0}, sends{0};
+int forcedResult=0;
 uint64_t sent[4], sentport;
 struct IOUserClient : OSObject {
  static int releaseAsyncReference64(OSAsyncReference64 ref) { assert(ref[0]); ++releases; return 0; }
- static int sendAsyncResult64(OSAsyncReference64 ref, int result, io_user_reference_t *a, unsigned n) {
-  assert(ref[0] && result==0 && n==4); sentport=ref[0]; std::memcpy(sent,a,sizeof(sent)); ++sends; return 0;
+ static int sendAsyncResult64WithOptions(OSAsyncReference64 ref, int result, io_user_reference_t *a, unsigned n, unsigned) {
+  assert(ref[0] && result==0 && n==4); sentport=ref[0]; std::memcpy(sent,a,sizeof(sent)); ++sends; return forcedResult;
  }
 };
+constexpr int MACH_SEND_TIMED_OUT=100; constexpr unsigned kIOUserNotifyOptionCanDrop=1;
+using thread_call_param_t=void *; struct Call { void (*fn)(void *,void *); void *arg; bool pending; }; using thread_call_t=Call *;
+thread_call_t lastCall=nullptr;
+constexpr unsigned THREAD_CALL_PRIORITY_KERNEL=1, THREAD_CALL_OPTIONS_ONCE=1;
+thread_call_t thread_call_allocate_with_options(void (*fn)(void*,void*),void *arg,unsigned,unsigned) { return lastCall=new Call{fn,arg,false}; }
+void thread_call_free(thread_call_t c) { delete c; }
+void thread_call_enter(thread_call_t c) { c->pending=true; }
+void thread_call_enter_delayed(thread_call_t c,uint64_t) { c->pending=true; }
+void thread_call_cancel_wait(thread_call_t c) { c->pending=false; }
+constexpr unsigned NSEC_PER_MSEC=1000000; void clock_interval_to_deadline(unsigned t,unsigned n,uint64_t *v) { *v=(uint64_t)t*n; }
 struct IOExternalMethodArguments { uint64_t asyncWakePort; io_user_reference_t *asyncReference; uint32_t asyncReferenceCount; };
 class SweetEventListener : public OSObject {
 public:
@@ -77,6 +89,12 @@ int main() {
  assert(q->advance(10)); IOReturn ret=-1; assert(q->drainOne(&ret) && ret==0);
  assert(sent[0]==1 && sent[1]==2 && sent[2]==10 && sends==1); assert(!q->drainOne(nullptr));
  assert(q->subscribe(l,1,2,5)==0 && q->drainOne(&ret));
+ forcedResult=MACH_SEND_TIMED_OUT;
+ assert(q->subscribe(l,6,7,5)==0 && lastCall->pending);
+ lastCall->pending=false; lastCall->fn(lastCall->arg,nullptr);
+ assert(lastCall->pending); forcedResult=0;
+ lastCall->pending=false; lastCall->fn(lastCall->arg,nullptr);
+ assert(!lastCall->pending && !q->drainOne(&ret));
  for(unsigned i=0;i<64;i++) assert(q->subscribe(l,1,2,100)==0);
  assert(q->subscribe(l,1,2,100)==kIOReturnNoResources);
  assert(q->cancelListener(l)==64 && q->cancelListener(l)==0);
@@ -86,5 +104,5 @@ int main() {
  assert(q->subscribe(l,1,2,12)==0); q->close();
  assert(q->subscribe(l,1,2,12)==kIOReturnNotOpen && !q->advance(12) && !q->drainOne(nullptr));
  q->release(); l->release(); assert(client.eventListenerRemove(0x456)==0 && releases==1);
- puts("PASS: pending threshold, ready, cancellation, capacity, close and ownership");
+ puts("PASS: pending threshold, ready, timeout retry, cancellation, capacity and close");
 }
