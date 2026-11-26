@@ -9,7 +9,7 @@ ROOT=pathlib.Path(__file__).resolve().parents[2]
 class StorageReceipt(unittest.TestCase):
  def test_receipt(self):
   source=(ROOT/'x9/baseband/qcom/baseband/coachz_baseband.cpp').read_text()
-  start=source.index('static __attribute__((unused)) bool bb_x9_sms_storage_result(')
+  start=source.index('static __attribute__((unused)) bool bb_x9_sms_terminal_result(')
   end=source.index('// CALL replies/events use',start)
   code=r'''
 #include <cstdint>
@@ -37,12 +37,22 @@ static void IOLockWakeup(int *,bb_channel *,bool) {} static void thread_call_ent
 int main(){
  uint8_t sdu[14]={2,42,0,0x31,0,7,0,2,4,0,0,0,0,0},owned[20]={};
  auto &c=bb_qmux.client[0];c={true,false,false,5,0,7};
- if(bb_x9_sms_storage_result(100,300,8,sdu,14,owned,20)||calls)return 1;
- if(bb_x9_sms_storage_result(100,301,7,sdu,14,owned,20)||calls)return 2;
- bb_ch[0].count=2;if(bb_x9_sms_storage_result(100,300,7,sdu,14,owned,20)||bb_ch[0].count!=2)return 3;
- bb_ch[0].count=0;if(!bb_x9_sms_storage_result(100,300,7,sdu,14,owned,20)||bb_ch[0].frames[0].p!=owned||bb_ch[0].count!=1)return 4;
- sdu[10]=1;if(bb_x9_sms_storage_result(100,300,7,sdu,14,owned,20))return 5;
- sdu[10]=0;sdu[3]=0x37;if(bb_x9_sms_storage_result(100,300,7,sdu,14,owned,20))return 6;
+ if(bb_x9_sms_terminal_result(100,300,8,sdu,14,owned,20)||calls)return 1;
+ if(bb_x9_sms_terminal_result(100,301,7,sdu,14,owned,20)||calls)return 2;
+ bb_ch[0].count=2;if(bb_x9_sms_terminal_result(100,300,7,sdu,14,owned,20)||bb_ch[0].count!=2)return 3;
+ bb_ch[0].count=0;if(!bb_x9_sms_terminal_result(100,300,7,sdu,14,owned,20)||bb_ch[0].frames[0].p!=owned||bb_ch[0].count!=1)return 4;
+ sdu[10]=1;if(bb_x9_sms_terminal_result(100,300,7,sdu,14,owned,20))return 5;
+ sdu[10]=0;sdu[3]=0x37;if(bb_x9_sms_terminal_result(100,300,7,sdu,14,owned,20))return 6;
+ // RawSend rejects truncated success and admits exactly one real result.
+ uint8_t mo[19]={2,42,0,0x20,0,12,0,2,4,0,0,0,0,0,1,2,0,3,0},mo_owned[25]={};
+ bb_ch[0].count=0;
+ if(bb_x9_sms_terminal_result(100,300,8,mo,19,mo_owned,25))return 7;
+ if(bb_x9_sms_terminal_result(100,300,7,mo,14,mo_owned,20))return 8;
+ if(!bb_x9_sms_terminal_result(100,300,7,mo,19,mo_owned,25)||bb_ch[0].count!=1)return 9;
+ bb_ch[0].count=0;mo[10]=1;mo[12]=3;
+ if(bb_x9_sms_terminal_result(100,300,7,mo,19,mo_owned,25))return 10;
+ mo[5]=7;
+ if(!bb_x9_sms_terminal_result(100,300,7,mo,14,mo_owned,20)||bb_ch[0].count!=1)return 11;
  return 0;
 }
 '''

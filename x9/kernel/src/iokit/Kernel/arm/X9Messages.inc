@@ -31,6 +31,18 @@ struct x9m_job {
 static x9m_job x9m_jobs[X9M_JOBS];
 static uint64_t x9m_store_order;
 static bool x9m_storage(unsigned op){return op==X9M_LIST||op==X9M_READ||op==X9M_TAG;}
+static bool x9m_has_receipt(unsigned op){return op==X9M_SEND||x9m_storage(op);}
+/* A pending RawSend may have already sent 0605. Retransmissions, including
+ * malformed reuse of the same transaction, cannot send again or race its
+ * terminal result with BUSY/ARG. New transactions still validate normally. */
+static bool x9m_send_repeated_wire(uint32_t local,uint32_t node,uint32_t port,const uint8_t *req,unsigned len){
+ const unsigned slot=local-CBQ_PORT_BASE;
+ if(node!=X9BB_NODE||local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS||port!=X9BB_PORT_BASE+5||
+  !req||len<7||req[0]!=0||x9q_u16(req+3)!=0x20)return false;
+ for(const x9m_job &j:x9m_jobs)if(j.op==X9M_SEND&&j.slot==slot&&
+  j.generation==x9q_clients[slot].generation&&x9q_u16(j.req+1)==x9q_u16(req+1))return true;
+ return false;
+}
 /* An active WMS storage transaction owns its QMI transaction number until
  * the native work is retired. A repeated or changed request cannot enqueue
  * another 0607 or produce a competing terminal response. */
@@ -104,17 +116,21 @@ static bool x9m_ack_response(const x9m_job &j){
  bzero(p.p,sizeof(p.p));return admitted;
 }
 /* First terminal SDU is immutable until admitted or original client loss. */
-static void x9m_storage_receipt_retry(x9m_job &j){
+static void x9m_receipt_retry(x9m_job &j){
  if(!j.receipt_pending)return;
  bool retired=!x9m_live(j.slot,j.generation);
  if(!retired){
   const unsigned room=CBQ_HDR+j.receipt_len;
   uint8_t *owned=static_cast<uint8_t *>(IOMallocData(room));
   const unsigned port=CBQ_PORT_BASE+j.slot;
-  const bool admitted=owned&&bb_x9_sms_storage_result(port,X9BB_NODE,j.bridge_generation,
+  const bool admitted=owned&&bb_x9_sms_terminal_result(port,X9BB_NODE,j.bridge_generation,
     j.receipt,j.receipt_len,owned,room);
   if(!admitted&&owned){bzero(owned,room);IOFreeData(owned,room);}
-  if(admitted)retired=true;
+  if(admitted){
+   if(j.op==X9M_SEND)
+    printf("X9 SMS: SIM%u RawSend txn %u terminal host queue receipt; not delivery\n",j.sim+1,x9q_u16(j.req+1));
+   retired=true;
+  }
   else{
    // Allocation changed before a local DEL was observed. A new positive
    // identity is decisive; zero can also mean temporarily unavailable.
@@ -124,20 +140,20 @@ static void x9m_storage_receipt_retry(x9m_job &j){
  }
  if(retired){j.receipt_pending=false;bzero(j.receipt,sizeof(j.receipt));j.receipt_len=0;}
 }
-static void x9m_storage_terminal(x9m_job &j,x9q_packet &p){
+static void x9m_terminal(x9m_job &j,x9q_packet &p){
  if(j.answered)return;
  j.answered=true;
  if(!x9m_live(j.slot,j.generation)||!p.good)return;
  p.p[5]=(uint8_t)(p.n-7);p.p[6]=(uint8_t)((p.n-7)>>8);
  memcpy(j.receipt,p.p,p.n);j.receipt_len=p.n;j.receipt_pending=true;
- x9m_storage_receipt_retry(j);
+ x9m_receipt_retry(j);
 }
 static void x9m_error(x9m_job &j,uint16_t err){
  if(j.op==X9M_DIAG){
   j.answered=true;if(j.sim<2)x9m_sims[j.sim].diag_stage=2;return;
  }
- if(x9m_storage(j.op)){
-  x9q_packet p(j.req,err);x9m_storage_terminal(j,p);bzero(p.p,sizeof(p.p));return;
+ if(x9m_has_receipt(j.op)){
+  x9q_packet p(j.req,err);x9m_terminal(j,p);bzero(p.p,sizeof(p.p));return;
  }
  if(j.op==X9M_ACK){
   if(j.answered)return;
@@ -191,7 +207,7 @@ static x9m_job *x9m_new(unsigned op,unsigned slot,unsigned sim,const uint8_t *re
  for(x9m_job &j:x9m_jobs)if(!j.op){
   bzero(&j,sizeof(j));j.op=op;j.slot=slot;j.sim=sim;j.len=len;j.background=background;
   j.generation=x9q_clients[slot].generation;memcpy(j.req,req,len);j.deadline=x9q_ms()+60000;
-  if(op==X9M_ACK||x9m_storage(op))j.bridge_generation=bb_x9_sms_ack_identity(CBQ_PORT_BASE+slot,X9BB_NODE);
+  if(op==X9M_ACK||x9m_has_receipt(op))j.bridge_generation=bb_x9_sms_ack_identity(CBQ_PORT_BASE+slot,X9BB_NODE);
   return &j;
  }
  return nullptr;
@@ -559,6 +575,7 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   if(!err){
    x9m_job *j=x9m_new(X9M_SEND,slot,sim,req,len);
    if(!j)err=X9Q_BUSY;
+   else if(!j->bridge_generation){bzero(j,sizeof(*j));err=X9Q_NOT_READY;}
    else{
     x9w_frame f(0x605,1u<<sim);f.byte(0x100,0);f.tlv(0x8101,raw.p+3,raw.n-3);
     f.byte(0x102,(uint8_t)(raw.n-4-raw.p[3]));j->token=f.submit();
@@ -732,7 +749,7 @@ static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
   uint8_t value[24]={'1',(uint8_t)(intl?'4':'2'),(uint8_t)(intl?'5':'9'),(uint8_t)k};
   memcpy(value+4,text.p+start,k);response.tlv(1,value,k+4);bzero(value,sizeof(value));
  }
- if(x9m_storage(j.op))x9m_storage_terminal(j,response);
+ if(x9m_has_receipt(j.op))x9m_terminal(j,response);
  else if(!j.answered&&!j.background&&x9m_live(j.slot,j.generation))response.send(CBQ_PORT_BASE+j.slot,X9BB_PORT_BASE+x9m_service(j));
  bzero(response.p,sizeof(response.p));
 }
@@ -755,8 +772,8 @@ static void x9m_poll(){
   x9m_sims[sim].reg_valid=false;
  }
  for(x9m_job &j:x9m_jobs)if(j.op){
-  if(x9m_storage(j.op)){
-   x9m_storage_receipt_retry(j);
+  if(x9m_has_receipt(j.op)){
+   x9m_receipt_retry(j);
    if(j.answered&&!j.token&&!j.follow&&!j.hold&&!j.receipt_pending){bzero(&j,sizeof(j));continue;}
   }
   if(j.hold)continue;

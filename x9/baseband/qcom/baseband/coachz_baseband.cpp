@@ -1515,15 +1515,15 @@ static bool bb_x9_sms_ack_result(uint32_t dst_port,uint32_t src_node,uint64_t ge
   }
   IOLockUnlock(bb_lock);return admitted;
 }
-// Storage receipt infrastructure only: caller retains response and allocation
-// until queue admission succeeds. No MD replay and no persistence implication.
-// Not wired to x9m storage jobs yet; caller must supply the original identity.
-static __attribute__((unused)) bool bb_x9_sms_storage_result(uint32_t dst_port,uint32_t src_node,uint64_t generation,
+// For RawSend20 and WMS storage, retain the terminal response and identity
+// until queue admission. No MD replay, delivery, or persistence implication.
+static __attribute__((unused)) bool bb_x9_sms_terminal_result(uint32_t dst_port,uint32_t src_node,uint64_t generation,
                                 const uint8_t *sdu,uint32_t size,uint8_t *owned,uint32_t room)
 {
   const uint32_t slot=dst_port-CBQ_PORT_BASE;
   if(!bb_lock||!generation||!owned||dst_port<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS||
-     room!=CBQ_HDR+size||room>BB_FRAME_MAX||!x9sr_storage_response(sdu,size))return false;
+     room!=CBQ_HDR+size||room>BB_FRAME_MAX||
+     !(x9sr_storage_response(sdu,size)||x9sr_send_response(sdu,size)))return false;
   bool admitted=false;IOLockLock(bb_lock);
   const cbq_client &c=bb_qmux.client[slot];
   const cbq_server *srv=cbq_server_find(&bb_qmux,5);
