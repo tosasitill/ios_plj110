@@ -37,14 +37,13 @@ struct IOUserClient {
 std::map<std::pair<task_t, mach_port_name_t>, OSObject *> IOUserClient::rights;
 bool IOUserClient::failExport;
 
+#include "../../kernel/src/iokit/Kernel/arm/SweetSurfaceEventViews.inc"
+
 struct IOSurfaceRootUserClient {
 	task_t fTask;
 	IOLock *fLock;
-	struct EventMap { SweetSharedEventCounter *event; IOMemoryMap *map; };
-	EventMap fEventMaps[64] = {};
-	bool fEventMapsClosed = false;
-	static void eventMapDrop(EventMap &record);
-	IOReturn eventMapFindOrCreate(SweetSharedEventCounter *, EventMap **, bool *);
+	SweetEventViewOwner *fEventViews = SweetEventViewOwner::make();
+	~IOSurfaceRootUserClient() { eventMapsClose(); fEventViews->release(); }
 	IOReturn eventCapabilityCreate(uint64_t *);
 	SweetSharedEventCounter *eventCapabilityCopy(uint64_t);
 	IOReturn eventCapabilityImport(uint64_t, uint64_t *);
@@ -80,14 +79,22 @@ int main()
 	IOUserClient::rights[{&taskB, 43}] = foreign;
 	assert(b.eventCapabilityImport(43, out) == kIOReturnBadArgument && foreign->refs == 1);
 	// Fixture explicitly installs a second, authorized right to the same object.
-	event->retain();
-	IOUserClient::rights[{&taskB, 44}] = event;
+	auto *sharedRight = IOUserClient::rights.at({&taskA, 42});
+	sharedRight->retain();
+	IOUserClient::rights[{&taskB, 44}] = sharedRight;
 	assert(b.eventCapabilityImport(44, out) == kIOReturnSuccess);
 	assert(sweet_event_map_count == 2 && out[0] == 7 && out[2] == event->traceID());
+	IOUserClient::rights.erase({&taskA, 42});
+	sharedRight->release();
+	assert(sweet_event_map_count == 2); // One authorized foreign right still exists.
 	a.eventMapsClose();
 	assert(sweet_event_map_count == 1);
+	IOUserClient::rights.erase({&taskB, 44});
+	sharedRight->release();
+	assert(!sweet_event_map_count); // Last right detached B's view while B is still open.
+	assert(b.eventCapabilityCreate(out) == kIOReturnSuccess);
 	b.eventMapsClose();
-	assert(!sweet_event_map_count && b.eventCapabilityImport(44, out) == kIOReturnNotOpen);
+	assert(!sweet_event_map_count && b.eventCapabilityImport(42, out) == kIOReturnNotOpen);
 	for (const auto &item : IOUserClient::rights) item.second->release();
 	IOUserClient::rights.clear();
 	event->release();
