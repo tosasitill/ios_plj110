@@ -9,6 +9,44 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOURCE = ROOT / 'x9/kernel/src/iokit/Kernel/arm/X9Messages.inc'
 
 class DiagnosticReadOnly(unittest.TestCase):
+    def test_storage_job_and_diagnostic_do_not_block_each_other(self):
+        source = SOURCE.read_text()
+        storage_start = source.index('static bool x9m_store_blocked(')
+        storage_end = source.index('static uint64_t x9m_store_submit(', storage_start)
+        diagnostic_start = source.index('static bool x9m_diag_storage_busy(')
+        diagnostic_end = source.index('static void x9m_diag_poll(', diagnostic_start)
+        poll = source[source.index('  if(j.op==X9M_DIAG&&!j.token){'):]
+        self.assertLess(poll.index('if(x9m_diag_storage_busy(j.sim,&j))continue;'),
+                        poll.index('x9w_frame f(j.step?0x607:0x60b'))
+        code = r'''
+#include <cassert>
+#include <cstdint>
+enum { X9M_LIST=5, X9M_READ, X9M_TAG, X9M_DIAG };
+struct x9m_job { unsigned op, sim; uint64_t token, store_order; bool hold; };
+static x9m_job x9m_jobs[3];
+static bool x9m_storage(unsigned op){return op==X9M_LIST||op==X9M_READ||op==X9M_TAG;}
+''' + source[storage_start:storage_end] + source[diagnostic_start:diagnostic_end] + r'''
+int main(){
+ auto &diag=x9m_jobs[0], &list=x9m_jobs[1], &other_sim=x9m_jobs[2];
+ diag={X9M_DIAG,0,0,0,false};
+ list={X9M_LIST,0,0,1,false};
+ other_sim={X9M_READ,1,0,2,false};
+ assert(x9m_diag_storage_busy(0,&diag)&&!x9m_store_blocked(list));
+ diag.token=3;
+ assert(x9m_store_blocked(list)&&!x9m_store_blocked(other_sim));
+ diag.token=0;list.token=4;
+ assert(x9m_diag_storage_busy(0,&diag));
+ list={};
+ assert(!x9m_diag_storage_busy(0,&diag));
+}
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            src = pathlib.Path(tmp) / 'schedule.cpp'
+            binary = pathlib.Path(tmp) / 'schedule'
+            src.write_text(code)
+            subprocess.run(['c++', '-std=c++17', '-Wall', '-Werror', str(src), '-o', str(binary)], check=True)
+            subprocess.run([str(binary)], check=True)
+
     def test_actual_cmgr_fields(self):
         source = SOURCE.read_text()
         start = source.index('   if(j.step){\n    const uint8_t index[2]={1,0};', source.index('static void x9m_poll()'))

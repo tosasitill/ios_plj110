@@ -240,7 +240,7 @@ static bool x9m_stored(const uint8_t *p,unsigned n,x9q_view &records,unsigned &c
  * returning BUSY for every message after the first. Never replay a sent token. */
 static bool x9m_store_blocked(const x9m_job &j){
  for(const x9m_job &other:x9m_jobs)if(&other!=&j&&other.sim==j.sim&&
-   (other.op==X9M_DIAG||(x9m_storage(other.op)&&
+   ((other.op==X9M_DIAG&&other.token)||(x9m_storage(other.op)&&
     (other.hold||other.token||other.store_order<j.store_order))))return true;
  return false;
 }
@@ -800,7 +800,9 @@ static void x9m_poll(){
   if(j.op==X9M_DIAG&&!j.token){
    if(j.answered||now>=j.deadline){x9m_error(j,X9Q_NOT_READY);bzero(&j,sizeof(j));continue;}
    if(!x9m_sims[j.sim].ready||!x9w_control_ready||!x9_md_mipc_message_online())continue;
-   if(j.step&&x9m_diag_storage_busy(j.sim,&j))continue;
+   /* A queued diagnostic yields to storage work. Only its in-flight
+    * token blocks that work until the native confirmation is drained. */
+   if(x9m_diag_storage_busy(j.sim,&j))continue;
    x9w_frame f(j.step?0x607:0x60b,1u<<j.sim);
    if(j.step){
     const uint8_t index[2]={1,0};f.byte(0x100,3);f.byte(0x101,5);f.tlv(0x102,index,2);
