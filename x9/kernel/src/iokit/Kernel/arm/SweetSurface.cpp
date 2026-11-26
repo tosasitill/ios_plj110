@@ -1538,6 +1538,21 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 	}
 
 	switch (selector) {
+	case 40:
+		/* 20H392 requires async registration, without scalar or struct I/O.
+		 * Match the input contract; the valid registration is still ignored
+		 * until the matching listener/event lifetime is implemented. */
+		if (args->asyncWakePort == MACH_PORT_NULL || args->asyncReference == NULL ||
+		    args->asyncReferenceCount < 1 || args->scalarInputCount != 0 ||
+		    args->scalarOutputCount != 0 || args->structureInputSize != 0 ||
+		    args->structureOutputSize != 0 || args->structureInputDescriptor != NULL ||
+		    args->structureOutputDescriptor != NULL) {
+			return kIOReturnBadArgument;
+		}
+		/* On error MIG disposes the right; on success it is ours to release. */
+		IOUserClient::releaseAsyncReference64(args->asyncReference);
+		sweet_surf_log_once("sel", selector);
+		return kIOReturnSuccess;
 	case kSweetSurfaceLimits: {
 		uint8_t limits[0x18] = { 0 };
 		put32(limits, 0x0, SWEET_SURFACE_ROW_ALIGN - 1);
@@ -1634,12 +1649,6 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 		    (args->structureOutput != NULL && args->structureOutputSize >= SWEET_SURFACE_RESULT_SIZE)) {
 			sweet_surf_log_once("sel (refused: lock result)", selector);
 			return kIOReturnUnsupported;
-		}
-		/* The ignored listener registration retains nothing. MIG transfers
-		 * its send right only on success; on error the request is destroyed. */
-		if (selector == 40 && args->asyncWakePort != MACH_PORT_NULL &&
-		    args->asyncReference != NULL && args->asyncReferenceCount >= 1) {
-			IOUserClient::releaseAsyncReference64(args->asyncReference);
 		}
 		/* Values, notifications, ownership, timestamps...: accept and ignore. */
 		for (uint32_t i = 0; i < args->scalarOutputCount; i++) {
