@@ -8,6 +8,7 @@
 #include <mach/mach.h>
 #include <mach/vm_map.h>
 #include <os/log.h>
+#include <objc/message.h>
 #include <objc/runtime.h>
 #include <stdarg.h>
 #include <stdatomic.h>
@@ -62,6 +63,7 @@ static int image_uuid(const void *base, const uint8_t expected[16])
 }
 
 static id (*original_specifiers)(id, SEL);
+static void (*original_central_state)(id, SEL, id);
 
 static int bool_ivar(id object, const char *name)
 {
@@ -82,6 +84,23 @@ static id settings_specifiers(id object, SEL selector)
     return result;
 }
 
+static void settings_central_state(id object, SEL selector, id manager)
+{
+    SEL state_selector = sel_registerName("state");
+    Method state_method = manager ? class_getInstanceMethod(object_getClass(manager), state_selector) : NULL;
+    const char *type = state_method ? method_getTypeEncoding(state_method) : NULL;
+    if (type && !strcmp(type, "q16@0:8")) {
+        intptr_t state = ((intptr_t (*)(id, SEL))objc_msgSend)(manager, state_selector);
+        note("Settings central state=%ld restricted=%d busy=%d toggling=%d initialized=%d",
+             (long)state, bool_ivar(object, "_bluetoothRestricted"),
+             bool_ivar(object, "_bluetoothIsBusy"), bool_ivar(object, "_togglingPower"),
+             bool_ivar(object, "_bluetoothInitialized"));
+    } else {
+        note("Settings central state selector ABI rejected");
+    }
+    original_central_state(object, selector, manager);
+}
+
 static void settings_install_ui(void *context)
 {
     const struct mach_header *header = context;
@@ -92,11 +111,21 @@ static void settings_install_ui(void *context)
     if (!type || strcmp(type, "@16@0:8") ||
         !dladdr((void *)method_getImplementation(method), &info) || info.dli_fbase != header) {
         note("Settings UI method identity rejected");
+    } else {
+        original_specifiers = (id (*)(id, SEL))method_getImplementation(method);
+        method_setImplementation(method, (IMP)settings_specifiers);
+        note("Settings UI specifiers diagnostic installed");
+    }
+    method = controller ? class_getInstanceMethod(controller, sel_registerName("centralManagerDidUpdateState:")) : NULL;
+    type = method ? method_getTypeEncoding(method) : NULL;
+    if (!type || strcmp(type, "v24@0:8@16") ||
+        !dladdr((void *)method_getImplementation(method), &info) || info.dli_fbase != header) {
+        note("Settings central callback identity rejected");
         return;
     }
-    original_specifiers = (id (*)(id, SEL))method_getImplementation(method);
-    method_setImplementation(method, (IMP)settings_specifiers);
-    note("Settings UI specifiers diagnostic installed");
+    original_central_state = (void (*)(id, SEL, id))method_getImplementation(method);
+    method_setImplementation(method, (IMP)settings_central_state);
+    note("Settings central callback diagnostic installed");
 }
 
 static void settings_image_added(const struct mach_header *header, intptr_t slide)
