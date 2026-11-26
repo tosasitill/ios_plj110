@@ -606,3 +606,9 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 基线 `2370e2fde87e2d9137fdf1f2d7111c75d3eb59fb`。源码观察：分配时内部 token 同时写为 16-bit MIPC txid；CNF 必须在 state 2 按 txid 和 request id + 1 匹配，才转 state 3 给 `take`。r2 的 VOICE20 日志只打印 QMI txn，无法稳定关联并发的 MD TX/CNF。
 - 最小诊断分别在 VOICE20 接纳时打印 QMI txn / MD token / SIM，以及守护 DIAL 的 0902 成功匹配时打印 token / txid / 长度 / cancelled；不打印号码或帧内容，不改线协议、状态机或拨号行为。未匹配 CNF 已有通用 no owner 日志；不代表无日志必然没有物理 RX（流可能提前失败）。
 - `DEVELOPER_DIR=$(xcode-select -p) SDKROOT=$(xcrun --sdk macosx --show-sdk-path)` 下 `xcrun clang++ -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-function -Wno-unused-variable x9/tools/tests/call_bridge_host.cpp -o x9/out/call-md-correlation/call` exit 0；依次运行 `voice20_dispatch ios_timeout ios_deleted ios_join dial_tx_failure` 均 exit 0。仅 host 测试，不是设备结果；无完整构建、CI、设备操作或 push。后续需以新候选和真实采样确认；不声称通话或音频已修复。
+
+### 6.45 2026-11-26 AI 账号迁移（任务暂停）
+
+- 交接文件：[X9 AI 账号迁移](docs/2026-11-26_x9-ai-handoff.md)。当前功能分支 `feat/bt-settings-offline-candidate`，文档前源码 `03e6f889`，main 仍 `2370e2fd`；保留当前分支和本轮 worktrees，未合入/推送。
+- `e7c401c8` 生成 verify/install/rollback 各 601 B，命令 `python3 -I x9/bluetooth/settings_boot.py --out x9/out/x9-bt-settings-boot-config-20261126` exit 0；`55a444ff` 添加通话 QMI→MD CNF 关联，Terra 针对 host 5/5；`03e6f889` 限定蓝牙单文件并拒绝预存临时名，`python3 -I x9/bluetooth/test_settings_<boot|temp|header|diag>.py` 10/10 exit 0（Xcode 15 SDK）。
+- 中断前只建了 `.worktrees/bt-settings-candidate-host`，HEAD `55a444ff`、`.local` 链及私有 config 就绪，`prepare-local.py --check` exit 0；未生成该工作树的 scoped header 或完整候选，无活动构建、logger、设备操作或 CI。最新完整候选仍为 §6.41 r2；最后已验证手机状态仍是 §6.37 Android。恢复后先按交接文档核对并快进专用 build worktree；任何上机动作重新确认授权。
