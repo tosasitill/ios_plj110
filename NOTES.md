@@ -504,3 +504,9 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 基线 `879c95c2`，修复 `96a53adb`。收执入队失败时若已观察到同 slot 的另一个非零 WMS QMUX allocation generation，退休旧终态并清理缓存，不再用旧身份重试；零身份不等于替换，仍保留收执。真正入队仍由 bridge 锁内原始身份校验；客户端本地失效也清除长度、内容及 pending。上述退休不取消 MD token 或解除 TAG hold。没有声称在设备上观察到该竞争。
 - Xcode 15 `DEVELOPER_DIR` + `SDKROOT=$(xcrun --sdk macosx --show-sdk-path)` 下，`python3 -I x9/baseband/test_sms_storage_<unit>.py` 的 terminal/deadline/receipt/poll_hold 4/4 exit 0，合成测试覆盖 replacement、暂时零身份、原 token/hold 不变。本轮 baseline fixture 编译成功，执行在 client-loss 未清长度断言 exit 4（外层 unittest exit 1）。`PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/out/x9-sms-receipt-generation-20261126/compile.py` exit 0，`X9Baseband.cpp.o` 2,233,424 B/34 warnings，同目录保存日志。
 - 本轮未增加通话或 SharedEvent 的设备证据。无整包、CI、刷机、重启、root/mailbox 或推送；r5 不含 §6.27–6.28 的变更。目标仍要求真实 SharedEvent/AegirPoster、原生拨接与双向音频、短信收发及持久化验收。
+
+### 6.29 2026-11-26 SharedEvent r6 实机证据候选
+
+- 基线 `e75ddb50`，构建源码 `25ac3353`。`x9ed=1` 是 `x9_surf_event_diag=1` 的短别名（长名优先）；与 `x9_surf_events=1` 并用时 argv 604 B（不含 NUL）。诊断按原 48/16 额度记录 selector 入口，并仅在实验路径记录对应返回码；以 comm/PID/seq/selector 对齐，不输出地址、端口值、scalar 值、用户引用。未改变协议返回行为。r6 还包含 §6.27–6.28 的调度及 WMS 收执退休修复。
+- `PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --boot-arg x9_surf_events=1 --boot-arg x9ed=1 --name x9-native-event-wired-20261126-r6` exit 0（104/104 overlay，含 3 prebuilt），boot 15,806,464 B、kernel 33,095,048 B；候选目录含 `build.log`，allowlist 280 未改。无 CI、刷机、重启、root/mailbox、push。子代理仍因额度不可用。
+- 若明确授权写入 r6 的 boot_b、启动及只读 USB 采集（采集后动作另行确认），先以同一日志的 boot-args、`SWEET SURF EVENT` 与 `SWEET SURF EVENT RESULT` 确定实际分支，按 PID 对齐首个 AegirPoster abort。selector 42 Unsupported 仅覆盖有静态依据的普通 present 回退，不等于 stop-crash；调用日志没有回调交付或通话/短信对端/持久化证据。当前设备观察仍只有 430，不标记全流程完成。
