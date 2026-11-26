@@ -528,3 +528,8 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 原采集会话 49582 保持运行。`~/432.txt` 初始空，随后收到 36,648 B；读到 `USB shim log ready`、`x9 shim: direct XNU loader`、保留 LK scanout 与 LK 记录。文件在数次检查中未继续增长。当前只证实到 shim，未见 XNU 交接、boot-args 或 launchd；不据此判断死机。
 - `python3 -I x9/tools/shared-event/review_log.py "$HOME/432.txt"` exit 0，首段无 boot-args、SharedEvent 调用或 AegirPoster SIGABRT。保持 logger，不重启；下一步读取同一捕获的新字节并核对启动阶段。无功能验收。
 - 同一捕获随后继续增长；复读时 426,793 B，`review_log.py` exit 0，唯一 boot-args 同时含 `x9_surf_events=1`、`x9ed=1`。设备已到 iOS 用户态：launchd 8.088 s 完成 early boot，SpringBoard 9.141 s 输出进程日志。日志尾部约 11.99 s；该快照尚无 SharedEvent 调用或 AegirPoster SIGABRT，时间窗不足以判断止崩。采集继续。
+
+### 6.33 2026-11-26 r6 触摸失效
+
+- HEAD `f9187ca1`，用户报告触摸失效、无法进入系统界面。`~/432.txt` 显示 S3910 两路电源读回开启、reset 已释放且 IRQ 低，但 2.385 s 首个 TCM header 为 `ff ff ff ff`，2.390 s identify 失败；`touch_run()` 立即返回，未进入触摸报告循环。9.254 s backboardd 打开 SweetHIDTouch 成功，不能证明硬件有输入。
+- 对照 `~/430.txt`：同阶段读到 `a5 10 1c 00`，识别 `S3910VA0A0-15.20`，随后记录 512 reports。`git diff --stat 2134b216 25ac3353 -- x9/kernel/src/bsd/dev/sweet_x9_touch.c x9/build/boot-device.json` exit 0 且无输出；一次失败不能确定是偶发、时序差异或其它初始化相互影响。USB logger 仍在运行。无新构建、CI、重启、刷写或 root/mailbox；建议下一次保留 r6 不换镜像，以新日志复核首个 TCM header，设备动作单独确认。
