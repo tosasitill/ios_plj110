@@ -170,13 +170,17 @@ static void x9c_response_poll(){
   if(cache.result.used&&cache.replay&&x9c_response_transfer(cache.result,UINT64_MAX))cache.replay=false;
  }
  for(struct x9c_response &r:x9c_responses)if(r.used){
-  if(!x9c_response_live(r)){bzero(&r,sizeof(r));continue;}
+  if(!x9c_response_live(r)){
+   if(x9cw_u16(r.sdu+3)==0x20)printf("X9 CALL: VOICE20 txn %u response owner lost ready=%u; no queue receipt\n",x9cw_u16(r.sdu+1),r.ready?1:0);
+   bzero(&r,sizeof(r));continue;
+  }
   if(!r.ready)continue;
   // Use the owned admission guard, including time waiting for a queue slot:
   // original03/20/21 guard, local policy for44 (see bind_begin).
   // An error already decided is immutable; no late success resurrection.
   if(!x9cw_u16(r.sdu+10)&&x9q_ms()>=r.deadline)x9c_response_error(r,X9Q_NOT_READY);
   if(!x9c_response_transfer(r,r.deadline))continue;
+  if(x9cw_u16(r.sdu+3)==0x20)printf("X9 CALL: VOICE20 txn %u terminal queued err=%u; not delivery/connection evidence\n",x9cw_u16(r.sdu+1),x9cw_u16(r.sdu+12));
   if(r.bind){
    if(!x9cw_u16(r.sdu+10))x9c_bind_commit(r);
    auto &cache=x9c_bind_completed[r.slot];cache.result=r;cache.replay=false;
@@ -993,9 +997,13 @@ static void x9c_dial_poll(uint8_t *frame){
   int rc=x9_md_mipc_take(j.token,frame,X9_MIPC_FRAME_MAX,&n);
   if(rc==1){
    j.token=0;j.cnf=true;
-   if(!x9cw_dial_join_cnf(&j.join,frame,n)){j.held=true;x9c_error(j,X9Q_INTERNAL);}
+   const bool parsed=x9cw_dial_join_cnf(&j.join,frame,n);
+   printf("X9 CALL: VOICE20 txn %u owned CNF parsed=%u failed=%u bytes=%u; awaiting MO join if valid\n",
+          j.transaction,parsed?1:0,j.join.failed,n);
+   if(!parsed){j.held=true;x9c_error(j,X9Q_INTERNAL);}
    bzero(frame,X9_MIPC_FRAME_MAX);
   }else if(rc<0){
+   if(!j.held)printf("X9 CALL: VOICE20 txn %u take rc=%d (not a call outcome)\n",j.transaction,rc);
    if(rc==-3){
     /* Writer proved no selection/TX; the native lease was retired there.
      * The separate response owner retains any undelivered terminal result. */
@@ -1007,13 +1015,20 @@ static void x9c_dial_poll(uint8_t *frame){
  if(!j.answered&&x9q_ms()>=j.deadline){
   /* Local60s host guard, NOT an inferred MD/network timer. Late results
    * are still drained but can never resurrect the timed-out host request. */
+  printf("X9 CALL: VOICE20 txn %u local deadline cnf=%u observed=%u blocked=%u; not an MD timer\n",
+         j.transaction,j.cnf?1:0,x9c_observed?1:0,x9c_outbound.blocked);
   j.held=true;x9c_error(j,X9Q_NOT_READY);
  }
- if(!x9c_observed||x9c_outbound.blocked){j.held=true;x9c_error(j,X9Q_NOT_READY);}
+ if(!x9c_observed||x9c_outbound.blocked){
+  if(!j.held)printf("X9 CALL: VOICE20 txn %u snapshot unavailable/blocked observed=%u blocked=%u\n",
+                    j.transaction,x9c_observed?1:0,x9c_outbound.blocked);
+  j.held=true;x9c_error(j,X9Q_NOT_READY);
+ }
  if(j.held||!j.cnf)return;
  unsigned id;int ready=x9cw_dial_join_id(&j.join,&x9c_outbound,&id);
  if(!ready)return;
- if(ready<0){j.held=true;x9c_error(j,X9Q_INTERNAL);return;}
+ if(ready<0){printf("X9 CALL: VOICE20 txn %u MO join rejected\n",j.transaction);j.held=true;x9c_error(j,X9Q_INTERNAL);return;}
+ printf("X9 CALL: VOICE20 txn %u owned CNF and MO epoch joined; not connected/audio evidence\n",j.transaction);
  if(!j.answered&&x9c_live(j)){
   uint8_t response[18];unsigned size=x9cw_dial_join_response(&j.join,&x9c_outbound,j.req,j.len,response,sizeof(response));
   if(!size){j.held=true;x9c_error(j,X9Q_INTERNAL);return;}
