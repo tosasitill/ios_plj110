@@ -1034,19 +1034,21 @@ static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    }
   }else if(x9cw_u16(req+3)==3){
    struct x9cw_voice_register options;
-   if(!x9cw_qmi_register(req,len,&options)){x9q_packet p(req,X9Q_ARG);p.send(local,port);return true;}
+   const bool valid=x9cw_qmi_register(req,len,&options);
    for(unsigned index=0;index<X9_C_REG_WAITS;index++){
     const struct x9c_reg_wait &w=x9c_reg_wait[slot][index];
     if(w.used&&w.generation==x9q_clients[slot].generation&&w.transaction==x9cw_u16(req+1)){
-     if(w.options.present==options.present&&w.options.call_events==options.call_events&&
+     if(valid&&w.options.present==options.present&&w.options.call_events==options.call_events&&
         w.options.handover==options.handover)return true;
-     /* Never advance/grant a changed request under an old transaction. */
+     /* Changed or malformed reuse resolves through the original owner,
+      * never through an independent response. */
      if(!w.answered){x9c_reg_answer(slot,index,X9Q_ARG);x9c_response_poll();}
      // An answered owner already has its first terminal (queued or retained).
      // Changed reuse must not append ARG after that transaction's success/error.
      return true;
     }
    }
+   if(!valid){x9q_packet p(req,X9Q_ARG);p.send(local,port);return true;}
    err=x9c_bind_pending(slot,true)?X9Q_BUSY:x9c_reg_begin(slot,req,len);if(!err)return true;
   }else if(x9cw_u16(req+3)==0x20){
    /* The accepted owner fences every later request under its transaction,
