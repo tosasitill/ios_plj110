@@ -587,3 +587,9 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - 通话 `ebae5a35`：原 VOICE20 owner/待交付终态在通用 TLV 校验前接管同事务畸形重试；不改变正常拨号、MO join 或音频路径。二者是源代码可验证的可靠性修复，未证明触发了 433 的故障。
 - Xcode 15 `DEVELOPER_DIR=$(xcode-select -p)` / `SDKROOT=$(xcrun --sdk macosx --show-sdk-path)`：`python3 -I x9/baseband/test_sms_storage_<unit>.py` 的 terminal（2）、receipt、deadline、poll_hold、reuse 合计 6/6 exit 0；`xcrun clang++ -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-function -Wno-unused-variable x9/tools/tests/call_bridge_host.cpp -o x9/out/x9-radio-followup-20261126-r2/call` exit 0，`voice20_dispatch ios_timeout ios_deleted ios_join dial_tx_failure` 5/5 exit 0。覆盖满队列保留、首个终态、代际隔离、畸形重试归属；不是设备数据。
 - 构建源码 `ebae5a35`：`PATH=/opt/homebrew/opt/llvm@22/bin:$PATH python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --boot-arg x9_surf_events=1 --boot-arg x9ed=1 --name x9-radio-followup-20261126-r2` exit 0，104/104 overlay（含 3 prebuilt）、boot 15,806,464 B、kernel 33,127,840 B；候选目录有 build 和 host 测试日志。替代 r1 用于下次通话/短信采样。无 CI、刷写、重启、root/mailbox 或 push；仍为上次确认的 Android 启动状态。蓝牙无新增生产改动；按 §6.40 独立准备 Preferences 采样，不能宣称灰按钮修复。
+
+### 6.42 2026-11-26 SMS 状态报告离线边界复核
+
+- 基线 `32bd65144f0b964d0e41762d2c9565bab2246782`，仅检查现有源码与 §6.38/6.39 证据；无设备操作、构建或 push。`0x21014b` 已知可由 CMGS fail helper 的输入 `0x14b` 形成，输入含义和 433 实际调用未证明，不能据此更改 SIM1 路由或错误码。
+- 静态观察：`X9Messages.inc` 的 `8603` 接受 TLV `8100` 且验证 SMSC 偏移及 TP-MTI=2；仅单 SIM mask，发送给同 SIM 的 WMS client，要求 MT events、routes、class 4 和 status_reports 均启用。队列未接纳则保留 PDU 重试；接纳后保留 token 等待 WMS37 ACK；`x9_mipc_messages.inc` 的 publication 和 reply 重新校验原 token/mask/MTI。重试从原 PDU 的 TP-MTI 重新计算，状态报告仍走 class 4。上述仅源码路径，不是实际状态报告或投递验收。
+- 433 无可关联 delivery report；已有 Android 快照无短信正文或状态报告 wire。尚缺真实 8603 / Android 同事务的非敏感 shape、route/subscription、WMS ACK 及最终对端结果，无法证明该路由与设备实际合同一致；不合成回执、不改行为。下一次授权采样应优先核对这些边界及 SIM1 modem 实际拒绝上下文。
