@@ -761,9 +761,10 @@ static void x9q_reject(uint32_t local,uint32_t port,const uint8_t *req,unsigned 
  x9bb_reply_error(local,port,req,len,err);
 }
 static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *req,unsigned len){
- // Only existing scoped WMS37/NAS03/NAS45/VOICE44 owners consume repeats before generic
+ // Only existing scoped WMS storage/WMS37/NAS03/NAS45/VOICE44 owners consume repeats before generic
  // TLV validation. New transactions and every other route still validate.
  if(x9m_ack_repeated(local,node,port,req,len))return;
+ if(x9m_storage_repeated_wire(local,node,port,req,len))return;
  if(x9r_repeated(local,node,port,req,len))return;
  if(x9c_bind_repeated(local,node,port,req,len))return;
  if(len<7)return;

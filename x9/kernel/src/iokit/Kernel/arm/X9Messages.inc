@@ -43,6 +43,16 @@ static bool x9m_storage_repeated(unsigned slot,uint64_t generation,const uint8_t
  }
  return false;
 }
+/* Check an existing owner before generic TLV rejection, as for WMS37.
+ * A malformed retransmission must not race the original terminal result. */
+static bool x9m_storage_repeated_wire(uint32_t local,uint32_t node,uint32_t port,const uint8_t *req,unsigned len){
+ unsigned slot=local-CBQ_PORT_BASE;
+ if(node!=X9BB_NODE||local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS||port!=X9BB_PORT_BASE+5||
+  !req||len<7||req[0]!=0)return false;
+ unsigned id=x9q_u16(req+3);
+ if(id!=0x31&&id!=0x22&&id!=0x23)return false;
+ return x9m_storage_repeated(slot,x9q_clients[slot].generation,req,len);
+}
 struct x9m_incoming {
  uint32_t token; unsigned sim,len,slot; uint64_t generation,next_delivery;
  bool delivered,replying,held; uint64_t ack_wait; uint8_t pdu[255];
@@ -483,7 +493,6 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   if(!x9m_sims[sim].ready||!x9w_control_ready||!x9_md_mipc_message_online())err=X9Q_NOT_READY;
   else{x9q_packet p(req);x9m_number(p,1,1,1);p.send(local,port);return true;}
  }else if(service==5&&(id==0x31||id==0x22||id==0x23)){
-  if(x9m_storage_repeated(slot,x9q_clients[slot].generation,req,len))return true;
   struct x9ms_storage_request storage;unsigned decoded=x9ms_storage_decode(req,len,&storage);
   if(decoded)err=decoded==X9MS_ARG?X9Q_ARG:X9Q_UNSUPPORTED;
   /* Apple sends List31 during startup before the real host-ready CNF.

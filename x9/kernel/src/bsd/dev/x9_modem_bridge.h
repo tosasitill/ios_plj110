@@ -101,18 +101,21 @@ int x9_md_mipc_call_incoming_snapshot(struct x9cw_inbound_state *state);
  * again under the MD lock and at writer selection. A guarded staging lease
  * survives CNF/client loss and blocks other CALL mutations except the
  * guarded end path. Retirement requires END + owned empty + drained slots;
- * this still does not supply a production DIAL profile or admission caller. */
+ * The actual QMUX allocation and local deadline also guard admission and
+ * writer selection; selected/partial TX stays owned. This does not close
+ * the typed provider or prove call/audio readiness. */
+struct x9_mipc_call_owner;
 uint64_t x9_md_mipc_call_dial_submit(const uint8_t *frame, uint32_t length,
-                                   const struct x9cw_outbound_state *baseline);
+ const struct x9cw_outbound_state *baseline, const struct x9_mipc_call_owner *owner);
 /* Owned complete current snapshot + matching real MO epoch/ID. Only SIM2
  * mode20 single ordinary call. Returns1 only with a valid target; no query,
  * approval or mutation is started by the getter. End submit rechecks under
  * MD lock and before TX. Uncertain sent owners persist across host timeout. */
 struct x9cw_end_target;
 int x9_md_mipc_call_end_snapshot(struct x9cw_end_target *target);
-/* END carries the actual QMUX allocation, not the QMI-local generation or
+/* DIAL/END/ANSWER carry the actual QMUX allocation, not the QMI-local generation or
  * a personality record revision. Only admission/selection of unsent END is
- * guarded. Both use MD -> bb_lock; the bridge holds bb_lock while invoking
+ * guarded. Admission/selection use MD -> bb_lock; the bridge holds bb_lock while invoking
  * the trusted, allocation-free callback which commits that local operation.
  * Callback must not call any MD/bridge API. Selected/partial TX stays owned. */
 struct x9_mipc_call_owner {
