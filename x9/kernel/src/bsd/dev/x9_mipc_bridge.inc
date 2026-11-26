@@ -594,6 +594,8 @@ static void x9mi_tick(void){
     }else x9mi_select(&selection);
    }
    if(rejected){
+    /* State1 has not been selected: this DIAL never reached MD. */
+    if(s->call_guard==1&&x9_mc_dial_token==s->token)x9_mc_dial_token=0;
     if(s->call_guard==2&&x9_mc_end_token==s->token)x9_mc_end_token=0;
     if(s->call_guard==3&&x9_mc_answer_token==s->token)x9_mc_answer_token=0;
     s->state=6;s->len=0;bzero(s->frame,sizeof(s->frame));

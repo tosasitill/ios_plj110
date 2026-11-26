@@ -995,7 +995,11 @@ static void x9c_dial_poll(uint8_t *frame){
    if(!x9cw_dial_join_cnf(&j.join,frame,n)){j.held=true;x9c_error(j,X9Q_INTERNAL);}
    bzero(frame,X9_MIPC_FRAME_MAX);
   }else if(rc<0){
-   if(rc==-3)j.token=0; /* definitive local pre-TX rejection */
+   if(rc==-3){
+    /* Writer proved no selection/TX; the native lease was retired there.
+     * The separate response owner retains any undelivered terminal result. */
+    x9c_error(j,X9Q_NOT_READY);bzero(&j,sizeof(j));return;
+   }
    j.held=true;x9c_error(j,X9Q_NOT_READY);
   }
  }
