@@ -181,7 +181,10 @@ static int x9_btr_apply(proc_t p,struct x9_btr_user u,const struct x9_btr_file *
  int e=x9_btr_name(tmp,sizeof(tmp),f->path,".x9-bt-temp");if(e)return e;
  if(upgrade){ /* our own earlier build: replace it atomically, no backup */
   e=x9_btr_write(p,u,tmp,f);if(e)return e;
-  e=x9_btr_rename(p,u,tmp,f->path);
+#if X9_BT_ROOT_SETTINGS_ONLY
+  e=x9_btr_previous(f);
+#endif
+  if(!e)e=x9_btr_rename(p,u,tmp,f->path);
   if(e)(void)x9_btr_unlink(p,u,tmp);
   else e=x9_btr_check(f->path,f->bytes,f->sha,f->mode);
   return e;
@@ -208,7 +211,7 @@ static int x9_btr_diag_temp_absent(void)
 {
  if(sizeof(x9_btr_files)/sizeof(x9_btr_files[0])!=1 ||
     strcmp(x9_btr_files[0].path,"/usr/lib/X9SettingsBTDiag.dylib") ||
-    x9_btr_files[0].orig_bytes || x9_btr_files[0].prev_count)return EINVAL;
+    x9_btr_files[0].orig_bytes || x9_btr_files[0].prev_count>1)return EINVAL;
  char tmp[320];int e=x9_btr_name(tmp,sizeof(tmp),x9_btr_files[0].path,".x9-bt-temp");
  if(e)return e;
  vnode_t vp=NULLVP;e=vnode_lookup(tmp,VNODE_LOOKUP_NOFOLLOW,&vp,vfs_context_kernel());

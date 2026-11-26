@@ -465,7 +465,12 @@ static void x9m_event(uint8_t *p,unsigned n,uint32_t token){
   unsigned full=1u+v.p[8]+v.p[2];
   if(full>v.n-8||!x9m_pdu(v.p+8,full,0))return;
   v={v.p+8,full};
- }else if(id==0x8603){v=x9w_tlv(p,n,0x8100);if(!x9m_pdu(v.p,v.n,2))return;}
+ }else if(id==0x8603){
+  v=x9w_tlv(p,n,0x8100);
+  bool valid=x9m_pdu(v.p,v.n,2);
+  printf("X9 SMS DIAG: 8603 SIM%u token %u status report valid %u\n",mask==2?2u:1u,token,valid?1u:0u);
+  if(!valid)return;
+ }
  else return;
  for(x9m_incoming &in:x9m_incoming_sms)if(!in.token){
   bzero(&in,sizeof(in));in.token=token;in.sim=mask==2?1:0;in.len=v.n;memcpy(in.pdu,v.p,v.n);
@@ -579,8 +584,8 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    else{
     x9w_frame f(0x605,1u<<sim);f.byte(0x100,0);f.tlv(0x8101,raw.p+3,raw.n-3);
     f.byte(0x102,(uint8_t)(raw.n-4-raw.p[3]));j->token=f.submit();
-    if(j->token){printf("X9 SMS: SIM%u send submitted token %llu QMI txn %u; waiting for modem CNF\n",
-      sim+1,(unsigned long long)j->token,x9q_u16(req+1));return true;}
+    if(j->token){printf("X9 SMS: SIM%u send submitted token %llu QMI txn %u status report requested %u; waiting for modem CNF\n",
+      sim+1,(unsigned long long)j->token,x9q_u16(req+1),(raw.p[4+raw.p[3]]&0x20)?1u:0u);return true;}
     bzero(j,sizeof(*j));err=X9Q_BUSY;
    }
   }
@@ -685,7 +690,7 @@ static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
    for(unsigned at=16;wire&&at+4<=n;){
     unsigned raw_tag=x9q_u16(p+at),tag=raw_tag&0x7fffu,k=x9q_u16(p+at+2);
     if(k>n-at-4){printf(" %x/%u!",tag,k);break;}
-    if(raw_tag<0x8000u&&k>0&&k<=4){
+    if(raw_tag<0x8000u&&k>0&&k<=4&&(j.op!=X9M_SEND||tag==0||tag==0x106)){
      unsigned v=0;for(unsigned i=0;i<k;i++)v|=(unsigned)p[at+4+i]<<(8u*i);
      printf(" %x/%u=0x%x",tag,k,v);
     }else printf(" %x/%u",tag,k);

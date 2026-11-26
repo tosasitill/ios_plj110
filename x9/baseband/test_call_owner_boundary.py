@@ -231,7 +231,8 @@ class CallOwnerBoundaryTests(unittest.TestCase):
         self.assertIn('id!=p.id||direction!=p.direction||epoch!=p.epoch||revision!=p.revision', source)
         self.assertIn('x9c_bind_pending(slot,true)||x9c_dial_job.used', source)
         self.assertIn('!x9cw_dial_join_begin(&join,&state,&profile)', source)
-        self.assertIn('fail-closed: no proven RAT', source)
+        self.assertIn('if(ios_state!=9||!same_call)return;', source)
+        self.assertIn('technology=c.calllist_technology;', source)
 
 
 if __name__ == '__main__':

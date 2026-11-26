@@ -60,7 +60,7 @@ static struct x9c_approve_owner x9c_approve_owners[X9_C_APPROVE_OWNERS];
 /* VOICE binding is independent of NAS/WMS clients and has NO SIM default. */
 struct x9c_client {bool bound,registered,handover;unsigned sim;uint32_t handover_floor;uint64_t generation,bridge_generation,binding;
  struct x9cw_handover_queue pending;
- bool calllist_valid;uint64_t calllist_epoch,calllist_revision;unsigned calllist_direction,calllist_id;};
+ bool calllist_valid;uint64_t calllist_epoch,calllist_revision;unsigned calllist_direction,calllist_id,calllist_technology;};
 static x9c_client x9c_clients[CBQ_MAX_CLIENTS];
 static uint64_t x9c_binding_next;
 static bool x9c_bound_live(unsigned slot,unsigned sim,uint64_t generation,uint64_t binding){
@@ -295,10 +295,25 @@ static struct {uint64_t token,deadline;bool confirmed,held;} x9c_cmd_init;
 /* Voice RAT cache fed by the read-only MIPC 042f query
  * (requestVoiceRegistrationState 0x30f8f0 -> 0430, TLV8100/10B,
  * networkType u16LE@+1). Empty until a response lands; the CallList
- * technology gate stays fail-closed while invalid. One query per SIM per
- * registration epoch, issued only after CS registration is confirmed. */
+ * technology gate stays fail-closed while invalid. Queries start only after
+ * CS registration is confirmed. */
 static struct {unsigned networkType;bool valid;} x9c_voice_rat[2];
-static struct {uint64_t token,deadline,next_ms;unsigned retries;bool done,held;} x9c_rat_query[2];
+struct x9c_rat_job {uint64_t token,deadline,next_ms;unsigned retries;bool done,held,superseded;};
+static x9c_rat_job x9c_rat_query[2];
+
+static void x9c_voice_rat_retry(x9c_rat_job &query,uint64_t now){
+ query.next_ms=now+10000;
+ if(query.retries<6)query.retries++;
+ else query.done=true;
+}
+
+static void x9c_voice_rat_refresh(unsigned sim){
+ auto &query=x9c_rat_query[sim];
+ x9c_voice_rat[sim].valid=false;
+ query.done=false;
+ query.retries=0;
+ if(query.token)query.superseded=true;
+}
 static bool x9c_reg_live(unsigned slot,const struct x9c_reg_wait &w){
  return x9c_bound_live(slot,w.sim,w.generation,w.binding)&&
   x9c_clients[slot].bridge_generation==w.bridge_generation;
@@ -461,6 +476,7 @@ static void x9c_init_poll(uint8_t *frame){
   for(unsigned sim=0;sim<2;sim++)if(x9c_init[sim].stage||x9c_init[sim].token)x9c_init[sim].held=1;
   for(unsigned sim=0;sim<2;sim++){
    if(x9c_rat_query[sim].token||x9c_rat_query[sim].done)x9c_rat_query[sim].held=true;
+   if(x9c_rat_query[sim].token)x9_md_mipc_voice_rat_abandon(x9c_rat_query[sim].token);
    x9c_rat_query[sim].token=0;x9c_voice_rat[sim].valid=false;
   }
  }
@@ -510,40 +526,48 @@ static void x9c_init_poll(uint8_t *frame){
    x9c_register_submit(s.stage==X9_CI_STATUS?0x4901:0x4902,sim);
   if(s.token)s.deadline=now+25000;
  }
- /* Read-only voice RAT query, one per SIM after CS registration is confirmed.
-  * The 0430 CNF carries TLV8100/10B; only networkType u16LE@+1 is consumed
-  * (x9cw_voice_rat). Fail-closed: a malformed/absent response leaves the cache
-  * empty, so the CallList technology gate stays closed. */
+ /* Refresh the read-only voice RAT query after a NAS registration change.
+  * The 0430 CNF remains the source for CallList technology. */
  for(unsigned sim=0;sim<x9_md_sim_count();sim++){
   auto &q=x9c_rat_query[sim];
+  if(q.token&&now>=q.deadline){
+   x9_md_mipc_voice_rat_abandon(q.token);
+   q.token=0;
+   if(q.superseded)q.superseded=false;
+   else x9c_voice_rat_retry(q,now);
+  }
   if(q.token){
-   if(now>=q.deadline)q.held=true;
    uint32_t n=0;int rc=x9_md_mipc_take(q.token,frame,X9_MIPC_FRAME_MAX,&n);
    if(rc==1){
     unsigned networkType=0;
-    bool good=n>=16&&x9cw_u16(frame+12)==q.token&&x9cw_voice_rat(frame,n,&networkType);
+    bool good=n>=16&&frame[8]==(1u<<sim)&&x9cw_u16(frame+12)==q.token&&x9cw_voice_rat(frame,n,&networkType);
     q.token=0;
-    if(!q.held&&good){
+    if(q.superseded)q.superseded=false;
+    else if(good){
      x9c_voice_rat[sim].networkType=networkType;x9c_voice_rat[sim].valid=true;
-     if(networkType==0&&q.retries<6){q.retries++;q.next_ms=now+10000;}
+     if(networkType==0)x9c_voice_rat_retry(q,now);
      else q.done=true;
      printf("X9 CALL: SIM%u voice RAT networkType %u cached (042f)\n",sim+1,networkType);
     }
-    else if(!q.held){
-     /* One 042f per SIM. A delivered but unusable 0430 is terminal for this
-      * boot; resubmitting on the same gate spins 042f/0430 without a log and
-      * consumes the shared 16-bit MIPC txid space. */
-     q.held=true;
+    else{
+     x9c_voice_rat[sim].valid=false;
+     x9c_voice_rat_retry(q,now);
      printf("X9 CALL: SIM%u 042f response unusable; voice RAT cache stays empty\n",sim+1);
     }
     bzero(frame,X9_MIPC_FRAME_MAX);
-   }else if(rc<0)q.held=true;
+   }else if(rc<0){
+    x9_md_mipc_voice_rat_abandon(q.token);
+    q.token=0;
+    if(q.superseded)q.superseded=false;
+    else x9c_voice_rat_retry(q,now);
+   }
   }
   if(!online||q.held||q.done||q.token||!x9c_cmd_init.confirmed||
      (q.next_ms&&now<q.next_ms)||
      x9c_init[sim].held||x9c_init[sim].stage!=X9_CI_DONE)continue;
   q.token=x9c_voice_rat_submit(sim);
-  if(q.token)q.deadline=now+25000;else q.held=true;
+  if(q.token){q.deadline=now+25000;q.next_ms=now+10000;}
+  else x9c_voice_rat_retry(q,now);
  }
  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++)for(unsigned index=0;index<X9_C_REG_WAITS;index++){
   struct x9c_reg_wait &w=x9c_reg_wait[i][index];if(!w.used||w.answered)continue;
@@ -832,8 +856,8 @@ static void x9c_mt_observe(const struct x9cw_inbound_state &in){
  * WT0x20->CT4/else->CT6; NR->CT6 is the real result, not a placeholder).
  * The kernel 042f read-only query/8100 parse that POPULATES this cache is
  * implemented in x9c_init_poll (x9c_voice_rat_submit + x9cw_voice_rat) and
- * runs once per SIM after CS registration. While the cache is empty this
- * provider returns no technology and CallList publication stays fail-closed.
+ * refreshes per SIM after CS registration. While the cache is empty this
+ * provider returns no technology.
  * docs 495-506 forbid rat2->LTE4 and Unknown placeholders; a real queried
  * networkType mapped by x9cw_calltechnology is the only admitted source. */
 static int x9c_call_technology(unsigned sim,unsigned *technology){
@@ -891,10 +915,14 @@ static void x9c_calllist_flush(unsigned slot){
  if(!c.bound||!c.registered||c.generation!=x9q_clients[slot].generation||!x9c_event_transport_ready())return;
  unsigned id,ios_state,direction;struct x9cw_end_reason reason={0,0};uint64_t epoch,revision;
  if(!x9c_calllist_select(c.sim,&id,&ios_state,&direction,&reason,&epoch,&revision))return;
- if(c.calllist_valid&&c.calllist_epoch==epoch&&c.calllist_revision==revision&&
-    c.calllist_direction==direction&&c.calllist_id==id)return;
+ bool same_call=c.calllist_valid&&c.calllist_epoch==epoch&&
+    c.calllist_direction==direction&&c.calllist_id==id;
  unsigned technology;
- if(!x9c_call_technology(c.sim,&technology))return; /* fail-closed: no proven RAT */
+ if(!x9c_call_technology(c.sim,&technology)){
+  if(ios_state!=9||!same_call)return;
+  technology=c.calllist_technology;
+ }
+ if(same_call&&c.calllist_revision==revision&&(ios_state==9||c.calllist_technology==technology))return;
  uint8_t sdu[25];unsigned size=x9cw_calllist(sdu,sizeof(sdu),id,ios_state,direction,technology,1,&reason);
  if(!size)return;
  uint32_t floor;
@@ -908,7 +936,7 @@ static void x9c_calllist_flush(unsigned slot){
  int rc=x9_md_mipc_call_publish_state(floor,x9c_calllist_publish_callback,&p);
  if(rc!=1){bzero(p.frame.owned,CBQ_HDR+size);IOFreeData(p.frame.owned,CBQ_HDR+size);}
  else{c.calllist_valid=true;c.calllist_epoch=epoch;c.calllist_revision=revision;
-  c.calllist_direction=direction;c.calllist_id=id;
+  c.calllist_direction=direction;c.calllist_id=id;c.calllist_technology=technology;
   printf("X9 CALL: CallList46 sim=%u id=%u state=%u dir=%u ct=%u ep=%llu rev=%llu\n",
          c.sim+1,id,ios_state,direction,technology,(unsigned long long)epoch,
          (unsigned long long)revision);}

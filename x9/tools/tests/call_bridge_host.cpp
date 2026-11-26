@@ -167,6 +167,96 @@ static void calllist_client_isolation(){
  x9c_clients[1].registered=true;x9c_clients[1].calllist_valid=false;
  x9c_calllist_flush(1);assert(calllist_count==3&&calllist_slots[2]==1);
 }
+static void calllist_voice_rat_refresh(){
+ calllist_fixture();
+ x9c_cmd_init.held=false;
+ x9c_cmd_init.confirmed=true;
+ x9c_init[1].held=0;
+ x9c_init[1].stage=X9_CI_DONE;
+ x9c_init[1].registered=1;
+ x9c_calllist_flush(0);
+ assert(calllist_count==1&&calllist_last[0][15]==4);
+ x9c_voice_rat_refresh(1);
+ uint8_t frame[X9_MIPC_FRAME_MAX]={};
+ x9c_init_poll(frame);
+ uint64_t token=x9c_rat_query[1].token;
+ assert(token&&!x9c_voice_rat[1].valid);
+ x9mi_tick();
+ x9c_voice_rat_refresh(1);
+ auto confirm=[](uint64_t tx,unsigned rat){
+  uint8_t reply[40];
+  x9cw_header(reply,sizeof(reply),0x430,2,(unsigned)tx);
+  x9cw_scalar(reply+16,0,0,4);
+  x9cw_put16(reply+24,0x8100);
+  x9cw_put16(reply+26,10);
+  x9cw_put16(reply+29,rat);
+  x9mi_rx(reply,sizeof(reply));
+ };
+ confirm(token,4096);
+ x9c_init_poll(frame);
+ assert(!x9c_rat_query[1].token&&!x9c_voice_rat[1].valid);
+ x9c_calllist_flush(0);
+ assert(calllist_count==1);
+ fake_ms+=10000;
+ x9c_init_poll(frame);
+ token=x9c_rat_query[1].token;
+ assert(token);
+ x9mi_tick();
+ confirm(token,32768);
+ x9c_init_poll(frame);
+ x9c_calllist_flush(0);
+ assert(calllist_count==2&&calllist_last[0][15]==6);
+ x9c_calllist_flush(0);
+ assert(calllist_count==2);
+}
+static void calllist_voice_rat_recovery(){
+ calllist_fixture();
+ x9c_cmd_init.held=false;
+ x9c_cmd_init.confirmed=true;
+ x9c_init[1].held=0;
+ x9c_init[1].stage=X9_CI_DONE;
+ x9c_calllist_flush(0);
+ x9c_voice_rat_refresh(1);
+ uint64_t filled[X9_MI_SLOTS];
+ for(uint64_t &token:filled){token=x9c_voice_rat_submit(1);assert(token);}
+ uint8_t frame[X9_MIPC_FRAME_MAX]={};
+ x9c_init_poll(frame);
+ assert(!x9c_rat_query[1].token&&!x9c_rat_query[1].held&&x9c_rat_query[1].next_ms==10000);
+ for(uint64_t token:filled)x9_md_mipc_voice_rat_abandon(token);
+ fake_ms=10000;
+ x9c_init_poll(frame);
+ uint64_t timed_out=x9c_rat_query[1].token;
+ assert(timed_out);
+ x9mi_tick();
+ x9_mc_outbound.ios_state=9;
+ x9_mc_outbound.revision++;
+ x9c_calllist_flush(0);
+ x9c_calllist_flush(1);
+ assert(calllist_count==2&&calllist_last[0][12]==9&&calllist_last[0][15]==4);
+ fake_ms=35000;
+ x9c_init_poll(frame);
+ assert(!x9c_rat_query[1].token&&!x9c_rat_query[1].held);
+ fake_ms=45000;
+ x9c_init_poll(frame);
+ uint64_t replacement=x9c_rat_query[1].token;
+ assert(replacement>timed_out);
+ x9mi_tick();
+ uint8_t reply[40];
+ x9cw_header(reply,sizeof(reply),0x430,2,(unsigned)timed_out);
+ x9cw_scalar(reply+16,0,0,4);
+ x9cw_put16(reply+24,0x8100);
+ x9cw_put16(reply+26,10);
+ x9cw_put16(reply+29,32768);
+ x9mi_rx(reply,sizeof(reply));
+ x9c_init_poll(frame);
+ assert(!x9c_voice_rat[1].valid&&x9c_rat_query[1].token==replacement);
+ x9cw_put16(reply+12,(unsigned)replacement);
+ x9mi_rx(reply,sizeof(reply));
+ x9c_init_poll(frame);
+ assert(x9c_voice_rat[1].valid&&x9c_voice_rat[1].networkType==32768);
+ x9c_calllist_flush(0);
+ assert(calllist_count==2);
+}
 static void calllist_stale_publication(){
  calllist_fixture();x9_mc_outbound.revision=2;
  md_lock_until_hook=4;during_md_lock=[](){x9_mc_outbound.revision=3;};
@@ -1552,7 +1642,8 @@ int main(int argc,char **argv){
   {"handover_live_generation_sim",handover_live_generation_sim},{"handover_live_overflow_disable",handover_live_overflow_disable},
   {"handover_live_no_request_deadline",handover_live_no_request_deadline},{"handover_live_queue_sequence",handover_live_queue_sequence},
   {"request_whitelist",request_whitelist},{"no_auto_policy",no_auto_policy},{"command_roundtrip",command_roundtrip},
- {"calllist_client_isolation",calllist_client_isolation},{"calllist_stale_publication",calllist_stale_publication},
+ {"calllist_client_isolation",calllist_client_isolation},{"calllist_voice_rat_refresh",calllist_voice_rat_refresh},
+ {"calllist_voice_rat_recovery",calllist_voice_rat_recovery},{"calllist_stale_publication",calllist_stale_publication},
  {"calllist_generation_fence",calllist_generation_fence},
   {"failure_retained",failure_retained},{"duplicate_pending",duplicate_pending},{"changed_duplicate",changed_duplicate},
   {"duplicate_replied",duplicate_replied},{"overflow_isolated",overflow_isolated},{"bounded_tombstones",bounded_tombstones},

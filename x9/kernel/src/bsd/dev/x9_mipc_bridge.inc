@@ -379,6 +379,15 @@ void x9_md_sim_at_cancel(uint64_t token){
  }
  lck_mtx_unlock(&x9_mi_lock);
 }
+void x9_md_mipc_voice_rat_abandon(uint64_t token){
+ lck_mtx_lock(&x9_mi_lock);
+ for(unsigned slot=0;slot<X9_MI_SLOTS;slot++){
+  struct x9_mi_slot *entry=&x9_mi_slots[slot];
+  if(!entry->state||entry->id!=0x42f||entry->token!=token)continue;
+  bzero(entry,sizeof(*entry));break;
+ }
+ lck_mtx_unlock(&x9_mi_lock);
+}
 int x9_md_mipc_take(uint64_t token,uint8_t *out,uint32_t room,uint32_t *len){
  if(!token||!out||!len)return -1;
  int found=-1;*len=0;lck_mtx_lock(&x9_mi_lock);

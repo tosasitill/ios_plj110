@@ -281,12 +281,22 @@ static uint8_t x9q_radio(int act){
 // Registration is not an IP route; WDS additionally checks its owned bearer.
 struct x9q_data_radio { uint64_t sampled; uint32_t rat; };
 static x9q_data_radio x9q_data_radios[2];
+static void x9c_voice_rat_refresh(unsigned sim);
 static void x9q_nas(x9q_job &j){
  x9q_data_radio &data=x9q_data_radios[j.sim_slot];data.sampled=x9q_ms();data.rat=0;
  if(j.attached==1){
   if(x9q_registered(j.reg[2])&&j.act==11)data.rat=1u<<10; // libqmi 3GPP_5GNR
   else if(x9q_registered(j.reg[1])&&(j.act==7||j.act==9||j.act==13))data.rat=1u<<5; // LTE
  }
+ static int voice_inputs[2][4]={{-1,-1,-1,-1},{-1,-1,-1,-1}};
+ const int observed[]={j.reg[0],j.reg[1],j.reg[2],j.act};
+ bool voice_changed=false;
+ for(unsigned field=0;field<4;field++){
+  if(observed[field]<0||voice_inputs[j.sim_slot][field]==observed[field])continue;
+  voice_inputs[j.sim_slot][field]=observed[field];
+  voice_changed=true;
+ }
+ if(voice_changed)x9c_voice_rat_refresh(j.sim_slot);
  /* 166.txt: SysInfo never carried LTE info; log the real registration inputs
   * whenever they change (stat values / CGATT / COPS AcT only, no identities). */
  {static int last[2][5]={{-9,-9,-9,-9,-9},{-9,-9,-9,-9,-9}};int now[5]={j.reg[0],j.reg[1],j.reg[2],j.attached,j.act};
@@ -781,6 +791,16 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
  if(x9n_request(local,port,req,len))return;
  if(x9g_send(local,port,req,len))return;
  if(x9m_request(local,port,req,len))return;
+ if(service==9&&req[0]==0&&(id==0x31||id==0x40)){
+  static unsigned voice_probe_logs;
+  if(voice_probe_logs<16){
+   voice_probe_logs++;
+   x9q_view operation=x9q_tlv(req,len,1),call_id=x9q_tlv(req,len,0x10);
+   printf("X9 CALL: VOICE unsupported msg 0x%04x txn %u operation_len=%u operation=%d call_id_len=%u\n",
+          id,x9q_u16(req+1),operation.n,
+          id==0x31&&operation.p&&operation.n==1?(int)operation.p[0]:-1,call_id.n);
+  }
+ }
  if(x9c_request(local,port,req,len))return;
  if(service==1&&x9w_request(local,port,req,len))return;
  /* Per-client NAS/DMS/DSD binding, not a default-data mutation.
