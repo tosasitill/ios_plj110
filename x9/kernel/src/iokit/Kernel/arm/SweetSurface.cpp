@@ -1635,6 +1635,12 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 			sweet_surf_log_once("sel (refused: lock result)", selector);
 			return kIOReturnUnsupported;
 		}
+		/* The ignored listener registration retains nothing. MIG transfers
+		 * its send right only on success; on error the request is destroyed. */
+		if (selector == 40 && args->asyncWakePort != MACH_PORT_NULL &&
+		    args->asyncReference != NULL && args->asyncReferenceCount >= 1) {
+			IOUserClient::releaseAsyncReference64(args->asyncReference);
+		}
 		/* Values, notifications, ownership, timestamps...: accept and ignore. */
 		for (uint32_t i = 0; i < args->scalarOutputCount; i++) {
 			args->scalarOutput[i] = 0;
