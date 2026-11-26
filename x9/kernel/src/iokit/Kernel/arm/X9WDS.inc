@@ -514,9 +514,13 @@ static void x9w_ril_post_act(unsigned sim,unsigned cid){
 // CSCON 4409 and physical-channel 4419 indications once per SIM, then while a
 // call is owned read NW_GET_CSCON_STATE 1151 and NW_GET_PHYSICAL_CHANNEL_
 // CONFIGS 04c7 every 3 s. Read-only; they do not change admission.
+// Diagnostic traffic is opt-in: a screen-off phone must not keep polling RRC
+// state just because a data bearer remains owned.
 static void x9w_up_diag(){
+ static int enabled=-1;
+ if(enabled<0){int v=0;PE_parse_boot_argn("x9_cell_diag",&v,sizeof(v));enabled=v==1;}
  static unsigned reg;static uint64_t next;static unsigned polls;
- if(!x9w_session_ready||!x9_md_mipc_online())return;
+ if(!enabled||!x9w_session_ready||!x9_md_mipc_online())return;
  if(reg<2*x9_md_sim_count()){
   unsigned sim=reg/2,id=reg&1?0x4419:0x4409;uint8_t bytes[2]={(uint8_t)id,(uint8_t)(id>>8)};
   x9w_frame f(0x307,1u<<sim);f.tlv(0x100,bytes,2);
