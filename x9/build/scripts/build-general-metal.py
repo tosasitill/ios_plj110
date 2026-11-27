@@ -98,6 +98,8 @@ bundle=w/f'X9GeneralMetal{opts.revision}.bundle';bundle.mkdir(exist_ok=True)
 subprocess.run(flags+['-bundle',str(factory),str(probe),str(transport),str(buffers),str(generated/'X9GeneralMetalFrontend.o'),str(w/'general-target/aarch64-apple-ios/release/libx9_general_metal_bridge.a'),'-framework','Foundation','-framework','Metal','-framework','IOSurface','-framework','IOKit','-framework','Security','-lcompression','-Wl,-dead_strip','-o',str(bundle/'X9GeneralMetal')],env=env,check=True)
 (bundle/'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'org.heliodarwin.X9GeneralMetal'+str(opts.revision),'CFBundleExecutable':'X9GeneralMetal','CFBundlePackageType':'BNDL','CFBundleVersion':'1','NSPrincipalClass':'X9GeneralMetalFactory','MinimumOSVersion':'16.0'},fmt=plistlib.FMT_XML))
 for name in ['LICENSE','LICENSE-GPL-2.0','LICENSE-LGPL-3.0','LICENSE-GPL-3.0']:shutil.copyfile(source/name,bundle/name)
+primelist=bridge/'X9GeneralMetal.primelist'
+if primelist.is_file():shutil.copyfile(primelist,bundle/'X9GeneralMetal.primelist')
 subprocess.run([env['DEVELOPER_DIR']+'/Toolchains/XcodeDefault.xctoolchain/usr/bin/strip','-S',str(bundle/'X9GeneralMetal')],check=True)
 subprocess.run(['/usr/bin/codesign','--force','--sign','-','--pagesize','16384',str(bundle)],check=True)
 print('Generic Metal runtime and iOS16 bundle compiled/linked/signed; no execution or deployment;requires native rendering KMD+PanVK loader',flush=True)
