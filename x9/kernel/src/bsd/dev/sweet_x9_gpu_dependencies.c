@@ -20,6 +20,7 @@ extern void sweet_x9_render_bootstrap(void);
 #include <stddef.h>
 #include "gpu_shared_prefix.h"
 #include "x9_sched_policy.h"
+#include "x9_cpuoff_policy.h"
 #include "x9_ufs/ufs_platform.h"
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 extern int sweet_early_is_x9(void);
@@ -694,6 +695,201 @@ static int sched_update_scene(int dark, int touch, unsigned gpu_util,
  return sched_scene;
 }
 
+
+/*
+ * CPU offline manager (boot arg x9cpuoff; x9/cpuoff/README.md). Bit 0
+ * arms the SweetCPU PSCI facility (probe + quiesce/resume); bit 1
+ * enables this policy. The pure decisions live in x9_cpuoff_policy.h;
+ * this glue executes them through XNU's own processor_exit() /
+ * processor_start() and confirms every transition against ground truth
+ * (PSCI AFFINITY_INFO for off, the initCPU publication for on), because
+ * cpu_exit_wait() is a no-op in this build: processor_exit() returning
+ * success does not by itself prove the core powered down.
+ * SweetCPU state values (SweetCPU.cpp): 0 online, 1 quiescing, 2 off,
+ * 3 suspended, 4 onlining, 5 parked.
+ */
+extern int sweet_x9_cpuoff_facility(void);
+extern uint32_t sweet_x9_cpuoff_get_state(unsigned int cpu);
+extern void sweet_x9_cpuoff_note_state(unsigned int cpu, uint32_t state);
+extern int64_t sweet_x9_psci_affinity_info(unsigned int cpu);
+extern uint32_t sweet_x9_cpu_is_initialized(unsigned int cpu);
+extern kern_return_t processor_exit(processor_t processor);
+extern kern_return_t processor_start(processor_t processor);
+#define X9CPUOFF_SW_PARKED 5u
+#define X9CPUOFF_SW_OFF 2u
+#define X9CPUOFF_SW_SUSPENDED 3u
+
+static int cpuoff_mask_cache2 = -1;
+static int cpuoff_ready;
+static struct x9cpuoff_mgr cpuoff_mgr;
+static struct x9cpuoff_cfg cpuoff_cfg;
+static unsigned cpuoff_trans_cpu;
+static int cpuoff_trans_dir;	/* 0 none, 1 going off, 2 coming on */
+static uint64_t cpuoff_trans_deadline_ms;
+
+static int cpuoff_bit(unsigned bit) {
+ if (cpuoff_mask_cache2 < 0) {
+  int v = 0;
+  PE_parse_boot_argn("x9cpuoff", &v, sizeof(v));
+  cpuoff_mask_cache2 = v;
+ }
+ return (cpuoff_mask_cache2 & (int)bit) != 0;
+}
+
+static uint64_t cpuoff_ms(uint64_t abs_time) {
+ uint64_t ns = 0;
+ absolutetime_to_nanoseconds(abs_time, &ns);
+ return ns / 1000000ull;
+}
+
+static void cpuoff_setup(uint64_t now) {
+ if (cpuoff_ready || !cpuoff_bit(2) || !sweet_x9_cpuoff_facility()) {
+  return;
+ }
+ x9cpuoff_cfg_defaults(&cpuoff_cfg, cpuoff_bit(4), cpuoff_bit(8));
+ x9cpuoff_mgr_init(&cpuoff_mgr, cpuoff_ms(now));
+ cpuoff_ready = 1;
+ printf("X9 CPUOFF: manager on allow_prime=%d drain_big=%d depth=%s "
+     "idle_off=%ums light_off=%ums min_online=%ums\n",
+     cpuoff_cfg.allow_prime, cpuoff_cfg.drain_big,
+     cpuoff_bit(16) ? "suspend" : "off", cpuoff_cfg.idle_off_ms,
+     cpuoff_cfg.light_off_ms, cpuoff_cfg.min_online_ms);
+}
+
+static void cpuoff_tick(int scene, uint64_t now) {
+ if (!cpuoff_ready) {
+  cpuoff_setup(now);
+  if (!cpuoff_ready) {
+   return;
+  }
+ }
+ const uint64_t now_ms = cpuoff_ms(now);
+ /* Ground-truth sync: a core SweetCPU reports parked is lost. */
+ for (unsigned cpu = X9CPUOFF_FIRST_BIG; cpu < X9CPUOFF_NCPU; cpu++) {
+  if (cpuoff_mgr.cpu[cpu].mstate != X9CPUOFF_M_LOST &&
+      sweet_x9_cpuoff_get_state(cpu) == X9CPUOFF_SW_PARKED) {
+   printf("X9 CPUOFF: cpu%u parked by platform layer; blacklisted\n", cpu);
+   x9cpuoff_note_failure(&cpuoff_mgr, &cpuoff_cfg, cpu, now_ms, 0);
+   if (cpuoff_trans_dir != 0 && cpuoff_trans_cpu == cpu) {
+    cpuoff_trans_dir = 0;
+   }
+  }
+ }
+ /* Confirm an in-flight transition before deciding anything new. */
+ if (cpuoff_trans_dir == 1) {
+  const unsigned cpu = cpuoff_trans_cpu;
+  const int64_t aff = sweet_x9_psci_affinity_info(cpu);
+  if (aff == 1) {
+   const uint64_t took = now_ms - cpuoff_mgr.cpu[cpu].state_since_ms;
+   sweet_x9_cpuoff_note_state(cpu,
+       cpuoff_bit(16) ? X9CPUOFF_SW_SUSPENDED : X9CPUOFF_SW_OFF);
+   x9cpuoff_note_off_confirmed(&cpuoff_mgr, cpu, now_ms);
+   printf("X9 CPUOFF: cpu%u off confirmed after %llums\n", cpu,
+       (unsigned long long)took);
+   cpuoff_trans_dir = 0;
+  } else if (now_ms >= cpuoff_trans_deadline_ms) {
+   printf("X9 CPUOFF: cpu%u offline confirm timeout aff=%lld\n", cpu,
+       (long long)aff);
+   x9cpuoff_note_failure(&cpuoff_mgr, &cpuoff_cfg, cpu, now_ms, aff == 0);
+   cpuoff_trans_dir = 0;
+  }
+  return;
+ }
+ if (cpuoff_trans_dir == 2) {
+  const unsigned cpu = cpuoff_trans_cpu;
+  if (sweet_x9_cpu_is_initialized(cpu)) {
+   const uint64_t took = now_ms - cpuoff_mgr.cpu[cpu].state_since_ms;
+   x9cpuoff_note_online_confirmed(&cpuoff_mgr, cpu, now_ms);
+   printf("X9 CPUOFF: cpu%u online confirmed after %llums\n", cpu,
+       (unsigned long long)took);
+   cpuoff_trans_dir = 0;
+  } else if (now_ms >= cpuoff_trans_deadline_ms) {
+   const int64_t aff = sweet_x9_psci_affinity_info(cpu);
+   printf("X9 CPUOFF: cpu%u online confirm timeout aff=%lld\n", cpu,
+       (long long)aff);
+   x9cpuoff_note_failure(&cpuoff_mgr, &cpuoff_cfg, cpu, now_ms, aff == 0);
+   cpuoff_trans_dir = 0;
+  }
+  return;
+ }
+ struct x9cpuoff_input in;
+ in.scene = scene;
+ /* Without live util accounting, never treat the big domain as idle:
+  * UINT_MAX also forces the LIGHT wake path to restore cores. */
+ in.big_util = cpu_boost_ready ? cpud[X9_BIG].util : UINT_MAX;
+ in.now_ms = now_ms;
+ in.quiescing = ml_is_quiescing();
+ const struct x9cpuoff_decision d =
+     x9cpuoff_decide(&cpuoff_mgr, &cpuoff_cfg, &in);
+ if (d.action == X9CPUOFF_ACT_OFFLINE) {
+  processor_t p = cpu_to_processor((int)d.cpu);
+  if (p == PROCESSOR_NULL) {
+   x9cpuoff_note_failure(&cpuoff_mgr, &cpuoff_cfg, d.cpu, now_ms, 1);
+   printf("X9 CPUOFF: cpu%u offline: no processor\n", d.cpu);
+   return;
+  }
+  x9cpuoff_note_offline_issued(&cpuoff_mgr, d.cpu, now_ms);
+  cpuoff_trans_cpu = d.cpu;
+  cpuoff_trans_dir = 1;
+  cpuoff_trans_deadline_ms = now_ms + 5000;
+  const kern_return_t kr = processor_exit(p);
+  printf("X9 CPUOFF: cpu%u offline issued (scene=%s) kr=%d\n", d.cpu,
+      x9sched_scene_name(scene), (int)kr);
+  if (kr != KERN_SUCCESS) {
+   x9cpuoff_note_failure(&cpuoff_mgr, &cpuoff_cfg, d.cpu, now_ms, 1);
+   cpuoff_trans_dir = 0;
+  }
+ } else if (d.action == X9CPUOFF_ACT_ONLINE) {
+  processor_t p = cpu_to_processor((int)d.cpu);
+  if (p == PROCESSOR_NULL) {
+   x9cpuoff_note_failure(&cpuoff_mgr, &cpuoff_cfg, d.cpu, now_ms, 0);
+   printf("X9 CPUOFF: cpu%u online: no processor\n", d.cpu);
+   return;
+  }
+  x9cpuoff_note_online_issued(&cpuoff_mgr, d.cpu, now_ms);
+  cpuoff_trans_cpu = d.cpu;
+  cpuoff_trans_dir = 2;
+  cpuoff_trans_deadline_ms = now_ms + 10000;
+  const kern_return_t kr = processor_start(p);
+  printf("X9 CPUOFF: cpu%u online issued (scene=%s) kr=%d\n", d.cpu,
+      x9sched_scene_name(scene), (int)kr);
+  if (kr != KERN_SUCCESS) {
+   const int64_t aff = sweet_x9_psci_affinity_info(d.cpu);
+   x9cpuoff_note_failure(&cpuoff_mgr, &cpuoff_cfg, d.cpu, now_ms,
+       aff == 0);
+   cpuoff_trans_dir = 0;
+  }
+ }
+}
+
+static void cpuoff_stat_line(uint64_t now) {
+ if (!cpuoff_ready) {
+  return;
+ }
+ const uint64_t now_ms = cpuoff_ms(now);
+ unsigned off_mask = 0, lost_mask = 0;
+ uint64_t tot[4];
+ for (unsigned i = 0; i < 4; i++) {
+  const unsigned cpu = X9CPUOFF_FIRST_BIG + i;
+  const struct x9cpuoff_cpu *c = &cpuoff_mgr.cpu[cpu];
+  tot[i] = c->off_total_ms;
+  if (c->mstate == X9CPUOFF_M_OFF) {
+   off_mask |= 1u << cpu;
+   if (c->off_since_ms != 0 && now_ms >= c->off_since_ms) {
+    tot[i] += now_ms - c->off_since_ms;
+   }
+  }
+  if (c->mstate == X9CPUOFF_M_LOST) {
+   lost_mask |= 1u << cpu;
+  }
+ }
+ printf("X9 CPUOFF STAT: off_mask=%x lost_mask=%x trans=%u fail=%u "
+     "off_ms=%llu/%llu/%llu/%llu\n", off_mask, lost_mask,
+     cpuoff_mgr.transitions, cpuoff_mgr.failures_total,
+     (unsigned long long)tot[0], (unsigned long long)tot[1],
+     (unsigned long long)tot[2], (unsigned long long)tot[3]);
+}
+
 /* Same util accounting as cpu_govern (busiest CPU per domain from XNU
  * accumulated ticks); the decision itself is the policy header's. */
 static unsigned cpu_govern2(int touch __unused, int temp, int dark,
@@ -870,6 +1066,7 @@ static void gov_thread(void *arg,wait_result_t result) {
   const int scene=sched_update_scene(dark,touch,util,now);
   const unsigned cpu_peak=sched_bit(1)?cpu_govern2(touch,temp,dark,scene):cpu_govern(touch,temp,dark);
   sched_last_peak=cpu_peak;
+  cpuoff_tick(scene,now);
   int steer=!dark&&touch&&boost_cool&&cpu_peak>=80;
   if(sched_bit(2)) {
    steer=(scene==X9SCENE_INTERACT||scene==X9SCENE_CAMERA)&&boost_cool;
@@ -927,6 +1124,7 @@ static void gov_thread(void *arg,wait_result_t result) {
    if(cpu_boost_ready)printf("X9 CPUFREQ: load=%u/%u/%u%% request=%u/%u/%uMHz touch_floor=%llu/%llu ticks mode=%s dark=%d\n",
     cpud[0].util,cpud[1].util,cpud[2].util,cpud[0].mhz[cpud[0].cur],cpud[1].mhz[cpud[1].cur],cpud[2].mhz[cpud[2].cur],
     boost_ticks,ui_ticks,cpu_mode_name(cpu_mode),dark);
+   cpuoff_stat_line(now);
    if(sched_bit(1)||sched_bit(2)||sched_bit(4))printf("X9 SCHED: scene=%s resid=%u/%u/%u/%u/%u up=%u/%u/%u down=%u/%u/%u capped=%u/%u/%u steer_mask=%d\n",
     x9sched_scene_name(sched_scene),sched_scene_residency[0],sched_scene_residency[1],sched_scene_residency[2],sched_scene_residency[3],sched_scene_residency[4],
     sched_d[0].up_commits,sched_d[1].up_commits,sched_d[2].up_commits,
