@@ -196,4 +196,62 @@ static inline bool x9wr_serialize_ipv6_metadata(const x9wr_settings &settings,x9
   * Caller must never publish connected merely because metadata encoded. */
  return p.good;
 }
+
+/* P-CSCF sourcing for IMS runtime settings. The MTK ACT CNF carries the
+ * proxy lists the network returned in the PCO: pcscfV4 count tag 0x117
+ * with addresses at 0x8118+i (4 B each), pcscfV6 count tag 0x11c with
+ * addresses at 0x811d+i (16 B each). Tag assignment cross-checked two
+ * ways: RmmDcEventHandler::decodeDataCallProfile in this device's
+ * libmtkmipc-ril.so reads exactly those tags before printing its
+ * pcscfV4/pcscfV6 dump, and this device's factory IMS ACT CNF
+ * (radio-baseline.txt 18:38:15.639) carries 0x11c=2 plus two 16-byte
+ * entries while the cbnet CNF carries neither list. The PDN's own
+ * addresses remain the family fields decoded elsewhere (0x8104/0x8109). */
+static inline bool x9w_pcscf_decode(const uint8_t *p,unsigned n,x9w_pcscf_list &out){
+ bzero(&out,sizeof(out));unsigned count=0;
+ if(!x9wr_optional_byte(p,n,0x117,count)||count>4)return false;
+ for(unsigned i=0;i<count;i++){
+  x9q_view t=x9w_tlv(p,n,0x8118+i);
+  if(!t.p||t.n!=4||!x9wr_address(t.p,4))return false;
+  memcpy(out.v4[i],t.p,4);
+ }
+ out.v4_count=(uint8_t)count;count=0;
+ if(!x9wr_optional_byte(p,n,0x11c,count)||count>4)return false;
+ for(unsigned i=0;i<count;i++){
+  x9q_view t=x9w_tlv(p,n,0x811d+i);
+  if(!t.p||t.n!=16||!x9wr_address(t.p,16))return false;
+  memcpy(out.v6[i],t.p,16);
+ }
+ out.v6_count=(uint8_t)count;
+ return out.v4_count||out.v6_count;
+}
+static inline void x9w_pcscf_publish(unsigned sim,const uint8_t *p,unsigned n){
+ if(sim>=2)return;
+ x9w_pcscf_list decoded;
+ if(x9w_pcscf_decode(p,n,decoded))x9w_pcscf_lists[sim]=decoded;
+}
+/* An IMS settings context is a bearer whose effective APN is "ims"; the
+ * proxy lists attach only when this SIM's factory ACT produced them. */
+static inline bool x9wr_ims_settings_applicable(const char *apn,const x9w_pcscf_list &list){
+ return apn&&!strcasecmp(apn,"ims")&&(list.v4_count||list.v6_count);
+}
+/* QMI wire format per 20H392 parseField<ProxyIPv4List/ProxyIPv6List>:
+ * u8 count followed by raw addresses; IPv4 entries are byte-reversed
+ * like x9wr_ipv4_tlv (MIPC stores them little-endian). */
+static inline bool x9wr_serialize_pcscf(const x9w_pcscf_list &list,x9q_packet &p){
+ if(list.v4_count){
+  uint8_t buf[1+4*4];buf[0]=list.v4_count;
+  for(unsigned i=0;i<list.v4_count;i++){
+   buf[1+4*i]=list.v4[i][3];buf[2+4*i]=list.v4[i][2];
+   buf[3+4*i]=list.v4[i][1];buf[4+4*i]=list.v4[i][0];
+  }
+  p.tlv(0x23,buf,(unsigned)(1+4*list.v4_count));
+ }
+ if(list.v6_count){
+  uint8_t buf[1+16*4];buf[0]=list.v6_count;
+  for(unsigned i=0;i<list.v6_count;i++)memcpy(buf+1+16*i,list.v6[i],16);
+  p.tlv(0x2e,buf,(unsigned)(1+16*list.v6_count));
+ }
+ return p.good;
+}
 #endif
