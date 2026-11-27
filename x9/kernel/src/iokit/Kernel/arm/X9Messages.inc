@@ -299,6 +299,12 @@ static bool x9m_factory_enabled(){
  * the report as X9M_FACTORY_CFG; mem_sent dedupes the two sites so each
  * SIM reports exactly once per boot. A failure here never blocks or
  * revokes host-ready, and is never retried. */
+static bool x9m_ind_enabled(){
+ /* Default off: IMS registration is not yet device-proven, so the
+  * no-ack indication path stays dormant until x9_sms_ind=1 opts in. */
+ static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_sms_ind",0)==1;
+ return enabled!=0;
+}
 static void x9m_mem_status_poll(uint8_t *p,unsigned room){
  if(!x9m_factory_enabled())return;
  const bool online=x9w_control_ready&&x9_md_mipc_online();
@@ -328,12 +334,6 @@ static void x9m_mem_status_poll(uint8_t *p,unsigned room){
   if(token){s.mem_token=token;s.mem_deadline=now+10000;}
   else s.mem_hold=true;
  }
-}
-static bool x9m_ind_enabled(){
- /* Default off: IMS registration is not yet device-proven, so the
-  * no-ack indication path stays dormant until x9_sms_ind=1 opts in. */
- static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_sms_ind",0)==1;
- return enabled!=0;
 }
 static void x9m_init_transport_loss(){
   /* Loss is not registration/config retirement. Stop advancing this boot,
