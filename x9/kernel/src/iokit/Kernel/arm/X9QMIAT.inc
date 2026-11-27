@@ -819,6 +819,27 @@ static void x9q_reject(uint32_t local,uint32_t port,const uint8_t *req,unsigned 
    port-X9BB_PORT_BASE,x9q_u16(req+3),x9q_u16(req+1),err,w?t:" none");}
  x9bb_reply_error(local,port,req,len,err);
 }
+/* NAS 0x0073 GetImsPreferenceInfo (20H392 libCommCenterMCommandDrivers):
+ * QMINetworkRegistrationDriver::getImsPreferenceInfo_sync constructs msg
+ * 0x73 with no request TLVs, once per SIM while binding the NAS
+ * subscription; device logs show the bare 7-byte request rejected
+ * UNSUPPORTED. Its SendProxy completion fetches TLV 0x10 and parses it as
+ * nas::tlv::IpPrefInfo (tlv::parse<nas::tlv::IpPrefInfo> 0x1f194cb4c):
+ * exactly 9 bytes, {u8 sys_mode, u64}. Byte 0 is passed as
+ * nas::RadioInterface to dataModesFromSysMode; nas::asString(nas::ImsSysMode)
+ * names 0 kNoService, 8 kLTE, 12 kNR5g and renders other values unknown.
+ * The u64 field's semantics are NOT established by the extracted inputs
+ * (the consuming delegate lives in the CommCenter executable, which is not
+ * in the DSC extract), so the answer below exists only behind the
+ * default-off x9_ims_pref_diag experiment gate and always sends u64=0.
+ * sys_mode comes from the freshest real serving sample for the SIM
+ * (x9q_data_radios, same 30 s freshness rule as WDS); no fresh sample is
+ * reported as kNoService, never as a capability claim. */
+static uint8_t x9q_ims_sys_mode(unsigned sim){
+ const x9q_data_radio &r=x9q_data_radios[sim];
+ uint32_t rat=r.sampled&&x9q_ms()-r.sampled<=30000?r.rat:0;
+ return rat&(1u<<10)?12:rat&(1u<<5)?8:0;
+}
 static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *req,unsigned len){
  // Only existing scoped WMS20/WMS37/WMS storage/NAS03/NAS45/VOICE20/VOICE44 owners consume repeats before generic
  // TLV validation. New transactions and every other route still validate.
@@ -932,6 +953,18 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
    service==3&&id==0x6c?"threshold/LQI configuration":"registration",
    service==3&&id==0x6c?"configuration not applied; NAS03 subscription unchanged":"no indications generated");}
   x9q_packet p(req);p.send(local,port);return;
+ }
+ /* NAS 0x0073 GetImsPreferenceInfo stays UNSUPPORTED by default. Only the
+  * default-off x9_ims_pref_diag experiment answers, with the proven
+  * IpPrefInfo shape and a sys_mode byte from real serving state; the
+  * trailing u64 is 0 because its semantics are unproven (see
+  * x9q_ims_sys_mode). Malformed lengths fall through to the normal reject. */
+ if(service==3&&id==0x73&&len==7&&sweet_x9_arg("x9_ims_pref_diag",0)==1){
+  uint8_t info[9]={};info[0]=x9q_ims_sys_mode(c.sim_slot);
+  x9q_packet p(req);p.tlv(0x10,info,9);
+  static unsigned logged;
+  if(logged<16){logged++;printf("X9 IMS: NAS73 GetImsPreferenceInfo SIM%u sysmode %u (x9_ims_pref_diag experiment; IpPrefInfo u64=0, semantics unproven)\n",c.sim_slot+1,info[0]);}
+  p.send(local,port);return;
  }
  /* WDA/DPM must not open a fabricated IPA endpoint. Unsupported WDS operations
   * must not promote CGATT to an IP route. */
