@@ -104,3 +104,41 @@ EMI 工作的前置核对（原交接要求「先按锁内 crs/regs 配对读真
    原件调用链做专项静态分析后才能设计。
 7. **runtime task-info[0] 的 8B 回读**：决定 scene0 实际 core；需 ADSP 在线实测，
    且以同版固件到位为前提（见 3）。
+
+## 第二轮：L5 USIP EMI owner（2026-11-27 晚，已落地）
+
+按机主要求以原厂安卓实现为规格，把 L5 从"描述子观察"推进到完整
+lifetime owner。Android 侧规格全部来自本机原厂模块源码
+（`oppo-modules-dt-mt6993` 的 `sound/soc/mediatek/common/mtk-usip.c`）：
+
+- **所有权模型**：Android 的 owner 是内核 mtk-usip 驱动——
+  `usip_get_addr()` 从 CCCI `get_smem_phy_start_addr(0, SMEM_USER_RAW_USIP)`
+  取得区域（即 LK cacheable 表 id 24），记录 addr_phy/memory_size/
+  memory_ready；`/dev/usip` 的 mmap 把整区以 noncached 重映射给
+  audio HAL，HAL 的 SpeechExtMemUSIP 在 map+0x4000 写 speech 参数。
+  本树的 owner 同构：描述子只从本 boot 的 LK 表配对读出
+  （`x9md_crs` 的 AP pa + `x9md_regs[24]` 的 MD view），不硬编码
+  f0d00000；绑定要求区域覆盖完整 EMI 表跨度（0x60000），不足直接拒绝。
+- **EMI 表**（mtk-usip.c `EMI_TABLE`）：AP_USIP_PARAMETER 0x0/0x30000、
+  ADSP_USIP_PHONECALL 0x30000/0x8000、ADSP_USIP_SMARTPA 0x38000/0x28000，
+  恰好平铺 0x60000。
+- **lifetime**：纯头文件 `x9/kernel/src/bsd/dev/x9_voice_usip.h` 跑
+  bind → acquire（首 pin 要求 glue 映射）→ map_done（失败回滚 pin）→
+  release（末 pin 要求 unmap）→ unmap_done 的状态机；内核 glue
+  （`x9_modem.inc`）用 `ml_io_map_wcomb`/`ml_io_unmap` 兑现，与其它
+  cacheable SMEM 区域同法。区域永不清零（SMF_NCLR_FIRST）、永不被
+  本 owner 读写——pin 只确立"地址可发布"的资格。
+- **AD50**：`x9_voice_usip_ad50_build()` 按 `audio_messenger_ipi.h`
+  的 ipi_msg_t 头 + mtk-usip 的 payload 规则构造整帧（scene 0 与
+  scene 19 两份，字节与契约 JSON 的参考推导逐字一致，主机测试锁定）。
+  只有 qualified（bound+mapped+pinned）时才允许构造。**构造不等于
+  发送**：本树没有 voice IPI transport owner（`x9_ipi_dma` 是
+  SmartPA 专用），帧只在 `x9_voice_usip=1` 门控下构造并打印
+  "constructed (not submitted)"，不投递 DSP。
+- **门控**：`x9_voice_usip=1` 默认关；关时 owner 连 bind 都不做，
+  行为与第一片之前完全一致。主机测试 `x9/baseband/test_voice_usip.py`
+  覆盖 EMI 平铺、bind 拒绝项、map 失败回滚、双 scene 帧字节、嵌套
+  pin 与末 pin unmap 全流程。
+
+仍缺：真实消费者（call owner）出现后 acquire/release 才有调用方；
+AD50 的提交等 voice IPI transport 与 scene 路由资格（见 L2/L6）。
