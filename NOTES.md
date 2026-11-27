@@ -29,6 +29,9 @@
 
 拨号窗口 IMS／短信诊断候选用于 447，双卡短信状态报告请求候选用于 448。IMS 配置缓存 raw 解码候选未刷写。`build.log` 与各镜像同目录。首个候选使用 LLVM 22、MacOSX 14 SDK 执行 `python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --boot-arg x9_call_sip_diag=1 --name x9-call-sms-flow-20261127-r1`，exit 0，内核 31,997,160 B。MacOSX 14 SDK 下 `python3 -I -m unittest discover -s x9/baseband -p 'test_*.py' -q` 24/24，`python3 -I x9/tools/test_x9_call_bridge.py` 使用 Homebrew clang++ 与该 SDK，ASan/UBSan 85/85，均 exit 0。通话 C++ 全集基线另有四个失败用例，未计入此套件，详见旧 §6.66 和 §6.75。
 
+
+- 调度优化（feat/sched-opt，离线完成，未上机）：诊断确认卡/烫主因是 ADT 单簇扁平化（MAX_CPU_CLUSTERS=1，调度器无三档核心感知）、governor v1 比例爬升慢且 util 非频率不变、热 cap 85°C 才收敛、8 核无下线/深度空闲。已落地策略 v2（纯头 `x9_sched_policy.h` + glue，boot arg `x9sched` 默认 0=逐字旧行为）：bit1 场景化 CPU 决策（峰值衰减 util、场景目标/下限、70–95°C 平滑热 cap、几何降频），bit2 场景推荐核掩码，bit4 LOAD/CAMERA 场景 GPU 目标 70%。主机测试 99 断言 + 基带 39/39，整树候选 `x9/out/sched-opt-20261127/boot.img`（15,659,008 B）构建通过。诊断、OPPO 对照表与上机 A/B 清单见 `x9/sched/README.md`；相机场景提示 `sweet_x9_sched_camera_active()` 已留接口、未接相机文件（避与并行相机工作冲突）。
+
 ## 2. 环境与固定输入
 
 ### 2.1 工具
