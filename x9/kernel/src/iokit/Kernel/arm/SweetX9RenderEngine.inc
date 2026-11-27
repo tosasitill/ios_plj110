@@ -88,13 +88,30 @@ static bool render_ready() {
 static uint64_t render_snoop_probe[2];
 /* H2 (opt-in x9_coh_probe=1): extend the fence-page probe above to real
  * client BOs. When a resource takes the coherent CIVAC skip in the post
- * phase, sample the first and last atom of its GPU-written range and count
- * qwords the plain CPU load already had right vs qwords only visible after
- * a CIVAC. Log only; the skip itself is unchanged, and the helper maintains
- * each sampled atom, so a probe build maintains MORE than production, never
- * less. [0] match, [1] stale. */
-static uint64_t render_coh_probe[2];
+ * phase, sample atoms of its GPU-written range and count qwords the plain
+ * CPU load already had right vs qwords only visible after a CIVAC. Log
+ * only; the skip itself is unchanged, and the helper maintains each
+ * sampled atom, so a probe build maintains MORE than production, never
+ * less.
+ * Step b (this state): strided sampling across the whole written range
+ * with a rotating cursor (x9_render_coh_pick_atoms), per-class verdicts
+ * -- class 0 native BOs, class 1 imported (IOSurface) BOs, the two memory
+ * classes the snoop claim must hold for separately -- and coverage
+ * accounting (eligible vs sampled resources), so a "stale=0" line carries
+ * its denominator. Step a sampled only the first/last atom of at most 4
+ * resources per job into one pooled counter pair.
+ * Step c is accounting only, by necessity: the pre phase skips the clean
+ * for the same classes on the same snoop assumption (CPU->GPU), but no
+ * CPU-side observation can falsify that direction -- only a GPU readback
+ * of CPU-written data could. render_coh_pre_skip[] therefore measures
+ * the assumption's exposure per class and the verdict line reports it as
+ * assumed, never as probed. The designed proof is a frontend readback
+ * harness; see docs/graphics/h2-step-bc-20261127.md. */
+static uint64_t render_coh_probe[2][2];
 static uint64_t render_coh_probe_atoms,render_coh_probe_jobs;
+static uint64_t render_coh_probe_eligible,render_coh_probe_sampled;
+static uint64_t render_coh_rotation;
+static uint64_t render_coh_pre_skip[2];
 static bool render_coh_probe_enabled() {
  static int mode=-1;
  if(mode<0){mode=sweet_x9_arg("x9_coh_probe",0)==1?1:0;IOLog("X9 RENDER COH-PROBE: client-BO coherency sampling %s (x9_coh_probe)\n",mode?"ON":"off");}
@@ -955,6 +972,12 @@ static IOReturn render_submit_publish(RenderJobState *st,const RenderOwner &owne
    }else st->scope_hold_bytes[0]+=r.bytes;   /* covered, held by a pending command buffer: maintained anyway */
   }
   if(coherent&&r.cpu_exposed) {
+   /* H2 step c accounting: this pre-phase clean is skipped on the same
+    * snoop assumption as the post phase, in the CPU->GPU direction the
+    * probe cannot observe. Count the exposure per class while the probe
+    * is on; the verdict line reports it as assumed, never as probed. */
+   if(render_coh_probe_enabled())
+    render_coh_pre_skip[r.imported?1:0]+=r.cache_end>r.cache_begin?r.cache_end-r.cache_begin:0;
    st->coherent_skip[0]+=r.cache_end>r.cache_begin?r.cache_end-r.cache_begin:0;continue;
   }
   if(!r.cpu_exposed&&r.initial_cache_clean){st->private_skip[0]+=r.bytes;continue;}
@@ -1177,23 +1200,31 @@ static IOReturn render_submit_reap(RenderJobState *st,const RenderOwner &owner) 
   if(r.write_combined){st->wc_skip[1]+=r.bytes;continue;}
   if(st->coherent&&r.cpu_exposed) {
    st->coherent_skip[1]+=r.write_end>r.write_begin?r.write_end-r.write_begin:0;
-   if(render_coh_probe_enabled()&&st->coh_samples<4) {
-    /* H2 sample: this resource's bytes were NOT invalidated after the GPU
-     * wrote them (that is the coherent claim under test). The job's final
-     * GPU flush has already run above, both locks are held, and the helper
-     * CIVACs each sampled atom, so sampling cannot lose CPU data and
-     * cannot hide a stale line from the count. At most 4 resources and 2
-     * atoms per job: bounded, and in the post phase, off the submit path. */
-    uint64_t begin=r.write_begin,end=r.write_end,match=0,mismatch=0;unsigned atoms=0;
-    if(end>begin&&!(begin&(X9_RENDER_CACHE_ATOM-1))) {
-     if(x9_render_memory_coherency_sample(&r,begin,&match,&mismatch))atoms++;
-     uint64_t last=end-X9_RENDER_CACHE_ATOM;
-     if(last>begin&&x9_render_memory_coherency_sample(&r,last,&match,&mismatch))atoms++;
-    }
-    if(atoms) {
-     if(!st->coh_samples)render_coh_probe_jobs++;
-     st->coh_samples++;render_coh_probe_atoms+=atoms;
-     render_coh_probe[0]+=match;render_coh_probe[1]+=mismatch;
+   if(render_coh_probe_enabled()) {
+    /* H2 step b sample: this resource's bytes were NOT invalidated after
+     * the GPU wrote them (that is the coherent claim under test). The
+     * job's final GPU flush has already run above, both locks are held,
+     * and the helper CIVACs each sampled atom, so sampling cannot lose
+     * CPU data and cannot hide a stale line from the count. At most 4
+     * resources and 16 atoms per job: bounded, and in the post phase,
+     * off the submit path. */
+    render_coh_probe_eligible++;
+    if(st->coh_samples<4) {
+     uint64_t begin=r.write_begin,end=r.write_end,match=0,mismatch=0;unsigned atoms=0;
+     if(end>begin&&!(begin&(X9_RENDER_CACHE_ATOM-1))) {
+      const uint64_t range_atoms=(end-begin)/X9_RENDER_CACHE_ATOM;
+      uint64_t pick[4];
+      const unsigned picks=x9_render_coh_pick_atoms(range_atoms,
+       render_coh_rotation++,4,pick);
+      for(unsigned pi=0;pi<picks;pi++)
+       if(x9_render_memory_coherency_sample(&r,begin+pick[pi]*X9_RENDER_CACHE_ATOM,&match,&mismatch))atoms++;
+     }
+     if(atoms) {
+      if(!st->coh_samples)render_coh_probe_jobs++;
+      st->coh_samples++;render_coh_probe_sampled++;render_coh_probe_atoms+=atoms;
+      const unsigned cls=r.imported?1:0;
+      render_coh_probe[cls][0]+=match;render_coh_probe[cls][1]+=mismatch;
+     }
     }
    }
    continue;
@@ -1276,9 +1307,11 @@ static IOReturn render_submit_reap(RenderJobState *st,const RenderOwner &owner) 
    if(x9_gpu_acelite_active)
     IOLog("X9 RENDER SNOOP: GPU->CPU fence probe coherent=%llu stale=%llu;stale>0 means GPU writes do not invalidate CPU lines\n",
      render_snoop_probe[0],render_snoop_probe[1]);
-   if(render_coh_probe[0]||render_coh_probe[1])
-    IOLog("X9 RENDER COH-PROBE: jobs=%llu atoms=%llu qwords match=%llu stale=%llu;stale>0 on a client BO falsifies the snoop claim for that memory class\n",
-     render_coh_probe_jobs,render_coh_probe_atoms,render_coh_probe[0],render_coh_probe[1]);
+   if(render_coh_probe_sampled)
+    IOLog("X9 RENDER COH-PROBE: jobs=%llu resources=%llu/%llu atoms=%llu native match=%llu stale=%llu imported match=%llu stale=%llu pre_skip_bytes native=%llu imported=%llu (CPU->GPU assumed,not probed);stale>0 falsifies the snoop claim for that class\n",
+     render_coh_probe_jobs,render_coh_probe_sampled,render_coh_probe_eligible,render_coh_probe_atoms,
+     render_coh_probe[0][0],render_coh_probe[0][1],render_coh_probe[1][0],render_coh_probe[1][1],
+     render_coh_pre_skip[0],render_coh_pre_skip[1]);
    IOLog("X9 RENDER cache-plan: builds=%llu reuses=%llu;mapping mutation invalidates,shared cache ops still per submission\n",plan_rebuilds,plan_reuses);
    plan_rebuilds=plan_reuses=0;
    for(unsigned i=0;i<2;i++)hole_total[i]=span_total[i]=0;
