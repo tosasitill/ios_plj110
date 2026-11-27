@@ -142,3 +142,42 @@ lifetime owner。Android 侧规格全部来自本机原厂模块源码
 
 仍缺：真实消费者（call owner）出现后 acquire/release 才有调用方；
 AD50 的提交等 voice IPI transport 与 scene 路由资格（见 L2/L6）。
+
+## 第二轮：L3 sph_info 动态字段闭合（2026-11-27 晚，已落地）
+
+`docs/call-ios-bridge.md` 与第一轮文档里悬着的 +3/+55 来源，本轮用
+原厂 HAL 反汇编（`x9/out/call-md-voice-owner/hal-config-speech-info.asm`）
++ mtk-usip.c 源码 + 本机 live.dts 三方对齐，已完全闭合：
+
+- **取值链**：`configSpeechInfo` 在 +0x03 存
+  `SpeechDriverOpenDSP::getAdspPhoneCallEnh()`、在 +0x55 存
+  `getAdspPhoneCallHwIf()`；两个成员由 OpenDSP 构造器经 /dev/usip
+  ioctl `c00844f1`/`c00844f3` 读入（实际拷贝是 u32，不是 ioctl 编码
+  的 8 字节）；mtk-usip 驱动的值来自其 probe 读取的
+  `speech-usip-mem` DT 节点属性 `adsp-phone-call-enh-enable` /
+  `adsp-phone-call-hwif`。本机 live.dts：**3 / 0**，与原厂 MO 日志
+  `configSpeechInfo(), ... opendsp: 3 ...` 一致。
+- **门控规则**：ADSP option 关闭且 SCP support feature bit 为 0 时，
+  HAL 不调用 getter，两个字段都存 0（汇编 1a6910/1a6938 的回退路径）。
+- **其余已钉字段**：+0x00 app（MO 0）、+0x01 bt（getBtInfo，MO 0）、
+  +0x02 rate enum（MO 3）；+0x05 与 +0x54 同属一个 HAL 分支
+  （+0x05=2、+0x54=1+isDualSmartPA，MO 的 smartPA config=2 证明该
+  分支被走）；+0x1c 起 24B common 块（MO com par[0]=6）、+0x34 起
+  32B debug 块（MO debug info[0]=3）。
+- **MD 消费**（SPC handler 反汇编）：body+3 被保存；body+0x55 存入
+  state+0x55 并分支——hwif≠0 时 state+0x54=2、+0x56=((body+3>>3)&3)+1；
+  hwif=0 时 state+0x54=(body+3<<1)&2、+0x56=0。本机值（3,0）推出
+  state = {2,0,0}。头部 `x9_voice_sph.h` 内含该镜像函数，主机测试
+  双分支锁定。
+- **合成物**：`x9_voice_sph.h` 的 builder 按 HAL 原样合成 128B body
+  （先清零再存已钉字段），输入集 `X9_VOICE_SPH_PLJ110_MO` 逐值来自
+  mo-call-audio.txt:790 的日志行，是观测输入而非默认常量；
+  wrapper（sph_msg 32B）只填已钉字段（+0=1、+2 msgid、+0x0c type、
+  +0x0e size、+0x10 body 指针）。
+- **仍未钉**：日志里的 `enh_dynamic_ctrl: 0x3` 偏移未定（可能是
+  +0x03 的第二名字），builder 不放；+0x04..+0x1b 簇（path/param/
+  ext_dev/loopback/延迟/mute/usip param）各字段偏移未全钉，MO 中
+  全为 0，builder 保持 0 与 MO 一致。
+- **不发送**：0x2f20 的承载是 SpeechMessageQueue/SPC 流，不在本桥
+  所有权内（原厂 MO 的 35 帧 MIPC 无 speech 帧）。builder 只把字节
+  合同变成可执行、可测的代码，等 transport owner 出现再接。
