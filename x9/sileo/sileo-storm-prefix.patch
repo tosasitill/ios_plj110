@@ -1,0 +1,130 @@
+# Sileo 2.5.1 storm-prefix patch (X9 ios_plj110)
+#
+# Teaches Sileo the X9 "storm" bootstrap: detection keys on the
+# marker file /var/storm/.x9_storm_strapped, which the storm
+# payload ships at the prefix root (build.py assemble() writes
+# it into the bootstrap tree). With the marker present,
+# CommandPath.prefix is /var/storm, the coreutils tool paths use
+# the prefix copies, CommandPath.sh points at usr/bin/sh (the
+# storm layout has no bin/sh), and DpkgWrapper treats /var/storm
+# as a rootless (iphoneos-arm64) prefix.
+#
+# Apply from the Sileo 2.5.1 source root:  patch -p1 < this file
+# (Source: Sileo/Sileo tag 2.5.1; files: Bootstrap.swift,
+# CommandPaths.swift, DpkgWrapper.swift.)
+#
+# NOT covered here, deliberately: the root spawn path. On
+# iOS 13+ APTWrapper/RootWrapper spawn tools directly with a
+# persona-99 posix_spawn override and never call giveMeRoot;
+# whether the X9 kernel honors persona-99 is an on-device
+# discriminator. If it does not, the follow-up patch forces
+# the giveMeRoot branch when Bootstrap.x9_storm is set, which
+# lands on the x9 rootexec chain (see rootexec/).
+
+diff --git a/Sileo/Backend/Root Wrapper/Bootstrap.swift b/Sileo/Backend/Root Wrapper/Bootstrap.swift
+index 5fe54e4..f92b654 100644
+--- a/Sileo/Backend/Root Wrapper/Bootstrap.swift	
++++ b/Sileo/Backend/Root Wrapper/Bootstrap.swift	
+@@ -12,6 +12,9 @@ enum Bootstrap: String, Codable {
+         
+     static let procursus_rootless = URL(fileURLWithPath: "/var/jb/.procursus_strapped").exists
+     static let procursus_rootful = URL(fileURLWithPath: "/.procursus_strapped").exists
++    // X9 storm prefix: the marker ships in the storm payload tree, so it
++    // exists exactly when the /var/storm symlink target is populated.
++    static let x9_storm = URL(fileURLWithPath: "/var/storm/.x9_storm_strapped").exists
+     
+     case procursus = "Procursus"
+     case elucubratus = "Bingner/Elucubratus"
+diff --git a/Sileo/Backend/Root Wrapper/CommandPaths.swift b/Sileo/Backend/Root Wrapper/CommandPaths.swift
+index 2fb6af6..1cca757 100644
+--- a/Sileo/Backend/Root Wrapper/CommandPaths.swift	
++++ b/Sileo/Backend/Root Wrapper/CommandPaths.swift	
+@@ -14,7 +14,9 @@ public class CommandPath {
+         #if targetEnvironment(macCatalyst)
+         return "/opt/procursus"
+         #else
+-        if Bootstrap.procursus_rootless {
++        if Bootstrap.x9_storm {
++            return "/var/storm"
++        } else if Bootstrap.procursus_rootless {
+             return "/var/jb"
+         } else {
+             return ""
+@@ -24,7 +26,7 @@ public class CommandPath {
+ 
+     // swiftlint:disable identifier_name
+     static var mv: String = {
+-        if Jailbreak.bootstrap == .procursus {
++        if Bootstrap.x9_storm || Jailbreak.bootstrap == .procursus {
+             return "\(prefix)/usr/bin/mv"
+         }
+ 
+@@ -32,7 +34,7 @@ public class CommandPath {
+     }()
+ 
+     static var chmod: String = {
+-        if Jailbreak.bootstrap == .procursus {
++        if Bootstrap.x9_storm || Jailbreak.bootstrap == .procursus {
+             return "\(prefix)/usr/bin/chmod"
+         }
+ 
+@@ -41,7 +43,7 @@ public class CommandPath {
+ 
+     // swiftlint:disable identifier_name
+     static var ln: String = {
+-        if Jailbreak.bootstrap == .procursus {
++        if Bootstrap.x9_storm || Jailbreak.bootstrap == .procursus {
+             return "\(prefix)/usr/bin/ln"
+         }
+ 
+@@ -50,7 +52,7 @@ public class CommandPath {
+ 
+     // swiftlint:disable identifier_name
+     static var rm: String = {
+-        if Jailbreak.bootstrap == .procursus {
++        if Bootstrap.x9_storm || Jailbreak.bootstrap == .procursus {
+             return "\(prefix)/usr/bin/rm"
+         }
+ 
+@@ -58,7 +60,7 @@ public class CommandPath {
+     }()
+ 
+     static var mkdir: String = {
+-        if Jailbreak.bootstrap == .procursus {
++        if Bootstrap.x9_storm || Jailbreak.bootstrap == .procursus {
+             return "\(prefix)/usr/bin/mkdir"
+         }
+ 
+@@ -67,7 +69,7 @@ public class CommandPath {
+ 
+     // swiftlint:disable identifier_name
+     static var cp: String = {
+-        if Jailbreak.bootstrap == .procursus {
++        if Bootstrap.x9_storm || Jailbreak.bootstrap == .procursus {
+             return "\(prefix)/usr/bin/cp"
+         }
+ 
+@@ -136,7 +138,10 @@ public class CommandPath {
+ 
+     // swiftlint:disable identifier_name
+     static var sh: String = {
+-        "\(prefix)/bin/sh"
++        if Bootstrap.x9_storm {
++            return "\(prefix)/usr/bin/sh"
++        }
++        return "\(prefix)/bin/sh"
+     }()
+ 
+     static var sileolists: String = {
+diff --git a/Sileo/Backend/DPKG Wrapper/DpkgWrapper.swift b/Sileo/Backend/DPKG Wrapper/DpkgWrapper.swift
+index 0ea74d1..83b0bf2 100644
+--- a/Sileo/Backend/DPKG Wrapper/DpkgWrapper.swift	
++++ b/Sileo/Backend/DPKG Wrapper/DpkgWrapper.swift	
+@@ -70,6 +70,7 @@ class DpkgWrapper {
+         let prefix = CommandPath.prefix
+         switch prefix {
+         case "/var/jb": defaultArchitectures = DPKGArchitecture(primary: .rootless, foreign: [])
++        case "/var/storm": defaultArchitectures = DPKGArchitecture(primary: .rootless, foreign: [])
+         default: defaultArchitectures = DPKGArchitecture(primary: .rootful, foreign: [])
+         }
+         #endif

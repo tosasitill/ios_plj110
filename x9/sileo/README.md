@@ -207,3 +207,90 @@ and the Sileo/Sileo 2.5.1 sources:
   libzstd1) are not yet in the bootstrap — apt is the long pole — and
   (b) the persona-99 question decides the spawn patch shape. Producing
   an .app before those land would be a hollow artifact.
+
+## Round 2 (2026-11-27, host-verified): apt tree, payload 0.2.0, Sileo trial
+
+The apt dependency tree and both remaining Sileo `Depends` are built.
+One clean end-to-end `build.py` run (`x9/out/storm-bootstrap-r2-20261127`)
+plus `verify.py`: **411 files, 196 Mach-O, 0 problems** — including the
+load-closure check (every dylib a Mach-O loads is a system library or
+present under its `/var/storm` install name), the 00storm status pin,
+and the Sileo dependency set. Payload regenerated as **0.2.0**
+(`x9/out/storm-payload-0.2.0`, 414 entries); `prep.sh` now also creates
+the apt state/cache skeleton idempotently. Nothing staged to a device.
+
+Built this round (all arm64, prefix `/var/storm`, install names
+verified): xxhash 0.8.2, lz4 1.9.4, zstd 1.5.5, gmp 6.3.0, nettle 3.9.1
+(+hogweed), libtasn1 4.19.0, libgpg-error 1.48, libgcrypt 1.10.3,
+berkeleydb 18.1.40 (C library only, headers in `include/db181`),
+gnutls 3.8.5 (lean config: no p11-kit/idn2/brotli, included unistring),
+**apt 2.9.4** (full tool set + libapt-pkg 6.0 + methods in
+`usr/libexec/apt/methods`, matching libapt-pkg's compiled-in paths),
+**coreutils 9.5**. apt's compiled-in `Dir::State::status` problem is
+handled by the shipped `00storm` pin (see `build.py assemble()`).
+
+Round-2 build fixes, all in `build.py` with the evidence in comments:
+- lz4: Procursus's `ln -s` → `$(LN_S)` rewrite broke the tarball's own
+  `LN_SF = ln -sf` definition (LN_S is undefined here), so `make
+  install` tried to execute a program named `f`. Rewrite dropped.
+- libgcrypt: iPhoneOS SDK headers omit the `getentropy()` declaration;
+  added at the single use site in rndgetentropy.c.
+- xxhash: PREFIX must be passed at build time too, or the dylib
+  install name stays `/usr/local/lib`.
+- berkeleydb: Procursus's nodoc.diff is load-bearing, not cosmetic —
+  with sql/stl off, `install_docs` copies doc dirs that are never
+  produced and `make install` fails. Its one-line change is applied
+  to `dist/Makefile.in`.
+- gnutls: nettle & friends are found via pkg-config; the cross
+  pkg-config wrapper (factored out of `build_apt`) goes first in PATH.
+  3.8.5 dropped `--disable-guile`/`--enable-local-libopts`; removed.
+- apt: host `triehash` is a hard CMake requirement — pinned 0.3 in
+  `sources.json`, installed into the host shim dir by `build_apt`.
+  USE_NLS=0 i18n stubs clash with the SDK's `<locale.h>` (dropped
+  `throw()`); `<libproc.h>`/proc_pidinfo guarded to non-iOS Apple so
+  ExecFork uses its generic FD_CLOEXEC fallback; `system()` call
+  sites in cdromutl/fileutl/private-source routed through a
+  fork/exec of the storm shell (same replacement as dpkg/patch).
+- coreutils: `ac_cv_func_clock_settime=no` — the SDK marks
+  clock_settime unavailable; gnulib's settime() then uses the
+  settimeofday fallback.
+
+### Sileo trial build (2.5.1 sources + storm patch)
+
+`sileo-storm-prefix.patch` (this directory) is the reproducible
+prefix patch: a `/var/storm/.x9_storm_strapped` marker (shipped by
+`assemble()` at the tree root) flips `Bootstrap.x9_storm`, which
+makes `CommandPath.prefix` return `/var/storm`, points the six
+coreutils tool paths and `CommandPath.sh` (`usr/bin/sh`; storm has
+no `bin/sh`) at the prefix, and makes DpkgWrapper treat the prefix
+as rootless. Verified: `patch -p1` on pristine 2.5.1 sources
+reproduces the patched tree exactly.
+
+Trial build outcome — **no .app/.deb produced; blockers pinned**:
+1. giveMeRoot builds and signs, but only after building a host
+   **ldid** (2.1.5-procursus7) and host **libplist** 2.3.0 from the
+   AppSync signer cache tarballs — neither existed on this Mac.
+   (Host C++ recipe that works: CLT clang++ with `-std=c++20` and
+   its own MacOSX.sdk; the Xcode-15/older pairings fail inside
+   libc++ headers.)
+2. **xcodebuild aborts deterministically before compiling**:
+   Xcode 15.0.1 (the only Xcode on the Mac) hits a DVTAssertions
+   failure in IDEContainerQuery during input-option resolution,
+   with duplicate DVTDownloads class registrations from the host's
+   newer /Library/Developer frameworks. Reproduced with a scrubbed
+   environment; not a Sileo-source problem.
+3. **Deps/DepictionKit is empty** in the source copy (submodule
+   never fetched) and the Mac's GitHub proxy (127.0.0.1:7890) was
+   down during this round, so neither the submodule nor a fresh
+   2.5.1 tarball could be fetched. The app target needs it.
+
+Spawn path, recorded for the persona discriminator: on iOS 13+,
+APTWrapper and RootWrapper spawn tools **directly** with
+`posix_spawnattr_set_persona_np(99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE)`
++ persona uid/gid 0; `giveMeRoot` is only the pre-iOS-13 fallback
+(and RootWrapper's explicit spawnRoot helper). So a stock 2.5.1
+Sileo on iOS 16 never exercises giveMeRoot: if the X9 kernel does
+not honor persona-99, the follow-up patch must force the
+giveMeRoot branch when `Bootstrap.x9_storm` is set, landing on
+this round's rootexec chain. Deciding input = discriminator 5
+(on-device), unchanged.

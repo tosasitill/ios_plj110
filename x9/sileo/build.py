@@ -6,9 +6,10 @@ addressed cache under .local/x9/sileo-cache), cross-compiles for
 arm64-apple-ios16.0 with the public prefix /var/storm, assembles a
 prefix-relative bootstrap tree and emits a runtime.json-style manifest.
 
-Built here: libmd, liblzma (xz), dash (as sh), dpkg, uicache.
-Pinned but NOT built (dependency trees pending, see sources.json):
-apt, coreutils. This script refuses to emit a manifest claiming them.
+Built here: libmd, liblzma (xz), dash (as sh), dpkg, the apt dependency
+tree (gmp, libtasn1, nettle, libgpg-error, libgcrypt, xxhash, lz4, zstd,
+berkeleydb, gnutls), apt, coreutils, uicache. Everything pinned in
+sources.json is built; the manifest never claims more than the tree.
 """
 import argparse
 import hashlib
@@ -84,6 +85,7 @@ class Builder:
             'CC_FOR_BUILD': self.host_clang,
             'CFLAGS': f'-O2 -I{inc}',
             'CXXFLAGS': f'-O2 -I{inc}',
+            'CPPFLAGS': f'-I{inc}',
             'LDFLAGS': f'-L{lib}',
             'MACOSX_DEPLOYMENT_TARGET': '',
             'ZERO_AR_DATE': '1',
@@ -95,9 +97,13 @@ class Builder:
                        env=env or self.env, check=True)
 
     def configure_make(self, src, args, make_targets=('all',), jobs=8,
-                       host='arm64-apple-darwin'):
+                       host='arm64-apple-darwin', dirs=False):
+        extra = []
+        if dirs:
+            extra = [f'--sysconfdir={PREFIX}/etc',
+                     f'--localstatedir={PREFIX}/var']
         self.run([src / 'configure', '--build=x86_64-apple-darwin',
-                  f'--host={host}', f'--prefix={PREFIX}/usr'] + args,
+                  f'--host={host}', f'--prefix={PREFIX}/usr'] + extra + args,
                  cwd=src)
         for t in make_targets:
             self.run(['make', f'-j{jobs}', t], cwd=src)
@@ -242,7 +248,419 @@ exports:
         bindir = self.sysroot / PREFIX.strip('/') / 'usr/bin'
         shutil.copy2(bindir / 'patch', bindir / 'gpatch')
 
-    STEPS = ('libmd', 'liblzma', 'dash', 'patch', 'dpkg', 'uicache')
+
+    # ---- apt dependency tree (Procursus pins, see sources.json) ----
+
+    def _pfx(self):
+        """Absolute sysroot path of the storm prefix (\u2026/var/storm/usr)."""
+        return self.sysroot / PREFIX.strip('/') / 'usr'
+
+    def build_gmp(self):
+        src = extract('gmp', self.work)
+        # Procursus libgmp10-setup sed: keep the -nostdlib probe link on
+        # the target arch/min-version. Our CC already carries both, so
+        # this is a safeguard, applied only if the string is present.
+        cfg = src / 'configure'
+        text = cfg.read_text()
+        needle = '-keep_private_externs -nostdlib'
+        if needle in text:
+            cfg.write_text(text.replace(
+                needle, '-keep_private_externs -miphoneos-version-min=16.0'
+                        ' -arch arm64 -nostdlib'))
+        env = dict(self.env)
+        env['CPP_FOR_BUILD'] = f"{self.env['CC_FOR_BUILD']} -E"
+        # --disable-assembly per Procursus (their issue #750); the plain
+        # C build is slower but portable, fine for nettle's use.
+        self.run([src / 'configure', '--build=x86_64-apple-darwin',
+                  '--host=arm64-apple-darwin', f'--prefix={PREFIX}/usr',
+                  f'--sysconfdir={PREFIX}/etc',
+                  f'--localstatedir={PREFIX}/var',
+                  '--disable-assembly', '--enable-cxx',
+                  '--disable-silent-rules'], cwd=src, env=env)
+        self.run(['make', '-j8'], cwd=src, env=env)
+        self.run(['make', 'install', f'DESTDIR={self.sysroot}'],
+                 cwd=src, env=env)
+
+    def build_libtasn1(self):
+        src = extract('libtasn1', self.work)
+        self.configure_make(src, ['--disable-silent-rules'], dirs=True)
+
+    def build_nettle(self):
+        src = extract('nettle', self.work)
+        env = dict(self.env)
+        env['CPP_FOR_BUILD'] = f"{self.env['CC_FOR_BUILD']} -E"
+        self.run([src / 'configure', '--build=x86_64-apple-darwin',
+                  '--host=arm64-apple-darwin', f'--prefix={PREFIX}/usr',
+                  f'--sysconfdir={PREFIX}/etc',
+                  f'--localstatedir={PREFIX}/var',
+                  '--disable-silent-rules'], cwd=src, env=env)
+        self.run(['make', '-j8'], cwd=src, env=env)
+        self.run(['make', 'install', f'DESTDIR={self.sysroot}'],
+                 cwd=src, env=env)
+
+    def build_libgpg_error(self):
+        src = extract('libgpg-error', self.work)
+        # Procursus's mkheader sed targets an older libgpg-error whose
+        # host table was static. 1.48 canonicalizes the host triplet in
+        # mkheader itself and ships syscfg/lock-obj-pub.aarch64-apple-
+        # darwin.h, so no patch is needed (verified in the tarball).
+        self.configure_make(src, ['--disable-silent-rules', '--disable-nls',
+                                  '--enable-install-gpg-error-config'],
+                            host='aarch64-apple-darwin', dirs=True)
+
+    def build_libgcrypt(self):
+        src = extract('libgcrypt', self.work)
+        # The iPhoneOS SDK omits the getentropy() declaration (no
+        # <sys/random.h>, unistd.h does not declare it) although the
+        # function is exported by libSystem and configure's link check
+        # finds it; rndgetentropy.c then fails under
+        # -Wimplicit-function-declaration. Add the missing declaration
+        # at its single use site. (A -include shim was tried first and
+        # leaked into the MPI assembler rules, breaking .S files.)
+        rnd = src / 'random/rndgetentropy.c'
+        text = rnd.read_text()
+        needle = '#include <unistd.h>\n'
+        assert text.count(needle) == 1
+        rnd.write_text(text.replace(
+            needle, needle +
+            '/* x9: declaration missing from the iPhoneOS SDK headers. */\n'
+            'extern int getentropy (void *__buf, size_t __len);\n'))
+        # Procursus libgcrypt-setup: Mach-O's assembler rejects the ELF
+        # .type/.size directives in the aarch64 asm and the symbol
+        # prefix differs (__gcry).
+        for asm in sorted((src / 'mpi/aarch64').glob('*.S')):
+            lines = [l for l in asm.read_text().splitlines()
+                     if '.type' not in l and '.size' not in l]
+            asm.write_text('\n'.join(lines).replace('_gcry', '__gcry') + '\n')
+        self.configure_make(
+            src, ['--disable-silent-rules', '--disable-doc',
+                  f'--with-gpg-error-prefix={self._pfx()}'],
+            host='aarch64-apple-darwin', dirs=True)
+
+    def build_xxhash(self):
+        src = extract('xxhash', self.work)
+        cc = self.env['CC']
+        # PREFIX must be present at build time too: xxhash's Makefile
+        # bakes the dylib install name from it, and the install step
+        # alone left it at the /usr/local default.
+        self.run(['make', '-j8', 'UNAME=Darwin', f'CC={cc}',
+                  f'CFLAGS={self.env["CFLAGS"]}',
+                  f'PREFIX={PREFIX}/usr'], cwd=src)
+        self.run(['make', 'install', 'UNAME=Darwin', f'CC={cc}',
+                  f'PREFIX={PREFIX}/usr', f'DESTDIR={self.sysroot}'],
+                 cwd=src)
+
+    def build_lz4(self):
+        src = extract('lz4', self.work)
+        # Procursus lz4-setup rewrites literal 'ln -s' in Makefile.inc
+        # to '$(LN_S)' because their make environment defines LN_S.
+        # Ours does not, and the only 'ln -s' in the 1.9.4 tarball is
+        # the definition `LN_SF = ln -sf` itself: the rewrite produced
+        # `LN_SF = $(LN_S)f` = `f`, so make tried to execute a program
+        # named `f` at the versioned-links step (install Error 1).
+        # Upstream's literal works as-is on the build host; keep it.
+        cc = self.env['CC']
+        self.run(['make', '-j8', 'install', 'TARGET_OS=Darwin',
+                  f'CC={cc}', f'CFLAGS={self.env["CFLAGS"]}',
+                  f'PREFIX={PREFIX}/usr', f'DESTDIR={self.sysroot}'],
+                 cwd=src)
+
+    def build_zstd(self):
+        src = extract('zstd', self.work)
+        cc = self.env['CC']
+        self.run(['make', '-j8', 'install', 'UNAME=Darwin', f'CC={cc}',
+                  f'PREFIX={PREFIX}/usr', f'DESTDIR={self.sysroot}'],
+                 cwd=src)
+
+    def build_berkeleydb(self):
+        src = extract('berkeleydb', self.work)
+        build = src / 'build_unix'
+        # Deviations from Procursus berkeleydb.mk, both deliberate:
+        # their mutex Darwin/_spin_lock_try is OSSpinLock, absent from
+        # the iOS 16 SDK; POSIX/pthreads is the supported equivalent.
+        # apt needs only the C library, so no --enable-cxx/sql/stl.
+        # Headers land in include/db181, matching the
+        # BERKELEY_INCLUDE_DIRS apt.mk passes.
+        # Their nodoc.diff is NOT cosmetic, as first assumed: with
+        # sql/stl off, install_docs copies doc subdirs (bdb-sql,
+        # gsg_db_server) that this configuration never produces and
+        # make install fails outright. Apply its one-line change to
+        # dist/Makefile.in (drop install_docs from library_install).
+        makefile_in = src / 'dist/Makefile.in'
+        text = makefile_in.read_text()
+        needle = ('library_install: install_include install_lib '
+                  'install_utilities @ADDITIONAL_INSTALL@ install_docs')
+        assert text.count(needle) == 1
+        makefile_in.write_text(text.replace(
+            needle, needle[: -len(' install_docs')]))
+        self.run([src / 'dist/configure', '--build=x86_64-apple-darwin',
+                  '--host=aarch64-apple-darwin', f'--prefix={PREFIX}/usr',
+                  f'--includedir={PREFIX}/usr/include/db181',
+                  '--with-mutex=POSIX/pthreads'], cwd=build)
+        self.run(['make', '-j8'], cwd=build)
+        self.run(['make', 'install', f'DESTDIR={self.sysroot}'], cwd=build)
+
+    def build_gnutls(self):
+        src = extract('gnutls', self.work)
+        cfg = src / 'configure'
+        text = cfg.read_text()
+        needle = '-keep_private_externs -nostdlib'
+        if needle in text:
+            cfg.write_text(text.replace(
+                needle, '-keep_private_externs -miphoneos-version-min=16.0'
+                        ' -arch arm64 -nostdlib'))
+        env = dict(self.env)
+        env['CPP_FOR_BUILD'] = f"{self.env['CC_FOR_BUILD']} -E"
+        # nettle/hogweed/gmp/libtasn1 are discovered via pkg-config;
+        # put the cross wrapper (sysroot-re-rooted .pc files) first in
+        # PATH or configure reports Libnettle not found.
+        shim = self.work / 'pkgconfig-shim'
+        shim.mkdir(exist_ok=True)
+        link = shim / 'pkg-config'
+        link.unlink(missing_ok=True)
+        link.symlink_to(self._cross_pkg_config())
+        env['PATH'] = str(shim) + ':' + env['PATH']
+        # Leaner than Procursus gnutls.mk, deliberately: apt's https
+        # method needs a TLS client, not the full feature set. Skipped
+        # trees: p11-kit (--without-p11-kit), libidn2 and brotli
+        # (absent from the sysroot, so off); libunistring uses
+        # gnutls's included copy. Kept from the recipe: the
+        # trust-store path shape and the malloc/realloc cross answers.
+        # (3.8.5 dropped the guile bindings and the local-libopts
+        # switch Procursus's older pin had; both flags are gone.)
+        self.run([src / 'configure', '--build=x86_64-apple-darwin',
+                  '--host=arm64-apple-darwin', f'--prefix={PREFIX}/usr',
+                  f'--sysconfdir={PREFIX}/etc',
+                  f'--localstatedir={PREFIX}/var',
+                  '--disable-silent-rules', '--disable-doc',
+                  '--disable-nls', '--without-p11-kit',
+                  '--with-included-unistring',
+                  f'--with-default-trust-store-file={PREFIX}/etc/ssl/certs/cacert.pem',
+                  'ac_cv_func_malloc_0_nonnull=yes',
+                  'ac_cv_func_realloc_0_nonnull=yes'],
+                 cwd=src, env=env)
+        self.run(['make', '-j8'], cwd=src, env=env)
+        self.run(['make', 'install', f'DESTDIR={self.sysroot}'],
+                 cwd=src, env=env)
+
+
+    def _cross_pkg_config(self):
+        """pkg-config wrapper that re-roots the storm .pc files (whose
+        compiled-in prefix is the device path /var/storm/usr) into the
+        sysroot. Needed by every consumer that discovers storm
+        libraries via pkg-config (gnutls, apt)."""
+        pfx = self._pfx()
+        wrap = self.work / 'cross-pkg-config'
+        wrap.write_text(
+            '#!/bin/sh\n'
+            f'export PKG_CONFIG_LIBDIR={pfx}/lib/pkgconfig:{pfx}/share/pkgconfig\n'
+            f'export PKG_CONFIG_SYSROOT_DIR={self.sysroot}\n'
+            'exec /opt/homebrew/bin/pkg-config "$@"\n')
+        wrap.chmod(0o755)
+        return wrap
+
+    def build_apt(self):
+        # apt's CMake hard-requires a host `triehash` executable
+        # (find_program; generates the vendor/trie headers). It is a
+        # single Perl script; install the pinned copy into the host
+        # shim dir, which make_host_shim already puts first in PATH.
+        th = extract('triehash', self.work)
+        shim = self.work / 'hostshim'
+        shim.mkdir(parents=True, exist_ok=True)
+        tool = shim / 'triehash'
+        shutil.copy2(th / 'triehash.pl', tool)
+        tool.chmod(0o755)
+        src = extract('apt', self.work)
+        recipes = extract('procursus_recipes', self.work)
+        pdir = recipes / 'build_patch' / 'apt'
+        for patch in sorted(pdir.iterdir()):
+            if patch.is_file():
+                data = patch.read_bytes()
+                data = data.replace(b'@MEMO_PREFIX@', PREFIX.encode())
+                data = data.replace(b'@MEMO_SUB_PREFIX@', b'/usr')
+                print(f'+ patch apt/{patch.name}')
+                subprocess.run(['patch', '-p1', '-f'], cwd=src,
+                               input=data, check=True)
+        # Procursus apt-setup: two translation units become ObjC++ on
+        # Apple targets, and ftparchive gets its own memrchr copy.
+        # (apt-macos/apt-key.diff is for macOS targets only; skipped.)
+        for cc_path in (src / 'apt-private/private-output.cc',
+                        src / 'apt-pkg/algorithms.cc'):
+            if cc_path.exists():
+                cc_path.rename(cc_path.with_suffix('.mm'))
+        memrchr = src / 'apt-pkg/memrchr.cc'
+        if memrchr.exists():
+            shutil.copy2(memrchr, src / 'ftparchive/memrchr.cc')
+        # CURRENT_VENDOR=storm needs a vendor dir; doc is off, so only
+        # the shape matters (no apt.conf-* fragments get installed).
+        vdir = src / 'vendor/storm'
+        vdir.mkdir(exist_ok=True)
+        (vdir / 'sources.list.in').write_text(
+            '# storm ships no remote source yet; see\n'
+            '# /var/storm/etc/apt/sources.list.d/storm.list\n')
+        (vdir / 'apt-vendor.ent').write_text(
+            '<!-- details about the keys used by the distribution -->\n'
+            '<!ENTITY keyring-distro "storm">\n'
+            '<!ENTITY keyring-package "">\n'
+            '<!ENTITY keyring-filename "">\n'
+            '<!ENTITY keyring-removed-filename "">\n'
+            '<!ENTITY keyring-master-filename "">\n'
+            '<!ENTITY keyring-uri "">\n'
+            '<!ENTITY current-codename "storm">\n')
+        # With USE_NLS=0, apt's apti18n.h.in stubs setlocale & friends
+        # with throw() specifications. glibc's <locale.h> declaration
+        # is noexcept-compatible so upstream never notices, but the
+        # iOS SDK declares setlocale with no exception specification
+        # and clang rejects the mismatched redeclaration. Drop the
+        # throw() from the four stubs; the inline no-op bodies (the
+        # actual point of the stubs) are unchanged.
+        i18n = src / 'CMake/apti18n.h.in'
+        text = i18n.read_text()
+        assert text.count(') throw() {') == 4
+        i18n.write_text(text.replace(') throw() {', ') {'))
+        # fileutl.cc (with Procursus's fork-fd-close patch) uses
+        # <libproc.h>/proc_pidinfo to enumerate fds in ExecFork. The
+        # iOS SDK ships no libproc.h. Guard both spots to non-iOS
+        # Apple targets so iOS takes the TU's pre-existing generic
+        # fallback (brute-force FD_CLOEXEC over 3.._SC_OPEN_MAX),
+        # which needs no /proc and no libproc.
+        futl = src / 'apt-pkg/contrib/fileutl.cc'
+        text = futl.read_text()
+        old_inc = '#if defined(__APPLE__)\n#include <libproc.h>\n#endif'
+        assert text.count(old_inc) == 1
+        text = text.replace(
+            old_inc,
+            '#if defined(__APPLE__) && '
+            '!defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)\n'
+            '#include <libproc.h>\n#endif')
+        old_branch = '#if defined(__APPLE__)\n        int bufsz = 0, count = 0;'
+        assert text.count(old_branch) == 1
+        text = text.replace(
+            old_branch,
+            '#if defined(__APPLE__) && '
+            '!defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)\n'
+            '        int bufsz = 0, count = 0;')
+        futl.write_text(text)
+        # cdromutl.cc calls system() twice (config-provided cdrom
+        # mount/umount command strings, inside forked children). Same
+        # iOS SDK unavailability as dpkg/GNU patch: route through a
+        # fork/exec of the storm shell with system()'s return
+        # convention (wait status, -1 on fork failure).
+        cdrom = src / 'apt-pkg/contrib/cdromutl.cc'
+        text = cdrom.read_text()
+        assert text.count('system(') == 2
+        text = text.replace('system(', 'x9_system(')
+        inc_anchor = '#include <apti18n.h>\n'
+        assert text.count(inc_anchor) == 1
+        helper = inc_anchor + '''
+/* x9: system() is unavailable in the iOS SDK; equivalent via sh. */
+#include <sys/wait.h>
+static int x9_system(const char *command)
+{
+   pid_t pid = fork();
+   if (pid == 0)
+     {
+        execl("/var/storm/usr/bin/sh", "sh", "-c", command, (char *) 0);
+        _exit(127);
+     }
+   if (pid < 0)
+     return -1;
+   int status = 0;
+   while (waitpid(pid, &status, 0) < 0)
+     if (errno != EINTR)
+       return -1;
+   return status;
+}
+'''
+        cdrom.write_text(text.replace(inc_anchor, helper))
+        # Two more TUs call system() the same way: fileutl.cc's
+        # RunScripts (dpkg pre/post-invoke hooks, in a forked child)
+        # and private-source.cc (dpkg-source / dpkg-buildpackage
+        # command strings). Same treatment, same helper.
+        for rel, count in (('apt-pkg/contrib/fileutl.cc', 1),
+                           ('apt-private/private-source.cc', 2)):
+            tu = src / rel
+            text = tu.read_text()
+            assert text.count('system(') >= count
+            assert text.count('\t if (system(') + text.count(' if (system(') >= count
+            text = text.replace(' if (system(', ' if (x9_system(')
+            assert 'x9_system(' in text
+            assert text.count(inc_anchor) == 1, rel
+            tu.write_text(text.replace(inc_anchor, helper))
+        pfx = self._pfx()
+        pcwrap = self._cross_pkg_config()
+        tc = self.work / 'apt-toolchain.cmake'
+        tc.write_text(
+            'set(CMAKE_SYSTEM_NAME Darwin)\n'
+            'set(CMAKE_SYSTEM_PROCESSOR arm64)\n'
+            f'set(CMAKE_OSX_SYSROOT "{self.sdk}")\n'
+            'set(CMAKE_OSX_ARCHITECTURES arm64)\n'
+            f'set(CMAKE_C_COMPILER "{self.clang}")\n'
+            f'set(CMAKE_CXX_COMPILER "{self.clang}++")\n'
+            'set(CMAKE_C_COMPILER_TARGET arm64-apple-ios16.0)\n'
+            'set(CMAKE_CXX_COMPILER_TARGET arm64-apple-ios16.0)\n'
+            f'set(CMAKE_FIND_ROOT_PATH "{pfx}" "{self.sdk}")\n'
+            f'set(CMAKE_PREFIX_PATH "{pfx}")\n'
+            'set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\n'
+            'set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)\n'
+            'set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)\n'
+            'set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)\n'
+            f'set(PKG_CONFIG_EXECUTABLE "{pcwrap}")\n')
+        build = src / 'build'
+        build.mkdir(exist_ok=True)
+        # CMAKE_POLICY_VERSION_MINIMUM: the host cmake is 4.x, which
+        # removed compatibility with apt 2.9.4's minimum (3.4).
+        # USE_NLS=0 (Procursus uses 1): no gettext tree in the
+        # bootstrap, same call as dpkg's --disable-nls in round 1.
+        # CURRENT_VENDOR=storm with the vendor dir injected above.
+        self.run(['cmake', '-S', str(src), '-B', str(build),
+                  f'-DCMAKE_TOOLCHAIN_FILE={tc}',
+                  '-DCMAKE_BUILD_TYPE=Release',
+                  '-DCMAKE_POLICY_VERSION_MINIMUM=3.5',
+                  f'-DCMAKE_INSTALL_PREFIX={PREFIX}/usr',
+                  f'-DCMAKE_INSTALL_SYSCONFDIR={PREFIX}/etc',
+                  f'-DCMAKE_INSTALL_NAME_DIR={PREFIX}/usr/lib',
+                  f'-DSTATE_DIR={PREFIX}/var/lib/apt',
+                  f'-DCACHE_DIR={PREFIX}/var/cache/apt',
+                  f'-DLOG_DIR={PREFIX}/var/log/apt',
+                  f'-DCONF_DIR={PREFIX}/etc/apt',
+                  '-DROOT_GROUP=wheel', '-DCURRENT_VENDOR=storm',
+                  '-DCOMMON_ARCH=iphoneos-arm64',
+                  '-DUSE_NLS=0', '-DWITH_DOC=0', '-DWITH_TESTS=0',
+                  f'-DDPKG_DATADIR={PREFIX}/usr/share/dpkg',
+                  f'-DBERKELEY_INCLUDE_DIRS={pfx}/include/db181'])
+        self.run(['make', '-j8'], cwd=build)
+        self.run(['make', 'install', f'DESTDIR={self.sysroot}'], cwd=build)
+
+    def build_coreutils(self):
+        src = extract('coreutils', self.work)
+        env = dict(self.env)
+        env['MAKEINFO'] = 'true'  # tarball ships .info; don't regenerate
+        # Procursus coreutils.mk runs autoreconf for their patch set;
+        # we patch nothing, so the shipped configure is used as-is.
+        # gl_cv_macro_MB_CUR_MAX_good is their cross answer, kept.
+        self.run([src / 'configure', '--build=x86_64-apple-darwin',
+                  '--host=arm64-apple-darwin', f'--prefix={PREFIX}/usr',
+                  f'--sysconfdir={PREFIX}/etc',
+                  f'--localstatedir={PREFIX}/var',
+                  '--disable-nls', '--disable-silent-rules',
+                  '--disable-dependency-tracking',
+                  'gl_cv_macro_MB_CUR_MAX_good=yes',
+                  # clock_settime is marked unavailable in the iOS
+                  # SDK headers although configure's link check finds
+                  # the symbol; gnulib's settime() then fails to
+                  # compile. With the check answered no, settime()
+                  # falls back to settimeofday, which iOS declares.
+                  'ac_cv_func_clock_settime=no'],
+                 cwd=src, env=env)
+        self.run(['make', '-j8'], cwd=src, env=env)
+        self.run(['make', 'install', f'DESTDIR={self.sysroot}'],
+                 cwd=src, env=env)
+
+    STEPS = ('libmd', 'liblzma', 'dash', 'patch', 'dpkg', 'gmp',
+             'libtasn1', 'nettle', 'libgpg_error', 'libgcrypt', 'xxhash',
+             'lz4', 'zstd', 'berkeleydb', 'gnutls', 'apt', 'coreutils',
+             'uicache')
 
     def make_host_shim(self):
         # Non-login shells default to the CLT MacOSX27.2 SDK, whose
@@ -300,9 +718,19 @@ def assemble(out):
         (tree / rel).mkdir(parents=True, exist_ok=True)
     (tree / 'Library/dpkg/status').touch()
     (tree / 'etc/apt/apt.conf.d/00storm').write_text(
-        'APT::Architecture "iphoneos-arm64";\n')
+        'APT::Architecture "iphoneos-arm64";\n'
+        # apt derives Dir::State::status from Dir::State (debsystem.cc
+        # getDpkgStatusLocation), which with STATE_DIR=<prefix>/var/lib/apt
+        # yields <prefix>/var/lib/dpkg/status. dpkg's admindir in the
+        # rootless layout is <prefix>/Library/dpkg, so pin the status
+        # file explicitly; verify.py checks the two agree.
+        f'Dir::State::status "{PREFIX}/Library/dpkg/status";\n')
     (tree / 'etc/apt/sources.list.d/storm.list').write_text(
         '# storm bootstrap ships no remote source yet; local .deb installs only.\n')
+    # Sileo's storm detection marker (see the storm patch in
+    # sileo-storm-prefix.patch): Bootstrap.x9_storm keys on this file
+    # at the prefix root, so it must ship in the tree itself.
+    (tree / '.x9_storm_strapped').write_text('x9-storm\n')
     files = {}
     for path in sorted(tree.rglob('*')):
         rel = path.relative_to(tree).as_posix()
@@ -320,8 +748,7 @@ def assemble(out):
                             'mode': oct(path.stat().st_mode & 0o777)}
     manifest = {'abi': 1, 'build': '20H392', 'target': TARGET, 'prefix': PREFIX,
                 'files': files,
-                'not_included': ['apt (pinned, dependency tree pending)',
-                                 'coreutils (pinned, optional)']}
+                'not_included': []}
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     return manifest
 
@@ -331,7 +758,7 @@ def main():
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--developer-dir', type=Path)
     ap.add_argument('--only', action='append',
-                    help='repeat to limit steps: libmd liblzma dash dpkg uicache')
+                    help='repeat to limit steps (see Builder.STEPS)')
     ap.add_argument('--assemble-only', action='store_true')
     a = ap.parse_args()
     out = a.out.resolve()
