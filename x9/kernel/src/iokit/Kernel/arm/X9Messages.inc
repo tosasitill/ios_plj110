@@ -71,11 +71,12 @@ struct x9m_incoming {
  bool delivered,replying,held; uint64_t ack_wait; uint8_t pdu[255];
 };
 static x9m_incoming x9m_incoming_sms[X9M_INCOMING];
-enum { X9M_CFG_IND=0, X9M_READY_QUERY, X9M_WAIT_READY, X9M_HOST_READY, X9M_INIT_DONE };
+enum { X9M_CFG_IND=0, X9M_READY_QUERY, X9M_WAIT_READY, X9M_HOST_READY, X9M_FACTORY_CFG, X9M_INIT_DONE };
 struct x9m_sim {
  bool wanted,ready,reg_valid,md_known,md_ready,init_hold,init_timed_out;
  unsigned reg,init,diag_stage,ims_stage; uint64_t sampled,init_token,init_deadline,ready_epoch,init_epoch;
  uint64_t reg_epoch,ims_epoch,ims_token,ims_deadline,ims_admit_deadline; bool ims_hold;
+ unsigned fx_stage; uint64_t fx_token,fx_deadline; bool fx_hold;
 };
 static x9m_sim x9m_sims[2];
 static unsigned x9m_init_stage;
@@ -276,6 +277,12 @@ static uint64_t x9m_store_submit(const x9m_job &j){
  }
  return f.submit();
 }
+static bool x9m_factory_enabled(){
+ /* Default on since 2026-11-27 (owner decision): the factory provisioning
+  * is part of normal init; x9_factory_init=0 opts out for A/B. */
+ static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_factory_init",1)!=0;
+ return enabled!=0;
+}
 static void x9m_init_transport_loss(){
   /* Loss is not registration/config retirement. Stop advancing this boot,
    * but still drain any complete results belonging to the original token. */
@@ -344,13 +351,19 @@ static void x9m_init_poll(uint8_t *response,unsigned room){
    }else if(!known||result){
     s.init_hold=true;
     printf("X9 SMS: SIM%u init %u rejected known %u result %u; other SIM unaffected\n",sim+1,s.init,known?1:0,result);
-   }else if(s.init==X9M_HOST_READY){
+   }else if(s.init==X9M_HOST_READY||s.init==X9M_FACTORY_CFG){
+    if(s.init==X9M_HOST_READY&&x9m_factory_enabled()){
+     /* The factory SMS_CFG sequence carries tag 0x108 after the config
+      * bundle; host-ready waits for that confirmation too. */
+     s.init=X9M_FACTORY_CFG;
+    }else{
     if(snapshot&&!ready)x9m_md_ready(sim,false);
     s.init=X9M_INIT_DONE;
     if(!s.init_hold&&s.md_known&&s.md_ready&&s.init_epoch==s.ready_epoch){
      s.ready=true;x9m_ready_ind(sim);
      printf("X9 SMS: SIM%u real host-ready CNF after modem-ready; GSM handlers installed\n",sim+1);
     }else{s.init_hold=true;printf("X9 SMS: SIM%u config confirmed but readiness changed; session held\n",sim+1);}
+    }
    }else s.init++;
    bzero(response,room);
   }
@@ -362,6 +375,7 @@ static void x9m_init_poll(uint8_t *response,unsigned room){
    unsigned id=0x4601;
    uint8_t v[2]={(uint8_t)id,(uint8_t)(id>>8)};f.tlv(0x100,v,2);
   }else if(step==X9M_READY_QUERY)f.byte(0x102,1);
+  else if(step==X9M_FACTORY_CFG)f.byte(0x108,1);
   else{f.byte(0x100,0);f.byte(0x105,1);f.byte(0x106,2);}
   uint64_t token=f.submit();
   if(token){s.init=step;s.init_token=token;s.init_epoch=s.ready_epoch;s.init_deadline=x9q_ms()+300000;}
@@ -480,6 +494,86 @@ static void x9m_rawsend_reject_diag(unsigned sim,const uint8_t *req,unsigned len
    remaining--;
   }
   at+=3+size;
+ }
+}
+
+/* Factory-init replay (x9_factory_init, default on; =0 opts out). During telephony
+ * init Android's RIL provisions each slot (this device's own capture,
+ * radio-baseline.txt 2026-11-15): SIM1 first receives one zeroed
+ * IMS_CFG_ADDITION_SERVICE 0a1c, then each SIM receives
+ * IMS_ENABLE_DATA_CHANNEL 0a18 (tag 0x100 = 0) and IMS_SET_CONFIG 0a00
+ * (tag 0x100 = 0, tag 0x102 = the six aggregated feature bytes), followed
+ * by the minimal IMS DATA_ACT_CALL (APN_TYPE 2, URSP descriptor DNN
+ * "ims") that establishes the factory IMS bearer. Under iOS
+ * the MD feature cache reads all zero, so none of this ever happens. The
+ * writer mirrors the factory frames and order, then re-reads the cache;
+ * a config ACK alone does not prove registration, so registration
+ * evidence stays with the existing 4a01/0a04 observers. Any rejection or
+ * timeout holds the sequence for the boot without retry. */
+static void x9m_factory_ims_bytes(uint8_t out[6]){
+ /* Aggregation inputs are this device's factory-observed carrier policy
+  * for its SIMs: VoLTE/VoNR/ViLTE/ViNR on, WFC/ViWiFi off, IMS SMS on,
+  * eims byte on. Bit layout follows the feature-cache decode above. */
+ const bool volte=true,vonr=true,vilte=true,vinr=true;
+ const bool wfc=false,viwifi=false,sms=true,ims=true;
+ out[0]=(uint8_t)((volte?1:0)|(vonr?2:0));
+ out[1]=(uint8_t)((vilte?1:0)|(vinr?2:0));
+ out[2]=wfc?1:0;out[3]=viwifi?1:0;out[4]=sms?1:0;out[5]=ims?1:0;
+}
+static void x9m_factory_poll(uint8_t *p,unsigned room){
+ if(!x9m_factory_enabled())return;
+ const bool online=x9w_control_ready&&x9_md_mipc_online();
+ const uint64_t now=x9q_ms();
+ for(unsigned sim=0;sim<x9_md_sim_count();sim++){
+  x9m_sim &s=x9m_sims[sim];
+  if(s.fx_stage>=6||s.fx_hold)continue;
+  if(s.fx_token){
+   if(now>=s.fx_deadline){s.fx_hold=true;
+    printf("X9 FACTORY: SIM%u stage %u timeout; token retained, no retry\n",sim+1,s.fx_stage);continue;}
+   unsigned n=0;int rc=x9_md_mipc_take(s.fx_token,p,room,&n);
+   if(!rc)continue;
+   if(rc<0){s.fx_hold=true;
+    printf("X9 FACTORY: SIM%u stage %u transport error; held\n",sim+1,s.fx_stage);continue;}
+   s.fx_token=0;
+   unsigned expect=s.fx_stage==1?0xa1d:s.fx_stage==2?0xa19:s.fx_stage==3?0xa01:s.fx_stage==4?0x202:0xa03;
+   unsigned result=1;
+   bool known=p[8]==(1u<<sim)&&x9q_u16(p+10)==expect&&x9w_word(p,n,0,result)&&
+    (s.fx_stage==4||x9w_wire(p,n));
+   if(!known||result){s.fx_hold=true;
+    printf("X9 FACTORY: SIM%u stage %u rejected known %u result %u; held\n",sim+1,s.fx_stage,known?1:0,result);
+    bzero(p,room);continue;}
+   if(s.fx_stage==3)printf("X9 FACTORY: SIM%u IMS config accepted by modem\n",sim+1);
+   if(s.fx_stage==4)printf("X9 FACTORY: SIM%u IMS data call accepted by modem\n",sim+1);
+   if(s.fx_stage==5){
+    x9q_view data=x9w_tlv(p,n,0x100);
+    if(data.p&&data.n==6)
+     printf("X9 FACTORY: SIM%u feature cache after write raw=%02x%02x%02x%02x%02x%02x\n",
+      sim+1,data.p[0],data.p[1],data.p[2],data.p[3],data.p[4],data.p[5]);
+    else printf("X9 FACTORY: SIM%u post-write feature cache unreadable\n",sim+1);
+   }
+   s.fx_stage++;bzero(p,room);continue;
+  }
+  if(!online)continue;
+  /* Start only after the boot IMS snapshot concluded for this SIM. */
+  if(!s.fx_stage&&!(s.ims_stage>=4||s.ims_hold))continue;
+  if(!s.fx_stage)s.fx_stage=sim?2:1; /* 0a1c observed on SIM1 only. */
+  uint64_t token=0;
+  if(s.fx_stage==1){x9w_frame f(0xa1c,1u<<sim);uint8_t z[64]={};f.tlv(0x100,z,sizeof(z));token=f.submit();}
+  else if(s.fx_stage==2){x9w_frame f(0xa18,1u<<sim);f.byte(0x100,0);token=f.submit();}
+  else if(s.fx_stage==3){x9w_frame f(0xa00,1u<<sim);f.word(0x100,0);
+   uint8_t b[6];x9m_factory_ims_bytes(b);f.tlv(0x102,b,6);token=f.submit();}
+  else if(s.fx_stage==4){
+   /* Factory IMS bearer (radio-baseline.txt 18:38:15.635): a minimal
+    * DATA_ACT_CALL with APN_TYPE 2 and only the URSP traffic descriptor
+    * carrying DNN "ims" (is_match_all 0, dnn_len 3 at +1, dnn at +4,
+    * rest zero) beside URSP_EVAL_FLAG 0 and tag 0x10a = 3. */
+   x9w_frame f(0x201,1u<<sim);f.word(0x10f,0);f.word(0x102,2);f.byte(0x10a,3);
+   static uint8_t td[672];bzero(td,sizeof(td));td[1]=3;memcpy(td+4,"ims",3);
+   f.tlv(0x10d,td,sizeof(td));token=f.submit();
+  }
+  else if(s.fx_stage==5){x9w_frame f(0xa02,1u<<sim);f.word(0x100,0);token=f.submit();}
+  if(token){s.fx_token=token;s.fx_deadline=now+10000;}
+  else s.fx_hold=true;
  }
 }
 static bool x9m_diag_storage_busy(unsigned sim,const x9m_job *self){
@@ -1023,6 +1117,7 @@ static void x9m_poll(){
  }
  x9m_ims_poll(p,sizeof(p));
  x9m_ims_feature_poll(p,sizeof(p));
+ x9m_factory_poll(p,sizeof(p));
  x9m_init_poll(p,sizeof(p)); // Consume pending readiness INDs before submitting config.
  for(x9m_incoming &in:x9m_incoming_sms)if(in.token&&!in.held){
   if(in.delivered){

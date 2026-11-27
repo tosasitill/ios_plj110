@@ -3166,3 +3166,16 @@ Carrier bundle 键在 SD `__cstring` 中完整可见：`EnableVoLTEWithVoWiFi`�
 448 完整 WDS 事务显示 SIM1 默认数据 `0x20/0x2d` 成功，SIM2 IMS 无可关联的 WDS Start 或 runtime settings。`0x5566` 和 `0x5568` 已核实为蜂窝数据状态与动态数据换卡许可，Apple IMS settings 的代理字段另有独立合同。复核命令见 [WDS 与 IMS 承载](network/2026-11-27_ims-wds-report.md)。
 
 仍未闭合的是运行时的实际 bundle 选择与 `voLte/vowifi` 状态、同卡 IMS bearer 和 P-CSCF 来源、SIP REGISTER、VoNR/视频/WFC/IMS SMS 的独立输入与验收。在这些证据出现前，不把 `0a02` 缓存、`NAS33` 意图、配置 ACK 或 `0902=0` 中的任何一项写成 IMS 注册、VoNR 用户意图或振铃前置条件。
+
+
+### 2026-11-27 原厂初始化复现：0a00 写入与 SMS 0x108
+
+诊断会话 `~/radio-r287-20261127.txt`（PR #12 诊断内核）给出三项新证据：SIM2 发送的短信在 `x9_sms_srr=1` 下收到 `8603` 状态报告且解析有效，发送→回执链闭合；存储列表 `0608=0x210000` 的二义性消除——CPMS 有正常响应（tag 102=50、103=1），失败的是 CMGR 按索引读；双卡 IMS feature cache 在 iOS 启动下全零（`raw=000000000000`），与原厂基线同卡 `030300000101` 形成对照。
+
+据此实现 `x9_factory_init` 门控的原厂 init 复现（2026-11-27 业主决定默认开，显式 `x9_factory_init=0` 才退出），全部帧形与顺序取自本机原厂基线 `radio-baseline.txt`（2026-11-15）：SIM1 先发 `0a1c`（tag 0x100、64 字节全零），双卡随后各发 `0a18`（0x100=0）与 `0a00`（0x100=0、0x102 六字节），每步等对应 CNF（0a1d/0a19/0a01），拒绝或超时即停且不重试；写后以 `0a02` 回读缓存打印原始六字节。六字节由聚合函数按本机原厂策略输入生成，不写死捕获原值以外的任何号码类信息。短信 init 在同一门控下于配置包确认后、host-ready 声明前补发 `0601` tag 0x108=1（原厂第三笔 SMS_CFG），其余 init 步序不变；显式关闭门控时行为与此前完全一致。原厂 `060f`（CBM）捕获帧含 RIL 未初始化内存字节，不复现。
+
+承载已补：原厂基线 18:38:15.635 有一笔最小 `DATA_ACT_CALL`（仅 0x10f=0、0x102 APN_TYPE=2、0x10a=3、0x10d URSP 描述子 DNN="ims"，其余 TLV 皆无），4 ms 内得 `0202` 确认；同基线稍后（18:38:22）SIM2 的 IMS DataNetwork 呈 ConnectedState。故工厂序列在 0a00 确认后逐卡补发同一 ACT（stage 4），其 CNF 含重复 tag，只按 id/mask/result 校验，不走全帧 walker。
+
+SIP UA 结论：本机原厂捕获的 init 窗口内不存在独立的 SIP UA MD 帧——0axx 只有 0a1c/0a18/0a00，`RmmImsCtlReqHdl` 也只打印 requestSetImsCfg 两行；`requestSetSipUserAgent` 在该路径上没有可观测的 MIPC 流量（属 AP 侧内部状态），不虚构帧形。若配置+承载后注册仍不动，下一证据需带 MCL 详细日志的原厂抓包或 MD 侧注册触发点反汇编，不靠猜。
+
+边界：配置与承载 ACK 仍不证明 IMS 注册；注册与振铃证据以 4a01 IND、拨号窗 0a04 快照和 ECPI2/132/6 为准。
