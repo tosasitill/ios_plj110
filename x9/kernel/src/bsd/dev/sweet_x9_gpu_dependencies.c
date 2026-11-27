@@ -19,6 +19,7 @@ extern void sweet_x9_render_bootstrap(void);
 #include <pexpert/device_tree.h>
 #include <stddef.h>
 #include "gpu_shared_prefix.h"
+#include "x9_sched_policy.h"
 #include "x9_ufs/ufs_platform.h"
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 extern int sweet_early_is_x9(void);
@@ -494,6 +495,7 @@ static unsigned cpu_measure_mhz(int *cpu) {
  }
  return best;
 }
+static void sched_setup(void);
 static void cpu_boost_setup(void) {
  cpuhw=ml_io_map(CPUHW_PA,0x4000);
  csram_sys=ml_io_map(CSRAM_SYS_PA,0x4000);
@@ -542,6 +544,7 @@ static void cpu_boost_setup(void) {
  cpu_boost_ready=1;
  printf("X9 CPUFREQ: load governor via %s target=80%% touch=1300/0/0MHz 100ms/150ms down-hold=100ms idle=%u/%u/%uMHz;no touch-to-max\n",
   cpu_mode_name(cpu_mode),cpud[0].mhz[cpud[0].idle],cpud[1].mhz[cpud[1].idle],cpud[2].mhz[cpud[2].idle]);
+ sched_setup();
 }
 /* XNU accounting is accumulated CPU time, not frequency-invariant PELT.
  * Scale the CURRENT request by busy/target, choose a real LUT OPP, use the
@@ -599,6 +602,195 @@ static unsigned cpu_govern(int touch,int temp,int dark) {
  cpu_boosted=touch&&!dark&&temp>=1&&temp<85;
  return peak;
 }
+/*
+ * Scheduler policy v2 glue (boot arg x9sched, default 0 = legacy v1
+ * behaviour everywhere):
+ *   bit 1: cpu_govern2() replaces the v1 per-domain decision with
+ *          x9_sched_policy.h (scene targets/floors, peak-decayed util,
+ *          70..95C smooth thermal cap, geometric down-steps);
+ *   bit 2: scene-driven recommended-cores steering replaces the x9g
+ *          bit-64 touch-only rule, and the prime render-thread boost
+ *          window also covers the camera scene;
+ *   bit 4: CPU/GPU coordination: in load/camera scenes the GPU governor
+ *          targets 70% instead of 80% util.
+ * Layered on the x9g bit-32 governor: with bit 32 off (or the cpufreq
+ * hardware not MCUPM-enabled) everything here is inert, exactly like v1.
+ * Observable via the periodic X9 SCHED line and per-domain counters.
+ */
+static int sched_mask = -1;
+static struct x9sched_domain sched_d[X9_NCLUSTER];
+static struct x9sched_scene_state sched_scene_state;
+static uint32_t sched_scene_residency[X9SCENE_COUNT];
+static int sched_scene = X9SCENE_LIGHT;
+static unsigned sched_last_peak;
+static uint64_t sched_last_swap_count, sched_last_swap_abs;
+static volatile int sched_camera_hint;
+static int sched_govern2_dark;
+
+static int sched_bit(unsigned bit) {
+ if (sched_mask < 0) {
+  int v = 0;
+  PE_parse_boot_argn("x9sched", &v, sizeof(v));
+  sched_mask = v;
+ }
+ return (sched_mask & (int)bit) != 0;
+}
+
+/* Camera capture hint for the scene classifier. No in-tree caller yet:
+ * the camera session start/stop in sweet_x9_camera.c is the intended
+ * single call site, left unwired here to avoid colliding with the
+ * parallel camera work. Until then the camera scene is unreachable and
+ * the classifier behaves as if no session ever runs. */
+void sweet_x9_sched_camera_active(int active);
+void sweet_x9_sched_camera_active(int active) {
+ if (__atomic_exchange_n(&sched_camera_hint, active ? 1 : 0,
+     __ATOMIC_ACQ_REL) != (active ? 1 : 0)) {
+  gov_wake();
+ }
+}
+
+static void sched_setup(void) {
+ if (!sched_bit(1) && !sched_bit(2) && !sched_bit(4)) {
+  return;
+ }
+ for (unsigned d = 0; d < X9_NCLUSTER; d++) {
+  struct x9sched_domain *sd = &sched_d[d];
+  memset(sd, 0, sizeof(*sd));
+  sd->opp_mhz = cpud[d].mhz;
+  sd->n_opp = cpud[d].n;
+  sd->domain_id = d;
+  sd->idle_idx = cpud[d].idle;
+  sd->boot_idx = cpud[d].boot;
+  sd->cur_idx = cpud[d].cur;
+ }
+ sched_last_swap_count = __atomic_load_n(&sweet_x9_ui_swaps,
+     __ATOMIC_RELAXED);
+ printf("X9 SCHED: x9sched=%d cpu_policy2=%d scene_steer=%d gpu_coord=%d "
+     "(0 = legacy v1)\n", sched_mask, !!sched_bit(1), !!sched_bit(2),
+     !!sched_bit(4));
+}
+
+static int sched_update_scene(int dark, int touch, unsigned gpu_util,
+    uint64_t now_abs) {
+ struct x9sched_signals s;
+ uint64_t swaps = __atomic_load_n(&sweet_x9_ui_swaps, __ATOMIC_RELAXED);
+ if (swaps != sched_last_swap_count) {
+  sched_last_swap_count = swaps;
+  sched_last_swap_abs = now_abs;
+ }
+ uint64_t age_ns = 0;
+ if (sched_last_swap_abs && now_abs >= sched_last_swap_abs) {
+  absolutetime_to_nanoseconds(now_abs - sched_last_swap_abs, &age_ns);
+ }
+ s.dark = dark;
+ s.camera_active = __atomic_load_n(&sched_camera_hint, __ATOMIC_RELAXED);
+ s.touch_age_ms = touch ? 0 : UINT32_MAX;
+ s.swap_age_ms = sched_last_swap_abs ?
+     (uint32_t)(age_ns / 1000000ull) : UINT32_MAX;
+ s.gpu_util = gpu_util;
+ s.cpu_peak = sched_last_peak;	/* previous tick: 50 ms lag is fine */
+ sched_scene = x9sched_scene_update(&sched_scene_state, &s);
+ sched_scene_residency[sched_scene]++;
+ return sched_scene;
+}
+
+/* Same util accounting as cpu_govern (busiest CPU per domain from XNU
+ * accumulated ticks); the decision itself is the policy header's. */
+static unsigned cpu_govern2(int touch __unused, int temp, int dark,
+    int scene) {
+ unsigned util[X9_NCLUSTER] = {0, 0, 0}, peak = 0;
+ for (unsigned c = 0; c < X9_NCPU; c++) {
+  processor_t p = cpu_to_processor(c);
+  natural_t ticks[CPU_STATE_MAX] = {0};
+  if (p == PROCESSOR_NULL) {
+   continue;
+  }
+  processor_cpu_load_info(p, ticks);
+  uint64_t busy = (natural_t)(ticks[CPU_STATE_USER] -
+      cpu_ticks[c][CPU_STATE_USER]);
+  busy += (natural_t)(ticks[CPU_STATE_SYSTEM] -
+      cpu_ticks[c][CPU_STATE_SYSTEM]);
+  uint64_t idle = (natural_t)(ticks[CPU_STATE_IDLE] -
+      cpu_ticks[c][CPU_STATE_IDLE]);
+  memcpy(cpu_ticks[c], ticks, sizeof(ticks));
+  unsigned u = busy + idle ? (unsigned)(busy * 100 / (busy + idle)) : 0;
+  unsigned d = x9_topo_cluster[c];
+  if (u > util[d]) {
+   util[d] = u;
+  }
+  if (u > peak) {
+   peak = u;
+  }
+ }
+ if (!cpu_boost_ready) {
+  return peak;
+ }
+ if (dark != sched_govern2_dark) {
+  printf("X9 CPUFREQ: display %s; policy v2 governs background load, "
+      "no touch floor while dark\n", dark ? "dark" : "lit");
+  sched_govern2_dark = dark;
+ }
+ const int known = temp >= 1 && temp <= 150;
+ uint64_t now_ns = 0;
+ absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
+ for (unsigned d = 0; d < X9_NCLUSTER; d++) {
+  cpud[d].util = util[d];
+  struct x9sched_input in;
+  in.util = util[d];
+  in.temp_c = temp;
+  in.temp_valid = known;
+  in.scene = scene;
+  in.dark = dark;
+  in.now_ns = now_ns;
+  unsigned next = x9sched_domain_decide(&sched_d[d], &in);
+  if (next == cpud[d].cur) {
+   continue;
+  }
+  unsigned req = cpud[d].mhz[next] * 1000u;
+  if (cpu_mode == 1) {
+   req = (req + FDVFS_UNIT_KHZ - 1u) / FDVFS_UNIT_KHZ;
+   for (unsigned c = 0; c < X9_NCPU; c++) {
+    if (x9_topo_cluster[c] == d) {
+     wr(fdvfs, 0x400 + 4 * c, req);
+    }
+   }
+  } else {
+   wr(cpud_base(d), 0x88, cpu_mode == 2 ? req : next);
+  }
+  cpud[d].cur = next;
+ }
+ return peak;
+}
+
+/* Scene steering (x9sched bit 2): idle consolidates onto the little
+ * domain so big/prime can sit at their idle OPP in WFI; interact/camera
+ * steer to cpu0+big+prime like the bit-64 rule; light/load allow all.
+ * The scheduler's own failsafe still re-recommends every core if a
+ * realtime thread starves. */
+extern void sched_perfcontrol_update_recommended_cores(uint32_t recommended_cores);
+static int scene_steered_mask = -1;
+static void core_steer_scene(int scene, int boost_ok) {
+ unsigned mask;
+ switch (scene) {
+ case X9SCENE_IDLE:
+  mask = x9_topo_mask(X9_LITTLE);
+  break;
+ case X9SCENE_INTERACT:
+ case X9SCENE_CAMERA:
+  mask = boost_ok ?
+      (1u | x9_topo_mask(X9_BIG) | x9_topo_mask(X9_PRIME)) : 0xffu;
+  break;
+ default:
+  mask = 0xffu;
+  break;
+ }
+ if ((int)mask == scene_steered_mask) {
+  return;
+ }
+ sched_perfcontrol_update_recommended_cores(mask);
+ scene_steered_mask = (int)mask;
+}
+
 /* x9g bit 64: steer to cpu0 (boot processor) + big + prime while the UI is active. Preemption and
  * interrupts enabled here (governor thread), as the scheduler requires; the
  * scheduler's own failsafe re-recommends all cores if a realtime thread
@@ -675,9 +867,16 @@ static void gov_thread(void *arg,wait_result_t result) {
   const int temp=last_temp;const bool known=temp>=1&&temp<=150;
   if(!known||temp>=90)boost_cool=false;else if(temp<85)boost_cool=true;
   const int touch=sweet_x9_perf(32)&&ui_tick();ui_ticks++;if(touch)boost_ticks++;
-  const unsigned cpu_peak=cpu_govern(touch,temp,dark);
-  const int steer=!dark&&touch&&boost_cool&&cpu_peak>=80;
-  core_steer_set(sweet_x9_perf(64)&&steer);
+  const int scene=sched_update_scene(dark,touch,util,now);
+  const unsigned cpu_peak=sched_bit(1)?cpu_govern2(touch,temp,dark,scene):cpu_govern(touch,temp,dark);
+  sched_last_peak=cpu_peak;
+  int steer=!dark&&touch&&boost_cool&&cpu_peak>=80;
+  if(sched_bit(2)) {
+   steer=(scene==X9SCENE_INTERACT||scene==X9SCENE_CAMERA)&&boost_cool;
+   core_steer_scene(scene,steer);
+  } else {
+   core_steer_set(sweet_x9_perf(64)&&steer);
+  }
   __atomic_store_n(&ui_boost_now,steer,__ATOMIC_RELAXED);
   int idle=0;
   if(__atomic_load_n(&render_active_refs,__ATOMIC_ACQUIRE)>=0&&!channel_uncertain&&!gpu_fault) {
@@ -694,7 +893,7 @@ static void gov_thread(void *arg,wait_result_t result) {
    uint32_t base=st.cur_fgpu;
    if(st.cur_fstack>base)base=st.cur_fstack;
    if(!base||base>opp_khz[gov_ceiling])base=opp_khz[gov_floor];
-   uint32_t wanted=(uint32_t)((uint64_t)base*util/80);
+   uint32_t wanted=(uint32_t)((uint64_t)base*util/((sched_bit(4)&&(sched_scene==X9SCENE_LOAD||sched_scene==X9SCENE_CAMERA))?70:80));
    if(delta&&!dark&&wanted<opp_khz[gov_floor])wanted=opp_khz[gov_floor];
    int target=gpu_opp_at_least(wanted);
    if(!delta&&(dark||idle_ns>=250000000ull))target=slowest;
@@ -728,6 +927,11 @@ static void gov_thread(void *arg,wait_result_t result) {
    if(cpu_boost_ready)printf("X9 CPUFREQ: load=%u/%u/%u%% request=%u/%u/%uMHz touch_floor=%llu/%llu ticks mode=%s dark=%d\n",
     cpud[0].util,cpud[1].util,cpud[2].util,cpud[0].mhz[cpud[0].cur],cpud[1].mhz[cpud[1].cur],cpud[2].mhz[cpud[2].cur],
     boost_ticks,ui_ticks,cpu_mode_name(cpu_mode),dark);
+   if(sched_bit(1)||sched_bit(2)||sched_bit(4))printf("X9 SCHED: scene=%s resid=%u/%u/%u/%u/%u up=%u/%u/%u down=%u/%u/%u capped=%u/%u/%u steer_mask=%d\n",
+    x9sched_scene_name(sched_scene),sched_scene_residency[0],sched_scene_residency[1],sched_scene_residency[2],sched_scene_residency[3],sched_scene_residency[4],
+    sched_d[0].up_commits,sched_d[1].up_commits,sched_d[2].up_commits,
+    sched_d[0].down_commits,sched_d[1].down_commits,sched_d[2].down_commits,
+    sched_d[0].capped_ticks,sched_d[1].capped_ticks,sched_d[2].capped_ticks,scene_steered_mask);
    last_log=now;busy_acc=elapsed_acc=ui_ticks=boost_ticks=0;
   }
   __atomic_store_n(&gov_idle_sleep,period>50,__ATOMIC_RELEASE);
