@@ -51,7 +51,7 @@ static const unsigned X9_MIPC_FRAME_MAX=4096;
 struct x9q_view { const uint8_t *p; unsigned n; };
 uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n);
 ''' + wds[w0:w1] + r'''
-struct x9m_sim { unsigned ims_stage=0, fx_stage=0; uint64_t fx_token=0, fx_deadline=0; bool ims_hold=false, fx_hold=false; };
+struct x9m_sim { unsigned ims_stage=0, fx_stage=0; uint64_t fx_token=0, fx_deadline=0; bool ims_hold=false, fx_hold=false, fx_pre=false; uint64_t fx_local_since=0; bool fx_local_noted=false; };
 x9m_sim x9m_sims[2];
 struct x9w_pcscf_list { uint8_t v4_count=0, v6_count=0; uint8_t v4[4][4]={}; uint8_t v6[4][16]={}; };
 x9w_pcscf_list x9w_pcscf_lists[2];
@@ -64,11 +64,15 @@ uint64_t x9q_ms(){return 1000;}
 static uint64_t next_tok=100;
 static unsigned sub_id[256], sub_mask[256];
 static uint8_t act_frame[3][1024]; static unsigned act_n[3];
+static uint8_t pre_frame[3][64]; static unsigned pre_n[3];
+static unsigned ord_id[128], ord_mask[128], ord_count;
 uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
  uint64_t t=next_tok++;
  unsigned id=x9q_u16(p+10);
  sub_id[t]=id; sub_mask[t]=p[8];
  if(id==0x201){memcpy(act_frame[p[8]],p,n);act_n[p[8]]=n;}
+ if(id==0x21b){memcpy(pre_frame[p[8]],p,n);pre_n[p[8]]=n;}
+ ord_id[ord_count]=id;ord_mask[ord_count]=p[8];ord_count++;
  return t;
 }
 int x9_md_mipc_take(uint64_t token, uint8_t *p, unsigned room, unsigned *n){
@@ -105,6 +109,23 @@ int main(){
   assert(!memcmp(f,want,478));
   for(unsigned i=478;i<720;i++)assert(f[i]==0);
  }
+ for(unsigned mask=1;mask<=2;mask++){
+  /* 021b DATA_RETRY_TIMER prelude: the real frame must match the WDS
+   * MODE=1 construction and the pinned bridge admission shape
+   * (n == 24+((k+11)&~7) for APN len k=4, zero padding). */
+  assert(pre_n[mask]==32&&pre_n[mask]==24+((4+11)&~7u));
+  const uint8_t *f=pre_frame[mask];
+  assert(f[0]==0x84&&f[1]==0x19&&f[2]==0x54&&f[3]==0x24&&f[8]==mask&&x9q_u16(f+10)==0x21b);
+  assert((f[14]|(f[15]<<8))==16);
+  assert(x9q_u16(f+16)==0x100&&x9q_u16(f+18)==1&&f[20]==1&&!f[21]&&!f[22]&&!f[23]);
+  assert(x9q_u16(f+24)==0x101&&x9q_u16(f+26)==4&&!memcmp(f+28,"ims",4));
+ }
+ /* Per-SIM submit order: the 021b immediately precedes the 0201. */
+ for(unsigned mask=1;mask<=2;mask++){
+  unsigned prev=0; bool seen=false;
+  for(unsigned i=0;i<ord_count;i++)if(ord_mask[i]==mask){if(ord_id[i]==0x201){assert(prev==0x21b);seen=true;} prev=ord_id[i];}
+  assert(seen);
+ }
  for(unsigned i=0;i<720;i++)if(i!=8)assert(act_frame[1][i]==act_frame[2][i]);
  printf("factory-act-frame ok\n");}
 '''
@@ -112,6 +133,8 @@ int main(){
         out = self.compile_run(code)
         self.assertIn('factory-act-frame ok', out)
         self.assertIn('X9 FACTORY: SIM1 IMS data call accepted by modem', out)
+        self.assertIn('X9 FACTORY: SIM1 DATA_RETRY_TIMER ims accepted; ACT follows', out)
+        self.assertIn('X9 FACTORY: SIM2 DATA_RETRY_TIMER ims accepted; ACT follows', out)
         self.assertIn('X9 FACTORY: SIM2 IMS data call accepted by modem', out)
 
 

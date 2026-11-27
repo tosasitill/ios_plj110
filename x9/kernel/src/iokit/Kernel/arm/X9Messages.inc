@@ -76,7 +76,8 @@ struct x9m_sim {
  bool wanted,ready,reg_valid,md_known,md_ready,init_hold,init_timed_out;
  unsigned reg,init,diag_stage,ims_stage; uint64_t sampled,init_token,init_deadline,ready_epoch,init_epoch;
  uint64_t reg_epoch,ims_epoch,ims_token,ims_deadline,ims_admit_deadline; bool ims_hold;
- unsigned fx_stage; uint64_t fx_token,fx_deadline; bool fx_hold;
+ unsigned fx_stage; uint64_t fx_token,fx_deadline; bool fx_hold,fx_pre;
+ uint64_t fx_local_since; bool fx_local_noted;
  bool mem_sent,mem_hold; uint64_t mem_token,mem_deadline;
  unsigned ind_stage; uint64_t ind_token,ind_deadline; bool ind_hold;
 };
@@ -563,8 +564,14 @@ static void x9m_rawsend_reject_diag(unsigned sim,const uint8_t *req,unsigned len
  * the MD feature cache reads all zero, so none of this ever happens. The
  * writer mirrors the factory frames and order, then re-reads the cache;
  * a config ACK alone does not prove registration, so registration
- * evidence stays with the existing 4a01/0a04 observers. Any rejection or
- * timeout holds the sequence for the boot without retry. */
+ * evidence stays with the existing 4a01/0a04 observers. A modem CNF
+ * rejection or a CNF timeout holds the sequence for the boot. A purely
+ * local submit failure (the shared MIPC allocator momentarily out of
+ * slots during the registration storm) is not a modem answer: the stage
+ * is retried under a 30 s budget before holding. The ACT itself is
+ * preceded per SIM by DATA_RETRY_TIMER 021b MODE=1 (APN "ims") and its
+ * 021c, mirroring the RIL/WDS datacycle; the bare ACT was refused with
+ * result 0x15000A even when byte-exact (radio3). */
 static void x9m_factory_ims_bytes(uint8_t out[6]){
  /* Aggregation inputs are this device's factory-observed carrier policy
   * for its SIMs: VoLTE/VoNR/ViLTE/ViNR on, WFC/ViWiFi off, IMS SMS on,
@@ -590,13 +597,18 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
    if(rc<0){s.fx_hold=true;
     printf("X9 FACTORY: SIM%u stage %u transport error; held\n",sim+1,s.fx_stage);continue;}
    s.fx_token=0;
-   unsigned expect=s.fx_stage==1?0xa1d:s.fx_stage==2?0xa19:s.fx_stage==3?0xa01:s.fx_stage==4?0x202:0xa03;
+   unsigned expect=s.fx_stage==1?0xa1d:s.fx_stage==2?0xa19:s.fx_stage==3?0xa01:s.fx_stage==4?(s.fx_pre?0x202:0x21c):0xa03;
    unsigned result=1;
    bool known=p[8]==(1u<<sim)&&x9q_u16(p+10)==expect&&x9w_word(p,n,0,result)&&
     (s.fx_stage==4||x9w_wire(p,n));
    if(!known||result){s.fx_hold=true;
     printf("X9 FACTORY: SIM%u stage %u rejected known %u result %u; held\n",sim+1,s.fx_stage,known?1:0,result);
     bzero(p,room);continue;}
+   if(s.fx_stage==4&&!s.fx_pre){
+    s.fx_pre=true;
+    printf("X9 FACTORY: SIM%u DATA_RETRY_TIMER ims accepted; ACT follows\n",sim+1);
+    bzero(p,room);continue;
+   }
    if(s.fx_stage==3)printf("X9 FACTORY: SIM%u IMS config accepted by modem\n",sim+1);
    if(s.fx_stage==4){
     printf("X9 FACTORY: SIM%u IMS data call accepted by modem\n",sim+1);
@@ -623,6 +635,15 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
   else if(s.fx_stage==2){x9w_frame f(0xa18,1u<<sim);f.byte(0x100,0);token=f.submit();}
   else if(s.fx_stage==3){x9w_frame f(0xa00,1u<<sim);f.word(0x100,0);
    uint8_t b[6];x9m_factory_ims_bytes(b);f.tlv(0x102,b,6);token=f.submit();}
+  else if(s.fx_stage==4&&!s.fx_pre){
+   /* Datacycle prerequisite (X9WDS.inc x9w_start_next, Android capture):
+    * every 0201 is preceded by DATA_RETRY_TIMER 021b MODE=1 carrying the
+    * APN, and the ACT waits for a successful 021c. The fx sequence sent
+    * the ACT bare; with the retry-timer plane never established the MD
+    * refused even a byte-exact ACT with result 0x15000A (radio3). The
+    * frame mirrors the WDS MODE=1 construction byte for byte. */
+   x9w_frame f(0x21b,1u<<sim);f.byte(0x100,1);f.tlv(0x101,"ims",4);token=f.submit();
+  }
   else if(s.fx_stage==4){
    /* Factory IMS bearer (radio-baseline.txt 18:38:15.635): a minimal
     * DATA_ACT_CALL with APN_TYPE 2 and only the URSP traffic descriptor
@@ -640,8 +661,19 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
    f.tlv(0x10d,td,sizeof(td));token=f.submit();
   }
   else if(s.fx_stage==5){x9w_frame f(0xa02,1u<<sim);f.word(0x100,0);token=f.submit();}
-  if(token){s.fx_token=token;s.fx_deadline=now+10000;}
-  else{s.fx_hold=true;printf("X9 FACTORY: SIM%u stage %u submit rejected locally; held\n",sim+1,s.fx_stage);}
+  if(token){s.fx_token=token;s.fx_deadline=now+10000;s.fx_local_since=0;s.fx_local_noted=false;}
+  else{
+   /* Local rejection means the frame never left the host: the shared
+    * allocator (X9_MI_SLOTS) is momentarily exhausted during the
+    * registration storm. Keep the stage and retry on later polls
+    * under a 30 s budget, like the SMS init machine; only a modem
+    * CNF rejection or an exhausted budget holds the sequence. */
+   if(!s.fx_local_since)s.fx_local_since=now;
+   if(!s.fx_local_noted){s.fx_local_noted=true;
+    printf("X9 FACTORY: SIM%u stage %u submit rejected locally; retry continues\n",sim+1,s.fx_stage);}
+   if(now-s.fx_local_since>=30000){s.fx_hold=true;
+    printf("X9 FACTORY: SIM%u stage %u submit retry budget exhausted; held\n",sim+1,s.fx_stage);}
+  }
  }
 }
 static bool x9m_diag_storage_busy(unsigned sim,const x9m_job *self){
