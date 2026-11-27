@@ -24,7 +24,7 @@ static x9m_client x9m_clients[CBQ_MAX_CLIENTS];
 struct x9m_job {
  unsigned op,slot,sim,len; uint64_t generation,token,deadline;
  bool answered,background,hold,follow; uint8_t req[X9Q_REQ];
- unsigned step,stored_len; uint64_t store_order; uint8_t stored_pdu[200];
+ unsigned step,stored_len; uint64_t store_order,reg_epoch; uint8_t stored_pdu[200];
  bool ack_done,ack_reply_pending;uint16_t ack_error;uint64_t bridge_generation;
  bool receipt_pending; unsigned receipt_len; uint8_t receipt[1536];
 };
@@ -71,10 +71,11 @@ struct x9m_incoming {
  bool delivered,replying,held; uint64_t ack_wait; uint8_t pdu[255];
 };
 static x9m_incoming x9m_incoming_sms[X9M_INCOMING];
-enum { X9M_CFG_IND=0, X9M_IMS_IND, X9M_READY_QUERY, X9M_WAIT_READY, X9M_HOST_READY, X9M_INIT_DONE };
+enum { X9M_CFG_IND=0, X9M_READY_QUERY, X9M_WAIT_READY, X9M_HOST_READY, X9M_INIT_DONE };
 struct x9m_sim {
  bool wanted,ready,reg_valid,md_known,md_ready,init_hold,init_timed_out;
- unsigned reg,init,diag_stage; uint64_t sampled,init_token,init_deadline,ready_epoch,init_epoch;
+ unsigned reg,init,diag_stage,ims_stage; uint64_t sampled,init_token,init_deadline,ready_epoch,init_epoch;
+ uint64_t reg_epoch,ims_epoch,ims_token,ims_deadline,ims_admit_deadline; bool ims_hold;
 };
 static x9m_sim x9m_sims[2];
 static unsigned x9m_init_stage;
@@ -329,7 +330,7 @@ static void x9m_init_poll(uint8_t *response,unsigned room){
    if(!x9w_control_ready||!x9_md_mipc_message_online())s.init_hold=true;
    if(s.init_hold){bzero(response,room);continue;} /* drain, never grant/advance */
    unsigned result=1,ready=0;
-   unsigned id=s.init<=X9M_IMS_IND?0x308:0x602;
+   unsigned id=s.init==X9M_CFG_IND?0x308:0x602;
    bool known=x9w_wire(response,n)&&x9q_u16(response+10)==id&&
     response[8]==(1u<<sim)&&x9w_word(response,n,0,result);
    bool snapshot=known&&!result&&x9w_byte(response,n,0x102,ready)&&ready<=1;
@@ -354,14 +355,67 @@ static void x9m_init_poll(uint8_t *response,unsigned room){
   if(!online||!s.wanted||x9m_init_hold||x9m_init_token||x9m_init_stage<2||s.init_hold||s.init==X9M_INIT_DONE)continue;
   unsigned step=s.init;
   if(step==X9M_WAIT_READY){if(!s.md_known||!s.md_ready)continue;step=X9M_HOST_READY;}
-  x9w_frame f(step<=X9M_IMS_IND?0x307:0x601,1u<<sim);
-  if(step<=X9M_IMS_IND){
-   unsigned id=step==X9M_CFG_IND?0x4601:0x4a01;
+  x9w_frame f(step==X9M_CFG_IND?0x307:0x601,1u<<sim);
+  if(step==X9M_CFG_IND){
+   unsigned id=0x4601;
    uint8_t v[2]={(uint8_t)id,(uint8_t)(id>>8)};f.tlv(0x100,v,2);
   }else if(step==X9M_READY_QUERY)f.byte(0x102,1);
   else{f.byte(0x100,0);f.byte(0x105,1);f.byte(0x106,2);}
   uint64_t token=f.submit();
   if(token){s.init=step;s.init_token=token;s.init_epoch=s.ready_epoch;s.init_deadline=x9q_ms()+300000;}
+ }
+}
+/* Boot IMS observation is independent of WMS clients and SMS readiness.
+ * Register the already-supported 4a01 indication, then take one 0a04
+ * snapshot per SIM. Each token remains owned after timeout/transport loss;
+ * no retry or invented registration state. */
+static void x9m_ims_poll(uint8_t *p,unsigned room){
+ const bool online=x9w_control_ready&&x9_md_mipc_online();
+ const uint64_t now=x9q_ms();
+ for(unsigned sim=0;sim<x9_md_sim_count();sim++){
+  x9m_sim &s=x9m_sims[sim];
+  if(!online&&s.ims_stage)s.ims_hold=true;
+  if(s.ims_token){
+   if(now>=s.ims_deadline)s.ims_hold=true;
+   unsigned n=0;int rc=x9_md_mipc_take(s.ims_token,p,room,&n);
+   if(rc==1){
+    s.ims_token=0;
+    if(!online)s.ims_hold=true;
+    unsigned result=1;
+    bool known=x9w_wire(p,n)&&p[8]==(1u<<sim)&&
+     x9q_u16(p+10)==(s.ims_stage==1?0x308:0xa05)&&x9w_word(p,n,0,result);
+    if(!s.ims_hold&&s.ims_stage==1){
+     if(!known||result)printf("X9 IMS: SIM%u indication registration unavailable known %u result %u\n",sim+1,known?1:0,result);
+     s.ims_stage=2; /* A failed subscription does not prevent a read. */
+    }else if(!s.ims_hold&&s.ims_stage==3){
+     unsigned type=0,state=0;
+     if(known&&!result&&x9w_byte(p,n,0x100,type)&&!type&&
+       x9w_byte(p,n,0x101,state)&&state<=4&&s.ims_epoch==s.reg_epoch){
+      s.reg_epoch++;
+      if(state==1){s.reg_valid=false;printf("X9 IMS: SIM%u registration state 1 unclassified\n",sim+1);}
+      else x9m_reg(sim,state==2?2:0);
+     }else printf("X9 IMS: SIM%u registration snapshot unavailable or superseded\n",sim+1);
+     s.ims_stage=4;
+    }
+    bzero(p,room);
+   }else if(rc==-3){s.ims_token=0;
+    if(s.ims_stage==1&&!s.ims_hold&&online)s.ims_stage=2;
+    else s.ims_hold=true;
+   }
+   else if(rc<0)s.ims_hold=true;
+  }
+  if(!online||s.ims_hold||s.ims_token||s.ims_stage>=3)continue;
+  if(!s.ims_admit_deadline)s.ims_admit_deadline=now+60000;
+  if(now>=s.ims_admit_deadline){s.ims_hold=true;printf("X9 IMS: SIM%u admission timed out; no retry\n",sim+1);continue;}
+  /* The indication inbox is quarantined independently of generic reads. */
+  if(!s.ims_stage&&!x9_md_mipc_message_online())s.ims_stage=2;
+  if(!s.ims_stage){
+   x9w_frame f(0x307,1u<<sim);uint8_t v[2]={0x01,0x4a};f.tlv(0x100,v,2);
+   uint64_t token=f.submit();if(token){s.ims_stage=1;s.ims_token=token;s.ims_admit_deadline=0;s.ims_deadline=x9q_ms()+60000;}
+  }else if(s.ims_stage==2){
+   x9w_frame f(0xa04,1u<<sim);f.byte(0x100,0);
+   uint64_t token=f.submit();if(token){s.ims_stage=3;s.ims_token=token;s.ims_epoch=s.reg_epoch;s.ims_admit_deadline=0;s.ims_deadline=x9q_ms()+60000;}
+  }
  }
 }
 static bool x9m_diag_enabled(){
@@ -451,7 +505,9 @@ static void x9m_event(uint8_t *p,unsigned n,uint32_t token){
    * The captured type2 expiry106=255 is NOT a service-capability mask. */
   unsigned type,state;
   if(!x9w_byte(p,n,0x100,type)||type||!x9w_byte(p,n,0x101,state)||state>1)return;
-  for(unsigned sim=0;sim<x9_md_sim_count();sim++)if(mask&(1u<<sim))x9m_reg(sim,state?2:0);
+  for(unsigned sim=0;sim<x9_md_sim_count();sim++)if(mask&(1u<<sim)){
+   x9m_sims[sim].reg_epoch++;x9m_reg(sim,state?2:0);
+  }
   return;
  }
  if(!token)return;
@@ -634,7 +690,7 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
      * read after this SIM's ready/config handshake rather than racing it. */
     j->deadline=x9q_ms()+20000;return true;
    }else{x9w_frame f(0xa04,1u<<sim);f.byte(0x100,0);
-    j->token=f.submit();if(j->token)return true;bzero(j,sizeof(*j));err=X9Q_BUSY;}
+    j->reg_epoch=x9m_sims[sim].reg_epoch;j->token=f.submit();if(j->token)return true;bzero(j,sizeof(*j));err=X9Q_BUSY;}
   }
  }else err=X9Q_UNSUPPORTED;
  x9m_reply(slot,service,req,err);return true;
@@ -710,6 +766,8 @@ static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
   /* This RIL explicitly maps 2 -> registered, 3/4 -> not registered.
    * It passes through 0/1 without naming them; do not invent REGISTERING
    * from a numeric similarity to IMSA. State 1 remains unclassified. */
+  if(j.reg_epoch!=x9m_sims[j.sim].reg_epoch){x9m_error(j,X9Q_NOT_READY);return;}
+  x9m_sims[j.sim].reg_epoch++;
   if(state==1){x9m_sims[j.sim].reg_valid=false;x9m_error(j,X9Q_NOT_READY);return;}
   unsigned reg=state==2?2:0;x9m_reg(j.sim,reg);x9m_number(response,0x12,reg);
  }else if(stored){
@@ -782,6 +840,10 @@ static void x9m_poll(){
  if(!x9_md_mipc_online())for(unsigned sim=0;sim<x9_md_sim_count();sim++){
   if(x9m_sims[sim].md_known)x9m_md_ready(sim,false);
   x9m_sims[sim].reg_valid=false;
+ }
+ for(unsigned i=0;i<X9M_INCOMING;i++){
+  unsigned n=0;uint32_t token=0;int rc=x9_md_mipc_message_event(p,sizeof(p),&n,&token);
+  if(rc!=1)break;x9m_event(p,n,token);bzero(p,sizeof(p));
  }
  for(x9m_job &j:x9m_jobs)if(j.op){
   if(x9m_has_receipt(j.op)){
@@ -886,10 +948,7 @@ static void x9m_poll(){
    }
   }
  }
- for(unsigned i=0;i<X9M_INCOMING;i++){
-  unsigned n=0;uint32_t token=0;int rc=x9_md_mipc_message_event(p,sizeof(p),&n,&token);
-  if(rc!=1)break;x9m_event(p,n,token);bzero(p,sizeof(p));
- }
+ x9m_ims_poll(p,sizeof(p));
  x9m_init_poll(p,sizeof(p)); // Consume pending readiness INDs before submitting config.
  for(x9m_incoming &in:x9m_incoming_sms)if(in.token&&!in.held){
   if(in.delivered){
@@ -906,7 +965,7 @@ static void x9m_poll(){
   for(const x9m_job &j:x9m_jobs)if(j.op==X9M_REG&&j.sim==sim)pending=true;
   x9m_clients[slot].reg_next=now+15000;if(pending)continue;
   uint8_t req[7]={0,0,0,0x20,0,0,0};x9m_job *j=x9m_new(X9M_REG,slot,sim,req,7,true);
-  if(j){x9w_frame f(0xa04,1u<<sim);f.byte(0x100,0);j->token=f.submit();if(!j->token)bzero(j,sizeof(*j));}
+  if(j){x9w_frame f(0xa04,1u<<sim);f.byte(0x100,0);j->reg_epoch=x9m_sims[sim].reg_epoch;j->token=f.submit();if(!j->token)bzero(j,sizeof(*j));}
  }
  x9m_diag_poll();
 }

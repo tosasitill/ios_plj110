@@ -12,7 +12,7 @@ class StorageDeadline(unittest.TestCase):
     def test_completion_guard(self):
         source = SOURCE.read_text()
         start = source.index('   if(taken==1){', source.index('static void x9m_poll()'))
-        end = source.index('\n  }\n }\n for(unsigned i=0;i<X9M_INCOMING', start)
+        end = source.index('\n  }\n }\n x9m_ims_poll(', start)
         block = source[start:end]
         harness = r'''
 #include <cstring>

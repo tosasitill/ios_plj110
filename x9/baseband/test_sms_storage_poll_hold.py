@@ -6,7 +6,7 @@ class PollHold(unittest.TestCase):
  def test_real_taken_branch(self):
   s=(ROOT/'x9/kernel/src/iokit/Kernel/arm/X9Messages.inc').read_text()
   a=s.index('   if(taken==1){',s.index('static void x9m_poll()'))
-  b=s.index('\n  }\n }\n for(unsigned i=0;i<X9M_INCOMING',a)
+  b=s.index('\n  }\n }\n x9m_ims_poll(',a)
   code=r'''
 #include <cstdint>
 #include <cstdio>
