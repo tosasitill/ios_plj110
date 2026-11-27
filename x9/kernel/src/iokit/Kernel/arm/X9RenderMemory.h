@@ -17,3 +17,11 @@ IOReturn x9_render_memory_reassert_wc(X9RenderContext *,uint64_t *,uint64_t *);
 struct X9RenderCacheSpan { uint64_t begin,end; unsigned resource; };
 IOReturn x9_render_memory_cache_spans(X9RenderContext *,X9RenderResource *,
  const X9RenderCacheSpan *,unsigned,uint32_t,uint64_t *);
+
+/* H2 coherency probe (log only, opt-in x9_coh_probe=1): compare plain cached
+ * loads of one atom-aligned X9_RENDER_CACHE_ATOM range against the same loads
+ * repeated after a CIVAC of that atom. Counts matching/stale qwords into
+ * *match/*mismatch. Returns false when the atom cannot be addressed (the
+ * caller counts nothing either way). Never skips maintenance: the sampled
+ * atom leaves CIVAC-maintained exactly as the non-coherent path leaves it. */
+bool x9_render_memory_coherency_sample(X9RenderResource *,uint64_t,uint64_t *,uint64_t *);
