@@ -310,6 +310,21 @@ exports:
 
     def build_libgcrypt(self):
         src = extract('libgcrypt', self.work)
+        # The iPhoneOS SDK omits the getentropy() declaration (no
+        # <sys/random.h>, unistd.h does not declare it) although the
+        # function is exported by libSystem and configure's link check
+        # finds it; rndgetentropy.c then fails under
+        # -Wimplicit-function-declaration. Add the missing declaration
+        # at its single use site. (A -include shim was tried first and
+        # leaked into the MPI assembler rules, breaking .S files.)
+        rnd = src / 'random/rndgetentropy.c'
+        text = rnd.read_text()
+        needle = '#include <unistd.h>\n'
+        assert text.count(needle) == 1
+        rnd.write_text(text.replace(
+            needle, needle +
+            '/* x9: declaration missing from the iPhoneOS SDK headers. */\n'
+            'extern int getentropy (void *__buf, size_t __len);\n'))
         # Procursus libgcrypt-setup: Mach-O's assembler rejects the ELF
         # .type/.size directives in the aarch64 asm and the symbol
         # prefix differs (__gcry).
@@ -325,8 +340,12 @@ exports:
     def build_xxhash(self):
         src = extract('xxhash', self.work)
         cc = self.env['CC']
+        # PREFIX must be present at build time too: xxhash's Makefile
+        # bakes the dylib install name from it, and the install step
+        # alone left it at the /usr/local default.
         self.run(['make', '-j8', 'UNAME=Darwin', f'CC={cc}',
-                  f'CFLAGS={self.env["CFLAGS"]}'], cwd=src)
+                  f'CFLAGS={self.env["CFLAGS"]}',
+                  f'PREFIX={PREFIX}/usr'], cwd=src)
         self.run(['make', 'install', 'UNAME=Darwin', f'CC={cc}',
                   f'PREFIX={PREFIX}/usr', f'DESTDIR={self.sysroot}'],
                  cwd=src)
