@@ -252,7 +252,7 @@ static int cam_out_write(unsigned slot,uint32_t value)
  * is kept and settled after stream-on (cam_out_settle_locked). */
 static int cam_out_defer(void)
 {
-    printf("X9 CAMERA OUTMUX ADOPT: cfg_done pending after 1s cmd=%x/%x done_status=%x/%x statusx=%x; "
+    printf("X9 CAMERA OUTMUX ADOPT: cfg_done pending cmd=%x/%x done_status=%x/%x statusx=%x; "
         "settle after stream-on (Android never waits)\n",
         cam_rr(cam_out.out[0],0x1c),cam_rr(cam_out.out[1],0x1c),
         cam_rr(cam_out.out[0],0x38),cam_rr(cam_out.out[1],0x38),cam_rr(cam_out.out[0],0x54));
@@ -267,11 +267,28 @@ static int cam_out_commit(void)
     int e=cam_out_guard();if(e)return e;
     if(cam_out.pending_slot<CAM_OUT_WRITES || cam_out.commit_pending)return CAM_FAIL(EBUSY);
     e=cam_out_irq_precommit();if(e)return e;
-    /* Android _wait_outmux_cfg_done: max(1 s, 1.1 frame). With the sensor
-     * off the latch needs VSYNC and always defers (395 spent 10 s here). */
-    nanoseconds_to_absolutetime(1000000000ull,&span);deadline=mach_absolute_time()+span;
     cam_out.commit_pending=true; /* BEFORE the possibly posted trigger */
     cam_rw(cam_out.out[0],0x1c,1);
+    if(!session.stream) {
+        /* The latch retires on the reference VSYNC, which exists only while
+         * the sensor streams (0100=1); session.stream is set immediately
+         * before that write and cleared by the stop path. Every start-path
+         * commit therefore runs with no VSYNC in existence and the 1 s poll
+         * below could never succeed: log 421-diag46 shows it expiring in
+         * full twice per cold start (~2 s of black screen), and log 395
+         * spent 10 s across repeated commits. Android outmux_config_all
+         * posts the trigger and never waits. Do one immediate finish check
+         * (a previous stream's retiring latch still counts), then defer to
+         * the post-stream-on settle exactly as the timeout path did. */
+        e=cam_out_guard();if(e)return e;
+        e=cam_out_irq_finish_commit();
+        if(!e){cam_out.deferred=false;return cam_out_guard();}
+        if(e!=EAGAIN)return e;
+        return cam_out_defer();
+    }
+    /* Android _wait_outmux_cfg_done: max(1 s, 1.1 frame). Reachable only
+     * while streaming, where a VSYNC can actually retire the latch. */
+    nanoseconds_to_absolutetime(1000000000ull,&span);deadline=mach_absolute_time()+span;
     for(;;) {
         e=cam_out_guard();if(e)return e;
         e=cam_out_irq_finish_commit();
