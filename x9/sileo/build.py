@@ -411,20 +411,29 @@ exports:
                         ' -arch arm64 -nostdlib'))
         env = dict(self.env)
         env['CPP_FOR_BUILD'] = f"{self.env['CC_FOR_BUILD']} -E"
+        # nettle/hogweed/gmp/libtasn1 are discovered via pkg-config;
+        # put the cross wrapper (sysroot-re-rooted .pc files) first in
+        # PATH or configure reports Libnettle not found.
+        shim = self.work / 'pkgconfig-shim'
+        shim.mkdir(exist_ok=True)
+        link = shim / 'pkg-config'
+        link.unlink(missing_ok=True)
+        link.symlink_to(self._cross_pkg_config())
+        env['PATH'] = str(shim) + ':' + env['PATH']
         # Leaner than Procursus gnutls.mk, deliberately: apt's https
         # method needs a TLS client, not the full feature set. Skipped
         # trees: p11-kit (--without-p11-kit), libidn2 and brotli
         # (absent from the sysroot, so off); libunistring uses
-        # gnutls's included copy. Kept from the recipe:
-        # --enable-local-libopts, the trust-store path shape and the
-        # malloc/realloc cross answers.
+        # gnutls's included copy. Kept from the recipe: the
+        # trust-store path shape and the malloc/realloc cross answers.
+        # (3.8.5 dropped the guile bindings and the local-libopts
+        # switch Procursus's older pin had; both flags are gone.)
         self.run([src / 'configure', '--build=x86_64-apple-darwin',
                   '--host=arm64-apple-darwin', f'--prefix={PREFIX}/usr',
                   f'--sysconfdir={PREFIX}/etc',
                   f'--localstatedir={PREFIX}/var',
                   '--disable-silent-rules', '--disable-doc',
-                  '--disable-nls', '--disable-guile',
-                  '--enable-local-libopts', '--without-p11-kit',
+                  '--disable-nls', '--without-p11-kit',
                   '--with-included-unistring',
                   f'--with-default-trust-store-file={PREFIX}/etc/ssl/certs/cacert.pem',
                   'ac_cv_func_malloc_0_nonnull=yes',
@@ -434,6 +443,21 @@ exports:
         self.run(['make', 'install', f'DESTDIR={self.sysroot}'],
                  cwd=src, env=env)
 
+
+    def _cross_pkg_config(self):
+        """pkg-config wrapper that re-roots the storm .pc files (whose
+        compiled-in prefix is the device path /var/storm/usr) into the
+        sysroot. Needed by every consumer that discovers storm
+        libraries via pkg-config (gnutls, apt)."""
+        pfx = self._pfx()
+        wrap = self.work / 'cross-pkg-config'
+        wrap.write_text(
+            '#!/bin/sh\n'
+            f'export PKG_CONFIG_LIBDIR={pfx}/lib/pkgconfig:{pfx}/share/pkgconfig\n'
+            f'export PKG_CONFIG_SYSROOT_DIR={self.sysroot}\n'
+            'exec /opt/homebrew/bin/pkg-config "$@"\n')
+        wrap.chmod(0o755)
+        return wrap
 
     def build_apt(self):
         src = extract('apt', self.work)
@@ -474,15 +498,7 @@ exports:
             '<!ENTITY keyring-uri "">\n'
             '<!ENTITY current-codename "storm">\n')
         pfx = self._pfx()
-        # Cross pkg-config: re-root the storm .pc files into the sysroot
-        # (their compiled-in prefix is the device path /var/storm/usr).
-        pcwrap = self.work / 'cross-pkg-config'
-        pcwrap.write_text(
-            '#!/bin/sh\n'
-            f'export PKG_CONFIG_LIBDIR={pfx}/lib/pkgconfig:{pfx}/share/pkgconfig\n'
-            f'export PKG_CONFIG_SYSROOT_DIR={self.sysroot}\n'
-            'exec /opt/homebrew/bin/pkg-config "$@"\n')
-        pcwrap.chmod(0o755)
+        pcwrap = self._cross_pkg_config()
         tc = self.work / 'apt-toolchain.cmake'
         tc.write_text(
             'set(CMAKE_SYSTEM_NAME Darwin)\n'
