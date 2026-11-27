@@ -62,8 +62,10 @@ struct x9_haptic_stock {
     uint32_t env;              /* buzz envelope peak tracker, 0..32767 */
     uint32_t cap_peak;         /* peak captured in the current window */
     uint32_t cap_left;         /* samples left in the capture window */
-    uint32_t prev_peak;        /* PCM peak of the last fired event */
-    uint32_t since_fire;       /* samples since the last fire (saturating) */
+    uint32_t prev_peak;        /* PCM peak of the last decided event */
+    uint32_t since_fire;       /* samples since the last decided event */
+    uint32_t arm_level;        /* re-arm level: prev peak / 16, clamped */
+    uint32_t arm_quiet;        /* consecutive samples below arm_level */
     uint32_t fire_level;       /* EV_FIRE: desired output peak, 0..127 */
     uint32_t fire_grade;       /* EV_FIRE: X9_HS_GRADE_* */
     uint32_t buzz_level;       /* while buzzing: envelope, 0..1000 */
@@ -102,7 +104,8 @@ static inline uint32_t x9_hs_level(uint32_t peak)
 static inline void x9_haptic_stock_init(struct x9_haptic_stock *e,
     uint32_t feel,uint32_t legacy_intensity)
 {
-    *e=(struct x9_haptic_stock){.feel=feel,.legacy_intensity=legacy_intensity};
+    *e=(struct x9_haptic_stock){.feel=feel,.legacy_intensity=legacy_intensity,
+        .arm_level=X9_HS_ONSET};
 }
 /* Decide one captured event. Returns the event bits for a fire/queue;
  * tail-guard and busy handling live here so feed() stays linear. */
@@ -117,16 +120,24 @@ static inline uint32_t x9_hs_decide(struct x9_haptic_stock *e,int busy)
         grade=X9_HS_GRADE_STANDARD;
     }
     /* Tail guard (QUEUE): a candidate whose peak fell below a quarter of
-     * the previous event's peak within 20 ms of that fire is the same
-     * pulse's decaying tail (e.g. the last half-cycle of a FullTap), not
-     * a new event. Genuine double taps have comparable peaks, and later
-     * quiet events pass on the time clause alone. */
-    if((e->feel&X9_HS_FEEL_QUEUE) && e->prev_peak &&
-       e->cap_peak*4u<e->prev_peak && e->since_fire<X9_HS_TAIL_WINDOW) {
+     * the previous event's peak within 20 ms of it is the same pulse's
+     * decaying tail (e.g. the last half-cycle of a FullTap), not a new
+     * event. Genuine double taps have comparable peaks, and later quiet
+     * events pass on the time clause alone. Every decided event -- fired,
+     * queued, dropped or suppressed -- becomes the reference for the
+     * guard and for the re-arm hysteresis below: a suppressed pulse's own
+     * tail is still that pulse's tail. */
+    int suppress=(e->feel&X9_HS_FEEL_QUEUE) && e->prev_peak &&
+        e->cap_peak*4u<e->prev_peak && e->since_fire<X9_HS_TAIL_WINDOW;
+    e->prev_peak=e->cap_peak;e->since_fire=0;
+    if(e->feel&X9_HS_FEEL_QUEUE) {
+        uint32_t lvl=e->cap_peak/16u;
+        e->arm_level=lvl<96u?96u:(lvl>X9_HS_ONSET?X9_HS_ONSET:lvl);
+    }
+    if(suppress) {
         ++e->tail_dropped;
         return 0;
     }
-    e->prev_peak=e->cap_peak;e->since_fire=0;
     if(busy) {
         if((e->feel&X9_HS_FEEL_QUEUE) && !e->pending) {
             e->pending=1;e->pending_level=level;e->pending_grade=grade;
@@ -167,10 +178,20 @@ static inline uint32_t x9_haptic_stock_feed(struct x9_haptic_stock *e,
     }
     if(a<X9_HS_ONSET) {
         if(e->quiet<arm_need)++e->quiet;
-        if(e->quiet>=arm_need)e->armed=1;
         if(e->quiet>=X9_HS_ARM_LEGACY)e->hot=0; /* 1 ms true silence ends it */
+        /* Re-arm hysteresis (QUEUE): with a 0.25 ms arm at the flat 512
+         * level, a decaying ~173 Hz pulse re-arms at its own zero
+         * crossings (its sub-512 dips outlast 0.25 ms once the cycle
+         * amplitude falls near ~1500) and re-triggers on itself. Arming
+         * therefore requires quiet below prev_peak/16 -- the signal must
+         * have fallen to a sixteenth of the last event, not just under
+         * the onset line. Legacy mode keeps the flat 512 arm. */
+        if(a<e->arm_level) {
+            if(e->arm_quiet<arm_need)++e->arm_quiet;
+            if(e->arm_quiet>=arm_need)e->armed=1;
+        } else e->arm_quiet=0;
     } else {
-        e->quiet=0;++e->hot;
+        e->quiet=0;e->arm_quiet=0;++e->hot;
         if(!e->capturing && e->armed) {
             e->armed=0;e->capturing=1;e->cap_peak=a;
             e->cap_left=(e->feel&X9_HS_FEEL_GRADE)?X9_HS_PEAK_WINDOW:0;

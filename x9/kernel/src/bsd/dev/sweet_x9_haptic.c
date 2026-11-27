@@ -161,7 +161,7 @@ static int start_locked(struct x9_haptic_start *s)
     hs.flags&=~X9_HAPTIC_THROTTLED;hs.flags|=X9_HAPTIC_RUNNING;stream_reset();
     ++hs.generation;head=count=0;sequence=0;draining=scene_active=false;stock_wave=NULL;
     x9_haptic_converter_init(&converter,hs.f0_millihz,s->conversion,s->intensity,s->sharpness);
-    x9_haptic_stock_init(&stock,feel_flags&(X9_HS_FEEL_GRADE|X9_HS_FEEL_HOLD|X9_HS_FEEL_ENV),s->intensity);
+    x9_haptic_stock_init(&stock,feel_flags,s->intensity);
     hs.last_write_ns=now_ns();s->generation=hs.generation;return 0;
 }
 static int haptic_open(dev_t d,int f,__unused int t,struct proc *p)
@@ -362,6 +362,17 @@ static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
                 if(count){++hs.underruns;fail_locked(ETIMEDOUT);}
                 else if(hb.active){int e=hoff();on_at=0;quiet_stop=true;if(e)fail_locked(e);}
             } else {
+                if(!scene_active && hs.mode==3) {
+                    /* A queued onset appends immediately behind the scene
+                     * that just finished filling -- no gap, no reopen. */
+                    uint32_t plvl,pgrd;
+                    if(x9_haptic_stock_take_pending(&stock,&plvl,&pgrd)) {
+                        const struct x9_haptic_stock_wave *w=
+                            pgrd==X9_HS_GRADE_LIGHT?&x9_stock_wave_tap_light:&x9_stock_wave_tap;
+                        stock_start_locked(w,stock_level_intensity(w,plvl));
+                        draining=false;
+                    }
+                }
                 if(scene_active && hs.mode==3 && scene_kind==2) {
                     /* Envelope buzz: loop the stock buzz wave; amplitude
                      * follows the live PCM envelope the engine tracks.

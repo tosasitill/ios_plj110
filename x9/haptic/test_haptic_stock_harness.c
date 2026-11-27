@@ -211,6 +211,68 @@ static void test_envelope_off_in_legacy(void)
     CHECK(nbuzz_on==0, "feel=0 buzz_on=%d want 0", nbuzz_on);
 }
 
+static void test_queue_double_tap(void)
+{
+    struct x9_haptic_stock e; x9_haptic_stock_init(&e, X9_HS_FEEL_ALL, 1000);
+    gen_clear(); gen_silence(20); gen_burst(20000, 8); gen_silence(6);
+    gen_burst(20000, 8); gen_silence(60);
+    emulate_busy=1; run_reset(); run(&e, 0, 0);
+    CHECK(nfires==2, "fires=%d want 2 (second tap queued, not lost)", nfires);
+    if(nfires==2) {
+        CHECK(fires[1].at>fires[0].at && fires[1].at-fires[0].at>=700 &&
+              fires[1].at-fires[0].at<=740,
+            "second fire at +%u samples, want right at playback end (~720)",
+            fires[1].at-fires[0].at);
+        CHECK(fires[1].grade==X9_HS_GRADE_STANDARD, "grade=%u want STANDARD", fires[1].grade);
+    }
+    CHECK(e.dropped==0, "dropped=%u want 0", e.dropped);
+    CHECK(e.pending==0, "pending left set");
+}
+static void test_queue_rapid_sequence(void)
+{
+    struct x9_haptic_stock e; x9_haptic_stock_init(&e, X9_HS_FEEL_ALL, 1000);
+    gen_clear(); gen_silence(20);
+    for(int k=0;k<6;k++) { gen_burst(12000, 8); gen_silence(25); }
+    emulate_busy=1; run_reset(); run(&e, 0, 0);
+    CHECK(nfires==6, "fires=%d want 6 (typing burst loses none)", nfires);
+    CHECK(e.dropped==0, "dropped=%u want 0", e.dropped);
+}
+static void test_queue_full_drop(void)
+{
+    struct x9_haptic_stock e; x9_haptic_stock_init(&e, X9_HS_FEEL_ALL, 1000);
+    gen_clear(); gen_silence(20);
+    gen_burst(20000, 4); gen_silence(2); gen_burst(20000, 4); gen_silence(2);
+    gen_burst(20000, 4); gen_silence(60);
+    emulate_busy=1; run_reset(); run(&e, 0, 0);
+    CHECK(nfires==2, "fires=%d want 2 (one playing + one queued)", nfires);
+    CHECK(e.dropped==1, "dropped=%u want 1 (queue holds at most one)", e.dropped);
+}
+static void test_tail_guard(void)
+{
+    struct x9_haptic_stock e; x9_haptic_stock_init(&e, X9_HS_FEEL_ALL, 1000);
+    gen_clear(); gen_silence(20); gen_burst(32767, 12); gen_silence(6);
+    gen_burst(2000, 4); gen_silence(40);
+    emulate_busy=0; run_reset(); run(&e, 0, 0);
+    CHECK(nfires==1, "fires=%d want 1 (tail blip suppressed)", nfires);
+    CHECK(e.tail_dropped==1, "tail_dropped=%u want 1", e.tail_dropped);
+    /* Control: the same blip 40 ms later is a genuine quiet event. */
+    x9_haptic_stock_init(&e, X9_HS_FEEL_ALL, 1000);
+    gen_clear(); gen_silence(20); gen_burst(32767, 12); gen_silence(40);
+    gen_burst(2000, 4); gen_silence(40);
+    emulate_busy=0; run_reset(); run(&e, 0, 0);
+    CHECK(nfires==2, "control fires=%d want 2 (late blip is real)", nfires);
+    CHECK(e.tail_dropped==0, "control tail_dropped=%u want 0", e.tail_dropped);
+}
+static void test_rearm_feel(void)
+{
+    struct x9_haptic_stock e; x9_haptic_stock_init(&e, X9_HS_FEEL_QUEUE, 1000);
+    gen_clear(); gen_silence(20); gen_burst(12000, 8);
+    for(int i=0;i<24;i++) pcm[npcm++]=0; /* 0.5 ms gap */
+    gen_burst(12000, 8); gen_silence(40);
+    emulate_busy=0; run_reset(); run(&e, 0, 0);
+    CHECK(nfires==2, "QUEUE arm fires=%d want 2 (0.5 ms gap re-arms)", nfires);
+}
+
 int main(void)
 {
     test_grade_light();
@@ -223,6 +285,11 @@ int main(void)
     test_envelope_continuous();
     test_envelope_tracks_amplitude();
     test_envelope_off_in_legacy();
+    test_queue_double_tap();
+    test_queue_rapid_sequence();
+    test_queue_full_drop();
+    test_tail_guard();
+    test_rearm_feel();
     printf("RESULT %s checks=%d failures=%d\n", failures?"FAIL":"PASS", checks, failures);
     return failures?1:0;
 }
