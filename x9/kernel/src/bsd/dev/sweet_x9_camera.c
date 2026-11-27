@@ -205,6 +205,19 @@ static bool cam_boot_deferred(void)
     if(said++<4)printf("X9 CAMERA: start deferred until %ds uptime (now %llums, x9_cam_defer)\n",defer_s,ns/1000000ull);
     return true;
 }
+/* The 20 ms post-mark drain in cam_progress() below was a diag34-era USB
+ * console flush aid. Log 421-diag46 (2026-11-26) shows ~45 prepare:/smmu:/ft:
+ * marks per cold start, i.e. ~0.9 s of the black-screen time is this delay,
+ * not hardware work. It is now opt-in: x9_cam_drain=1 restores the flush
+ * behaviour for hang diagnosis; the default path pays nothing. The stop
+ * path keeps its own unconditional drain (cam_drain_mark): close-path
+ * resets are still an active diagnosis target. */
+static bool cam_drain_enabled(void)
+{
+    static int on=-1;
+    if(on<0){int v=0;if(!PE_parse_boot_argn("x9_cam_drain",&v,sizeof(v)))v=0;on=v?1:0;}
+    return on!=0;
+}
 static void cam_slow_summary(const char *step);
 extern void x9_crumb_cam_step(const char *step);
 static void cam_progress(const char *step)
@@ -219,8 +232,11 @@ static void cam_progress(const char *step)
     /* diag34: the first-open freeze (diag32/32b/33) lands in the ~1 KiB the
      * USB console loses after prepare:controller. Flush 20 ms after each
      * prepare/SMMU bring-up mark, as cam_drain_mark does on the stop path,
-     * so the last visible mark is the step that hung. Logging only. */
-    if(!strncmp(step,"prepare:",8) || !strncmp(step,"smmu:",5) || !strncmp(step,"ft:",3))delay(20000);
+     * so the last visible mark is the step that hung. Logging only -- and,
+     * since log 421-diag46 priced it at ~0.9 s per cold start, only with
+     * x9_cam_drain=1 (see cam_drain_enabled). */
+    if(cam_drain_enabled() &&
+       (!strncmp(step,"prepare:",8) || !strncmp(step,"smmu:",5) || !strncmp(step,"ft:",3)))delay(20000);
 }
 /* Stop-path step mark: the USB console loses ~1 KiB at a SoC reset, so wait
  * 20 ms after each mark for the host to drain it; the last visible mark is
@@ -494,7 +510,7 @@ int x9_camera_register_platform(const struct x9_camera_platform *p)
     else if(hw.version)e=CAM_FAIL(EBUSY);
     else if(!X9_HHMAIN_INIT_COUNT || !X9_HHFRONT_INIT_COUNT)e=CAM_FAIL(ENOTSUP);
     else {
-        hw=*p;int first=0;
+        hw=*p;int first=0;uint32_t probed=0;
         for(unsigned i=0;i<X9_CAMERA_SENSOR_COUNT && !e;i++) {
             if(!(cam_native_mask&(1u<<sensors[i].sensor)))continue;
             st.sensor=sensors[i].sensor;
@@ -508,7 +524,22 @@ int x9_camera_register_platform(const struct x9_camera_platform *p)
                 st.flags|=X9_CAMERA_RETAINED;
             }
             if(!e)e=off; if(!e && id!=sensors[i].chip_id)e=CAM_FAIL(ENODEV);
-            if(!e)cam_sensor_id_record(sensors[i].sensor,id);
+            if(!e){cam_sensor_id_record(sensors[i].sensor,id);probed|=1u<<sensors[i].sensor;}
+            else if(!off && (e==ENXIO || e==ENODEV) &&
+                    !(X9_CAMERA_DUAL_MASK&(1u<<sensors[i].sensor))) {
+                /* Optional lens (ultra-wide/telephoto) whose ID stage failed
+                 * with a clean power cycle: exclude only this lens from the
+                 * effective mask instead of faulting the whole camera, so
+                 * x9_camera_lenses=1 degrades to the proven dual pair when
+                 * an optional module is absent or a variant. A dirty
+                 * power-off or a power-stage error still fails everything:
+                 * the WL rails and buses are shared, so their state is not
+                 * per-sensor. st.supported_mask below carries the effective
+                 * mask; GET_LENSES and the userland backend check both read
+                 * it, so the exclusion is consistent end to end. */
+                printf("X9 CAMERA REGISTER: optional sensor=%u ID failed errno=%d; excluded, remaining lenses continue\n",sensors[i].sensor,e);
+                e=0;
+            }
             else if(e==ENXIO && !off) {
                 /* Clean NACK with a clean power-off: still probe the next
                  * sensor (logs 335-345: back NACKs; front shares WL/DOVDD
@@ -520,7 +551,12 @@ int x9_camera_register_platform(const struct x9_camera_platform *p)
             }
         }
         if(!e && first)e=first;
-        if(!e){st.sensor=X9_CAMERA_BACK;st.supported_mask=cam_native_mask;st.flags=X9_CAMERA_READY;}
+        /* The dual pair is the minimum viable camera (the userland backend
+         * check requires both bits); an admitted-but-unprobed back or front
+         * sensor fails registration exactly as before. */
+        if(!e && (probed&X9_CAMERA_DUAL_MASK)!=X9_CAMERA_DUAL_MASK)
+            e=first?first:CAM_FAIL(ENODEV);
+        if(!e){st.sensor=X9_CAMERA_BACK;st.supported_mask=probed;st.flags=X9_CAMERA_READY;}
         else {st.flags|=X9_CAMERA_FAULT;st.last_errno=e;}
     }
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);return e;

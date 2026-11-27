@@ -239,6 +239,22 @@ isp_frame_rate(struct isp *isp, const struct hakios_camera_frame *f, double mini
 	uint32_t longest = (uint32_t)floor(1e9 / minimum / f->line_ns);
 	fastest = (fastest + step - 1) / step * step;
 	if (fastest < f->frame_lines_min) fastest = f->frame_lines_min;
+	/* The advertised rates are rounded figures: the main sensor's native
+	 * 7546-line frame at 4415 ns/line is 30.03 fps, so a strict "30 fps"
+	 * ceiling computes to 7550 lines and the exposure step rounds it to
+	 * 7552 -- above the mode's own minimum. Every start and lens switch
+	 * then discards its first frames as "too fast" until AE happens to
+	 * lengthen the frame (log 421-diag46: first RAW at stream-on +13 ms,
+	 * first delivered picture was seq=3, ~0.6 s later). When the computed
+	 * ceiling exceeds the native minimum only by rate-quantization slop
+	 * (<= 0.2%), the native length is the honest fastest bound: before any
+	 * control lands the sensor physically cannot run shorter than its
+	 * mode minimum anyway. A real client cap is far outside the slop
+	 * (24 fps computes to 9438 lines on the main sensor) and is
+	 * unaffected. The admission gate itself is unchanged: frames that
+	 * arrive below a genuinely new rate contract are still held. */
+	if (fastest > f->frame_lines_min && fastest - f->frame_lines_min <= f->frame_lines_min / 512)
+		fastest = f->frame_lines_min;
 	if (fastest > f->frame_lines_max) return false;
 	if (longest > f->frame_lines_max) longest = f->frame_lines_max;
 	longest -= longest % step;

@@ -121,9 +121,24 @@ static NSDictionary *device_profile(NSDictionary *original, bool front, bool vid
                                       @{@"DeviceFormat": photo, @"MinFrameRate": @15, @"MaxFrameRate": @30}} mutableCopy];
     if (video) {
         streams[@"X9-Video-30"] = @{@"SensorWidth": @(vw), @"SensorHeight": @(vh), @"MaxFrameRate": @30};
+        /* The smaller sizes mirror preset names the stock D22/D221 plist
+         * declares (Medium, Low, 352x288, iFrame960x540): the previous
+         * replacement dropped them, so an app requesting e.g.
+         * AVCaptureSessionPresetMedium found no matching device format and
+         * video capture failed even though 1080p worked. Every size here is
+         * a crop/scale of the same single 30 fps source the bridge already
+         * renders (its FigVideoCaptureConnection allows downscale to 1/32,
+         * which covers 192x144 from the 4096-wide source); nothing exceeds
+         * the proven 1080p30 envelope. iFrame960x540 is declared at 30 fps:
+         * the stock plist's 60 fps variant cannot be sourced by this
+         * pipeline and is not claimed. */
         NSArray *sizes = @[@[@"1080p30", @1920, @1080, @"AVCaptureSessionPreset1920x1080"],
                            @[@"720p30", @1280, @720, @"AVCaptureSessionPreset1280x720"],
-                           @[@"640x480", @640, @480, @"AVCaptureSessionPreset640x480"]];
+                           @[@"640x480", @640, @480, @"AVCaptureSessionPreset640x480"],
+                           @[@"540p30", @960, @540, @"AVCaptureSessionPresetiFrame960x540"],
+                           @[@"480x360", @480, @360, @"AVCaptureSessionPresetMedium"],
+                           @[@"352x288", @352, @288, @"AVCaptureSessionPreset352x288"],
+                           @[@"192x144", @192, @144, @"AVCaptureSessionPresetLow"]];
         for (NSArray *size in sizes) {
             formats[size[0]] = @{@"CaptureStreamFormat": @"X9-Video-30", @"Width": size[1],
                                 @"Height": size[2], @"MaxFrameRateOverride": @30,
@@ -131,6 +146,16 @@ static NSDictionary *device_profile(NSDictionary *original, bool front, bool vid
             presets[size[3]] = @{@"DeviceFormat": size[0], @"MinFrameRate": @30, @"MaxFrameRate": @30,
                                  @"VideoCodec": @"hvc1"};
         }
+        /* iFrame variant of 720p30: same format, every frame a keyframe, as
+         * the stock plist's iFrame presets mean. */
+        NSMutableDictionary *iframe720 = [presets[@"AVCaptureSessionPreset1280x720"] mutableCopy];
+        iframe720[@"VideoCompressionProperties"] = @{@"MaxKeyFrameInterval": @1};
+        presets[@"AVCaptureSessionPresetiFrame1280x720"] = iframe720;
+        [iframe720 release];
+        NSMutableDictionary *iframe540 = [presets[@"AVCaptureSessionPresetiFrame960x540"] mutableCopy];
+        iframe540[@"VideoCompressionProperties"] = @{@"MaxKeyFrameInterval": @1};
+        presets[@"AVCaptureSessionPresetiFrame960x540"] = iframe540;
+        [iframe540 release];
         presets[@"AVCaptureSessionPresetHigh"] = @"AVCaptureSessionPreset1920x1080";
         presets[@"Common"] = @{@"MinFrameRate": @30, @"MaxFrameRate": @30, @"VideoCodec": @"hvc1",
             @"VideoCompressionProperties": @{@"MaxKeyFrameIntervalDuration": @1, @"AverageBitRate": @6000000}};
@@ -151,23 +176,61 @@ static NSDictionary *device_profile(NSDictionary *original, bool front, bool vid
     return result;
 }
 
+/* Every rejection below used to be silent. Across all 120 hook installs in
+ * the saved device logs the replacement success line never appeared once,
+ * so on device the stock H10ISP formats stayed in force and no X9 video
+ * format ever matched -- with no log evidence of which gate refused. Log
+ * the first requested plist path and each distinct rejection reason once. */
+static void profile_reject(unsigned bit, const char *why, uint32_t mask)
+{
+    static unsigned seen;
+    if (seen & bit) return;
+    seen |= bit;
+    x9_dprintf2( "X9 CAMERA PROFILE: keeping original plist (%s, backend mask=%x)\n", why, mask);
+}
+
 static id capture_plist(id self, SEL selector, NSURL *url)
 {
     id original = ((id (*)(id, SEL, id))original_plist)(self, selector, url);
+    static bool path_logged;
+    if (!path_logged && [url isKindOfClass:[NSURL class]] &&
+        [url.path hasSuffix:@"AVCaptureSession.plist"]) {
+        path_logged = true;
+        x9_dprintf2( "X9 CAMERA PROFILE: capture plist requested: %s\n",
+                url.path.UTF8String ?: "(null)");
+    }
     /* Read the original first. Do not supply a profile if its real asset or
-     * physical backend is unavailable, or modify other frameworks/plists. */
+     * physical backend is unavailable, or modify other frameworks/plists.
+     * Both board variants of this OS image are accepted: the stock rootfs
+     * carries D22 and D221 AVCaptureSession.plists whose AVCaptureDevices
+     * lists are identical (verified entry by entry), and which one
+     * CMCapture requests depends on the board identity the image resolves
+     * at runtime -- accepting only D22 silently never matched if the
+     * loader asked for D221. */
     if (![url isKindOfClass:[NSURL class]] || !url.isFileURL ||
-        ![url.path hasSuffix:@"/CMCapture.framework/D22/AVCaptureSession.plist"] ||
-        ![original isKindOfClass:[NSDictionary class]]) return original;
+        !([url.path hasSuffix:@"/CMCapture.framework/D22/AVCaptureSession.plist"] ||
+          [url.path hasSuffix:@"/CMCapture.framework/D221/AVCaptureSession.plist"]) ||
+        ![original isKindOfClass:[NSDictionary class]]) {
+        if ([url isKindOfClass:[NSURL class]] &&
+            [url.path hasSuffix:@"AVCaptureSession.plist"])
+            profile_reject(1, "capture plist is not the D22/D221 asset or not a dictionary", 0);
+        return original;
+    }
     uint32_t mask = x9_camera_backend_mask();
-    if (!mask) return original;
+    if (!mask) { profile_reject(2, "physical backend not ready", mask); return original; }
     NSArray *devices = original[@"AVCaptureDevices"];
-    if (![devices isKindOfClass:[NSArray class]] || devices.count > 16) return original;
+    if (![devices isKindOfClass:[NSArray class]] || devices.count > 16) {
+        profile_reject(4, "unexpected AVCaptureDevices shape", mask);
+        return original;
+    }
     bool video = x9_camera_software_hevc_ready();
     NSMutableArray *selected = [NSMutableArray array];
     bool wide = false, front = false, tele = false;
     for (id item in devices) {
-        if (![item isKindOfClass:[NSDictionary class]]) return original;
+        if (![item isKindOfClass:[NSDictionary class]]) {
+            profile_reject(8, "non-dictionary device entry", mask);
+            return original;
+        }
         NSString *uid = item[@"uniqueID"];
         if ([uid isEqual:@"com.apple.avfoundation.avcapturedevice.built-in_video:0"]) {
             if (wide) return original;
@@ -184,7 +247,10 @@ static id capture_plist(id self, SEL selector, NSURL *url)
         }
         /* Do not leave fake dual/depth/Pearl devices referring to absent streams. */
     }
-    if (!wide || !front || ((mask & (1u << X9_CAMERA_TELEPHOTO)) && !tele)) return original;
+    if (!wide || !front || ((mask & (1u << X9_CAMERA_TELEPHOTO)) && !tele)) {
+        profile_reject(16, "required physical device missing from stock plist", mask);
+        return original;
+    }
     NSMutableDictionary *copy = [original mutableCopy];
     copy[@"AVCaptureDevices"] = selected;
     NSDictionary *common = original[@"AVCaptureDeviceCommonSettings"];
@@ -213,5 +279,5 @@ void x9_camera_install_profile(uintptr_t slide)
     }
     /* Caller has already qualified the CMCapture image UUID. */
     original_plist = method_setImplementation(method, (IMP)capture_plist);
-    x9_dprintf2( "X9 CAMERA PROFILE: exact D22 URL-loader hook; requires physical backend\n");
+    x9_dprintf2( "X9 CAMERA PROFILE: exact D22/D221 URL-loader hook; requires physical backend\n");
 }
