@@ -6155,6 +6155,11 @@
    "template": "osfmk-c-3"
   },
   {
+   "name": "cpu_common.o",
+   "source": "osfmk/arm/cpu_common.c",
+   "template": "osfmk-c-3"
+  },
+  {
    "name": "sweet_early.o",
    "source": "osfmk/arm64/sweet_early.c",
    "prebuilt": "prebuilt/sweet_early.o",

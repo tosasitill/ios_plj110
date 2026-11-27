@@ -32,6 +32,8 @@
 
 - 调度优化（feat/sched-opt，离线完成，未上机）：诊断确认卡/烫主因是 ADT 单簇扁平化（MAX_CPU_CLUSTERS=1，调度器无三档核心感知）、governor v1 比例爬升慢且 util 非频率不变、热 cap 85°C 才收敛、8 核无下线/深度空闲。已落地策略 v2（纯头 `x9_sched_policy.h` + glue，boot arg `x9sched` 默认 0=逐字旧行为）：bit1 场景化 CPU 决策（峰值衰减 util、场景目标/下限、70–95°C 平滑热 cap、几何降频），bit2 场景推荐核掩码，bit4 LOAD/CAMERA 场景 GPU 目标 70%。主机测试 99 断言 + 基带 39/39，整树候选 `x9/out/sched-opt-20261127/boot.img`（15,659,008 B）构建通过。诊断、OPPO 对照表与上机 A/B 清单见 `x9/sched/README.md`；相机场景提示 `sweet_x9_sched_camera_active()` 已留接口、未接相机文件（避与并行相机工作冲突）。
 
+- CPU 下线/深度空闲（feat/cpu-offline，离线完成，未上机）：补齐调度优化留下的结构性缺口。PSCI 证据钉死（DTS psci-1.0/smc、idle-states 原始参数 cpuoff=0x00010000 与 Linux cpu_psci_cpu_die 的 CPU_OFF 参数一致；原厂 core_ctl min_cpus={4,0,0}）。XNU 盘点找到三处阻断：`ml_cpu_can_exit` 在本构建（无 USE_APPLEARMSMP）恒 false、`SweetCPU::quiesceCPU/haltCPU` 是 panic 桩、startCPU/initCPU 不支持热重启/恢复；且 `cpu_exit_wait()` 在本配置是空操作，下线确认必须走 AFFINITY_INFO。实现（boot arg `x9cpuoff` 位掩码，默认 0=逐字旧行为）：bit1 设施（PSCI 探测 + quiesce/resume/restart 武装）、bit2 场景/负载排空策略（纯头 `x9_cpuoff_policy.h`，IDLE 10s/LIGHT 低负载 20s 排空大核，默认保留 cpu7 与一个大核在线，比原厂更保守；场景需求立即上线、防抖/退避/黑名单齐备）、bit4 超大核可下线、bit8 大核可排空、bit16 实验 CPU_SUSPEND 深度。安全线：cpu0 与小核簇永不下线（策略+quiesce 双层）、haltCPU 睡眠路径保持 panic 不动、下线失败回滚 online、上线失败 park 不 panic 且管理器拉黑。主机测试 63 断言 + 基带 42/42 + sched 套件 OK，整树候选 `x9/out/cpuoff-final-20261127/boot.img`（15,663,104 B）构建通过。证据、盘点与上机清单（探测→策略循环×20→待机 A/B→唤醒可靠性→suspend 深度探针）见 `x9/cpuoff/README.md`；待上机探测：ATF 对 suspended 核的 CPU_ON 语义、非 cpuidle 上下文 CPU_SUSPEND 接受度、suspended 核的 AFFINITY_INFO 值。
+
 ## 2. 环境与固定输入
 
 ### 2.1 工具
