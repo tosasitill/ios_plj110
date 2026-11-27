@@ -655,7 +655,7 @@ bsd_init(void)
 		x9_sample_start();
 		int usb_log = 0;
 		int usb_device = sweet_x9_arg("x9_usb", 0);
-		if (usb_device == 1 || usb_device == 2) {
+		if (usb_device == 1 || usb_device == 2 || usb_device == 3) {
 			extern void x9_usb_start(void);
 			x9_usb_start(); /* replaces, never races, the EP0 log worker */
 		} else if ((usb_log = sweet_x9_arg("x9_usb_log", 1)) == 1) {

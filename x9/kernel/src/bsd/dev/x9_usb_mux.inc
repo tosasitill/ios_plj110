@@ -12,6 +12,7 @@
 static struct x9_mux_engine mux_engine;
 static unsigned mux_engine_ready;
 static socket_t mux_socks[X9_MUX_CONNS];
+static unsigned mux_rx_logged, mux_open_logged;
 static uint8_t mux_scratch[4096];
 
 #define X9_MUX_TXQ 4
@@ -59,6 +60,11 @@ static int mux_glue_open(void *ctx, uint16_t dport)
         return -1;
     }
     mux_socks[slot] = so;
+    if (!mux_open_logged) {
+        mux_open_logged = 1;
+        printf("X9 USB MUX: first loopback service connection (port %u)\n",
+            dport);
+    }
     return slot;
 }
 
@@ -109,6 +115,11 @@ static void x9_mux_glue_ensure(void)
 /* EP1 OUT completion data (called from complete()). */
 static void x9_mux_glue_rx(const uint8_t *bytes, unsigned n)
 {
+    if (!mux_rx_logged) {
+        mux_rx_logged = 1;
+        printf("X9 USB MUX: first host mux traffic (%u bytes); engine live\n",
+            n);
+    }
     x9_mux_glue_ensure();
     x9_mux_feed(&mux_engine, bytes, n);
 }

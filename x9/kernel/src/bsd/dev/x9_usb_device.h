@@ -65,6 +65,9 @@ int x9_usb_receive(uint64_t, uint32_t, void *, uint32_t *);
 int x9_usb_send_tracked(uint64_t, uint32_t, const void *, uint32_t, uint64_t *);
 int x9_usb_get_tx_result(uint64_t, uint32_t, uint64_t, unsigned, struct x9_usb_tx_result *);
 int x9_usb_dma_alloc(void **, uint64_t *);
+/* IOPlatformSerialNumber as a validated C string (the hardware serial the
+ * usbmux profile must present as its USB serial). 0 on success. */
+int x9_platform_serial(char *, unsigned);
 /* Sole device worker only. Registry empty by default; the bulk QMU backend is
  * not installed today. available requires native_apple_stack AND a live bus.
  * Does not enable native mode, change identity or accept a user callback. */

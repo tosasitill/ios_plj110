@@ -10,6 +10,8 @@
 #include <libkern/c++/OSString.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSArray.h>
+#include <libkern/c++/OSData.h>
+#include <IOKit/IORegistryEntry.h>
 #include <sys/errno.h>
 #include "../../../bsd/dev/x9_usb_device.h"
 #include "../../../bsd/dev/x9_usb_native_qmu.h"
@@ -45,6 +47,43 @@ extern "C" int x9_usb_dma_alloc(void **va, uint64_t *pa)
     bzero(*va, 16384); pinned[count++] = m;
     return 0;
 }
+
+/* The usbmux profile's USB serial string must equal IOPlatformSerialNumber:
+ * usbmuxd adopts the USB serial as the UDID while lockdownd answers with the
+ * platform value, so a synthetic serial could enumerate but never pair. The
+ * platform expert has already decoded the device-tree serial-number by the
+ * time BSD init runs; fall back to those raw bytes (the very input of
+ * createSystemSerialNumberString) if the property is not reachable. */
+extern "C" int x9_platform_serial(char *out, unsigned capacity)
+{
+    if (!out || capacity < 2) return EINVAL;
+    char value[32] = {};
+    IOService *platform = IOService::getPlatform();
+    auto *serial = platform ? OSDynamicCast(OSString,
+        platform->getProperty("IOPlatformSerialNumber")) : nullptr;
+    if (serial && serial->getLength() && serial->getLength() < sizeof(value))
+        memcpy(value, serial->getCStringNoCopy(), serial->getLength() + 1);
+    if (!value[0]) {
+        IORegistryEntry *entry = IORegistryEntry::fromPath("IODeviceTree:/");
+        auto *data = entry ? OSDynamicCast(OSData,
+            entry->getProperty("serial-number")) : nullptr;
+        if (data && data->getLength() && data->getLength() < sizeof(value)) {
+            const char *bytes = (const char *)data->getBytesNoCopy();
+            unsigned n = 0;
+            while (n < data->getLength() && bytes[n]) n++;
+            if (n && n < sizeof(value)) { memcpy(value, bytes, n); value[n] = 0; }
+        }
+        if (entry) entry->release();
+    }
+    unsigned n = 0;
+    while (value[n]) {
+        if ((uint8_t)value[n] < 0x20 || (uint8_t)value[n] > 0x7e) return EINVAL;
+        n++;
+    }
+    if (!n || n + 1 > capacity) return ENOENT;
+    memcpy(out, value, n + 1);
+    return 0;
+}
 class X9USBDevice : public IOService {
     OSDeclareDefaultStructors(X9USBDevice);
 public:
@@ -56,7 +95,7 @@ OSDefineMetaClassAndStructors(X9USBDevice, IOService);
 IOService *X9USBDevice::probe(IOService *p, SInt32 *score)
 {
     int mode = sweet_x9_arg("x9_usb", 0);
-    if (!sweet_early_is_x9() || (mode != 1 && mode != 2)) return nullptr;
+    if (!sweet_early_is_x9() || (mode != 1 && mode != 2 && mode != 3)) return nullptr;
     return IOService::probe(p, score);
 }
 bool X9USBDevice::start(IOService *p)
@@ -73,6 +112,8 @@ bool X9USBDevice::start(IOService *p)
         !setProperty("X9USBDescriptionMetadata", kOSBooleanTrue) ||
         !setProperty("X9USBTrackedTXABIVersion", X9_USB_TX_ABI, 32) ||
         !setProperty("X9USBSuperSpeed", kOSBooleanFalse)) return false;
+    if (sweet_x9_arg("x9_usb", 0) == 3)
+        setProperty("X9USBNetworkInterface", "none-usbmux-profile");
     /* BSD starts the only MMIO worker after proc0 is ready. Service discovery
      * is not a statement that enumeration or a DMA transfer has succeeded. */
     registerService();
