@@ -62,6 +62,7 @@ struct x9q_job {
  uint8_t sim_slot,cards[512],slots[41],iccid[2][10];unsigned card_bytes,slot_bytes;
  bool iccid_valid[2],card_ready[2];
  int reg[3],attached,act,csq;uint16_t mcc,mnc;unsigned mnc_digits;
+ uint8_t sec_form,sec_compact[40];unsigned sec_compact_len; /* 0 none, 1 referenced 8B, 2 compact 8C, 3 expanded AB */
 };
 static x9q_job x9q_jobs[X9Q_JOBS];static int x9q_active=-1;static uint64_t x9q_order;
 static void x9q_cancel(x9q_job &j){
@@ -109,13 +110,51 @@ static bool x9q_ber(const uint8_t *p,unsigned n,unsigned &pos,uint8_t &tag,x9q_v
   k=0;while(bytes--)k=(k<<8)|p[pos++];}
  if(k>n-pos)return false;v={p+pos,k};pos+=k;return true;
 }
+/* Translate ETSI TS 102 221 compact security attributes (FCP tag 0x8C)
+ * into QMI file-attribute access entries (libqmi logic: 0 ALWAYS, 1 NEVER,
+ * 2 AND, 3 OR, 4 SINGLE; mask bits PIN1/PIN2/UPIN/ADM = 1/2/4/8). Only the
+ * outcomes the compact form states unambiguously are translated: an
+ * operation whose AM bit is clear is NEVer (the standard's default), and an
+ * SC byte of 0x00 is ALWays. Any referenced key condition (non-zero SC,
+ * e.g. the 0x90 ADM/PIN form whose key reference is only implicit), a
+ * proprietary AM byte (b8 set), a malformed rule, or a lone DEACTIVATE /
+ * ACTIVATE bit (their b4/b5 order is not distinguished here) fails the
+ * whole translation; the caller then keeps its conservative fallback.
+ * Output order matches the QMI response: read, write, increase,
+ * deactivate, activate. Masks stay 0: ALW/NEV carry no key reference. */
+static bool x9q_acl_translate(const uint8_t *v,unsigned n,uint8_t logic[5],uint16_t mask[5]){
+ static const uint8_t bit_op[8]={255,0,1,2,3,4,255,255}; /* AM b1..b7 -> op; b6/b7 unmapped */
+ bool seen[5]={};unsigned i=0;
+ for(unsigned k=0;k<5;k++){logic[k]=1;mask[k]=0;}
+ if(!n)return false;
+ while(i<n){
+  uint8_t am=v[i++];if(am&0x80)return false;
+  unsigned sc=0;for(unsigned b=0;b<7;b++)if(am&(1u<<b))sc++;
+  if(i+sc>n)return false;
+  for(int b=6;b>=0;b--){
+   if(!(am&(1u<<b)))continue;
+   uint8_t cond=v[i++];uint8_t op=bit_op[b+1];
+   if(op==255)continue;
+   if(cond)return false;
+   seen[op]=true;logic[op]=0;
+  }
+ }
+ /* DEACTIVATE/ACTIVATE must agree: a single one of the pair is ambiguous. */
+ if(seen[3]!=seen[4])return false;
+ return true;
+}
 static bool x9q_fcp(x9q_job &j,const uint8_t *p,unsigned n,uint16_t expected){
- j.record_size=j.record_count=0;j.structure=0;unsigned pos=0;uint8_t tag;x9q_view v;
+ j.record_size=j.record_count=0;j.structure=0;j.sec_form=0;j.sec_compact_len=0;
+ unsigned pos=0;uint8_t tag;x9q_view v;
  if(!x9q_ber(p,n,pos,tag,v)||tag!=0x62||pos!=n)return false;
  bool desc=false,size=false,id=false;unsigned i=0;
  while(i<v.n){x9q_view f;if(!x9q_ber(v.p,v.n,i,tag,f))return false;
   if(tag==0x83){if(f.n!=2||((unsigned)f.p[0]<<8|f.p[1])!=expected)return false;id=true;}
   else if(tag==0x80){if(f.n<1||f.n>2)return false;unsigned bytes=f.p[0];if(f.n==2)bytes=(bytes<<8)|f.p[1];j.raw_len=bytes;size=true;}
+  else if(tag==0x8b)j.sec_form=1;
+  else if(tag==0xab)j.sec_form=3;
+  else if(tag==0x8c){j.sec_form=2;
+   if(f.n<=sizeof(j.sec_compact)){memcpy(j.sec_compact,f.p,f.n);j.sec_compact_len=f.n;}}
   else if(tag==0x82){if(f.n<2)return false;unsigned type=f.p[0]&7;
    if(type==1)j.structure=1;
    else if((type==2||type==6)&&f.n==5){j.structure=(uint8_t)type;j.record_size=(uint16_t)((f.p[2]<<8)|f.p[3]);j.record_count=f.p[4];}
@@ -687,13 +726,23 @@ static void x9q_result(x9q_job &j,const char *r,int result){
    if(j.id==0x24){
     /* File Attributes (libqmi order): size, id, type (0 transparent, 1 cyclic,
      * 2 linear fixed), record size, record count, then read/write/increase/
-     * deactivate/activate as {logic u8, mask u16}, then raw FCP. Security is what
-     * this bridge permits, not the card's ACL: read ALWAYS(0), others NEVER(1). */
+     * deactivate/activate as {logic u8, mask u16}, then raw FCP. When the card
+     * states compact security attributes (tag 0x8C) that translate without
+     * guessing (x9q_acl_translate), the card's own ALW/NEV outcomes are
+     * reported. Otherwise the fallback is what this bridge permits, not the
+     * card's ACL: read ALWAYS(0), others NEVER(1). Referenced (0x8B) and
+     * expanded (0xAB) forms are observed in sec_form but never translated:
+     * their key references live in an ARR file this path does not read. */
     uint8_t at[16+512];unsigned w=0;
     auto u16=[&](unsigned v){at[w++]=(uint8_t)v;at[w++]=(uint8_t)(v>>8);};
     u16(j.raw_len);u16(j.file);at[w++]=(uint8_t)(j.structure==1?0:j.structure==6?1:2);
     u16(j.record_size);u16(j.record_count);
-    for(unsigned k=0;k<5;k++){at[w++]=(uint8_t)(k?1:0);u16(0);}
+    uint8_t acl_logic[5]={0,1,1,1,1};uint16_t acl_mask[5]={0,0,0,0,0};
+    bool acl_card=j.sec_form==2&&x9q_acl_translate(j.sec_compact,j.sec_compact_len,acl_logic,acl_mask);
+    {static unsigned logged;if(logged<32){logged++;
+     printf("X9 QMI AT: UIM 0x24 file 0x%04x security form %u (0 none 1 ref8B 2 compact8C 3 expAB); %s\n",
+      j.file,j.sec_form,acl_card?"card compact ACL translated":"bridge-permission fallback");}}
+    for(unsigned k=0;k<5;k++){at[w++]=acl_logic[k];u16(acl_mask[k]);}
     if(n>sizeof(at)-w-2){x9q_error(j,X9Q_INTERNAL);return;}
     u16(n);memcpy(at+w,data,n);w+=n;
     x9q_packet p(j.req);uint8_t sw[]={a,b};p.tlv(0x10,sw,2);p.tlv(0x11,at,w);x9q_finish(j,p);return;
@@ -846,7 +895,14 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
  if(service==0x0b&&id==0x6e){x9ds_map(local,port,req,len);return;}
  if(service==0x0b&&id==0x2e){
   x9q_view m=x9q_tlv(req,len,1);
-  if(!m.p||m.n!=4||len!=14||x9q_u32(m.p)&~0x11u){x9q_reject(local,port,req,len,X9Q_UNSUPPORTED);return;}
+  if(!m.p||m.n!=4||len!=14||x9q_u32(m.p)&~0x11u){
+   /* Observe only: name what was asked so a later session can size the
+    * gap. The registration is still rejected as a whole; refresh, PIN and
+    * eSIM event bits are never ACKed without a real event source. */
+   if(m.p&&m.n==4){static unsigned logged;if(logged<8){logged++;
+    printf("X9 QMI AT: UIM 0x2e mask 0x%x carries unsupported event bits 0x%x; rejected, nothing ACKed\n",
+     x9q_u32(m.p),x9q_u32(m.p)&~0x11u);}}
+   x9q_reject(local,port,req,len,X9Q_UNSUPPORTED);return;}
   c.uim_mask=x9q_u32(m.p);c.next=0;x9q_packet p(req);p.tlv(0x10,m.p,4);p.send(local,port);return;
  }
  /* NAS Indication Register. 161.txt: CommCenter always asks for many tags
