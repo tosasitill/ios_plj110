@@ -460,6 +460,16 @@ exports:
         return wrap
 
     def build_apt(self):
+        # apt's CMake hard-requires a host `triehash` executable
+        # (find_program; generates the vendor/trie headers). It is a
+        # single Perl script; install the pinned copy into the host
+        # shim dir, which make_host_shim already puts first in PATH.
+        th = extract('triehash', self.work)
+        shim = self.work / 'hostshim'
+        shim.mkdir(parents=True, exist_ok=True)
+        tool = shim / 'triehash'
+        shutil.copy2(th / 'triehash.pl', tool)
+        tool.chmod(0o755)
         src = extract('apt', self.work)
         recipes = extract('procursus_recipes', self.work)
         pdir = recipes / 'build_patch' / 'apt'
@@ -497,6 +507,86 @@ exports:
             '<!ENTITY keyring-master-filename "">\n'
             '<!ENTITY keyring-uri "">\n'
             '<!ENTITY current-codename "storm">\n')
+        # With USE_NLS=0, apt's apti18n.h.in stubs setlocale & friends
+        # with throw() specifications. glibc's <locale.h> declaration
+        # is noexcept-compatible so upstream never notices, but the
+        # iOS SDK declares setlocale with no exception specification
+        # and clang rejects the mismatched redeclaration. Drop the
+        # throw() from the four stubs; the inline no-op bodies (the
+        # actual point of the stubs) are unchanged.
+        i18n = src / 'CMake/apti18n.h.in'
+        text = i18n.read_text()
+        assert text.count(') throw() {') == 4
+        i18n.write_text(text.replace(') throw() {', ') {'))
+        # fileutl.cc (with Procursus's fork-fd-close patch) uses
+        # <libproc.h>/proc_pidinfo to enumerate fds in ExecFork. The
+        # iOS SDK ships no libproc.h. Guard both spots to non-iOS
+        # Apple targets so iOS takes the TU's pre-existing generic
+        # fallback (brute-force FD_CLOEXEC over 3.._SC_OPEN_MAX),
+        # which needs no /proc and no libproc.
+        futl = src / 'apt-pkg/contrib/fileutl.cc'
+        text = futl.read_text()
+        old_inc = '#if defined(__APPLE__)\n#include <libproc.h>\n#endif'
+        assert text.count(old_inc) == 1
+        text = text.replace(
+            old_inc,
+            '#if defined(__APPLE__) && '
+            '!defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)\n'
+            '#include <libproc.h>\n#endif')
+        old_branch = '#if defined(__APPLE__)\n        int bufsz = 0, count = 0;'
+        assert text.count(old_branch) == 1
+        text = text.replace(
+            old_branch,
+            '#if defined(__APPLE__) && '
+            '!defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)\n'
+            '        int bufsz = 0, count = 0;')
+        futl.write_text(text)
+        # cdromutl.cc calls system() twice (config-provided cdrom
+        # mount/umount command strings, inside forked children). Same
+        # iOS SDK unavailability as dpkg/GNU patch: route through a
+        # fork/exec of the storm shell with system()'s return
+        # convention (wait status, -1 on fork failure).
+        cdrom = src / 'apt-pkg/contrib/cdromutl.cc'
+        text = cdrom.read_text()
+        assert text.count('system(') == 2
+        text = text.replace('system(', 'x9_system(')
+        inc_anchor = '#include <apti18n.h>\n'
+        assert text.count(inc_anchor) == 1
+        helper = inc_anchor + '''
+/* x9: system() is unavailable in the iOS SDK; equivalent via sh. */
+#include <sys/wait.h>
+static int x9_system(const char *command)
+{
+   pid_t pid = fork();
+   if (pid == 0)
+     {
+        execl("/var/storm/usr/bin/sh", "sh", "-c", command, (char *) 0);
+        _exit(127);
+     }
+   if (pid < 0)
+     return -1;
+   int status = 0;
+   while (waitpid(pid, &status, 0) < 0)
+     if (errno != EINTR)
+       return -1;
+   return status;
+}
+'''
+        cdrom.write_text(text.replace(inc_anchor, helper))
+        # Two more TUs call system() the same way: fileutl.cc's
+        # RunScripts (dpkg pre/post-invoke hooks, in a forked child)
+        # and private-source.cc (dpkg-source / dpkg-buildpackage
+        # command strings). Same treatment, same helper.
+        for rel, count in (('apt-pkg/contrib/fileutl.cc', 1),
+                           ('apt-private/private-source.cc', 2)):
+            tu = src / rel
+            text = tu.read_text()
+            assert text.count('system(') >= count
+            assert text.count('\t if (system(') + text.count(' if (system(') >= count
+            text = text.replace(' if (system(', ' if (x9_system(')
+            assert 'x9_system(' in text
+            assert text.count(inc_anchor) == 1, rel
+            tu.write_text(text.replace(inc_anchor, helper))
         pfx = self._pfx()
         pcwrap = self._cross_pkg_config()
         tc = self.work / 'apt-toolchain.cmake'

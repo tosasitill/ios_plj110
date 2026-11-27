@@ -112,5 +112,11 @@
     "url": "https://fossies.org/linux/misc/db-18.1.40.tar.gz",
     "sha256": "0cecb2ef0c67b166de93732769abdeba0555086d51de1090df325e18ee8da9c8",
     "note": "Procursus berkeleydb.mk pin (fossies mirror; Oracle requires registration). apt 2.9.4 CMakeLists has find_package(Berkeley REQUIRED) for apt-ftparchive; headers land in usr/include/db181 like Procursus"
+  },
+  "triehash": {
+    "version": "0.3",
+    "url": "https://github.com/julian-klode/triehash/archive/refs/tags/v0.3.tar.gz",
+    "sha256": "289a0966c02c2008cd263d3913a8e3c84c97b8ded3e08373d63a382c71d2199c",
+    "note": "host build tool required by apt CMake (find_program triehash); single Perl script, run on the build host only"
   }
 }
