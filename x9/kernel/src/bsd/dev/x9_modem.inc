@@ -44,6 +44,8 @@
 #define X9MD_CLOCK_REQUEST 5
 #define X9MD_POWER_CONFIG 6
 #define X9MD_FLIGHT_MODE_SET 7
+#include "x9_voice_smem.h"
+
 #define X9MD_CCIF_CLK_REQUEST 14
 #define X9MD_CCIF_CLK_RELEASE 15
 #define X9MD_MTCMOS_ENABLE 18
@@ -535,6 +537,21 @@ static int x9md_smem_init(void){
   cc+=sz;
  }
  printf("X9 MODEM: S2 cleared %x bytes of cacheable smem\n",cc);
+ if(sweet_x9_arg("x9_voice_diag",0)==1){
+  /* Observation only (x9_voice_diag=1, default off): report the USIP
+   * voice-EMI descriptor this boot's LK tables produced. No mapping,
+   * clearing or granting is added or changed by this block. */
+  struct x9md_reg *vr=&x9md_regs[X9_VOICE_SMEM_ID];
+  struct x9_voice_smem_desc vd;struct x9_voice_smem_report vrp;
+  vd.md_view=vr->md;vd.size=vr->size;vd.flags=vr->flags;vd.ap_off=vr->ap_off;
+  vd.in_lk=vr->in_lk;vd.exists=vr->exists;vd.nclr_first=0;
+  for(unsigned k=0;k<sizeof(x9md_nclr_first);k++)
+   if(x9md_nclr_first[k]==X9_VOICE_SMEM_ID)vd.nclr_first=1;
+  x9_voice_smem_evaluate(&vd,&vrp);
+  printf("X9 VOICE: smem id%u present=%d android_match=%d md=%08x size=%x flags=%x ap_off=%x in_lk=%d exists=%d nclr_first=%d; observation only\n",
+   X9_VOICE_SMEM_ID,vrp.present,vrp.android_match,vrp.md_view,vrp.size,
+   vrp.flags,vd.ap_off,vd.in_lk,vd.exists,vd.nclr_first);
+ }
  return 0;
 }
 
