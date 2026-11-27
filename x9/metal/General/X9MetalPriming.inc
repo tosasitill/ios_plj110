@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: MIT
-// DRAFT -- not compiled in the preparation environment (no iOS SDK / plugin
-// build chain there). Written against the rev284 frontend sources read for
-// this draft; expect one compile-fix iteration on the build machine.
+// Shipped in the rev286 frontend (its on-device "no inventory" lines are in
+// the r286 log). The rev287 round then proved the failure mode this file
+// cannot see from inside: the plugin build compiles this frontend from
+// .local/x9/MaliMetal/X9/General, a symlink into the main checkout, and
+// that checkout had been reverted to a pre-priming state -- only the
+// primelist was re-applied. Rev287 therefore shipped the inventory with a
+// binary containing no priming code at all, and the session log held zero
+// x9-prime lines because no code existed to emit one.
+// build-general-metal.py now runs check-priming-consistency.py on both
+// the source dir and the built bundle to refuse that mismatch.
 //
 // X9MetalPriming.inc -- pipeline priming for the X9 Metal frontend.
 //
@@ -161,9 +168,10 @@ static std::vector<std::string> primeLibraries(std::string &note) {
 // Wait until a 250 ms window is quiet, after having seen the desktop busy
 // at least once (a never-busy process starts immediately). Returns the
 // largest commit count any window saw. Deadline: kBusyDeadlineMs.
-static unsigned primeWaitForQuiet() {
+static unsigned primeWaitForQuiet(bool *forced) {
  const uint64_t began=primeNowMs();
  bool busy=false;unsigned peak=0;
+ if(forced)*forced=false;
  for(;;) {
   const uint64_t before=gCommits.load();
   struct timespec ts={0,250*1000*1000};
@@ -173,7 +181,7 @@ static unsigned primeWaitForQuiet() {
   x9_prime_rate=(uint32_t)peak;
   if(delta>kQuietCommits) {busy=true;x9_prime_compiling=2;}
   else return peak;   // never busy, or the first quiet window after busy
-  if(primeNowMs()-began>kBusyDeadlineMs)return peak;
+  if(primeNowMs()-began>kBusyDeadlineMs) {if(forced)*forced=true;return peak;}
  }
 }
 
@@ -250,6 +258,8 @@ static void *primeThread(void *raw) {
    x9_prime_pass_complete=2;
    delete ctx;return nullptr;
   }
+  NSLog(@"x9-prime: begin %s libraries=%u build=%s",note.c_str(),
+        (unsigned)libraries.size(),ctx->build.c_str());
   const std::string dir=primeDirectory();
   const std::string donePath=dir.empty()?std::string():dir+"/prime-done";
   const std::set<std::string> done=donePath.empty()?std::set<std::string>():primeReadLines(donePath);
@@ -260,7 +270,11 @@ static void *primeThread(void *raw) {
    const std::string id=path+"\t"+std::to_string((long long)st.st_size)+"\t"+
        std::to_string((long long)st.st_mtimespec.tv_sec)+"\t"+ctx->build;
    if(done.count(id)) {resumed++;finished++;x9_prime_libraries_done=finished;continue;}
-   primeWaitForQuiet();
+   bool forced=false;
+   const unsigned peak=primeWaitForQuiet(&forced);
+   if(forced)
+    NSLog(@"x9-prime: quiet deadline before %s (peak=%u commits/250ms); proceeding busy",
+          path.c_str(),peak);
    x9_prime_compiling=3;
    const bool ok=primeLibrary(ctx->device,[NSString stringWithUTF8String:path.c_str()]);
    x9_prime_compiling=0;
