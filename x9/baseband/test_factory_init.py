@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Exercise the factory-init replay (IMS config writer + feature bytes)."""
+import pathlib
+import subprocess
+import tempfile
+import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+SOURCE = ROOT / 'x9/kernel/src/iokit/Kernel/arm/X9Messages.inc'
+
+
+class FactoryInit(unittest.TestCase):
+    def compile_run(self, code):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = pathlib.Path(tmp) / 'test.cpp'
+            exe = pathlib.Path(tmp) / 'test'
+            src.write_text(code)
+            subprocess.run(['c++', '-std=c++17', '-Wall', '-Werror', str(src), '-o', str(exe)], check=True)
+            return subprocess.run([str(exe)], check=True, capture_output=True, text=True).stdout
+
+    def test_factory_sequence_bytes_and_hold(self):
+        source = SOURCE.read_text()
+        b0 = source.index('static void x9m_factory_ims_bytes(')
+        b1 = source.index('static bool x9m_diag_storage_busy(', b0)
+        code = r'''
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <strings.h>
+struct x9m_sim { unsigned ims_stage=0, fx_stage=0; uint64_t fx_token=0, fx_deadline=0; bool ims_hold=false, fx_hold=false; };
+x9m_sim x9m_sims[2]; bool x9w_control_ready=true; bool factory_on=true; uint64_t clock_ms=1, next_token=1;
+bool x9m_factory_enabled(){return factory_on;}
+unsigned x9_md_sim_count(){return 2;} bool x9_md_mipc_online(){return true;} uint64_t x9q_ms(){return clock_ms;}
+struct Rec { unsigned id=0, mask=0, tag102[6]={}, has102=0, word100=99, byte100=99, tlv100len=0; };
+Rec recs[16]; unsigned count=0; uint64_t tok_req[64]={}; unsigned tok_sim[64]={}; int reject_sim=-1; unsigned reject_id=0;
+struct x9w_frame { unsigned id, mask; Rec *r;
+ x9w_frame(unsigned i, unsigned m):id(i),mask(m){r=&recs[count];r->id=i;r->mask=m;}
+ void tlv(unsigned tag, const void *v, unsigned len){ if(tag==0x102&&len==6){r->has102=1;memcpy(r->tag102,v,6);} if(tag==0x100)r->tlv100len=len; }
+ void byte(unsigned tag, uint8_t v){ if(tag==0x100)r->byte100=v; }
+ void word(unsigned tag, uint32_t v){ if(tag==0x100)r->word100=v; }
+ uint64_t submit(){ count++; uint64_t t=next_token++; tok_req[t]=id; tok_sim[t]=(mask==1)?0:1; return t; } };
+uint8_t answer[64]; unsigned answer_for=0;
+int x9_md_mipc_take(uint64_t token, uint8_t *p, unsigned, unsigned *n){
+ unsigned req=tok_req[token]; unsigned sim=tok_sim[token]; memset(answer,0,sizeof(answer));
+ answer[8]=(uint8_t)(1u<<sim); unsigned cnf=req+1; answer[10]=(uint8_t)cnf; answer[11]=(uint8_t)(cnf>>8);
+ answer[2]=(reject_sim==(int)sim&&reject_id==req)?1:0;
+ memcpy(p,answer,32); *n=32; return 1; }
+bool x9w_wire(const uint8_t*, unsigned){return true;}
+unsigned x9q_u16(const uint8_t *p){return p[0]|(p[1]<<8);}
+bool x9w_word(const uint8_t *p, unsigned, unsigned, unsigned &v){v=p[2];return true;}
+struct x9q_view {const uint8_t *p; unsigned n;};
+uint8_t cache[6]={3,3,0,0,1,1};
+x9q_view x9w_tlv(const uint8_t*, unsigned, unsigned tag){return tag==0x100?x9q_view{cache,6}:x9q_view{nullptr,0};}
+''' + source[b0:b1] + r'''
+int main(){uint8_t p[64]={};
+ uint8_t out[6]; x9m_factory_ims_bytes(out); assert(!memcmp(out,"\x03\x03\x00\x00\x01\x01",6));
+ factory_on=false; x9m_factory_poll(p,sizeof(p)); assert(count==0);
+ factory_on=true; x9m_sims[0].ims_stage=4; x9m_sims[1].ims_stage=4;
+ for(int i=0;i<16;i++)x9m_factory_poll(p,sizeof(p));
+ unsigned ids1[8], ids2[8]; unsigned n1=0, n2=0;
+ for(unsigned i=0;i<count;i++)(recs[i].mask==1?ids1[n1++]:ids2[n2++])=recs[i].id;
+ assert(n1==4&&ids1[0]==0xa1c&&ids1[1]==0xa18&&ids1[2]==0xa00&&ids1[3]==0xa02);
+ assert(n2==3&&ids2[0]==0xa18&&ids2[1]==0xa00&&ids2[2]==0xa02);
+ for(unsigned i=0;i<count;i++)if(recs[i].id==0xa00){assert(recs[i].has102&&!memcmp(recs[i].tag102,"\x03\x03\x00\x00\x01\x01",6));assert(recs[i].word100==0);}
+ for(unsigned i=0;i<count;i++)if(recs[i].id==0xa1c)assert(recs[i].tlv100len==64);
+ assert(x9m_sims[0].fx_stage==5&&x9m_sims[1].fx_stage==5);
+ /* Rejection of the config write holds that SIM without retry. */
+ count=0; memset(recs,0,sizeof(recs)); memset(tok_req,0,sizeof(tok_req));
+ x9m_sims[0]=x9m_sim{}; x9m_sims[1]=x9m_sim{}; x9m_sims[0].ims_stage=4; x9m_sims[1].ims_stage=4;
+ reject_sim=1; reject_id=0xa00;
+ for(int i=0;i<16;i++)x9m_factory_poll(p,sizeof(p));
+ assert(x9m_sims[1].fx_hold&&x9m_sims[1].fx_stage==3);
+ assert(x9m_sims[0].fx_stage==5);
+ printf("factory-init ok\n");}
+'''
+        out = self.compile_run(code)
+        self.assertIn('factory-init ok', out)
+        self.assertIn('X9 FACTORY: SIM1 IMS config accepted by modem', out)
+        self.assertIn('feature cache after write raw=030300000101', out)
+
+
+if __name__ == '__main__':
+    unittest.main()
