@@ -166,6 +166,51 @@ static void test_hold(void)
         "re-begin after cancel broken");
 }
 
+static void test_envelope_continuous(void)
+{
+    struct x9_haptic_stock e;
+    x9_haptic_stock_init(&e, X9_HS_FEEL_GRADE|X9_HS_FEEL_ENV, 1000);
+    gen_clear(); gen_silence(20); gen_burst(16000, 250); gen_silence(60);
+    emulate_busy=1; run_reset();
+    uint32_t probe=960+4800; /* 100 ms into the sustained segment */
+    run(&e, probe, 0);
+    CHECK(nfires==1, "fires=%d want 1 (the onset tap only)", nfires);
+    if(nfires==1)
+        CHECK(fires[0].grade==X9_HS_GRADE_STANDARD, "grade=%u want STANDARD", fires[0].grade);
+    CHECK(nbuzz_on==1, "buzz_on=%d want 1", nbuzz_on);
+    /* onset ~ sample 970; sustain fires at +30 ms of hot span */
+    CHECK(buzz_on_at>960+1200 && buzz_on_at<960+1800,
+        "buzz_on_at=%u want ~onset+30 ms", buzz_on_at);
+    CHECK(buzz_level_mid1>300, "buzz level mid=%u want >300 (env of 16000)", buzz_level_mid1);
+    CHECK(nbuzz_off==1, "buzz_off=%d want 1", nbuzz_off);
+    uint32_t silence_at=960+12000;
+    CHECK(buzz_off_at>=silence_at && buzz_off_at<=silence_at+300,
+        "buzz_off_at=%u want silence+~5 ms (%u)", buzz_off_at, silence_at);
+}
+static void test_envelope_tracks_amplitude(void)
+{
+    struct x9_haptic_stock e;
+    x9_haptic_stock_init(&e, X9_HS_FEEL_GRADE|X9_HS_FEEL_ENV, 1000);
+    gen_clear(); gen_silence(20); gen_burst(6000, 120); gen_burst(24000, 120); gen_silence(40);
+    emulate_busy=1; run_reset();
+    run(&e, 960+2880, 960+8640); /* mid of each 120 ms segment */
+    CHECK(nbuzz_on==1, "buzz_on=%d want 1 (one unbroken span)", nbuzz_on);
+    CHECK(buzz_level_mid1>=100 && buzz_level_mid1<=280,
+        "level1=%u want ~183 (env of 6000)", buzz_level_mid1);
+    CHECK(buzz_level_mid2>=600 && buzz_level_mid2<=830,
+        "level2=%u want ~732 (env of 24000)", buzz_level_mid2);
+    CHECK(buzz_level_mid2>buzz_level_mid1+200,
+        "level did not follow the amplitude step: %u -> %u", buzz_level_mid1, buzz_level_mid2);
+}
+static void test_envelope_off_in_legacy(void)
+{
+    struct x9_haptic_stock e; x9_haptic_stock_init(&e, 0, 1000);
+    gen_clear(); gen_silence(20); gen_burst(16000, 250); gen_silence(40);
+    emulate_busy=1; run_reset(); run(&e, 0, 0);
+    CHECK(nfires==1, "feel=0 fires=%d want 1", nfires);
+    CHECK(nbuzz_on==0, "feel=0 buzz_on=%d want 0", nbuzz_on);
+}
+
 int main(void)
 {
     test_grade_light();
@@ -175,6 +220,9 @@ int main(void)
     test_legacy_fixed_full_scale();
     test_legacy_arm_1ms();
     test_hold();
+    test_envelope_continuous();
+    test_envelope_tracks_amplitude();
+    test_envelope_off_in_legacy();
     printf("RESULT %s checks=%d failures=%d\n", failures?"FAIL":"PASS", checks, failures);
     return failures?1:0;
 }

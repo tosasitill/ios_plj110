@@ -53,7 +53,11 @@ struct x9_haptic_stock {
     uint32_t legacy_intensity; /* START intensity (0..1000), legacy fire */
     uint32_t quiet;            /* consecutive samples below X9_HS_ONSET */
     uint32_t in_peak;          /* max |sample| since init (diagnostics) */
-    uint32_t hot;              /* consecutive samples at/above onset */
+    uint32_t hot;              /* span of the current sustained event in
+                                * samples; zero-crossing dips under 1 ms do
+                                * not break it (iOS continuous events are
+                                * enveloped sines, below onset near every
+                                * zero crossing for tens of microseconds) */
     uint32_t cold;             /* consecutive samples below onset (buzz) */
     uint32_t env;              /* buzz envelope peak tracker, 0..32767 */
     uint32_t cap_peak;         /* peak captured in the current window */
@@ -162,9 +166,9 @@ static inline uint32_t x9_haptic_stock_feed(struct x9_haptic_stock *e,
         return 0;
     }
     if(a<X9_HS_ONSET) {
-        e->hot=0;
         if(e->quiet<arm_need)++e->quiet;
         if(e->quiet>=arm_need)e->armed=1;
+        if(e->quiet>=X9_HS_ARM_LEGACY)e->hot=0; /* 1 ms true silence ends it */
     } else {
         e->quiet=0;++e->hot;
         if(!e->capturing && e->armed) {

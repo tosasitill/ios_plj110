@@ -161,7 +161,7 @@ static int start_locked(struct x9_haptic_start *s)
     hs.flags&=~X9_HAPTIC_THROTTLED;hs.flags|=X9_HAPTIC_RUNNING;stream_reset();
     ++hs.generation;head=count=0;sequence=0;draining=scene_active=false;stock_wave=NULL;
     x9_haptic_converter_init(&converter,hs.f0_millihz,s->conversion,s->intensity,s->sharpness);
-    x9_haptic_stock_init(&stock,feel_flags&(X9_HS_FEEL_GRADE|X9_HS_FEEL_HOLD),s->intensity);
+    x9_haptic_stock_init(&stock,feel_flags&(X9_HS_FEEL_GRADE|X9_HS_FEEL_HOLD|X9_HS_FEEL_ENV),s->intensity);
     hs.last_write_ns=now_ns();s->generation=hs.generation;return 0;
 }
 static int haptic_open(dev_t d,int f,__unused int t,struct proc *p)
@@ -193,6 +193,20 @@ static int haptic_read(dev_t d,struct uio *u,__unused int flags)
 static void stock_start_locked(const struct x9_haptic_stock_wave *w,uint32_t intensity)
 {stock_wave=w;scene_frame=0;scene_intensity=intensity;scene_active=true;scene_kind=1;
     x9_hs_hold_cancel(&stock);wakeup(&count);}
+static void stock_buzz_start_locked(void)
+{
+    /* If a one-shot scene is somehow still filling, leave the buzz to the
+     * engine state alone rather than truncating the tap mid-fill. */
+    if(scene_active && scene_kind==1)return;
+    stock_wave=&x9_stock_wave_buzz;scene_frame=0;
+    scene_intensity=stock_level_intensity(&x9_stock_wave_buzz,(stock.buzz_level*127u)/1000u);
+    scene_active=true;scene_kind=2;draining=false;
+    x9_hs_hold_cancel(&stock);wakeup(&count);
+}
+static void stock_buzz_stop_locked(void)
+{
+    if(scene_active && scene_kind==2){scene_active=false;draining=true;wakeup(&count);}
+}
 static int haptic_write(dev_t d,struct uio *u,__unused int flags)
 {
     if(minor(d)!=1 || !uio_isuserspace(u) || uio_iovcnt(u)!=1 ||
@@ -233,6 +247,8 @@ static int haptic_write(dev_t d,struct uio *u,__unused int flags)
                             &x9_stock_wave_tap_light:&x9_stock_wave_tap;
                         stock_start_locked(w,stock_level_intensity(w,stock.fire_level));
                     }
+                    if((ev&X9_HS_EV_BUZZ_ON) && !cooling)stock_buzz_start_locked();
+                    if(ev&X9_HS_EV_BUZZ_OFF)stock_buzz_stop_locked();
                 }
                 converter.in_peak=stock.in_peak;
             } else for(unsigned i=0;i<packet.frames;i++) {
@@ -328,7 +344,7 @@ static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
                  * like the drained stream would have at its end. */
                 x9_hs_hold_cancel(&stock);
                 int stopped=stop_locked();if(stopped)fail_locked(stopped);
-            } else if(scene_active && on_at && now-on_at>=1000000000ULL) {
+            } else if(scene_active && scene_kind!=2 && on_at && now-on_at>=1000000000ULL) {
                 hs.flags|=X9_HAPTIC_THROTTLED;cool_until=now+1000000000ULL;
                 hs.throttled_rtp_frames+=count;head=count=0;
                 int e=hoff();on_at=0;quiet_stop=true;
@@ -346,7 +362,20 @@ static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
                 if(count){++hs.underruns;fail_locked(ETIMEDOUT);}
                 else if(hb.active){int e=hoff();on_at=0;quiet_stop=true;if(e)fail_locked(e);}
             } else {
-                if(scene_active && hs.mode==3) {
+                if(scene_active && hs.mode==3 && scene_kind==2) {
+                    /* Envelope buzz: loop the stock buzz wave; amplitude
+                     * follows the live PCM envelope the engine tracks.
+                     * Ends only via EV_BUZZ_OFF -> draining. */
+                    scene_intensity=stock_level_intensity(stock_wave,
+                        (stock.buzz_level*127u)/1000u);
+                    /* Cap the lookahead at 40 ms: filling the whole ring
+                     * would make envelope changes wait ~340 ms in queue. */
+                    while(count<480) {
+                        int32_t v=(int32_t)stock_wave->samples[scene_frame]*(int32_t)scene_intensity/1000;
+                        ring[(head+count)%X9_HAPTIC_RING]=(int8_t)v;
+                        scene_frame=(scene_frame+1)%stock_wave->len;++count;
+                    }
+                } else if(scene_active && hs.mode==3) {
                     while(count<X9_HAPTIC_RING && scene_frame<stock_wave->len) {
                         int32_t v=(int32_t)stock_wave->samples[scene_frame]*(int32_t)scene_intensity/1000;
                         ring[(head+count)%X9_HAPTIC_RING]=(int8_t)v;++scene_frame;++count;
