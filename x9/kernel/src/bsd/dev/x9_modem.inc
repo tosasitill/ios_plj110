@@ -45,6 +45,7 @@
 #define X9MD_POWER_CONFIG 6
 #define X9MD_FLIGHT_MODE_SET 7
 #include "x9_voice_smem.h"
+#include "x9_voice_usip.h"
 
 #define X9MD_CCIF_CLK_REQUEST 14
 #define X9MD_CCIF_CLK_RELEASE 15
@@ -80,6 +81,7 @@
 
 static vm_offset_t x9md_ap,x9md_md;
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr,vm_size_t size);
+extern void ml_io_unmap(vm_offset_t addr,vm_size_t size);
 extern void read_random(void *buffer,u_int numbytes);
 
 static uint64_t x9md_smc(uint64_t req,uint64_t a2,uint64_t a3,uint64_t out[4]) {
@@ -469,6 +471,60 @@ static void x9md_regions_emulate(const uint8_t *ord,unsigned n){
  }
 }
 
+
+/* ---- USIP voice EMI owner (L5) ----
+ * Lifetime for the id 24 speech EMI region, mirroring Android's
+ * mtk-usip owner (usip_get_addr / usip_mmap): the descriptor comes
+ * from this boot's LK tables (x9md_crs AP pa + x9md_regs MD view),
+ * the first pin maps the region write-combine like the other
+ * cacheable SMEM regions, and the last release unmaps it. The region
+ * is never cleared (SMF_NCLR_FIRST) and never read or written by this
+ * owner; the pin only qualifies the address for a future consumer.
+ * Everything here is inert unless x9_voice_usip=1 (default off):
+ * with the gate off the owner is not even bound. */
+static struct x9_voice_usip x9md_vusip;
+static volatile uint32_t *x9md_vusip_map;
+
+static int x9md_voice_usip_bind(void){
+ for(unsigned i=0;i<x9md_ncr;i++){
+  struct x9md_cr *c=&x9md_crs[i];
+  if(c->id!=(int)X9_VOICE_SMEM_ID)continue;
+  int rc=x9_voice_usip_bind(&x9md_vusip,c->pa,c->sz,x9md_regs[X9_VOICE_SMEM_ID].md);
+  if(rc)printf("X9 VOICE: usip bind rejected rc=%d pa=%llx size=%x\n",rc,c->pa,c->sz);
+  return rc;
+ }
+ printf("X9 VOICE: usip id%u absent from cacheable LK table; owner unbound\n",
+        X9_VOICE_SMEM_ID);
+ return -1;
+}
+
+/* Take a pin on the EMI region; maps on the first pin. Returns the VA
+ * while pinned, or 0 when the gate is off / the owner is unbound /
+ * the map failed. No region content is accessed. */
+static volatile uint32_t *x9md_voice_usip_acquire(void){
+ if(sweet_x9_arg("x9_voice_usip",0)!=1)return 0;
+ int rc=x9_voice_usip_acquire(&x9md_vusip);
+ if(rc==0)return x9md_vusip_map;
+ if(rc<0)return 0;
+ uint32_t sz=(x9md_vusip.size+0xfff)&~0xfffu;
+ volatile uint32_t *m=(volatile uint32_t *)ml_io_map_wcomb((vm_offset_t)x9md_vusip.pa,sz);
+ if(!m){x9_voice_usip_map_done(&x9md_vusip,0);
+  printf("X9 VOICE: usip map failed pa=%llx size=%x\n",x9md_vusip.pa,sz);return 0;}
+ x9md_vusip_map=m;
+ x9_voice_usip_map_done(&x9md_vusip,1);
+ printf("X9 VOICE: usip emi pinned pa=%llx size=%x md=%08x (map only, no access)\n",
+        x9md_vusip.pa,x9md_vusip.size,x9md_vusip.md_view);
+ return m;
+}
+
+static void x9md_voice_usip_release(void){
+ if(x9_voice_usip_release(&x9md_vusip)!=1)return;
+ ml_io_unmap((vm_offset_t)x9md_vusip_map,(x9md_vusip.size+0xfff)&~0xfffu);
+ x9md_vusip_map=0;
+ x9_voice_usip_unmap_done(&x9md_vusip);
+ printf("X9 VOICE: usip emi unpinned and unmapped pa=%llx\n",x9md_vusip.pa);
+}
+
 static int x9md_smem_init(void){
  for(unsigned i=0;i<X9MD_SMEM_MAX;i++)x9md_regs[i]=(struct x9md_reg){0};
  if(x9md_lk_table("nc_smem_layout","nc_smem_layout_num",0,&x9md_nc_total,&x9md_nc_md))return -1;
@@ -551,6 +607,22 @@ static int x9md_smem_init(void){
   printf("X9 VOICE: smem id%u present=%d android_match=%d md=%08x size=%x flags=%x ap_off=%x in_lk=%d exists=%d nclr_first=%d; observation only\n",
    X9_VOICE_SMEM_ID,vrp.present,vrp.android_match,vrp.md_view,vrp.size,
    vrp.flags,vd.ap_off,vd.in_lk,vd.exists,vd.nclr_first);
+ }
+ if(sweet_x9_arg("x9_voice_usip",0)==1){
+  /* L5 owner bring-up (x9_voice_usip=1, default off): bind this boot's
+   * LK descriptor and take the boot-lifetime pin, mirroring Android's
+   * probe-time usip_get_addr(). The AD50 frames are only constructed
+   * and logged here -- there is no voice IPI transport owner in this
+   * tree, so nothing is submitted to the DSP. */
+  if(x9md_voice_usip_bind()==0&&x9md_voice_usip_acquire()){
+   uint8_t frame[X9_VOICE_USIP_AD50_FRAME];
+   if(x9_voice_usip_ad50_build(&x9md_vusip,X9_VOICE_USIP_SCENE_MAIN,frame)==0)
+    printf("X9 VOICE: usip AD50 scene0 constructed (not submitted) addr=%llx len=%x\n",
+           x9md_vusip.pa+X9_VOICE_USIP_CALL_OFF,
+           (unsigned)(X9_VOICE_USIP_CALL_SIZE+X9_VOICE_USIP_SMARTPA_SIZE));
+   if(x9_voice_usip_ad50_build(&x9md_vusip,X9_VOICE_USIP_SCENE_SUB,frame)==0)
+    printf("X9 VOICE: usip AD50 scene19 constructed (not submitted; Android DT config=3 sets CORE_SEPARATE)\n");
+  }
  }
  return 0;
 }
