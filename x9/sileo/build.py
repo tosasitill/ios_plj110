@@ -645,7 +645,13 @@ static int x9_system(const char *command)
                   f'--localstatedir={PREFIX}/var',
                   '--disable-nls', '--disable-silent-rules',
                   '--disable-dependency-tracking',
-                  'gl_cv_macro_MB_CUR_MAX_good=yes'],
+                  'gl_cv_macro_MB_CUR_MAX_good=yes',
+                  # clock_settime is marked unavailable in the iOS
+                  # SDK headers although configure's link check finds
+                  # the symbol; gnulib's settime() then fails to
+                  # compile. With the check answered no, settime()
+                  # falls back to settimeofday, which iOS declares.
+                  'ac_cv_func_clock_settime=no'],
                  cwd=src, env=env)
         self.run(['make', '-j8'], cwd=src, env=env)
         self.run(['make', 'install', f'DESTDIR={self.sysroot}'],
