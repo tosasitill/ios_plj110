@@ -15,6 +15,22 @@ static inline unsigned x9ms_u16(const uint8_t *p){return p[0]|((unsigned)p[1]<<8
 static inline uint32_t x9ms_u32(const uint8_t *p){
  return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);
 }
+static inline int x9ms_submit_report(uint8_t *pdu,unsigned size,int request){
+ if(!pdu||size<3||size>255||pdu[0]>12||pdu[0]+2u>=size)return 0;
+ uint8_t *first=pdu+1+pdu[0];
+ if((*first&3u)!=1)return 0;
+ if(request)*first|=0x20u;
+ return (*first&0x20u)!=0;
+}
+/* Apply the GSM retry to the private SMS-SUBMIT copy. TP-MR is one octet. */
+static inline int x9ms_submit_retry(uint8_t *pdu,unsigned size,uint32_t reference){
+ if(!pdu||size<3||size>255||pdu[0]>12||pdu[0]+2u>=size||reference>255)return 0;
+ uint8_t *first=pdu+1+pdu[0];
+ if((*first&3u)!=1)return 0;
+ *first|=0x04u;
+ first[1]=(uint8_t)reference;
+ return 1;
+}
 /* Commit output only after the complete, unique-tag request is accepted.
  * Unsupported modes must NOT be reinterpreted as storage tag filters.
  * Both storage31 optional fields are independent: tag10, mode11.

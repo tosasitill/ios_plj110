@@ -19,12 +19,11 @@ static inline int x9cw_qmi_register(const uint8_t *p,unsigned n,
  }
  *out=r;return 1;
 }
-/* Only the original handler's two already-consumed events and incoming
- * command. No blanket Android20-URC registration without consumers. */
+/* CALL events consumed by the state bridge or the opt-in SIP diagnostic. */
 static inline unsigned x9cw_call_register(uint8_t *out,unsigned room,
                                          unsigned id,unsigned sim,unsigned sims){
  if(!out||room<24||!sims||sims>2||sim>=sims||
-    (id!=0x8901&&id!=0x4901&&id!=0x4902))return 0;
+    (id!=0x8901&&id!=0x4901&&id!=0x4902&&id!=0x4904))return 0;
  x9cw_header(out,24,id==0x8901?0x30b:0x307,id==0x8901?0xff:1u<<sim,0);
  x9cw_scalar(out+16,0x100,id,2);return 24;
 }

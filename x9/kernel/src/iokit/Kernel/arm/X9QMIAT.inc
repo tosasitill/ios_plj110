@@ -785,6 +785,15 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   x9q_reject(local,port,req,len,X9Q_BAD);return;
  }
  x9q_client &c=x9q_clients[slot];
+ if(service==3&&id==0x33&&sweet_x9_arg("x9_call_sip_diag",0)==1){
+  x9q_view preference=x9q_tlv(req,len,0x33);
+  static unsigned logged;
+  if(preference.p&&preference.n==1&&preference.p[0]<=2&&logged<16){
+   logged++;
+   printf("X9 IMS: NAS33 txn %u route SIM%u IP state %u\n",
+          x9q_u16(req+1),c.sim_slot+1,preference.p[0]);
+  }
+ }
  // NetworkName owns its admission route through CNF. Do not accept a new
  // old-route owner while NAS45 awaits its actual host receipt and rebind.
  if(service==3&&id==0x44&&x9r_route_pending(slot)){x9q_reject(local,port,req,len,X9Q_BUSY);return;}
