@@ -288,9 +288,33 @@ static const int8_t x9_stock_buzz[2196] = {
 53,37,16,0,
 };
 
+
+/* Light grade for graded stock mode: aw8697_stepable_regulate_RTP_105, the
+ * ColorOS step-adjust tick (native peak 12/127, one gentle ~14 ms pulse),
+ * resampled with the same 32-tap Hamming sinc + decimate x2 as tap above
+ * (method verified to reproduce x9_stock_tap sample-exactly), cropped to
+ * 6 samples before / 12 after the |x|>2 span. Played scaled up toward the
+ * requested output peak; its softness is the point. */
+static const int8_t x9_stock_tap_light[182] = {
+0,0,0,0,1,1,3,4,7,9,11,11,12,12,12,11,
+11,11,10,10,9,8,8,7,6,6,6,5,4,4,2,2,
+1,0,-2,-5,-8,-9,-10,-10,-10,-10,-8,-8,-7,-6,-4,-3,
+-2,-1,0,1,2,3,4,6,6,7,8,8,9,10,11,11,
+11,11,11,10,9,8,7,6,5,3,2,1,0,-1,-3,-4,
+-5,-7,-7,-9,-9,-10,-10,-10,-11,-11,-11,-10,-10,-10,-9,-8,
+-7,-6,-5,-3,-2,-1,0,1,2,3,5,5,7,7,9,9,
+9,9,9,9,7,7,5,5,4,3,2,2,1,0,0,-1,
+-2,-3,-4,-5,-5,-7,-7,-8,-9,-9,-9,-9,-9,-7,-6,-4,
+-1,0,0,1,1,1,2,2,3,3,3,4,4,4,5,5,
+5,6,6,6,6,6,6,6,5,4,2,1,0,0,0,0,
+0,0,0,0,0,0,
+};
+
 struct x9_haptic_stock_wave { const int8_t *samples; uint32_t len; };
 
 static const struct x9_haptic_stock_wave x9_stock_wave_tap = {x9_stock_tap,180};
+
+static const struct x9_haptic_stock_wave x9_stock_wave_tap_light = {x9_stock_tap_light,182};
 
 static const struct x9_haptic_stock_wave x9_stock_wave_notify = {x9_stock_notify,1917};
 
