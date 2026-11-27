@@ -626,10 +626,17 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
   else if(s.fx_stage==4){
    /* Factory IMS bearer (radio-baseline.txt 18:38:15.635): a minimal
     * DATA_ACT_CALL with APN_TYPE 2 and only the URSP traffic descriptor
-    * carrying DNN "ims" (is_match_all 0, dnn_len 3 at +1, dnn at +4,
-    * rest zero) beside URSP_EVAL_FLAG 0 and tag 0x10a = 3. */
+    * carrying DNN "ims" (is_match_all 0, dnn_len 3 at +1, dnn at +4)
+    * beside URSP_EVAL_FLAG 0 and tag 0x10a = 3. Byte-exact against the
+    * factory frame (720 B on the wire, header len 704; the baseline
+    * logcat dump truncates at 478 B): the descriptor is NOT all zero
+    * past the DNN -- prot_id_next_hdr at +414 is 0xff (unspecified),
+    * the same fill the WDS ACT path uses. Leaving it 0 named protocol
+    * 0 instead and the MD rejected the ACT with result 0x15000A on
+    * both SIMs (2026-11-27 radio2/P1/P2 rounds). */
    x9w_frame f(0x201,1u<<sim);f.word(0x10f,0);f.word(0x102,2);f.byte(0x10a,3);
    static uint8_t td[672];bzero(td,sizeof(td));td[1]=3;memcpy(td+4,"ims",3);
+   td[414]=0xff; /* prot_id_next_hdr: unspecified, factory fill */
    f.tlv(0x10d,td,sizeof(td));token=f.submit();
   }
   else if(s.fx_stage==5){x9w_frame f(0xa02,1u<<sim);f.word(0x100,0);token=f.submit();}
