@@ -670,14 +670,23 @@ struct x9m_publication {
  * family is subscribed through REGISTER_IND (0x307) per SIM, mirroring
  * the 4a01 registration, after the SIM's CFG_IND step has passed. The
  * MD only emits 4602/4606 in its prefer_no_ack mode, so this is a
- * dormant fallback until a device round proves which mode fires. */
+ * dormant fallback until a device round proves which mode fires.
+ * 4603 STORE_STATUS joins the rotation for evidence: if the MD runs
+ * the store model (MT saved to ME storage, notify via 4603) instead
+ * of pushing 8601, its handler already logs flag/index with no
+ * delivery change -- but only once 4603 is actually registered. */
 static void x9m_ind_poll(uint8_t *p,unsigned room){
  if(!x9m_ind_enabled())return;
+ /* Registration rotation, one outstanding per SIM: 4602 NEW_SMS,
+  * 4603 STORE_STATUS (evidence only at its handler), 4606
+  * STATUS_REPORT. Stage 1..3 register ind_ids[stage-1]; stage 4
+  * is the terminal state. */
+ static const uint16_t ind_ids[3]={0x4602,0x4603,0x4606};
  const bool online=x9w_control_ready&&x9_md_mipc_online();
  const uint64_t now=x9q_ms();
  for(unsigned sim=0;sim<x9_md_sim_count();sim++){
   x9m_sim &s=x9m_sims[sim];
-  if(s.ind_stage>=3||s.ind_hold)continue;
+  if(s.ind_stage>3||s.ind_hold)continue;
   if(s.ind_token){
    if(now>=s.ind_deadline){s.ind_hold=true;
     printf("X9 SMS IND: SIM%u stage %u timeout; token retained, no retry\n",sim+1,s.ind_stage);continue;}
@@ -691,13 +700,13 @@ static void x9m_ind_poll(uint8_t *p,unsigned room){
    if(!known||result){s.ind_hold=true;
     printf("X9 SMS IND: SIM%u stage %u rejected known %u result %u; held\n",sim+1,s.ind_stage,known?1:0,result);
     bzero(p,room);continue;}
-   if(s.ind_stage==2)printf("X9 SMS IND: SIM%u no-ack indications registered (4602/4606)\n",sim+1);
+   if(s.ind_stage==3)printf("X9 SMS IND: SIM%u no-ack indications registered (4602/4603/4606)\n",sim+1);
    s.ind_stage++;bzero(p,room);continue;
   }
   if(!online||s.init<X9M_READY_QUERY)continue;
   if(!s.ind_stage)s.ind_stage=1;
   x9w_frame f(0x307,1u<<sim);
-  uint16_t id=s.ind_stage==1?0x4602:0x4606;
+  uint16_t id=ind_ids[s.ind_stage-1];
   uint8_t v[2]={(uint8_t)id,(uint8_t)(id>>8)};f.tlv(0x100,v,2);
   uint64_t token=f.submit();
   if(token){s.ind_token=token;s.ind_deadline=now+10000;}

@@ -589,6 +589,14 @@ static void x9mi_rx(const uint8_t *p,unsigned n){
     unsigned at=(x9_mi_head+x9_mi_count++)%X9_MI_EVENTS;
     x9_mi_events[at].len=need;memcpy(x9_mi_events[at].frame,x9_mi_stream,need);
    }
+   /* Census: a kind-1 id no consumer recognizes vanishes at this
+    * fan-out. Name it once per boot (gated inside x9mm_census) so an
+    * unexpected MD indication is evidence instead of silence. The
+    * recognition set mirrors the fan-out above exactly; nothing is
+    * admitted or rerouted by logging it. */
+   if(!x9mm_id(id)&&!x9mc_id(id)&&id!=0x4409&&id!=0x4419&&
+      id!=0x4202&&id!=0x4203&&id!=0x4302&&id!=0x4220)
+    x9mm_census(id,x9_mi_stream[8],need);
   }else if(kind==2&&x9mm_id(id))x9mm_rx(x9_mi_stream,need,id,tx);
   else if(kind==2&&x9mc_id(id))x9mc_rx(x9_mi_stream,need,id,tx);
   else printf("X9 MIPC: MD command id 0x%04x txn %u ignored (no AP handler)\n",id,tx);

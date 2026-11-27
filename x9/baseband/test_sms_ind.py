@@ -104,21 +104,28 @@ int main(){uint8_t f[256]; unsigned at;
  /* malformed 4602 (short PDU_LIST) dropped */
  uint8_t short_list[8]={}; at=build(f,1,0x4602); addtlv(f,at,0x8104,short_list,8); finish(f,at);
  x9m_event(f,at,0); assert(ndeliv==4);
- /* registration: per-SIM 4602 then 4606 via 0x307 */
+ /* registration: per-SIM 4602 then 4603 then 4606 via 0x307 */
  x9m_sims[0].init=1; x9m_sims[1].init=1;
  for(int i=0;i<10;i++){uint8_t p[64]; x9m_ind_poll(p,sizeof(p));}
- assert(nfrec==4); assert(frecs[0].reg==0x4602&&frecs[1].reg==0x4602&&frecs[2].reg==0x4606&&frecs[3].reg==0x4606);
- assert(x9m_sims[0].ind_stage==3&&x9m_sims[1].ind_stage==3);
- /* rejection of the 4606 registration holds SIM2 without retry */
+ assert(nfrec==6);
+ assert(frecs[0].reg==0x4602&&frecs[1].reg==0x4602&&frecs[2].reg==0x4603&&frecs[3].reg==0x4603&&frecs[4].reg==0x4606&&frecs[5].reg==0x4606);
+ assert(x9m_sims[0].ind_stage==4&&x9m_sims[1].ind_stage==4);
+ /* rejection of the 4606 registration holds SIM2 at stage 3 without retry */
  nfrec=0; memset(frecs,0,sizeof(frecs)); x9m_sims[0]=x9m_sim{}; x9m_sims[1]=x9m_sim{};
  x9m_sims[0].init=1; x9m_sims[1].init=1; reject_reg=0x4606;
  for(int i=0;i<10;i++){uint8_t p[64]; x9m_ind_poll(p,sizeof(p));}
- assert(x9m_sims[1].ind_hold&&x9m_sims[1].ind_stage==2); assert(x9m_sims[0].ind_stage==3);
+ assert(x9m_sims[1].ind_hold&&x9m_sims[1].ind_stage==3); assert(x9m_sims[0].ind_stage==4);
+ /* rejection of the new 4603 registration holds SIM2 at stage 2 */
+ nfrec=0; memset(frecs,0,sizeof(frecs)); x9m_sims[0]=x9m_sim{}; x9m_sims[1]=x9m_sim{};
+ x9m_sims[0].init=1; x9m_sims[1].init=1; reject_reg=0x4603;
+ for(int i=0;i<10;i++){uint8_t p[64]; x9m_ind_poll(p,sizeof(p));}
+ assert(x9m_sims[1].ind_hold&&x9m_sims[1].ind_stage==2); assert(x9m_sims[0].ind_stage==4);
  printf("sms-ind ok\n");}
 '''
         out = self.compile_run(code)
         self.assertIn('sms-ind ok', out)
         self.assertIn('store status flag 1 index 7', out)
+        self.assertIn('no-ack indications registered (4602/4603/4606)', out)
 
 
 if __name__ == '__main__':
