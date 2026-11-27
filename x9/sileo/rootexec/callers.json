@@ -1,0 +1,9 @@
+{
+  "comment": "Pinned callers for x9-rootexec: the Sileo app binary only. sha256 null = unpinned placeholder: never authorizes until the Sileo packaging step fills in the real hash of the built Sileo binary (and re-pins the as-installed path if it differs).",
+  "rootexec_callers": [
+    {
+      "path": "/var/storm/Applications/Sileo.app/Sileo",
+      "sha256": null
+    }
+  ]
+}

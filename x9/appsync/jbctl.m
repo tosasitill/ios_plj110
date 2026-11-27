@@ -9,6 +9,8 @@
 #import <dlfcn.h>
 #import <unistd.h>
 #import <dispatch/dispatch.h>
+#import <spawn.h>
+#import <sys/wait.h>
 #import <errno.h>
 extern int __mac_syscall(const char *, int, void *);
 
@@ -45,12 +47,48 @@ static int status(void) {
         "/private/var/x9/jailbreak/20H392/lib/libunixnu-ldid.dylib",
         "/private/var/x9/jailbreak/20H392/bin/x9-appinst",
         "/Applications/X9Installer.app/X9Installer",
-        "/bin/sh", "/usr/bin/dpkg", "/usr/bin/apt", "/usr/sbin/sshd"
+        "/bin/sh", "/usr/sbin/sshd",
+        "/private/var/x9/storm/prep.sh",
+        "/private/var/mobile/Library/X9Storm/current",
+        "/var/storm/usr/bin/sh", "/var/storm/usr/bin/dpkg",
+        "/var/storm/usr/bin/apt-get", "/var/storm/usr/bin/uicache",
+        "/var/storm/Library/dpkg/status"
     };
     for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i)
         printf("%s: %s\n", paths[i], access(paths[i], F_OK) ? "absent" : "present (not execution verification)");
     printf("Native USB/Trust/AppSync hook activation requires separate runtime evidence.\n");
+    char linkbuf[1024];
+    ssize_t n = readlink("/private/var/storm", linkbuf, sizeof(linkbuf) - 1);
+    if (n >= 0) { linkbuf[n] = 0; printf("/private/var/storm -> %s\n", linkbuf); }
+    n = readlink("/private/var/mobile/Library/X9Storm/current", linkbuf, sizeof(linkbuf) - 1);
+    if (n >= 0) { linkbuf[n] = 0; printf("X9Storm/current -> %s\n", linkbuf); }
     return result ? 1 : 0;
+}
+
+// Materialize the staged storm payload onto the Data volume by running the
+// payload's own prep.sh with the payload's own shell (the stock root has no
+// /bin/sh). jbctl already runs as root in this environment.
+static int stormPrep(void) {
+    NSString *root = @"/private/var/x9/storm/payload";
+    NSArray *versions = [NSFileManager.defaultManager contentsOfDirectoryAtPath:root error:nil];
+    NSString *version = versions.count ? versions.firstObject : nil;
+    NSString *sh = version ? [NSString stringWithFormat:@"%@/%@/usr/bin/sh", root, version] : nil;
+    NSString *prep = @"/private/var/x9/storm/prep.sh";
+    if (!version || access(sh.UTF8String, X_OK) || access(prep.UTF8String, R_OK)) {
+        fprintf(stderr, "x9-jbctl: storm payload incomplete under %s\n", root.UTF8String);
+        return 2;
+    }
+    char *const args[] = { (char *)sh.UTF8String, (char *)prep.UTF8String,
+                           (char *)version.UTF8String, NULL };
+    pid_t pid;
+    extern char **environ;
+    if (posix_spawn(&pid, sh.UTF8String, NULL, NULL, args, environ)) {
+        fprintf(stderr, "x9-jbctl: posix_spawn storm prep failed\n");
+        return 1;
+    }
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
 }
 
 static id workspace(void) {
@@ -238,7 +276,8 @@ int main(int argc, const char **argv) {
         if (argc == 3 && !strcmp(argv[1], "--register")) return registerApp(@(argv[2]));
         if (argc == 3 && !strcmp(argv[1], "--repair-container")) return repairContainer(@(argv[2]));
         if (argc == 2 && !strcmp(argv[1], "--ensure-local-storage")) return ensureLocalStorage();
-        fprintf(stderr, "usage: x9-jbctl --status | --register /Applications/<Name>.app | --repair-container com.apple.<id> | --ensure-local-storage\n");
+        if (argc == 2 && !strcmp(argv[1], "--storm-prep")) return stormPrep();
+        fprintf(stderr, "usage: x9-jbctl --status | --register /Applications/<Name>.app | --repair-container com.apple.<id> | --ensure-local-storage | --storm-prep\n");
         return 2;
     }
 }
