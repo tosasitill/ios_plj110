@@ -545,6 +545,24 @@ static void fragmented(){
  }
  x9mi_rx(p+63,1);event();assert(!writes);
 }
+static void finish_reason_diagnostic(){
+ uint8_t frame[X9_MIPC_FRAME_MAX];dial_owner_fixture();
+ x9c_observed=true;x9c_outbound={};x9c_outbound.epoch=1;
+ x9c_outbound.ended=1;x9c_outbound.has_cause=1;x9c_outbound.cause=16;
+ x9c_finish_reason_poll(frame);x9mi_tick();assert(!writes&&!x9_mi_next);
+ x9c_outbound.cause=2172;x9c_finish_reason_poll(frame);
+ assert(x9_mi_next==1&&x9_mi_slots[0].state==1);
+ x9c_finish_reason_poll(frame);assert(x9_mi_next==1);
+ x9mi_tick();assert(writes==1&&last_length==16&&last_frame[8]==2&&x9cw_u16(last_frame+10)==0x90f);
+ uint16_t token=x9cw_u16(last_frame+12);assert(token);
+ for(unsigned i=0;i<5;i++)x9c_finish_reason_poll(frame);
+ assert(writes==1&&x9_mi_slots[0].state==2&&x9_mi_next==token);
+ uint8_t cnf[32];x9cw_header(cnf,sizeof(cnf),0x910,2,token);
+ x9cw_scalar(cnf+16,0,0,4);x9cw_scalar(cnf+24,0x100,2172,4);
+ x9mi_rx(cnf,sizeof(cnf));x9c_finish_reason_poll(frame);
+ assert(!x9_mi_slots[0].state&&x9_mi_next==token);
+ x9c_finish_reason_poll(frame);x9mi_tick();assert(writes==1&&x9_mi_next==token);
+}
 static void late_cnf(){
  uint8_t p[24],out[24];x9cw_header(p,16,0x907,2,0);
  uint64_t token=x9_md_mipc_submit(p,16);assert(token);x9mi_tick();
@@ -692,6 +710,16 @@ static void outbound_end_reason(){
   assert(x9cw_outbound_apply(&s,&c)==0&&!s.blocked&&!s.ended&&s.ios_state==1);
   n=reason_frame(p,133,0,2174,true,7,0);assert(x9cw_progress(p,n,&c));
   assert(x9cw_outbound_apply(&s,&c)==1&&!s.blocked&&s.ended&&s.ios_state==9&&!s.end_reason.known);
+ }
+ /* SIM2 failure captures go straight from 130/mode0 to 133/2172,
+  * without alerting or conversation. Preserve the native cause but do not
+  * invent an Apple reason or infer an empty modem call list. */
+ {
+  begin();s.count_known=1;s.native_count=1;
+  unsigned n=reason_frame(p,133,0,2172,true,7,0);
+  assert(x9cw_progress(p,n,&c)&&x9cw_outbound_apply(&s,&c)==1);
+  assert(s.ended&&!s.blocked&&s.ios_state==9&&s.has_cause&&s.cause==2172);
+  assert(!s.end_reason.known&&!s.count_known);
  }
 }
 static void incoming_end_reason(){
@@ -1641,7 +1669,7 @@ int main(int argc,char **argv){
   {"codec_golden",codec_golden},{"codec_invalid",codec_invalid},{"incoming_routes",incoming_routes},{"action_codec",action_codec},
   {"dial_golden",dial_golden},{"dial_invalid",dial_invalid},{"dial_whitelist",dial_whitelist},
   {"dial_roundtrip",dial_roundtrip},{"dial_tx_failure",dial_tx_failure},{"dial_cnf_invalid",dial_cnf_invalid},
-  {"progress_framing",progress_framing},{"outbound_states",outbound_states},{"current_arrays",current_arrays},
+  {"progress_framing",progress_framing},{"outbound_states",outbound_states},{"finish_reason_diagnostic",finish_reason_diagnostic},{"current_arrays",current_arrays},
   {"status_fence",status_fence},{"dial_join_order",dial_join_order},{"ios_join",ios_join},
   {"ios_timeout",ios_timeout},{"ios_deleted",ios_deleted},{"dial_presend_fence",dial_presend_fence},{"dial_presend_release",dial_presend_release},
   {"dial_guard_admission_release",dial_guard_admission_release},{"dial_guard_admission_timeout",dial_guard_admission_timeout},
