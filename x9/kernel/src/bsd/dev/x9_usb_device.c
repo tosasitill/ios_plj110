@@ -72,6 +72,8 @@ _Static_assert(sizeof(struct x9_usb_tx_result) == 64, "TX result ABI");
 static int channel;
 static int bus_channel;
 enum { COMMAND_DESCRIPTION = X9_USB_BUS_CYCLE + 1 };
+static unsigned mux_profile; /* x9_usb=3: Apple usbmux profile */
+static void x9_mux_glue_rx(const uint8_t *bytes, unsigned n);
 static struct x9_usb_description description = {
     .version = X9_USB_DESCRIPTION_ABI, .vendor_id = 0x1209, .product_id = 1,
     .device_id = 0x200, .device_class = 0xef, .device_subclass = 2,
@@ -333,13 +335,13 @@ static int complete(struct endpoint *e)
     tx_finish(e->request_id, X9_USB_TX_COMPLETE, 0, n);
     e->request_id = 0;
     if (e->in && !e->interrupt) {
-        if (e->number == 1) st.net_tx_frames++; else st.raw_tx_bytes += n;
+        if (e->number == 1) { if (!mux_profile) st.net_tx_frames++; } else st.raw_tx_bytes += n;
     }
     lck_mtx_unlock(&usb_lock);
     if (e->in && e->number == 1 && netif) ifnet_stat_increment_out(netif, 1, n, 0);
     if (!e->in) {
         cache(e->va + DMA_BUFFER, DMA_BUFFER, 1);
-        if (e->number == 1) net_receive(e->va + DMA_BUFFER, n);
+        if (e->number == 1) { if (mux_profile) x9_mux_glue_rx(e->va + DMA_BUFFER, n); else net_receive(e->va + DMA_BUFFER, n); }
         else if (n) {
             lck_mtx_lock(&usb_lock);
             if (lease && lease == e->owner && raw_rx.count < QUEUE) {
@@ -368,9 +370,12 @@ static int kick_tx(struct endpoint *e, struct queue *q)
     /* Lease close/reset is a pre-HWO rejection, not a hardware fault. */
     return error == ESTALE ? 0 : error;
 }
+#include "x9_usb_mux.inc"
+
 static void data_poll(void)
 {
     if (st.native_apple_stack) return; /* no private/native endpoint sharing */
+    if (mux_profile) { mux_data_poll(); return; }
     lck_mtx_lock(&usb_lock); uint64_t owner = lease;
     unsigned drain = (st.reserved & X9_USB_RAW_DRAINING) || owner != raw_owner;
     if (drain) st.reserved |= X9_USB_RAW_DRAINING;
@@ -437,6 +442,7 @@ static int reset_data(void)
     for (unsigned i = 0; i < 5; i++) { int e = disable_endpoint(&eps[i]); if (e) return e; }
     lck_mtx_lock(&usb_lock); packet_filter = 0; lck_mtx_unlock(&usb_lock);
     notification = suspended = 0;
+    if (mux_profile) x9_mux_glue_reset();
     return 0;
 }
 static void bus_finish(int error)
@@ -570,10 +576,13 @@ static int valid_string(const char *s)
 }
 int x9_usb_set_description(const struct x9_usb_description *d)
 {
+    int class_ok = d && ((d->device_class == 0xef && d->device_subclass == 2 &&
+        d->device_protocol == 1) ||
+        (mux_profile && !d->device_class && !d->device_subclass &&
+         !d->device_protocol && d->vendor_id == 0x5ac));
     if (!d || d->version != X9_USB_DESCRIPTION_ABI || !d->vendor_id ||
         d->vendor_id > 0xffff || !d->product_id || d->product_id > 0xffff ||
-        d->device_id > 0xffff || d->device_class != 0xef || d->device_subclass != 2 ||
-        d->device_protocol != 1 || d->bcd_usb != 0x200 ||
+        d->device_id > 0xffff || !class_ok || d->bcd_usb != 0x200 ||
         !valid_string(d->manufacturer) || !valid_string(d->product) || !valid_string(d->serial)) return EINVAL;
     return worker_command(COMMAND_DESCRIPTION, 0, d);
 }
@@ -591,10 +600,11 @@ static int set_configuration(unsigned value)
     int error = reset_data(); if (error || !value) return error;
     /* MTU3 with a USB3 IP has separate EP0/TX/RX FIFOs even at USB2 speed.
      * Validate capacity at init, then assign 512 bytes per endpoint. */
-    configure_endpoint(&eps[2], 512);
+    if (!mux_profile) configure_endpoint(&eps[2], 512);
     if (st.raw_enabled) { configure_endpoint(&eps[3], 512); configure_endpoint(&eps[4], 1024); }
     lck_mtx_lock(&usb_lock); st.configuration = 1; st.state = X9_USB_CONFIGURED; lck_mtx_unlock(&usb_lock);
     printf("X9 USB: config=1 speed=%u (%s) QMU36 gen2=%u raw=%u\n", st.speed, st.speed == 3 ? "480Mbps HS" : st.speed == 1 ? "12Mbps FS" : "unknown", gen2, st.raw_enabled);
+    if (mux_profile) printf("X9 USB MUX: Apple usbmux profile configured (05AC:12A8, FF/FE/02, lockdownd loopback bridge); EP0 log retained\n");
     return 0;
 }
 static void update_link(void)
@@ -625,6 +635,25 @@ static unsigned string_descriptor(unsigned index)
 }
 static unsigned configuration_descriptor(unsigned other)
 {
+    if (mux_profile) {
+        /* usbmuxd matches VID 05AC + interface FF/FE/02 with exactly two
+         * bulk endpoints, OUT first. macOS activates configuration 1. */
+        static const uint8_t mc[] = {
+            9,2,32,0,1,1,0,0x80,250,
+            9,4,0,0,2,0xff,0xfe,2,0,
+            7,5,0x01,2,64,0,0, 7,5,0x81,2,64,0,0
+        };
+        memcpy(control, mc, sizeof(mc));
+        unsigned n = sizeof(mc);
+        control[2] = (uint8_t)n; control[3] = (uint8_t)(n >> 8);
+        if (other) control[1] = 7;
+        unsigned mps = (st.speed == 3) ^ !!other ? 512 : 64;
+        for (unsigned o = 9; o < n; o += control[o]) {
+            if (control[o + 1] != 5 || control[o + 3] != 2) continue;
+            control[o + 4] = (uint8_t)mps; control[o + 5] = (uint8_t)(mps >> 8);
+        }
+        return n;
+    }
     static const uint8_t cfg[] = {
         9,2,88,0,2,1,0,0x80,250,
         8,11,0,2,2,6,0,0, /* IAD isolates ECM from the optional private function */
@@ -685,10 +714,11 @@ static void setup(void)
             control[8]=(uint8_t)description.vendor_id; control[9]=(uint8_t)(description.vendor_id>>8);
             control[10]=(uint8_t)description.product_id; control[11]=(uint8_t)(description.product_id>>8);
             control[12]=(uint8_t)description.device_id; control[13]=(uint8_t)(description.device_id>>8);
+            control[4]=(uint8_t)description.device_class; control[5]=(uint8_t)description.device_subclass; control[6]=(uint8_t)description.device_protocol;
         }
         else if ((value == 0x200 || value == 0x700) && !index) count=configuration_descriptor(value == 0x700);
         else if ((value >> 8) == 3 && (!(value & 255) ? !index : index == 0x409)) count=string_descriptor(value & 255);
-        else if (value == 0x600 && !index) { memcpy(control,qual,sizeof(qual)); count=sizeof(qual); }
+        else if (value == 0x600 && !index) { memcpy(control,qual,sizeof(qual)); count=sizeof(qual); control[4]=(uint8_t)description.device_class; control[5]=(uint8_t)description.device_subclass; control[6]=(uint8_t)description.device_protocol; }
         if (!count || !n) { stall(n ? 0 : SETUP); return; }
     } else if (type == 0 && req == 5 && !n && value < 128 && !index && !st.configuration)
         W(0x800,(R(0x800)&~(0x7fu<<24))|value<<24);
@@ -846,7 +876,7 @@ static void worker(void *arg, wait_result_t why)
         void *va=NULL; uint64_t pa=0; error=x9_usb_dma_alloc(&va,&pa);
         if (error) break; eps[i].va=va; eps[i].pa=pa;
     }
-    if (!error) error=create_network();
+    if (!error && !mux_profile) error=create_network();
     if (error) { fault(error,info); thread_terminate_self(); return; }
     /* No IOMMU attachment is declared for ssusb in the MT6993 DTS. This is
      * not proof of live EMI/MPU accessibility; only an actual DMA can prove it. */
@@ -857,6 +887,7 @@ static void worker(void *arg, wait_result_t why)
     lck_mtx_lock(&usb_lock); st.state=X9_USB_READY; lck_mtx_unlock(&usb_lock);
     W(0x2404,R(0x2404)|BIT(6));
     printf("X9 USB: MTU3 USB2 ECM%s ready, GIC INTID533 polled, QMU36 version=%#x; EP0 log retained\n",st.raw_enabled?"+private bulk":"",version);
+    if (mux_profile) printf("X9 USB MUX: usbmux profile armed (x9_usb=3); no ue0 in this profile\n");
     for (;;) {
         bus_poll(); /* completes even if the hardware was isolated */
         lck_mtx_lock(&usb_lock); unsigned off = st.reserved & X9_USB_BUS_FORCED_OFF; lck_mtx_unlock(&usb_lock);
@@ -878,6 +909,7 @@ static void worker(void *arg, wait_result_t why)
          * 100us; idle cost stays at the original 1ms. Producers also wake
          * the worker explicitly (thread_wakeup above). */
         lck_mtx_lock(&usb_lock); unsigned hot = net_tx.count || raw_tx.count; lck_mtx_unlock(&usb_lock);
+        hot |= x9_mux_glue_hot();
         for (unsigned i = 0; i < 5; i++) hot |= eps[i].busy;
         uint64_t deadline;
         if (hot) clock_interval_to_deadline(100,NSEC_PER_USEC,&deadline);
@@ -890,6 +922,20 @@ void x9_usb_start(void)
     lck_mtx_lock(&usb_lock);
     if (started) { lck_mtx_unlock(&usb_lock); return; }
     started=1; st.mode=(uint32_t)sweet_x9_arg("x9_usb",0); st.raw_enabled=st.mode==2;
+    mux_profile = st.mode == 3;
+    if (mux_profile) {
+        /* Apple identity for the usbmux profile. The serial stays at the
+         * synthetic default on purpose: it is a USB string, not a UDID
+         * (see x9_usb_device.h). Set it to the boot log's
+         * IOPlatformSerialNumber via the description flow before pairing
+         * validation; lockdownd serves the real identity values itself. */
+        description.vendor_id = 0x5ac; description.product_id = 0x12a8;
+        description.device_id = 0x100; description.bcd_usb = 0x200;
+        description.device_class = 0; description.device_subclass = 0;
+        description.device_protocol = 0;
+        memcpy(description.manufacturer, "Apple Inc.", sizeof("Apple Inc."));
+        memcpy(description.product, "iPhone", sizeof("iPhone"));
+    }
     st.state=X9_USB_INITIALIZING; st.generation=1; lck_mtx_unlock(&usb_lock);
     thread_t t; int error=kernel_thread_start(worker,NULL,&t);
     if (!error) thread_deallocate(t);
