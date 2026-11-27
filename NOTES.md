@@ -101,6 +101,8 @@ PATH=/opt/homebrew/opt/llvm@22/bin:$PATH \
 - **短信**：双卡存储列表 `0608=0x210000` 可来自 CPMS 或 CMGL 失败。先用 rev 284 无线诊断候选确认同卡 CPMS/CMGR，再对照投递及真实入站 `8601/8603`。SIM2 `0606=0` 只确认基带受理。见 [基带 README](x9/baseband/README.md)及[短信结果链](docs/baseband/sms-result-path-20261126.md)。
 - **本轮增量**：`090f` 和启动 IMS `0a04` 查询超时后释放只读 token，迟到确认无法匹配新事务。可选 `4904` 仅记录逐卡 SIP 标量，不进入通话事件队列，其专用订阅效果待实机确认。短信终态仅等待主机收执时放行同卡下一项存储请求，原生未结束或结果不确定时仍保持串行。`0601/108` 缺 iOS owner。`4606` 与 `8603` 为不同基带路径，仍缺 `4606` 的 iOS 交付合同。
 
+- 原厂初始化复现（`x9_factory_init=1`，默认关）：诊断会话（`~/radio-r287-20261127.txt`）确认 iOS 启动下双卡 IMS feature cache 全零（`raw=000000000000`）、注册快照 0；原厂基线（本机 `radio-baseline.txt`，2026-11-15）逐卡在 init 期发送 `0a1c`（仅 SIM1，tag 0x100 长 64 全零）→`0a18`（0x100=0）→`0a00`（0x100=0、0x102=`030300000101`），确认 `0a1d/0a19/0a01` 均有真实往返。本轮实现逐卡同序写入：六字节由聚合函数按本机原厂策略输入生成（VoLTE/VoNR/ViLTE/ViNR 开、WFC/ViWiFi 关、IMS SMS 与 eims 开），写后回读 `0a02` 缓存留证；注册证据仍归 4a01/0a04 观察者，配置 ACK 不写成注册。短信 init 在配置包确认后、host-ready 前补发原厂 `0601` tag 0x108=1（同一门控）；原厂 `060f` CBM 捕获含未初始化指针字节，不复现且与 MT 投递无关。主机新增 `test_factory_init.py`（帧序、六字节、拒绝即停）通过；基带套件 18 项中 2 项错误与未改 main 相同（`test_call_owner_boundary`、`test_sms_pdu_class` 的 SDK 27.2 tapi 环境问题，非本轮引入）。候选 `radio-factory-r287b-20261127`（纯内核、allowlist 由已 stage 的 287 mailbox.json 再生、boot 参数 `x9_factory_init=1 x9_call_sip_diag=1 x9_sms_srr=1`，合计 607 字节恰在 mkpayload 上限内）未刷，待上机验收：写后缓存应为 `030300000101`，随后观察 4a01 注册变化、入站短信与 SIM2 拨号。
+
 ## 5. 其他子系统
 
 - **GPU / SharedEvent**：主线已有 SharedEvent 接线和 rev 284 Metal2Vulkan 热路径优化。止崩、高刷、性能和降温仍需匹配样本。见 [Metal README](x9/metal/README.md)及[SharedEvent 合同](docs/graphics/shared-event-contract-20261126.md)。
