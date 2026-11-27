@@ -727,6 +727,10 @@ def assemble(out):
         f'Dir::State::status "{PREFIX}/Library/dpkg/status";\n')
     (tree / 'etc/apt/sources.list.d/storm.list').write_text(
         '# storm bootstrap ships no remote source yet; local .deb installs only.\n')
+    # Sileo's storm detection marker (see the storm patch in
+    # sileo-storm-prefix.patch): Bootstrap.x9_storm keys on this file
+    # at the prefix root, so it must ship in the tree itself.
+    (tree / '.x9_storm_strapped').write_text('x9-storm\n')
     files = {}
     for path in sorted(tree.rglob('*')):
         rel = path.relative_to(tree).as_posix()

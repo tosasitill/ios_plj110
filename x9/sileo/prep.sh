@@ -40,6 +40,16 @@ else
     echo "storm-prep: $VERSION already materialized"
 fi
 
+# apt state/cache skeleton (0.2.0): the bootstrap tree ships these,
+# but create them unconditionally so a tree materialized by an older
+# prep gains them too. apt itself also creates them on demand; having
+# them from the start keeps ownership/permissions uniform.
+mkdir -p "$DST/var/lib/apt/lists/partial" \
+         "$DST/var/cache/apt/archives/partial" \
+         "$DST/var/log/apt" \
+         "$DST/etc/apt/sources.list.d" "$DST/etc/apt/preferences.d" \
+         "$DST/etc/apt/apt.conf.d" "$DST/etc/apt/trusted.gpg.d"
+
 # Atomic flip of the public target.
 ln -s "$DST" "$DATA_ROOT/.current-$$"
 mv -f "$DATA_ROOT/.current-$$" "$DATA_ROOT/current"
