@@ -3179,3 +3179,14 @@ Carrier bundle 键在 SD `__cstring` 中完整可见：`EnableVoLTEWithVoWiFi`�
 SIP UA 结论：本机原厂捕获的 init 窗口内不存在独立的 SIP UA MD 帧——0axx 只有 0a1c/0a18/0a00，`RmmImsCtlReqHdl` 也只打印 requestSetImsCfg 两行；`requestSetSipUserAgent` 在该路径上没有可观测的 MIPC 流量（属 AP 侧内部状态），不虚构帧形。若配置+承载后注册仍不动，下一证据需带 MCL 详细日志的原厂抓包或 MD 侧注册触发点反汇编，不靠猜。
 
 边界：配置与承载 ACK 仍不证明 IMS 注册；注册与振铃证据以 4a01 IND、拨号窗 0a04 快照和 ECPI2/132/6 为准。
+
+
+### 2026-11-27 4606 家族：无确认投递合同（x9_sms_ind，默认关）
+
+先正名：`4606` 不是一条独立的 IMS 短信传输。按本机 vendor 头 `mipc_msg_tlv_const.h`，SMS 指示空间分两套——`0x46xx` 是 IND（无需确认，MD 在 prefer_no_ack 模式下发），`0x86xx` 是 CMD（需 AP 回 RSP，prefer_ack 模式）。逐条形状：`4601` CFG_IND、`4602` NEW_SMS_IND、`4603` STORE_STATUS_IND、`4606` NEW_STATUS_REPORT_IND、`4607` NEW_CBM_IND、`4609` EXT_INFO_IND；对偶面是 `8601` NEW_SMS_CMD→`8602` RSP、`8603` NEW_STATUS_REPORT_CMD→`8604` RSP。桥此前的状态：4602/4603/4606/4607/4609 全部无人认领（消息收件箱白名单只有 8601/8603/4601/4a01，事件分发对无 token 帧直接丢弃）。
+
+两侧合同闭合的部分：NEW_SMS_IND 与 NEW_SMS_CMD 的 TLV 布局逐字相同（0x100 FORMAT、0x103 PDU_COUNT、0x8104 PDU_LIST、0x8105 C2K），状态报告两侧同为 0x8100 PDU；原厂 Rmm 侧 4606/4607/4603/4609 与 8602/8604 本就是 GSM 共享回调。桥的 CFG 已固定 PREFER_ACK(0x105)=1、PREFER_STORAGE(0x106)=2(TE)，故正常模式应走 CMD 面；IND 面是 MD 模式回退时的暗道——它是否在本机触发无任何设备证据（既有日志的 RX 行不覆盖该层，不能据缺席断言不存在）。
+
+实现（`x9_sms_ind=1` 门控，默认关；IMS 注册未实测前不默认启用）：收件箱白名单在门控下放行 4602/4603/4606；逐卡以 REGISTER_IND(0x307) 订阅 4602/4606（镜像 4a01 的注册方式，CFG_IND 步通过后启动，拒绝/超时即停）；事件分发为 IND 合成 bit31 命名空间的主机侧 token（CMD 收件箱永不签发），与 CMD 共用 PDU 抽取、WMS 发布与主机 ACK 记账，但发布准入不查 CMD 槽位、DISCARD 路由与主机 ACK 完成都不向 MD 发 RSP（无命令可回）。4602 的 FORMAT 字节只记诊断（未观测，不照搬 CMD 的 type==3 门禁；结构校验仍由 PDU 解析把关，C2K 的 0x8105 编码仍不映射）。4603 只打印 flag/index 作证据：它出现即证明 MD 把 MT 短信存进了 DEVICE 存储而非投递主机，与 CMGR 断点互为印证。
+
+只写文档不写代码的部分：4607 CBM（桥整体未接小区广播）、4609 EXT_INFO（载荷语义未定义）、4602 的 C2K 变体、以及 prefer_no_ack 的触发条件本身（CFG 组合与 MD 固件模式的对应关系未闭合）。主机新增 `test_sms_ind.py` 覆盖门控开关、4602/4606 投递形状、合成 token 命名空间、CMD 路径无回归、注册帧序与拒绝即停；全套基带测试仅余 2 项与未改 main 相同的 SDK 环境错误。候选 `sms-ind-r287-20261127` 已离线构建（纯内核、配对 287），未刷机；上机判读点：开 `x9_sms_ind=1` 后注册确认、入站时究竟走 8601 还是 4602、4603 是否出现。
