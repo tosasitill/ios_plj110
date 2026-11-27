@@ -19,6 +19,7 @@
 #include "x9_haptic.h"
 #include "x9_haptic_convert.h"
 #include "x9_haptic_stock_waves.h"
+#include "x9_haptic_stock.h"
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 extern int sweet_early_is_x9(void);
 extern int sweet_x9_arg(const char *,int);
@@ -66,6 +67,23 @@ static bool writer,draining,scene_active,quiet_stop;
 static struct x9_haptic_converter converter;
 static struct x9_haptic_pattern pattern;
 static const struct x9_haptic_stock_wave *stock_wave;
+static struct x9_haptic_stock stock;
+static uint32_t feel_flags=X9_HS_FEEL_ALL;
+static uint8_t scene_kind; /* 0 none, 1 one-shot stock scene, 2 envelope buzz */
+static uint32_t stock_peak_tap=127,stock_peak_light=12,stock_peak_buzz=126;
+static uint32_t stock_wave_peak(const struct x9_haptic_stock_wave *w)
+{
+    if(w==&x9_stock_wave_tap_light)return stock_peak_light;
+    if(w==&x9_stock_wave_buzz)return stock_peak_buzz;
+    return stock_peak_tap;
+}
+/* Intensity that lands a stock wave's native peak on a desired output
+ * peak (0..127): the worker scales samples by scene_intensity/1000. */
+static uint32_t stock_level_intensity(const struct x9_haptic_stock_wave *w,uint32_t level)
+{uint32_t pk=stock_wave_peak(w);return pk?(level*1000u)/pk:1000;}
+static uint32_t wave_peak_scan(const int8_t *s,uint32_t n)
+{uint32_t pk=0;for(uint32_t i=0;i<n;i++){int32_t a=s[i]<0?-(int32_t)s[i]:s[i];
+    if((uint32_t)a>pk)pk=(uint32_t)a;}return pk;}
 /* Kept off the kernel stack; write_lock protects copyin/conversion. */
 static struct x9_haptic_packet packet;
 static uint64_t now_ns(void)
@@ -121,6 +139,7 @@ static int stop_locked(void)
 {
     stream_summary();
     hs.flags&=~X9_HAPTIC_RUNNING;draining=scene_active=quiet_stop=false;stock_wave=NULL;
+    scene_kind=0;x9_haptic_stock_init(&stock,0,0);
     ++hs.generation;head=count=0;sequence=0;
     int e=hoff();on_at=last_signal_ns=0;hs.last_stop_ns=now_ns();
     if(e)hs.last_errno=e;
@@ -141,6 +160,7 @@ static int start_locked(struct x9_haptic_start *s)
     hs.flags&=~X9_HAPTIC_THROTTLED;hs.flags|=X9_HAPTIC_RUNNING;stream_reset();
     ++hs.generation;head=count=0;sequence=0;draining=scene_active=false;stock_wave=NULL;
     x9_haptic_converter_init(&converter,hs.f0_millihz,s->conversion,s->intensity,s->sharpness);
+    x9_haptic_stock_init(&stock,feel_flags&X9_HS_FEEL_GRADE,s->intensity);
     hs.last_write_ns=now_ns();s->generation=hs.generation;return 0;
 }
 static int haptic_open(dev_t d,int f,__unused int t,struct proc *p)
@@ -170,7 +190,7 @@ static int haptic_read(dev_t d,struct uio *u,__unused int flags)
     return uiomove((char *)&s,sizeof(s),u);
 }
 static void stock_start_locked(const struct x9_haptic_stock_wave *w,uint32_t intensity)
-{stock_wave=w;scene_frame=0;scene_intensity=intensity;scene_active=true;wakeup(&count);}
+{stock_wave=w;scene_frame=0;scene_intensity=intensity;scene_active=true;scene_kind=1;wakeup(&count);}
 static int haptic_write(dev_t d,struct uio *u,__unused int flags)
 {
     if(minor(d)!=1 || !uio_isuserspace(u) || uio_iovcnt(u)!=1 ||
@@ -198,21 +218,21 @@ static int haptic_write(dev_t d,struct uio *u,__unused int flags)
             if(!cooling)hs.flags&=~X9_HAPTIC_THROTTLED;
             if(hs.mode==3) {
                 /* Stock mode: Apple PCM is an event cue, not drive content.
-                 * Each onset after >=1 ms below 512 plays one full-scale stock
-                 * transient; playback/refractory input is consumed, not queued,
-                 * so the HAL packet contract never sees EBUSY mid-stream. */
+                 * The engine (x9_haptic_stock.h) detects onsets and grades
+                 * them by captured peak; playback/refractory input is
+                 * consumed, not queued at the packet layer, so the HAL
+                 * packet contract never sees EBUSY mid-stream. */
                 for(unsigned i=0;i<packet.frames;i++) {
-                    int32_t a=packet.samples[i]<0?-(int32_t)packet.samples[i]:packet.samples[i];
-                    if(a>converter.in_peak)converter.in_peak=a;
-                    if(a<512) {
-                        if(converter.stock_quiet<48)++converter.stock_quiet;
-                        else converter.stock_armed=1;
-                    } else {
-                        if(converter.stock_armed && !scene_active && !draining && !cooling)
-                            stock_start_locked(&x9_stock_wave_tap,converter.intensity);
-                        converter.stock_quiet=0;converter.stock_armed=0;
+                    uint32_t ev=x9_haptic_stock_feed(&stock,packet.samples[i],
+                        (scene_active || draining)?1:0);
+                    if((ev&X9_HS_EV_FIRE) && !cooling) {
+                        const struct x9_haptic_stock_wave *w=
+                            stock.fire_grade==X9_HS_GRADE_LIGHT?
+                            &x9_stock_wave_tap_light:&x9_stock_wave_tap;
+                        stock_start_locked(w,stock_level_intensity(w,stock.fire_level));
                     }
                 }
+                converter.in_peak=stock.in_peak;
             } else for(unsigned i=0;i<packet.frames;i++) {
                 int8_t v;if(x9_haptic_convert_sample(&converter,packet.samples[i],&v)) {
                     if(cooling)++hs.throttled_rtp_frames;
@@ -400,6 +420,8 @@ void sweet_x9_haptic_init(void)
      * The log-296 hang after haptic init was io_submap exhaustion, not the
      * haptic itself; its stage-12 busy bank is now logged/handled. */
     int mode=sweet_x9_arg("x9_haptic",3);if(mode<0 || mode>3)mode=0;
+    int feel=sweet_x9_arg("x9_haptic_feel",15);if(feel<0 || feel>15)feel=15;
+    feel_flags=(uint32_t)feel;
     hs.mode=(unsigned)mode;if(!mode)return;
     int f0=sweet_x9_arg("x9_haptic_f0",1730);
     if(f0<1600 || f0>1900){hs.last_errno=EINVAL;hs.flags=X9_HAPTIC_FAULT;}
@@ -416,8 +438,15 @@ void sweet_x9_haptic_init(void)
         if(kr==KERN_SUCCESS)thread_deallocate(thread);
         else {hs.last_errno=ENOMEM;hs.flags=X9_HAPTIC_FAULT;(void)hoff();}
         devfs_make_node(makedev(major,1),DEVFS_CHAR,501,501,0600,"x9-haptic");
-        if(mode==3)printf("X9 HAPTIC: stock waves tap=%u notify=%u buzz=%u samples @12k\n",
-            x9_stock_wave_tap.len,x9_stock_wave_notify.len,x9_stock_wave_buzz.len);
+        if(mode==3) {
+            stock_peak_tap=wave_peak_scan(x9_stock_tap,x9_stock_wave_tap.len);
+            stock_peak_light=wave_peak_scan(x9_stock_tap_light,x9_stock_wave_tap_light.len);
+            stock_peak_buzz=wave_peak_scan(x9_stock_buzz,x9_stock_wave_buzz.len);
+            printf("X9 HAPTIC: stock waves tap=%u notify=%u buzz=%u light=%u samples @12k feel=%u peaks=%u/%u/%u\n",
+                x9_stock_wave_tap.len,x9_stock_wave_notify.len,x9_stock_wave_buzz.len,
+                x9_stock_wave_tap_light.len,feel_flags,
+                stock_peak_tap,stock_peak_light,stock_peak_buzz);
+        }
     }
     x9_crumb_rgu=ml_io_map(0x1c010000,0x1000);
     if(x9_crumb_rgu)*(volatile uint32_t *)(x9_crumb_rgu+0x20)=0;
