@@ -1,6 +1,16 @@
 /* Read-only topology production at the actual LK -> ADT handoff. Qualifies
  * full register/name/interrupt and pin tables, not merely a matching address.
- * No SMC, MMIO, IRQ init/ack, SRAM read, reset or inherited READY claim. */
+ * No SMC, MMIO, IRQ init/ack, SRAM read, reset or inherited READY claim.
+ *
+ * Stall root cause (2026-11-23 revert of the feat/hevc-hw merge): the first
+ * version of layout() called fdt_property() once per field (~35 calls);
+ * every call re-validates the whole LK FDT up to END. In the pre-XNU shim
+ * (MMU and D-cache off, no watchdog service) those per-field full-tree
+ * walks stalled the boot, the same failure that had stopped the audio
+ * qualifiers at BOOT130. layout() therefore uses ONE bounded fdt_collect
+ * pass -- the fdt_collect.c pattern built for audio: the same complete-tree
+ * validation run once, watchdog kicked every 2048 tokens, fail-closed
+ * after a 2000 ms budget -- and reads every field from the collection. */
 #include "fdt.h"
 #include "plog.h"
 #include "vcp_fdt_expected.h"
@@ -16,28 +26,35 @@ static int same(const uint8_t *p, size_t n, const char *s)
     while (at < n && s[at] && p[at] == (uint8_t)s[at]) at++;
     return at < n && !s[at] && !p[at];
 }
-static int exact(uintptr_t dt, const char *path, const char *key,
-                   const uint8_t *want, size_t bytes)
+/* The five nodes layout() qualifies, captured in one collection pass. */
+enum { N_ROOT, N_SOC, N_VCP, N_MMUP, N_VDEC, N_NODES };
+static const char vcp_paths[N_NODES][FDT_CAPTURE_PATH_BYTES] = {
+    "", "/soc", "/soc/vcp@31800000", "/soc/mmup@31a00000", "/soc/vdec@36000000",
+};
+/* ~6 KiB: static storage, never the pre-XNU stack (see fdt.h). */
+static struct fdt_collect vcp_collect;
+static int exact(unsigned node, const char *key,
+                 const uint8_t *want, size_t bytes)
 {
     const uint8_t *p; size_t n;
-    if (!fdt_property(dt, path, key, &p, &n) || n != bytes) return 0;
+    if (fdt_collect_get(&vcp_collect, node, key, &p, &n) != 1 || n != bytes)
+        return 0;
     for (size_t i = 0; i < n; i++) if (p[i] != want[i]) return 0;
     return 1;
 }
-static int cells(uintptr_t dt, const char *path, const char *key,
-                   const uint32_t *want, size_t count)
+static int cells(unsigned node, const char *key,
+                 const uint32_t *want, size_t count)
 {
     const uint8_t *p; size_t n;
-    if (!fdt_property(dt, path, key, &p, &n) || n != count * 4) return 0;
+    if (fdt_collect_get(&vcp_collect, node, key, &p, &n) != 1 ||
+        n != count * 4) return 0;
     for (size_t i = 0; i < count; i++) if (be32(p + i * 4) != want[i]) return 0;
     return 1;
 }
-#define CELLS(dt,path,key,a) cells(dt,path,key,a,sizeof(a)/sizeof((a)[0]))
-#define NAMES(dt,path,key,a) exact(dt,path,key,(const uint8_t *)(a),sizeof(a))
+#define CELLS(node,key,a) cells(node,key,a,sizeof(a)/sizeof((a)[0]))
+#define NAMES(node,key,a) exact(node,key,(const uint8_t *)(a),sizeof(a))
 static int layout(uintptr_t dt)
 {
-    const char *v = "/soc/vcp@31800000", *m = "/soc/mmup@31a00000";
-    const char *d = "/soc/vdec@36000000";
     const char dc[] = "mediatek,vcodec-dec", dp[] = "platform:mt6993";
     const char vc[] = "mediatek,vcp", mc[] = "mediatek,mmup";
     const char vi[] = "wdt\0reserved\0mbox0\0mbox1\0mbox2";
@@ -46,27 +63,38 @@ static int layout(uintptr_t dt)
     const uint32_t one[] = {1}, zero[] = {0};
     const uint8_t okay[] = {'o','k','a','y',0};
     const uint8_t *p; size_t n;
-    if (!CELLS(dt,"","#address-cells",two) || !CELLS(dt,"","#size-cells",two) ||
-        !CELLS(dt,"/soc","#address-cells",two) || !CELLS(dt,"/soc","#size-cells",two) ||
-        !fdt_property(dt,"/soc","ranges",&p,&n) || n) return 0;
-    if (!NAMES(dt,v,"compatible",vc) || !NAMES(dt,m,"compatible",mc) ||
-        !exact(dt,v,"status",okay,sizeof(okay)) || !exact(dt,m,"status",okay,sizeof(okay)) ||
-        !CELLS(dt,v,"reg",vcp_reg) || !CELLS(dt,m,"reg",mmup_reg) ||
-        !NAMES(dt,v,"reg-names",vcp_reg_names) || !NAMES(dt,m,"reg-names",mmup_reg_names) ||
-        !CELLS(dt,v,"interrupts",vcp_interrupts) || !CELLS(dt,m,"interrupts",mmup_interrupts) ||
-        !NAMES(dt,v,"interrupt-names",vi) || !NAMES(dt,m,"interrupt-names",mi) ||
-        !CELLS(dt,v,"core-nums",two) || !CELLS(dt,v,"vcp-sram-size",sram) ||
-        !CELLS(dt,v,"vcp-mem-tbl",x9_vcp_global_mem_table) ||
-        !CELLS(dt,v,"vcp-secure-dump",zero) ||
-        !CELLS(dt,v,"twohart",one) || !CELLS(dt,m,"twohart",zero) ||
-        !CELLS(dt,v,"mbox-count",three) || !CELLS(dt,m,"mbox-count",two)) return 0;
-    return NAMES(dt,d,"compatible",dc) && NAMES(dt,d,"mediatek,platform",dp) &&
-        CELLS(dt,d,"mediatek,ipm",two) && CELLS(dt,d,"vdec-power-in-vcp",one) &&
-        CELLS(dt,d,"vp-mode-buf-size-multi",one) &&
-        CELLS(dt,v,"send-table",vcp_send) &&
-        CELLS(dt,v,"recv-table",vcp_recv) &&
-        CELLS(dt,m,"send-table",mmup_send) &&
-        CELLS(dt,m,"recv-table",mmup_recv);
+    /* ONE bounded pass: whole-tree validation, watchdog serviced, hard
+     * time budget. Any refusal (invalid tree, a wanted node missing or
+     * duplicated, property capacity, over budget) is a plain mismatch:
+     * fail closed, print, and let the boot continue without VCP. */
+    if (fdt_collect(&vcp_collect, dt, vcp_paths, N_NODES,
+                    (1u << N_NODES) - 1) != FDT_PROPERTY_PRESENT) {
+        plog_str("X9 VCP FDT: collection refused or over budget, transport unavailable\n");
+        return 0;
+    }
+    plog_hex("X9 VCP FDT watchdog kicks", vcp_collect.kicks);
+    plog_hex("X9 VCP FDT properties", vcp_collect.count);
+    if (!CELLS(N_ROOT,"#address-cells",two) || !CELLS(N_ROOT,"#size-cells",two) ||
+        !CELLS(N_SOC,"#address-cells",two) || !CELLS(N_SOC,"#size-cells",two) ||
+        fdt_collect_get(&vcp_collect,N_SOC,"ranges",&p,&n) != 1 || n) return 0;
+    if (!NAMES(N_VCP,"compatible",vc) || !NAMES(N_MMUP,"compatible",mc) ||
+        !exact(N_VCP,"status",okay,sizeof(okay)) || !exact(N_MMUP,"status",okay,sizeof(okay)) ||
+        !CELLS(N_VCP,"reg",vcp_reg) || !CELLS(N_MMUP,"reg",mmup_reg) ||
+        !NAMES(N_VCP,"reg-names",vcp_reg_names) || !NAMES(N_MMUP,"reg-names",mmup_reg_names) ||
+        !CELLS(N_VCP,"interrupts",vcp_interrupts) || !CELLS(N_MMUP,"interrupts",mmup_interrupts) ||
+        !NAMES(N_VCP,"interrupt-names",vi) || !NAMES(N_MMUP,"interrupt-names",mi) ||
+        !CELLS(N_VCP,"core-nums",two) || !CELLS(N_VCP,"vcp-sram-size",sram) ||
+        !CELLS(N_VCP,"vcp-mem-tbl",x9_vcp_global_mem_table) ||
+        !CELLS(N_VCP,"vcp-secure-dump",zero) ||
+        !CELLS(N_VCP,"twohart",one) || !CELLS(N_MMUP,"twohart",zero) ||
+        !CELLS(N_VCP,"mbox-count",three) || !CELLS(N_MMUP,"mbox-count",two)) return 0;
+    return NAMES(N_VDEC,"compatible",dc) && NAMES(N_VDEC,"mediatek,platform",dp) &&
+        CELLS(N_VDEC,"mediatek,ipm",two) && CELLS(N_VDEC,"vdec-power-in-vcp",one) &&
+        CELLS(N_VDEC,"vp-mode-buf-size-multi",one) &&
+        CELLS(N_VCP,"send-table",vcp_send) &&
+        CELLS(N_VCP,"recv-table",vcp_recv) &&
+        CELLS(N_MMUP,"send-table",mmup_send) &&
+        CELLS(N_MMUP,"recv-table",mmup_recv);
 }
 /* Validate the WHOLE ADT before writing. Property order is irrelevant; a
  * duplicate name/placeholder or a placeholder outside /chosen is invalid. */
