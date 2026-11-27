@@ -93,7 +93,7 @@ def package(runtime, out, settings_original=None):
                 'preferences_uuid': 'B2ED1830-FB2B-3702-B254-17872B2E0A97',
                 'manager_uuid': '54FB08F7-FE66-344D-B7CE-31838CDEE572',
                 'mobile_bluetooth_uuid': 'FDE5B98E-2257-35C8-B323-92B824492207',
-                'hook_count': 7, 'boot_arg': 'x9_bt_settings_diag=1',
+                'hook_count': 8, 'boot_arg': 'x9_bt_settings_diag=1',
                 'log_interface': 'kern.x9_bt_note', 'manager_state_modified': False,
             }
             or value.get('power_interface') != 'kern.x9_bt_power'
