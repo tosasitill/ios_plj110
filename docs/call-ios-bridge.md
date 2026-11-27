@@ -3179,3 +3179,21 @@ Carrier bundle 键在 SD `__cstring` 中完整可见：`EnableVoLTEWithVoWiFi`�
 SIP UA 结论：本机原厂捕获的 init 窗口内不存在独立的 SIP UA MD 帧——0axx 只有 0a1c/0a18/0a00，`RmmImsCtlReqHdl` 也只打印 requestSetImsCfg 两行；`requestSetSipUserAgent` 在该路径上没有可观测的 MIPC 流量（属 AP 侧内部状态），不虚构帧形。若配置+承载后注册仍不动，下一证据需带 MCL 详细日志的原厂抓包或 MD 侧注册触发点反汇编，不靠猜。
 
 边界：配置与承载 ACK 仍不证明 IMS 注册；注册与振铃证据以 4a01 IND、拨号窗 0a04 快照和 ECPI2/132/6 为准。
+
+### Apple IMS 能力接口清单与 NAS 0x0073 闭合边界（2026-11-27，静态+DSC，未上机）
+
+本节把 CommCenter 向 baseband 查询/宣告 IMS 能力与语音 options 的接口逐项落账。证据源：20H392 `.local/apple/dsc-20H392` 下 `libCommCenterMCommandDrivers.dylib`（llvm-nm/objdump 全文反汇编，`mov w1,#id`+消息工厂桩 `0x1f2f994a0` 归属到构造函数的映射表）、设备日志 `~/radio-r287-20261127.txt` 与 445–448 的 reject 统计。此前 L591 记的"Apple IMS provider 到 MTK modem IMS 的桥及语音能力 options 仍未实现"按本节细分：MIPC 侧的注册快照/feature cache/工厂配置已由 PR #12/#13 闭合（见前节）；QMI 侧 CommCenter 实际发出的 IMS 能力查询只有下列 NAS 0x0073 一项，其余皆为未观测或语义未闭合，不放行、不伪造。
+
+**NAS 0x0073 = GetImsPreferenceInfo（请求侧闭合、响应形状闭合、u64 语义未闭合）。** `QMINetworkRegistrationDriver::getImsPreferenceInfo_sync(SubscriptionType)`（`0x1f1afaf50`）以 `mov w1,#0x73` 经消息工厂构造请求，无请求 TLV；在 `bindNASSubscription_sync` 的完成块内、`sendIndRegisterReq_sync` 之后逐卡调用一次（返回值被丢弃，实义在异步完成里）。设备侧与之吻合：每卡每次开机约 22–28 s 各发一次 7 字节裸请求，现被 `x9q_reject` 以 UNSUPPORTED(94) 拒绝。其 SendProxy 完成块（`0x1f1b0cba4`）在成功路径上按类型 **0x10** 取 TLV 并调用 `tlv::parse<nas::tlv::IpPrefInfo>`（`0x1f194cb4c`）：先验 1 字节、再验 8 字节、游标共进 9——即 **IpPrefInfo 恰为 {u8 sys_mode, u64}、TLV 0x10 长 9**。byte0 以 `&0xff` 作 `nas::RadioInterface` 传入 `dataModesFromSysMode`；`nas::asString(nas::ImsSysMode)`（`0x1f1954e44`）的 csel 链给出 **0=kNoService、8=kLTE、12=kNR5g**，其余值显示 "???"。完成块另把一个钳制到 1..4（越界归 0）的标量与该 u64 一并交给驱动的 preference delegate（`NetworkRegistrationDriverEventHandlerInterface`，实现体在 CommCenter 主程序，不在 DSC 抽取内）；**u64 的语义因此无法由现有静态输入闭合**——它可能是 IP 偏好位图、能力掩码或其他编码，任一猜测都会污染 CommCenter 的 IMS data-mode 决策，比维持 UNSUPPORTED 更坏。同消息族还有基带→AP 的 `ImsPreferenceInfo::Indication`（bootstrap 以 `setIndHandler` 注册，驱动日志串 "#I Received IMS preference update from baseband"），其 IND 消息号与字段复用关系同样未闭合，不发送。
+
+实现（分支 radio/ims-provider，未上机）：默认行为不变——`x9q_supported` 不准入 0x73，仍回 UNSUPPORTED。仅在默认关的实验门 `x9_ims_pref_diag=1` 下，`x9q_send` 以已证形状应答：结果 TLV 成功 + TLV 0x10{sys_mode, u64=0}，其中 sys_mode 由 `x9q_ims_sys_mode()` 取本卡最新真实 serving 样本（`x9q_data_radios`，与 WDS 同一 30 s 新鲜度规则；NR 位→12、LTE 位→8、无新鲜样本→0=kNoService），不含任何"全部支持"式硬编码。该门是为下一轮上机实验预备的探针：开门后观察 CommCenter 是否据此推进 IMS 偏好状态、以及 u64=0 的可观测后果，再决定是否转正或撤除。主机测试 `test_ims_pref_info.py` 覆盖 sys_mode 映射/新鲜度边界/逐卡独立与门控-默认边界；全套基带测试 18/20 通过，2 项错误为既有 SDK 环境失败（test_call_owner_boundary、test_sms_pdu_class，与未改 main 相同）。
+
+**其余 IMS 相邻接口（清单，均保持现状）：**
+- `QMINetworkRegistrationDriver::enableIms(SimSlot, ImsStateForBaseband)`（`0x1f1b0119c`）构造 NAS 0x33 系消息宣告 IMS 开关；设备上 NAS 0x33 的实发形状是带 TLV 0x18/4 或 0xa4–0xa6 的 set 类请求，与本文档既有结论一致（按 route/IP-state preference 处理，`x9_call_sip_diag` 下有只读 diag 钩子），不与 0x0073 混同。`updateVoNRState(SimSlot, VoNRStateForBaseband)` 构造 **NAS 0x10b**（VoNR 状态宣告）——设备日志从未出现，MTK 侧映射未证明，不放行（与 L3164 对 0x10b 的既有边界一致）。
+- `EurekaCallCommandDriver::updateVoLTECallStatus(nas::ImsCallStatus{Start,Stop}, …)` 是驱动内 API，其 QMI 线形（疑经 NAS ImsStateNotification）未闭合；`QMIDataCommandDriver::setVoLTEAudioCodec_sync(AudioCodecInfo)` 有 "#E Device does not support setVoLTEAudioCodec" 失败串，设备上无对应请求样本。两者均只登记、不实现。
+- `QMIDataCommandDriver::reportPhsClients_sync(int)` 构造 0x5567、TLV 0x10/u32，设备上以 NAS 客户端逐卡实发（约 59 s 起）并被拒；"PHS" 语义在抽取内无定义、无 IMS 关联证据，不冒充 IMS 能力接口处理。
+- 被拒清单里其余 NAS 项已各自归属、与 IMS 能力无关：0x3b=GetPlmnModeBit、0xeb=DisableIccidRequest、0x110=GetNRDisableStatus、0x5569=updateCurrentDataSIM（数据卡切换）；0x5566/0x5568 的 WDS 侧结论见 `docs/network/2026-11-27_ims-wds-report.md`。
+- WMS 侧 `wms::tlv::IMSControl`、`wms::tlv::SmsOnIms` 仅出现在 QMISMSCommandDriver 的发送路径（SMS-over-IMS 标记），与 X9Messages.inc 文件头既有边界一致（SIP/非 CS type4/8105/VoLTE 发送未实现），不在本节重复展开。
+- WDS 0x2d IMS runtime settings 的 P-CSCF 列表（TLV 0x23/0x2e）与 S-NSSAI（TLV 0x32）仍缺：解析方 `QMIDataContextIPBase::parseImsSettingsFromResponse` 的期望已由前述报告闭合，但桥内没有真实 P-CSCF 来源（IMS 承载 ACT 的 PCO 未提取），无值可填，保持不提供。
+
+仍缺证据的字段汇总：IpPrefInfo 的 u64 语义与完成块钳制标量的来源字段；ImsPreferenceInfo::Indication 的消息号；updateVoLTECallStatus 的线形；IMS 承载 PCO 中的 P-CSCF 地址。四项任一闭合前，相关应答维持 UNSUPPORTED 或不提供，不以样本值/全集值填充。
