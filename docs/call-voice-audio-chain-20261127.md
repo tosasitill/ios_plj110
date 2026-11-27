@@ -181,3 +181,34 @@ AD50 的提交等 voice IPI transport 与 scene 路由资格（见 L2/L6）。
 - **不发送**：0x2f20 的承载是 SpeechMessageQueue/SPC 流，不在本桥
   所有权内（原厂 MO 的 35 帧 MIPC 无 speech 帧）。builder 只把字节
   合同变成可执行、可测的代码，等 transport owner 出现再接。
+
+## 第二轮：L6/L1 Baseband Voice provider 合同骨架（2026-11-27 晚，已落地）
+
+- **原厂 PCM 合同（本机实测）**：原厂 MO 走 `modemPcmOpen` + 两次
+  `Hostless_Speech` open（DL owner flags 0x10000000、UL owner flags 0、
+  prepare=false），`mMdConfig = {channels 2, rate 48000,
+  period_size 1024, period_count 2, format 0(S16_LE)}`，
+  `SetModemSideSamplingRate 48000 => 48000`，SpeechOn 的 modem
+  index 为 0（mo-call-audio.txt:625-640,633）。周期几何：1024 帧 ×
+  2ch × 2B = 4096 B/周期、8192 B/缓冲。frame-base 分支会绕过
+  Hostless，本机本次未走该分支。
+- **AFE trigger 的决定门在 DSP**：reference 实现中
+  `use_adsp_share_mem` 为真时主机跳过 memif/IRQ 启停，HWPARAMS/
+  PREPARE 传的是物理 descriptor 地址而非 PCM 样本——主机侧 provider
+  无权冒充 trigger，这条边界写进合同头注释。
+- **iOS 侧合同（20H392 原件静态）**：VirtualAudio factory 按 UID
+  `Baseband Voice` 匹配后创建 592B wrapper（Downlink/Uplink 两条
+  stream），但 wrapper 不是凭 UID 生成：base ctor 把**真实传入的
+  AudioObjectID** 存于 device+0xb8，slot88 经 `stm#` 的 inpt/outp
+  scope 查真实 stream ID 再构造 owned wrapper；wrapper 还消费
+  `ttye`（→CTSetTTYMode）与 `ctsr`（→CTAudioSampleRateSwitchDidComplete）。
+  未闭合：谁把真实 object ID 交给 factory（ingress）、以及从
+  Baseband Voice 入口到真实硬件 IOProc 的完整 caller 链。
+- **骨架**：`x9/kernel/src/bsd/dev/x9_voice_bbdev.h` 把合同变成可
+  执行规则——资格函数要求：双向真实 stream、真实 IOProc、非媒体
+  owner、格式恰为原厂 modem PCM 合同；单例 registry 只接受合格
+  provider，ingress 决策在 registry 为空时恒关。本树目前**没有任何
+  provider 能合格**（无 PCM supplier），所以骨架默认即 fail-closed；
+  广告 UID 或复用媒体 Speaker 设备被资格规则构造性拒绝（主机测试
+  含 Speaker 形状被拒一项）。将来 PCM supplier 出现时在 x9/audio 的
+  HAL 插件层注册，内核侧经此合同校验。
