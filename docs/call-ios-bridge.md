@@ -3105,3 +3105,64 @@ Android 同次拨出 `live-logcat.txt:80433`、`:80436` 在 `0901` 前 136 ms �
 | IMS config request | `0x91333694` | `0x91333b54` |
 
 本次仅补证据和验收条件，未修改桥接代码或操作设备。
+
+## 2026-11-27：原厂振铃与 448 拨号窗口对照
+
+原厂同机 SIM2 记录 `live-logcat.txt:80436` 的 IMS 已注册，`:80955` 发送 `0901`，`:80969` 受理，`:80976` 首报 ECPI130。`4904` 的 tag104 依次捕获 SIP 100、183、180（`:84066`、`:91207`、`:92980`）。ECPI2 在 SIP 183 与 180 之间到达（`:91941`，距 `0901` 约 3.584 s），之后 ECPI132/6（`:93305`、`:93319`）。SIP 180 距 `0901` 约 3.835 s。原厂和 X9 都有相同的起始 ECPI130/mode0。
+
+`448.txt` 两笔同 SIM 请求均经真正 `0902=0`。关联 `0a04` 分别在 `0901` 后约 3 ms、2 ms 发出，`0a05` 的原始注册状态均为 0（`:21405`–`:21412`、`:28646`–`:28675`）；开机同卡快照也为 0。两笔均无可见 ECPI2/132/6，虽确认订阅 `4904`，也无可见 SIP 诊断记录。首次约 25 s、第二次约 34.6 s 后各由主机 `0905` 挂断。此前 435/441 自然结束为 2172，可定位至 MD 待处理 CC 服务拒绝路径，具体 MM/RRC 分支尚缺证据。综合证据将振铃差异定位在基带上报 ALERTING 之前，优先调查同卡 IMS 配置、注册与承载。
+
+原厂 SIM2 provisioning 由 `MtkImsConfigImpl` 逐项提交网络 feature，随后 `RmmImsControlRequestHandler` 发送 `0a00`（`radio-baseline.txt:1161`–`:1349`）。同一窗口 `isImsRegistered` 在 `0a01` 前已为 true，MmTel Voice capability 在确认后才见 true（`:1367`、`:1385`、`:1393`–`:1394`）。两者是不同证据，单次 ACK 的必要性和充分性均无法由该时间线推出。`0a18` 同卡在原厂拨号前约 11.630 s 有确认样本，字段 `100=0`，实际语义及因果关系待验证。现有 X9 `0a04` 和 `4a01` 只读／订阅侧已能观测状态，仍缺绑定本机选卡与运营商策略的 IMS 初始化。当前固定 `0901` 的 tag103=0 对应原厂 RIL 的 IMS 请求分支，非紧急非 IMS 分支 tag103=5 的选用仍需要真实 CS 可用性和域选择输入。
+
+同机 `ImsService.apk` 的 ASC 提取补齐了逐卡策略的两条入口。`ImsConfigUtils.getBooleanCarrierConfig` 从 phoneId 查 subId，读取对应 `CarrierConfigManager`；多 IMS 机型的属性按 `1 << phoneId` 取位。批量路径由 `MtkMmTelFeature` 交给 `MtkImsConfigImpl.setMultiFeatureValues`，后者按能力过滤值，再由 `ImsConfigController.setFeatureValue` 发 RIL 2136，带 feature、network、value、批次终止标记。另一条 `ImsConfigUtils.triggerSendCfg` 聚合同卡语音、视频、WFC、ViWiFi、IMS SMS 和 IMS 启用策略，经 `ImsRILAdapter.setImsCfg` 发 RIL 2077 六个布尔输入。原厂 RIL 下发的 6 字节模式与 Java 输入不是同一层，抓包显示前两个可为 3。Android 基础策略还区分用户开关、运营商能力、TTY 和 provisioning。见 [AOSP ImsManager](https://android.googlesource.com/platform/frameworks/opt/net/ims/+/master/src/java/com/android/ims/ImsManager.java)。
+
+新增 `x9_call_sip_diag=1` 下的逐卡配置基线。MD `mipc_ims_get_config_req` `0x91333bde..0x91333eee` 的 class 0 路径从 `0x2814ee04 + SIM*6` 读取缓存，将六字节写入 `0a03` tag100，另写 result tag0。X9 据此发 `0a02`，校验原 SIM、确认 ID、结果和长度，超时回收只读 token。另记录 iOS `NAS33` 的桥路由及 `BasebandIpState`，用以对照逐卡策略意图。缓存无法证明 NVRAM、网络配置或已注册状态。已知 iOS `WithVoLTE` 只包含语音启用意图，对 VoNR、视频、WFC、IMS SMS 的权威输入仍待接入；候选仅增加观测路径，未引入 `0a00` setter。
+
+## 2026-11-27：RIL 2136 的六字节聚合与 2133 的传输汇合
+
+### 2136 → native → MD `0a00`
+
+固定 `librilfusion.so` 的 `MtkRadioIms::setImsCfgFeatureValue` 在 `0xd0950..0xd0980` 仅在末尾 int 为 `1` 时把 RIL 2136（`0x858`）、四参数形状交给 `dispatchInts`。严格 AIDL 入口因此只提交批次末项；native `handleSetFeatureValue` 在 `0x202aa4..0x202aac` 还接受 `-1`，但该值不来自这条 AIDL 入口。固定 `libmtkmipc-ril.so` 的 `RtmImsConfigController::onHandleRequest` 在 `0x1fd9c0..0x1fd9ec` 将 2136 转到 `setFeatureValue`；后者从 `RfxIntsData` 取四个 int，再由 `handleSetFeatureValue` 调用 `triggerImsCfgCommand`。`triggerImsCfgCommand` 在 `0x2012ec` 以六个 int 构造 native `0xcf11`，并在 `0x200dcc..0x200e48` 写回 `persist.vendor.mtk.volte/vilte/vonr/vinr.enable`。
+
+`triggerImsCfgCommand` 的已闭合输入：逐卡 VoLTE/ViLTE/WFC/ViWiFi 属性、全局 IMS SMS 属性、VoNR/ViNR、5G VoWiFi force 和 dynamic IMS switch。有效 VoNR 需 VoLTE 与请求同时成立；有效 ViNR 还需有效 VoNR；config key1004 `uOpt` 以 `0` 开头时可清 NR 语音/视频。输出六字节中：
+
+- byte0 = VoLTE | (VoNR << 1)
+- byte1 = (VoLTE & ViLTE) | (ViNR << 1)
+- byte2 = WFC
+- byte3 = WFC & ViWiFi
+- byte4 = 全局 IMS SMS 值
+- byte5 = native 聚合启用字段，不是 Java `cfg[5]` 的直接复制
+
+六字节经 native `0xcf11`（53009）进入 `RtmImsController::onHandleRequest`（`0x1f35bc..0x1f35f0`）。该函数对 `0xcf10` 和 `0xcf11` 都先走 `cacheimscfgparams`，再调用 `setVolteSettingStatus`，最后 `requestToMcl`（`0x1f3658..0x1f36bc`）。`cacheimscfgparams` 只在 `0xcf10` 时按 featureVersion≥2 且 status==1 把前两个 int 的 `1` 改写为 `3`（`0x1f3788..0x1f3810`），并按 `24*slot` 缓存六个 int；`0xcf11` 不做该改写。严格映射为 RIL 2136→`0xcf18`、RIL 2077→`0xcf10`；`msgIdToId(0xcf18)` 反查得到 2136，`0xcf11` 只是 native 内部构造。
+
+MCL 侧 `RmmImsControlRequestHandler::onHandleRequest` 在 `0x28d480..0x28d4b0` 把 `0xcf10` 和 `0xcf11` 同一路由到 `requestSetImsCfg`。后者以 `isCurrentSlotSupportIms` 门控，取缓存前六个 int 的低字节，在 `0x28d838..0x28d884` 发送 MD `0a00`：TLV100=`0`，TLV102=六字节。该路径还调用 `requestSetSipUserAgent`，并按属性修正：`persist.vendor.radio.imstestmode==1` 时 byte5 清零；`persist.vendor.radio.imsdisablesms==1` 且 byte0..3 全零时 byte4/byte5 清零。RCS 状态特性另有由属性门控的 AT 通道调用，不参与 `0a00` 字段。
+
+原厂 SIM2 的 `3,3,0,0,1,1` 与上述公式相容：byte0/byte1 的 `3` 表示 LTE/NR 语音及视频位，不是两个独立布尔；WFC/ViWiFi 关闭，全局 SMS 值开启。Android 记录为 Java 逐 feature 2136 提交后，`RmmImsControlRequestHandler` 发 `0a00`，再收 `0a01 result=0`；单次 ACK 仍不能证明注册或通话成功。
+
+已闭合到 MD 写入前：严格 id→msgId 跳表、`Rtm` 的 cf10/cf11 合流、`cacheimscfgparams` 的 cf10 专属 1→3 改写、`Rmm` 的同一 `requestSetImsCfg`、`0a00` 的 TLV100/TLV102 构造及两个属性修正。仍未闭合：`0a00` 之后的持久化、驻留重注册、运营商门控运行时效果；2136 路径写回的 Android 属性不会由直接注入 `0a00` 复现，SIP UA/RCS 副作用也不会。因此当前桥仍只读 `0a02/0a03`，日志同时打印六字节原值和上述位解码，不硬编码样本值，不引入 `0a00` writer。
+
+### 2133 → GSM `0605`：传输汇合不等于 IMS 承载
+
+固定 AIDL `MtkRadioIms::sendImsSmsEx` 使用 RIL 2133（`0x855`）；format 0 走 `dispatchImsGsmSmsEx`，format 1 走 CDMA。GSM 路径复制 SMSC/PDU 后进入 native `dispatchImsSms` 与 `RtmImsSmsController::sendGsmSms`，后者委托通用 `RtmGsmSmsController`。`DEDE` 转 `DEE2`、`DEE1` 转 `DEDF`，随后都进入 `RmmGsmSmsRequestHandler::handleSendSms`。
+
+该 handler 在 `0x3305d8..0x330640` 构造 MIPC `0605`，写入 TLV100、`0x8101` PDU 和 TLV102 长度；TLV104=1 只出现在内部 `DEB9` 分支，`DEE2/DEDF` 不写。接收/状态报告侧 `4606`、`4607`、`4603`、`4609` 与 `8602/8604` 也是 GSM 共享回调。
+
+因此已证明的是 AP 侧 2133 与 GSM 在 MIPC `0605` 汇合；**没有**证明 MD 收到 `0605` 后选择 IMS 域、IMS 承载成功或对端投递。`0606`、TP-SRR、`8603` 和共享状态报告都不能单独改写为 IMS SMS 成功。现有 X9 GSM 路径不能因传输相同而重命名为 IMS SMS，也不重复新增双卡 GSM 重试。
+
+### Apple 逐 PersonalityID IMS 策略：静态输入链
+
+CommCenter 主程序不在 `/usr/libexec`，而在 20H392 的 `System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter`（24,740,528 B，Mach-O arm64）。其符号表只导出 6,095 个外部引用，本地符号已剥离；下述地址只对应这个固定文件。`VoLteControl::initialize` 的五处 REST sink 可由 mangled 符号直接确认：`ims_voice_support`、`ims_preference_states`、`current_data_slot`、`operator_bundles`、`in_home_countries_definite`。其中四个字面量在代码中可定位到同一初始化区（`0x100771xxx`–`0x100772xxx`，与 `VoLTEBlockedByNetwork`、`VoLTENetworkSeen` 相邻）；`ims_preference_states` 的前缀是拼接的，只能由符号确认。这些输入是逐 `SimSlot` 的 bundle、用户偏好与驻留判定，不是单卡全局开关。
+
+合并后的 `/cc/props/volte_and_vowifi_prov_state` 类型为 `map<PersonalityID, VolteAndVoWiFiProvisioningState>`。消费者是 `sd::IMSSubscriberEventHandler::handleVolteAndVoWiFiProvStateChanged_sync(OverloadEqualityOperators<...> const&)`（CommCenter mangled 符号）：其中 `$_10/$_11` 产生 `bool(VoWiFiConfigurationSrc)`，`$_12`–`$_15` 产生 `bool(BoolWithUnknown)`。事件随后进入 `SystemDeterminationManager::handleVoLTEFeatureSupportChanged_sync`（`0x1f2e578a0`）和 `handleVoNRFeatureSupportChanged_sync`（`0x1f2e57d2c`）：两者在同一 `map<PersonalityID, shared_ptr<sd::IMSSubscriberControllerInterface>>`（`this+0x68`）中解析 PersonalityID，再调用该订阅的 controller interface；这一步没有 SIM slot 参数，逐卡绑定完全由 PersonalityID 决定。
+
+模型侧 `sd::IMSSubscriberModel::updateVoLTEEnabled(bool)`（`0x1f2e790f4`）与 `updateVoNREnabled(bool)`（`0x1f2e79168`）在同一模型锁内写各自 `DataCache+0x38`/`+0x39`；`isVoLTEEnabled`/`isVoNREnabled`（`0x1f2e79130`/`0x1f2e791a4`）读同一字节。因此 enable 状态按订阅实例隔离，不是全局位。`sd::IMSSubscriberController::evaluateImsFeature_sync(bool)`（`0x1f2e6f838`）比较各 feature 的注册状态（`state==2` 视为开启）与缓存布尔，变化时打印 `#I IMS Feature: VoLTE feature is turned %s` / `VoNR feature is turned %s`，再回调对应更新。`evaluateIMSServiceMasks(int&,int&)`（`0x1f2e77e98`）用注册传输构造 cell/wifi 掩码：已注册时置 `0x3`，另一条件再置 `0x2`；结果由 `getImsFeatureMaskOverCell/WiFi`（`0x1f2e77f20`/`0x1f2e77f34`）从 `ImsFeature+0x18`/`+0x1c` 读出。`updateWifiCallStatus` 的 NAS `5562` 仍是通话状态上报，不是用户 WFC 开关；`NAS33/TLV33=2` 只证明 WithVoLTE 意图。
+
+Carrier bundle 键在 SD `__cstring` 中完整可见：`EnableVoLTEWithVoWiFi`、`EnableVoNRByDefault`、`VoLTE`、`VoNR`、`ShowVolteSwitch`、`ShowVolteWarningUnsupportedCarrier`，IMSConfig 子树另有 `Voice.EnableVolteByDefault`、`SMS.allowCSFBInVolteMode`、`SMS.enableInNonVoLTEMode`、`SMS.supportInNonVoLTEModeWhenRoaming`、`CarrierDomain`/`imsi@3gppDomain`/`pcscf` 与 `XCAP`。固定 20H392 iPhone bundle 的 MCC 460 只有 `46000/46001/46002/46003/46007/46008/46009/46011`；**没有 `46015`**，全部 plist 中也搜不到该串。`46000/overrides_D20_D21_D22.plist`（D22 为本机伪装型号）有 `Voice.EnableVolteByDefault=true`、`SMS.allowCSFBInVolteMode=true`、`ShowVolteSwitch=true`、`ShowVoLteWarningUnsupportedCarrier=false`，**没有 `EnableVoNRByDefault`**；`46000/carrier.plist` 只有 cmnet/cmwap APN。D22 override 提供 `IMS` APN（type-mask `131072`）、`SupportsImsCapability=true`、`AttachAPN` 和 IMSConfig。`Default.bundle` 无 IMSConfig。
+
+私有原厂日志给出两张卡的静态身份：SIM1（slot 0，`PHONE0`）为 `46015` CHINA BROADNET/中国广电，NR SA，`availableServices=[VOICE,SMS,VIDEO]`（`radio-baseline.txt:179`–`:208`）；SIM2（slot 1，`PHONE-1`）为 `46000` 中国移动，同次 Android 运行中 `isImsRegistered=true`、`getImsRegistrationTechnology=3`。这些静态输入支持优先核对 SIM2 的 VoLTE provisioning 和 SIM1 实际选中的 bundle。447/448 双卡的 `0a05` 原始状态 0 与未捕获 `010b` 仍缺运行时归因。还需要设备实际选中的 bundle 和对应订阅的 `volte_and_vowifi_prov_state`。
+
+桥侧边界不变：`x9q_supported`（`X9QMIAT.inc:742`）只准入 NAS `0x20/0x24/0x4d/0x4f/0x5556`，`0x10b` 与 `5562` 不在内，若 iOS 未来发出会被拒绝为 UNSUPPORTED；两者的 MD 映射都未证明，不能为“可能用到”而放行。诊断仍只有只读的逐卡 `0a02`（`X9Messages.inc:433`）、拨号时 `0a04`（`X9Calls.inc:1001`）和可选 `4904`（`X9Calls.inc:447`），并各自超时回收 token。`0a02` 是 MD RAM 缓存，不是 NVRAM、有效能力或注册；仍不引入 `0a00` writer，不硬编码样本六字节，不伪造 ACK。
+
+448 完整 WDS 事务显示 SIM1 默认数据 `0x20/0x2d` 成功，SIM2 IMS 无可关联的 WDS Start 或 runtime settings。`0x5566` 和 `0x5568` 已核实为蜂窝数据状态与动态数据换卡许可，Apple IMS settings 的代理字段另有独立合同。复核命令见 [WDS 与 IMS 承载](network/2026-11-27_ims-wds-report.md)。
+
+仍未闭合的是运行时的实际 bundle 选择与 `voLte/vowifi` 状态、同卡 IMS bearer 和 P-CSCF 来源、SIP REGISTER、VoNR/视频/WFC/IMS SMS 的独立输入与验收。在这些证据出现前，不把 `0a02` 缓存、`NAS33` 意图、配置 ACK 或 `0902=0` 中的任何一项写成 IMS 注册、VoNR 用户意图或振铃前置条件。
