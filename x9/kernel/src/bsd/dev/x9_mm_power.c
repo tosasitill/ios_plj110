@@ -220,7 +220,7 @@ static uint64_t vcp_smc(uint32_t op, uint32_t val)
             "x12", "x13", "x14", "x15", "x16", "x17");
     return x0;
 }
-/* Opt-in only (boot-arg x9_mmup_smmu_init=1, absent from boot-device.json).
+/* Runs by default in vcp_boot_ensure (x9_mmup_smmu_init=0 opts out).
  * Android arm-smmu-v3.c smmu_hw_sec_init(): MTK_IOMMU_SECURE_CONTROL
  * (0xC2000514) cmd INIT(0), MM_SMMU, sec bit 11. ATF 0x33c54->0x47c9c builds
  * the secure STEs whose stage-2 table (domain 1) holds the MMUP loader map at
@@ -720,11 +720,19 @@ static int vcp_boot_ensure(void)
     init_c1 = mm_read(vcp_cfg_core1, VCP_CORE_STATUS_OFF);
     vcp_snap_core1(&snap_pre);
     {
-        /* Opt-in diagnostic (x9_mmup_smmu_init=1): PM_GET alone first, then
-         * INIT, with NS-visible HWCCF voter snapshots around each ATF call.
-         * No PM_PUT: a successful PM_GET reference is kept so MM stays up. */
-        uint32_t want_smmu_init = 0;
-        if (PE_parse_boot_argn("x9_mmup_smmu_init", &want_smmu_init, sizeof(want_smmu_init)) && want_smmu_init) {
+        /* Android smmu_hw_sec_init order, required before reset release:
+         * PM_GET first, then WPCFG + smmu_init_wpcfg, then INIT, with
+         * NS-visible HWCCF voter snapshots around each ATF call. INIT makes
+         * ATF build the secure STEs whose stage-2 table lets MMUP stage0
+         * fetch its main image (IOVA 0x1_06c39000); without it stage0 runs
+         * but READY never posts and the stage-4 poll times out (log 369
+         * proved this sequence; production boots never ran it because it
+         * was gated behind this boot-arg). Default on; x9_mmup_smmu_init=0
+         * is the A/B opt-out. No PM_PUT: a successful PM_GET reference is
+         * kept so MM stays up. */
+        uint32_t want_smmu_init = 1;
+        (void)PE_parse_boot_argn("x9_mmup_smmu_init", &want_smmu_init, sizeof(want_smmu_init));
+        if (want_smmu_init) {
             uint64_t rg, ri, rw = ~0ull;
             mm_smmu_hwv_snap("pre");
             rg = mm_smmu_smc_timed("PM_GET", 0x803u);
