@@ -70,7 +70,7 @@ static const struct x9_haptic_stock_wave *stock_wave;
 static struct x9_haptic_stock stock;
 static uint32_t feel_flags=X9_HS_FEEL_ALL;
 static uint8_t scene_kind; /* 0 none, 1 one-shot stock scene, 2 envelope buzz */
-static uint32_t stock_peak_tap=127,stock_peak_light=12,stock_peak_buzz=126;
+static uint32_t stock_peak_tap=127,stock_peak_light=X9_STOCK_TAP_LIGHT_PEAK,stock_peak_buzz=126;
 static uint32_t stock_wave_peak(const struct x9_haptic_stock_wave *w)
 {
     if(w==&x9_stock_wave_tap_light)return stock_peak_light;

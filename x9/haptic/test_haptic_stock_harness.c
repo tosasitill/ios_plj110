@@ -214,15 +214,16 @@ static void test_envelope_off_in_legacy(void)
 static void test_queue_double_tap(void)
 {
     struct x9_haptic_stock e; x9_haptic_stock_init(&e, X9_HS_FEEL_ALL, 1000);
-    gen_clear(); gen_silence(20); gen_burst(20000, 8); gen_silence(6);
+    gen_clear(); gen_silence(20); gen_burst(20000, 8); gen_silence(1);
     gen_burst(20000, 8); gen_silence(60);
     emulate_busy=1; run_reset(); run(&e, 0, 0);
     CHECK(nfires==2, "fires=%d want 2 (second tap queued, not lost)", nfires);
     if(nfires==2) {
-        CHECK(fires[1].at>fires[0].at && fires[1].at-fires[0].at>=700 &&
-              fires[1].at-fires[0].at<=740,
-            "second fire at +%u samples, want right at playback end (~720)",
-            fires[1].at-fires[0].at);
+        uint32_t want=x9_stock_wave_tap.len*4u;
+        CHECK(fires[1].at>fires[0].at && fires[1].at-fires[0].at+24>=want &&
+              fires[1].at-fires[0].at<=want+24,
+            "second fire at +%u samples, want right at playback end (~%u)",
+            fires[1].at-fires[0].at, want);
         CHECK(fires[1].grade==X9_HS_GRADE_STANDARD, "grade=%u want STANDARD", fires[1].grade);
     }
     CHECK(e.dropped==0, "dropped=%u want 0", e.dropped);
@@ -241,8 +242,8 @@ static void test_queue_full_drop(void)
 {
     struct x9_haptic_stock e; x9_haptic_stock_init(&e, X9_HS_FEEL_ALL, 1000);
     gen_clear(); gen_silence(20);
-    gen_burst(20000, 4); gen_silence(2); gen_burst(20000, 4); gen_silence(2);
-    gen_burst(20000, 4); gen_silence(60);
+    gen_burst(20000, 3); gen_silence(1); gen_burst(20000, 3); gen_silence(1);
+    gen_burst(20000, 3); gen_silence(60);
     emulate_busy=1; run_reset(); run(&e, 0, 0);
     CHECK(nfires==2, "fires=%d want 2 (one playing + one queued)", nfires);
     CHECK(e.dropped==1, "dropped=%u want 1 (queue holds at most one)", e.dropped);
@@ -273,6 +274,73 @@ static void test_rearm_feel(void)
     CHECK(nfires==2, "QUEUE arm fires=%d want 2 (0.5 ms gap re-arms)", nfires);
 }
 
+static void test_tap_tail_cropped(void)
+{
+    const struct x9_haptic_stock_wave *w=&x9_stock_wave_tap;
+    /* The [0,15ms) source pulse ends in ~5.6 ms of <=2/127 residue; the
+     * shipped wave is cropped to the |x|>2 convention, so the busy window
+     * (ring drain) tracks the content, not the residue. */
+    CHECK(w->len<=120, "tap len=%u want <=120 (residue tail cropped)", w->len);
+    int tail_ok=1;
+    for(uint32_t i=w->len-12;i<w->len;i++) {
+        int v=w->samples[i]; if(v<0)v=-v; if(v>2)tail_ok=0;
+    }
+    CHECK(tail_ok, "tap last 12 samples exceed 2/127");
+}
+static void test_light_wave_factory_shape(void)
+{
+    const struct x9_haptic_stock_wave *w=&x9_stock_wave_tap_light;
+    /* Factory yardstick (wave_he_short_f0_174_4 @24 kHz): 8.75 ms total.
+     * The old stepable_regulate light wave ran 182 samples (15.2 ms) of
+     * rolling low cycles -- the diffuse light-grade feel. */
+    CHECK(w->len>=96 && w->len<=120,
+        "light len=%u want 96..120 samples (8..10 ms)", w->len);
+    uint32_t pk=0;
+    for(uint32_t i=0;i<w->len;i++) {
+        int v=w->samples[i]; if(v<0)v=-v; if((uint32_t)v>pk)pk=(uint32_t)v;
+    }
+    CHECK(pk==X9_STOCK_TAP_LIGHT_PEAK,
+        "light peak=%u want %u (define must match table)", pk,
+        (uint32_t)X9_STOCK_TAP_LIGHT_PEAK);
+    CHECK(pk>=100, "light peak=%u want >=100 (down-only scaling)", pk);
+    /* Energy concentration: the span at/above quarter peak stays under
+     * 7 ms (factory _4: 6.0 ms; old light: 10.8 ms of rolling cycles). */
+    uint32_t a25=0;
+    for(uint32_t i=0;i<w->len;i++) {
+        int v=w->samples[i]; if(v<0)v=-v; if((uint32_t)v*4>=pk)++a25;
+    }
+    CHECK(a25<=84, "light quarter-peak span=%u want <=84 samples (7 ms)",
+        a25);
+    /* Clean end so the hardware brake stops a still LRA: the wave ends
+     * at zero (final sample and last-4 window ~zero; the final decay
+     * slope just before them is the source's own). */
+    int tail_ok=1;
+    for(uint32_t i=w->len-4;i<w->len;i++) {
+        int v=w->samples[i]; if(v<0)v=-v; if(v>8)tail_ok=0;
+    }
+    { int v=w->samples[w->len-1]; if(v<0)v=-v; if(v>2)tail_ok=0; }
+    CHECK(tail_ok, "light does not end at ~zero");
+    /* Decay after the peak half-cycle is monotonic (factory _4 half-cycle
+     * peaks 103/116/126/116/88/1): no second swell in the tail. */
+    uint32_t peaks[32]; int np=0; int sign=0; uint32_t cur=0;
+    for(uint32_t i=0;i<w->len;i++) {
+        int v=w->samples[i];
+        int sg=v>0?1:(v<0?-1:0);
+        if(sg) {
+            if(sign && sg!=sign) { if(np<32)peaks[np++]=cur; cur=0; }
+            sign=sg;
+            uint32_t a=(uint32_t)(v<0?-v:v); if(a>cur)cur=a;
+        }
+    }
+    if(np<32)peaks[np++]=cur;
+    int argmax=0;
+    for(int i=1;i<np;i++) if(peaks[i]>peaks[argmax])argmax=i;
+    int decay_ok=1;
+    for(int i=argmax+1;i<np;i++) if(peaks[i]>peaks[i-1])decay_ok=0;
+    CHECK(np>=4, "light half-cycles=%d want >=4", np);
+    CHECK(decay_ok, "light half-cycle peaks swell again after the peak");
+}
+
 int main(void)
 {
     test_grade_light();
@@ -290,6 +358,8 @@ int main(void)
     test_queue_full_drop();
     test_tail_guard();
     test_rearm_feel();
+    test_tap_tail_cropped();
+    test_light_wave_factory_shape();
     printf("RESULT %s checks=%d failures=%d\n", failures?"FAIL":"PASS", checks, failures);
     return failures?1:0;
 }

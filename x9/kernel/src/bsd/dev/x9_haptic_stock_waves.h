@@ -4,12 +4,16 @@
  * tap = Threestagekey_RTP_365 first key pulse [0,15ms); notify =
  * notification_clean_RTP_364; buzz = aw8697_haptic_170 RAM payload.
  * f0=1742 selects the base .bin variants (get_rtp_name first-threshold).
+ * tap is cropped to 6 samples before / 12 after its |x|>2 span (the
+ * convention the light wave below always used): the [0,15ms) pulse's last
+ * ~5.6 ms are <=2/127 resampling residue that only held the scene busy
+ * (busy lasts until the ring drains), so the content is unchanged.
  */
 #ifndef X9_HAPTIC_STOCK_WAVES_H
 #define X9_HAPTIC_STOCK_WAVES_H
 #include <stdint.h>
 
-static const int8_t x9_stock_tap[180] = {
+static const int8_t x9_stock_tap[113] = {
 1,1,1,2,4,6,10,16,25,37,56,76,87,93,94,91,
 86,80,71,61,52,42,31,20,9,-1,-11,-22,-32,-45,-61,-82,
 -102,-111,-114,-111,-101,-89,-75,-57,-38,-19,2,21,40,59,76,91,
@@ -17,11 +21,7 @@ static const int8_t x9_stock_tap[180] = {
 -31,-49,-66,-80,-92,-101,-106,-105,-98,-81,-61,-46,-35,-24,-15,-6,
 2,10,20,28,37,46,54,61,67,71,74,74,70,62,47,30,
 19,12,7,4,3,2,1,1,1,1,1,1,1,2,2,2,
-2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,
-1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-0,0,0,0,
+2,
 };
 
 static const int8_t x9_stock_notify[1917] = {
@@ -289,32 +289,36 @@ static const int8_t x9_stock_buzz[2196] = {
 };
 
 
-/* Light grade for graded stock mode: aw8697_stepable_regulate_RTP_105, the
- * ColorOS step-adjust tick (native peak 12/127, one gentle ~14 ms pulse),
- * resampled with the same 32-tap Hamming sinc + decimate x2 as tap above
- * (method verified to reproduce x9_stock_tap sample-exactly), cropped to
- * 6 samples before / 12 after the |x|>2 span. Played scaled up toward the
- * requested output peak; its softness is the point. */
-static const int8_t x9_stock_tap_light[182] = {
-0,0,0,0,1,1,3,4,7,9,11,11,12,12,12,11,
-11,11,10,10,9,8,8,7,6,6,6,5,4,4,2,2,
-1,0,-2,-5,-8,-9,-10,-10,-10,-10,-8,-8,-7,-6,-4,-3,
--2,-1,0,1,2,3,4,6,6,7,8,8,9,10,11,11,
-11,11,11,10,9,8,7,6,5,3,2,1,0,-1,-3,-4,
--5,-7,-7,-9,-9,-10,-10,-10,-11,-11,-11,-10,-10,-10,-9,-8,
--7,-6,-5,-3,-2,-1,0,1,2,3,5,5,7,7,9,9,
-9,9,9,9,7,7,5,5,4,3,2,2,1,0,0,-1,
--2,-3,-4,-5,-5,-7,-7,-8,-9,-9,-9,-9,-9,-7,-6,-4,
--1,0,0,1,1,1,2,2,3,3,3,4,4,4,5,5,
-5,6,6,6,6,6,6,6,5,4,2,1,0,0,0,0,
-0,0,0,0,0,0,
+/* Light grade for graded stock mode: wave_he_short_f0_174_4 from the
+ * factory wave_lib pulled off this PLJ110 (Android, 2026-11-27,
+ * x9/out/android-evidence-20261127/haptics). The library is tiered by
+ * measured LRA F0 (F_MMAP: F0 0-164, F1 164-168, F2 168-172, F3 172-176,
+ * F4 176-200 Hz); this LRA sits at ~173 Hz, so the F3 tier applies, and
+ * _4 is its shortest, crispest short wave: 210 samples @ 24 kHz = 8.75 ms,
+ * half-cycle peaks 103/116/126/116/88/1, ending at zero. Resampled with
+ * the same 32-tap Hamming sinc (5.4 kHz) + decimate x2 as tap above.
+ * It replaces aw8697_stepable_regulate_RTP_105 (native peak 12/127
+ * smeared over ~15 ms of rolling low cycles): scaled up to the graded
+ * output peak that shape read as a diffuse wobble -- the factory tick
+ * concentrates the same peak into 8.75 ms. Played scaled toward the
+ * requested output peak; the native peak is X9_STOCK_TAP_LIGHT_PEAK, so
+ * scaling is down-only and the peak define and the table cannot drift. */
+#define X9_STOCK_TAP_LIGHT_PEAK 126
+static const int8_t x9_stock_tap_light[105] = {
+0,0,-2,-4,-7,-12,-20,-33,-50,-70,-87,-98,-103,-103,-102,-99,
+-95,-90,-83,-75,-67,-58,-46,-34,-21,-9,2,14,28,46,67,89,
+106,114,116,115,110,103,90,72,51,31,12,-4,-23,-41,-57,-72,
+-85,-97,-107,-116,-122,-125,-126,-124,-118,-108,-95,-81,-66,-50,-33,-15,
+2,19,39,59,78,92,104,111,116,115,107,91,71,50,33,20,
+10,2,-6,-14,-23,-32,-41,-49,-57,-65,-71,-78,-84,-87,-88,-83,
+-75,-61,-38,-17,-5,0,1,1,0,
 };
 
 struct x9_haptic_stock_wave { const int8_t *samples; uint32_t len; };
 
-static const struct x9_haptic_stock_wave x9_stock_wave_tap = {x9_stock_tap,180};
+static const struct x9_haptic_stock_wave x9_stock_wave_tap = {x9_stock_tap,113};
 
-static const struct x9_haptic_stock_wave x9_stock_wave_tap_light = {x9_stock_tap_light,182};
+static const struct x9_haptic_stock_wave x9_stock_wave_tap_light = {x9_stock_tap_light,105};
 
 static const struct x9_haptic_stock_wave x9_stock_wave_notify = {x9_stock_notify,1917};
 
