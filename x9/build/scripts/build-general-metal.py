@@ -66,6 +66,11 @@ p.write_text(s)
 # The Metal API layer names no IOKit, transport or CSF symbol; the bridge's
 # discovery probe is the only seam that may.
 subprocess.run([sys.executable,'-I',str(Path(__file__).with_name('check-native-boundary.py')),'--metal'],check=True)
+# Priming consistency, source side: an inventory in the bridge dir without
+# the priming sources there builds a silently dead feature (rev287). The
+# bridge dir resolves through .local into the main checkout, which may not
+# be the tree this build was invoked from; refuse the mismatch up front.
+subprocess.run([sys.executable,'-I',str(Path(__file__).with_name('check-priming-consistency.py')),'--source',str(bridge)],check=True)
 generated=w/'general-build-inputs';generated.mkdir(exist_ok=True)
 llvm_as=BREW+'/opt/llvm/bin/llvm-as'
 fixtures=[('NMB_FIXTURE_AIR','runtime_examples.air','crates/metal2vulkan-validation/fixtures/public/examples/runtime_examples.ll'),('NMB_FC_AIR','function_constant.air','crates/metal2vulkan-validation/fixtures/public/kernel_function_constant_gate_fold.ll')]
@@ -102,4 +107,7 @@ primelist=bridge/'X9GeneralMetal.primelist'
 if primelist.is_file():shutil.copyfile(primelist,bundle/'X9GeneralMetal.primelist')
 subprocess.run([env['DEVELOPER_DIR']+'/Toolchains/XcodeDefault.xctoolchain/usr/bin/strip','-S',str(bundle/'X9GeneralMetal')],check=True)
 subprocess.run(['/usr/bin/codesign','--force','--sign','-','--pagesize','16384',str(bundle)],check=True)
+# Priming consistency, bundle side: the packaged inventory and the linked
+# binary must agree, whatever the sources claimed.
+subprocess.run([sys.executable,'-I',str(Path(__file__).with_name('check-priming-consistency.py')),'--bundle',str(bundle)],check=True)
 print('Generic Metal runtime and iOS16 bundle compiled/linked/signed; no execution or deployment;requires native rendering KMD+PanVK loader',flush=True)
