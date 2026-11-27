@@ -3179,3 +3179,14 @@ Carrier bundle 键在 SD `__cstring` 中完整可见：`EnableVoLTEWithVoWiFi`�
 SIP UA 结论：本机原厂捕获的 init 窗口内不存在独立的 SIP UA MD 帧——0axx 只有 0a1c/0a18/0a00，`RmmImsCtlReqHdl` 也只打印 requestSetImsCfg 两行；`requestSetSipUserAgent` 在该路径上没有可观测的 MIPC 流量（属 AP 侧内部状态），不虚构帧形。若配置+承载后注册仍不动，下一证据需带 MCL 详细日志的原厂抓包或 MD 侧注册触发点反汇编，不靠猜。
 
 边界：配置与承载 ACK 仍不证明 IMS 注册；注册与振铃证据以 4a01 IND、拨号窗 0a04 快照和 ECPI2/132/6 为准。
+
+
+### 2026-11-27 SIM1 拨号准入与 SIM2 对齐
+
+逐点盘点了 MO 链上的 SIM2-only 判断，并按性质分开处理。属于"先在一张卡上验证"的保守限制、且证据条件与槽位无关的，已推广到 SIM1：`x9cw_dial_profile_valid` 只认 sim==1、`x9cw_dial` 编码把帧 mask 写死 2、`x9cw_native_dial` 只认 mask 2、VOICE20 派发对 sim!=1 直接 UNSUPPORTED、`x9c_end_begin` 的同名门、CallList 发布选择对 sim!=1 返回 false、拨号窗 IMS 快照把 0a04 写死 mask 2。推广方式逐条保持原纪律：SIM1 用同一组实测标量（address_type 2、call_type 1、domain/ecc 0、CLIR 原始值），只换槽位；编码 mask 由已验证的 profile 决定；派发按客户端所属 SIM 选 profile，日志逐卡打印。
+
+状态层补了一个此前不存在的约束：`x9cw_outbound_state` 现在记录当前 epoch 的所属 SIM（ECPI130 建 epoch 时绑定）。另一张卡的 progress 既不能 adopt、推进、结束，也不能 poison 本 epoch（返回 0 忽略，与此前 mask!=2 的处理一致）；epoch 结束后另一张卡的 130 可以正常绑定新 epoch。跨卡隔离由主机测试直接覆盖。
+
+未推广（SIM2 特有实测事实或独立的 MT 功能）：来电 CMD 批准（`x9c_incoming_deliver`）、接听（`x9c_answer_begin`）、`x9cw_inbound_begin/apply` 的 mask2 约束、4901 的 SIM2 CS 结束序列特例（日志 444）、4902 handover 的 low==2 失效化。这些属于 SIM1 来电（MT）功能，其 reducer 与批准形状尚无 SIM1 捕获，不与拨号一起放开；END 的推广只对 MO 方向有实际作用，MT 方向在 SIM1 上因入站状态从不建立而自然返回 NOT_READY。
+
+拨号路径本身没有独立的 RAT 新鲜度门：准入证据条件就是绑定/注册态、代际、传输就绪、无未决 dial owner 与 owned empty GET_STATUS 基线（join 的 epoch 关联），全部逐 SIM 通用。主机测试（test_call_owner_boundary）新增 SIM1 准入+生命周期、拒绝+跨卡隔离两组用例与派发层源代码围栏；候选 `sim1-dial-r287-20261127` 离线构建通过，未上机。SIM1 拨号的真实振铃/接通仍待实机验证，本节不声称已通。
