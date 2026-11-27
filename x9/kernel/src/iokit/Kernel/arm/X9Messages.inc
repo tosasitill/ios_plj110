@@ -430,8 +430,10 @@ static void x9m_init_poll(uint8_t *response,unsigned room){
   }else if(step==X9M_READY_QUERY)f.byte(0x102,1);
   else if(step==X9M_FACTORY_CFG)f.byte(0x108,1);
   else{f.byte(0x100,0);f.byte(0x105,1);f.byte(0x106,2);}
+  static unsigned submit_noted;
   uint64_t token=f.submit();
   if(token){s.init=step;s.init_token=token;s.init_epoch=s.ready_epoch;s.init_deadline=x9q_ms()+300000;}
+  else if(!(submit_noted&(1u<<(sim*8+step)))){submit_noted|=(1u<<(sim*8+step));printf("X9 SMS: SIM%u init step %u submit rejected locally; retry continues\n",sim+1,step);}
  }
 }
 /* Boot IMS observation is independent of WMS clients and SMS readiness.
@@ -632,7 +634,7 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
   }
   else if(s.fx_stage==5){x9w_frame f(0xa02,1u<<sim);f.word(0x100,0);token=f.submit();}
   if(token){s.fx_token=token;s.fx_deadline=now+10000;}
-  else s.fx_hold=true;
+  else{s.fx_hold=true;printf("X9 FACTORY: SIM%u stage %u submit rejected locally; held\n",sim+1,s.fx_stage);}
  }
 }
 static bool x9m_diag_storage_busy(unsigned sim,const x9m_job *self){

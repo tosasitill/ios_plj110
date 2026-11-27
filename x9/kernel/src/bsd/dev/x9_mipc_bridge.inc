@@ -156,6 +156,24 @@ static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbou
   if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||n!=24||
      x9mi_u16(p+16)!=0x100||x9mi_u16(p+18)!=4||p[20]||p[21]||p[22]||p[23])return 0;
  }
+ /* Factory IMS config writes (x9m_factory_poll stages 1-3, radio-baseline
+  * shapes only): 0a18 clears the config word, SIM1-only 0a1c carries the
+  * 64-byte zero block, 0a00 carries word 0 plus the 6-byte IMS feature
+  * bytes. No other 0axx write is admitted here. */
+ else if(id==0xa18){
+  if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||n!=24||!x9mm_one(p,n,0x100,0))return 0;
+ }
+ else if(id==0xa1c){
+  const uint8_t *v;unsigned k;
+  if(p[8]!=1||n!=88||!x9mm_find(p,n,0x100,&v,&k)||!v||k!=64)return 0;
+  for(unsigned i=0;i<64;i++)if(v[i])return 0;
+ }
+ else if(id==0xa00){
+  const uint8_t *v;unsigned k;
+  if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||n!=40||
+     !x9mm_find(p,n,0x100,&v,&k)||!v||k!=4||v[0]||v[1]||v[2]||v[3])return 0;
+  if(!x9mm_find(p,n,0x102,&v,&k)||!v||k!=6)return 0;
+ }
  /* Evidence-bounded call actions. DIAL mirrors the measured PLJ110 SIM2
   * profile (2026-11-15); VOICE09/CallList publication does not imply audio
   * readiness. ANSWER{} and HANGUP{MODE0,ID} mirror Android captures.
