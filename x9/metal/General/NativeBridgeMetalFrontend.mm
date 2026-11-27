@@ -243,6 +243,9 @@ static void waitForResource(id resource);
 @property(nonatomic) NSUInteger heapOffset;
 @end
 #include "X9TileProbe.inc"
+// Pipeline priming (M3): background, resumable warm-up of the system
+// metallib inventory once the desktop is quiet. See X9MetalPriming.inc.
+#include "X9MetalPriming.inc"
 // Frame metrics (M4 step a): windowed completion rate, stutter gaps and
 // commit-ring retention for the telemetry table. See X9MetalFrameMetrics.inc.
 #include "X9MetalFrameMetrics.inc"
@@ -2485,6 +2488,10 @@ extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint
  objc_registerClassPair(cls);
  gDeviceObject=[cls new];
  x9WatchMemoryPressure();
+ // Priming starts only here: the factory offers this device solely when
+ // x9_metal_render=1 and the render backend probed ready, so no other
+ // process pays for the thread. NATIVE_METAL_NO_PRIME=1 opts out.
+ x9_prime_start((id<MTLDevice>)gDeviceObject,loader);
  return gDeviceObject;
 }
 
