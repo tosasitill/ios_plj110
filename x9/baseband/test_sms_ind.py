@@ -128,5 +128,18 @@ int main(){uint8_t f[256]; unsigned at;
         self.assertIn('no-ack indications registered (4602/4603/4606)', out)
 
 
+    def test_defaults_on_source(self):
+        """x9_sms_ind / x9_sms_srr are default-on since the 2026-11-28
+        defaults pass; =0 is the only opt-out. Source-asserted because
+        the behaviour tests stub the enabled accessors."""
+        messages = SOURCE.read_text()
+        bridge = (ROOT / 'x9/kernel/src/bsd/dev/x9_mipc_messages.inc').read_text()
+        self.assertIn('sweet_x9_arg("x9_sms_ind",1)!=0', messages)
+        self.assertIn('sweet_x9_arg("x9_sms_srr",1)!=0', messages)
+        self.assertNotIn('sweet_x9_arg("x9_sms_ind",0)', messages)
+        self.assertNotIn('sweet_x9_arg("x9_sms_srr",0)', messages)
+        self.assertIn('int v=1;enabled=PE_parse_boot_argn("x9_sms_ind",&v,sizeof(v))?v!=0:1', bridge)
+
 if __name__ == '__main__':
     unittest.main()
+

@@ -14,7 +14,7 @@ static uint32_t x9_mm_next;
 static unsigned x9_mm_poisoned;
 static int x9mm_ind_enabled(void){
  static int enabled=-1;
- if(enabled<0){int v=0;enabled=PE_parse_boot_argn("x9_sms_ind",&v,sizeof(v))&&v==1?1:0;}
+ if(enabled<0){int v=1;enabled=PE_parse_boot_argn("x9_sms_ind",&v,sizeof(v))?v!=0:1;}
  return enabled;
 }
 static int x9mm_id(unsigned id){
@@ -26,7 +26,7 @@ static int x9mm_id(unsigned id){
  if(x9mm_ind_enabled()&&(id==0x4602||id==0x4603||id==0x4606))return 1;
  return 0;
 }
-/* Indication census (x9_sms_ind=1 only): the bridge RX fan-out drops
+/* Indication census (x9_sms_ind, default on): the bridge RX fan-out drops
  * kind-1 ids that no consumer recognizes without a trace. Name each
  * such id once per boot (first 32 distinct ids; id + SIM mask +
  * frame length) so an
