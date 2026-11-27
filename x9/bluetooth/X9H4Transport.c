@@ -7,6 +7,8 @@
  * or device writes occur in the constructor. */
 #include <errno.h>
 #include <fcntl.h>
+#include <libkern/OSCacheControl.h>
+#include <mach/mach.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <stdint.h>
@@ -110,6 +112,80 @@ static int serial_open(uint32_t mode,const char *configuration)
     x9_bt_note("X9 H4: native RxLoop/TX on cu.bluetooth; board owns baud and initialization\n");
     return 0;
 }
+/* Log 433 teardown crash: the function at 0x1000f3b44 calls the transport
+ * thunk at 0x1000e6aac, which loads the current table from 0x100844850,
+ * checks only its type word, and tail-jumps to table+0x60. The H4 table
+ * (0x100844228, type 1) has +0x60 == NULL in the stock image, so shutdown
+ * jumps to 0. The guard below replaces ONLY the BL at 0x1000f3b4c inside
+ * that one teardown function; the thunk's other caller (0x1003ca25c) and
+ * the table itself are untouched (no slot filling). It replicates the
+ * thunk's exact register contract (clobbers x8/x9 only, x30 preserved):
+ * table NULL, type 0, or a NULL +0x60 slot returns instead of jumping;
+ * any real slot tail-jumps to the unmodified thunk. The next teardown
+ * step calls the +0x20 thunk, whose H4 slot is non-NULL (0x1000685c0). */
+__attribute__((used)) static uintptr_t td_table_global;
+__attribute__((used)) static uintptr_t td_thunk;
+__attribute__((naked)) static void teardown_guard(void)
+{
+    __asm__ volatile(
+        "adrp x8, _td_table_global@PAGE\n\t"
+        "ldr  x8, [x8, _td_table_global@PAGEOFF]\n\t"
+        "ldr  x8, [x8]\n\t"
+        "cbz  x8, 1f\n\t"
+        "ldr  w9, [x8]\n\t"
+        "cbz  w9, 1f\n\t"
+        "ldr  x9, [x8, #0x60]\n\t"
+        "cbz  x9, 1f\n\t"
+        "adrp x8, _td_thunk@PAGE\n\t"
+        "ldr  x8, [x8, _td_thunk@PAGEOFF]\n\t"
+        "br   x8\n\t"
+        "1: ret\n\t");
+}
+static int install_teardown_guard(void)
+{
+    static const struct {
+        uint64_t va; uint32_t words[6]; uint32_t count;
+    } contract[] = {
+        {0x1000f3b44,{0xa9bf7bfd,0x910003fd,0x97ffcbd8,0x94027bea},4},
+        {0x1000e6aac,{0xd0003ae8,0xf9442908,0xb9400109,0x34000069,
+                      0xf9403100,0xd61f0000},6},
+    };
+    for(size_t k=0;k<sizeof(contract)/sizeof(contract[0]);k++) {
+        if(memcmp((void *)address(contract[k].va),contract[k].words,
+                  contract[k].count*sizeof(uint32_t))) {
+            x9_bt_note("X9 H4: unexpected teardown/thunk instructions; no table changed\n");
+            return -1;
+        }
+    }
+    td_table_global=address(0x100844850);
+    td_thunk=address(0x1000e6aac);
+    uintptr_t call=address(0x1000f3b4c);
+    int64_t offset=(int64_t)((uintptr_t)teardown_guard-call);
+    if(offset%4 || offset<-(INT64_C(1)<<27) || offset>=(INT64_C(1)<<27)) {
+        x9_bt_note("X9 H4: teardown guard out of BL range (%lld); no table changed\n",
+                   (long long)offset);
+        return -1;
+    }
+    uint32_t word=0x94000000u|(uint32_t)((offset/4)&0x3ffffff);
+    vm_size_t page=vm_page_size;
+    uintptr_t target=call&~(page-1);
+    kern_return_t kr=vm_protect(mach_task_self(),target,page,FALSE,
+                                VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY);
+    if(kr) {
+        x9_bt_note("X9 H4: teardown guard COW failed kr=%d; no table changed\n",kr);
+        return -1;
+    }
+    *(uint32_t *)call=word;
+    sys_icache_invalidate((void *)call,4);
+    kr=vm_protect(mach_task_self(),target,page,FALSE,
+                  VM_PROT_READ|VM_PROT_EXECUTE);
+    if(kr) {
+        x9_bt_note("X9 H4: teardown guard R|X failed kr=%d\n",kr);
+        return -1;
+    }
+    x9_bt_note("X9 H4: teardown +0x60 null-slot guard installed at 0x1000f3b4c\n");
+    return 0;
+}
 __attribute__((constructor)) static void install(void)
 {
     /* Image 0 is not guaranteed to be the main executable once
@@ -164,8 +240,10 @@ __attribute__((constructor)) static void install(void)
             return;
         }
     }
-    /* __DATA is writable in this version. Neither text nor chained fixups
-     * are edited; the unchanged original image remains the replay input. */
+    if(install_teardown_guard()<0) return;
+    /* __DATA is writable in this version. Apart from the single verified
+     * teardown BL above, neither text nor chained fixups are edited; the
+     * unchanged original image remains the replay input. */
     if(x9_vendor16_install(slide)<0) return;
     *uptr(OPEN_SLOT)=(uintptr_t)serial_open;
     *uptr(CLOSE_SLOT)=(uintptr_t)serial_close;
