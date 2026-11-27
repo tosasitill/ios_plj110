@@ -3179,3 +3179,10 @@ Carrier bundle 键在 SD `__cstring` 中完整可见：`EnableVoLTEWithVoWiFi`�
 SIP UA 结论：本机原厂捕获的 init 窗口内不存在独立的 SIP UA MD 帧——0axx 只有 0a1c/0a18/0a00，`RmmImsCtlReqHdl` 也只打印 requestSetImsCfg 两行；`requestSetSipUserAgent` 在该路径上没有可观测的 MIPC 流量（属 AP 侧内部状态），不虚构帧形。若配置+承载后注册仍不动，下一证据需带 MCL 详细日志的原厂抓包或 MD 侧注册触发点反汇编，不靠猜。
 
 边界：配置与承载 ACK 仍不证明 IMS 注册；注册与振铃证据以 4a01 IND、拨号窗 0a04 快照和 ECPI2/132/6 为准。
+
+
+### 2026-11-27 短信存储可用上报的触发点与 CMGR 假设链
+
+`0601` tag 0x108 的语义不是 init 配置项，而是存储可用上报：原厂 RIL `RmmGsmSmsRequestHandler::handleReportSmsMemStatus`（`0x331378..0x33139c`）在主机侧消息存储可用时按 slot 发出，固定 MD 经 `0x91366e88`、`0x914082fa` 路由为 `AT+EMEMS=1`（见 `docs/baseband/sms-result-path-20261126.md`）。原厂基线里它与 host-ready 配置包（`:1055`）是不同事务（`:2341`），且其成功之后同卡才收到 `8601`（`:4119`）。此前实现把该报告塞进 init 序列的 X9M_FACTORY_CFG 步，时机只是近似。本轮新增事件点发送者 `x9m_mem_status_poll`：以 host-ready 声明本身（配置确认、modem 就绪、GSM handler 已装）为触发——这是桥内与"主机存储可用"语义对应的事件；modem 侧的 CFG IND（md_ready）方向相反且早于主机配置，不能作触发。两处以 `mem_sent` 状态位去重，同 boot 同卡只报一次；事件点发送失败不阻塞、不撤销 host-ready。
+
+CMGR 假设链（未证明，不改 CMGR 行为）：若 EMEMS 从未上报，MD 的 SMS 层可能视 ME 存储不可用——按索引读（CMGR）走 AT 确认链（`l5usms_at_cnf_fail_*`），可被拒并经失败转换产生 `0608=0x210000`；MT 短信也可能因此被扣留而不发 `8601`。旁证：实测 CPMS 查询本身有正常响应（查询不依赖 ME 存储可用性）、诊断会话全程未发过 0x108 而 CMGR 恒失败、原厂在 EMEMS 成功后收到 8601。反证保留：wire storage 0 映射到内部 SM 存储，CMGR 读的未必是 ME 存储，故因果未闭合。上机判别：(1) 报告发出后同卡诊断 CMGR index 1 是否由 0x210000 变为有效/空响应；(2) 对端短信后是否出现 8601；(3) 以 `x9_factory_init=0` 做同 boot 条件 A/B，三项差异即该报告的净效果。
