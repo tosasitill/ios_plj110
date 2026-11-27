@@ -26,6 +26,24 @@ static int x9mm_id(unsigned id){
  if(x9mm_ind_enabled()&&(id==0x4602||id==0x4603||id==0x4606))return 1;
  return 0;
 }
+/* Indication census (x9_sms_ind=1 only): the bridge RX fan-out drops
+ * kind-1 ids that no consumer recognizes without a trace. Name each
+ * such id once per boot (first 32 distinct ids; id + SIM mask +
+ * frame length) so an
+ * unexpected MD indication identifies itself; evidence only -- this
+ * admits nothing and changes no dispatch decision. */
+static uint16_t x9mm_census_seen[32];
+static unsigned x9mm_census_count;
+static int x9mm_census_unseen(unsigned id){
+ for(unsigned i=0;i<x9mm_census_count;i++)if(x9mm_census_seen[i]==id)return 0;
+ if(x9mm_census_count>=32)return 0;
+ x9mm_census_seen[x9mm_census_count++]=(uint16_t)id;
+ return 1;
+}
+static void x9mm_census(unsigned id,unsigned mask,unsigned len){
+ if(!x9mm_ind_enabled()||!x9mm_census_unseen(id))return;
+ printf("X9 SMS IND: census unhandled id 0x%04x mask 0x%02x len %u; evidence only\n",id,mask,len);
+}
 /* Exact padded TLVs, unique normalized tags. Enforce this again at the
  * transport boundary, not merely in the QMI adapter. */
 static int x9mm_find(const uint8_t *p,unsigned n,unsigned wanted,const uint8_t **out,unsigned *len){
