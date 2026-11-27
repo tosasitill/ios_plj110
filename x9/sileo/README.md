@@ -86,3 +86,61 @@ uicache 的取舍：优先 Procursus uikittools 的 `uicache`（通用：任意 
 - 「装上 Sileo」的验收不在本轮：需上机完成 §2.1 判别、payload staging、
   prep、helper 激活、Sileo 图标注册与启动、真实源 `apt-get update` 与
   小包安装全链，缺一环只能报到该环为止。
+
+## Build status (2026-11-27, host-verified)
+
+`build.py` (pinned sources in `sources.json`, SHA256-verified, cache under
+`.local/x9/sileo-cache`) cross-compiles for arm64-apple-ios16.0, prefix
+`/var/storm`, and `verify.py` gates the result. Current output
+(`x9/out/storm-bootstrap-20261127`): **332 files, 23 Mach-O, verify 0
+problems** — every Mach-O arm64 + iOS platform + ad-hoc signed, dpkg's
+compiled-in admindir is `/var/storm/Library/dpkg`, dpkg links the storm
+`liblzma.5`/`libmd.0`, and no file references `/var/jb`.
+
+Built: libmd 1.1.0, liblzma 5.4.4 (xz, library only), dash 0.5.12 (as
+`usr/bin/sh`), GNU patch 2.7.6 (`usr/bin/patch` + `gpatch`), dpkg 1.22.6
+(Procursus `build_patch/dpkg` + `dpkg-ios` applied; `--disable-nls
+--disable-dselect --disable-start-stop-daemon --without-libselinux
+--without-libzstd --without-libbz2`), uicache (uikittools-ng 2.1.8).
+
+Not built, deliberately not faked: **apt** (pinned 2.9.4; needs xxhash,
+liblz4, zstd and the GnuTLS tree cross-built first) and **coreutils**
+(pinned 9.5, optional). Until apt lands, installs are local
+`dpkg -i file.deb` only.
+
+Build notes / deviations, all deliberate:
+- dash uses the Debian orig tarball (ships generated `configure`); the
+  kernel.org snapshot has none and the build Mac has no autotools. An
+  earlier pin of a nonexistent `.orig.tar.xz` pool path briefly recorded
+  the SHA256 of a 404 page; corrected via snapshot's file API and the
+  tarball magic is now sanity-checked by extraction.
+- dpkg's configure hard-requires GNU patch (`DPKG_PROG_PATCH`) and bakes
+  the found name in; a host GNU patch satisfies configure and the cross
+  build ships `usr/bin/{patch,gpatch}` so the name resolves on device.
+- The iOS SDK marks `system()` unavailable. GNU patch and dpkg each have
+  exactly one call site (ed-script runner; dpkg's pre/post-invoke hooks);
+  both are replaced at build time with an equivalent fork/exec of
+  `/var/storm/usr/bin/sh` (asserted single occurrence in `build.py`).
+- uicache needs two ObjC classes from the private MobileContainerManager
+  framework; the public SDK has no stub and the 20H392 DSC binary is not
+  ld-consumable, so `build.py` emits a minimal two-class `.tbd`.
+  uicache's `APP_PATH` default (`/var/jb/Applications`, behind `#ifndef`)
+  is overridden to `/var/storm/Applications`.
+- Host-tool compiles go through an SDK-26.5 shim (the non-login CLT 27.2
+  SDK breaks host linking; same workaround as the baseband host tests).
+
+## Payload & prep (stage 2, host-verified)
+
+`payload.py` turns a bootstrap build into a stageable rootfs overlay
+(`x9/out/storm-payload-0.1.0`, 335 entries, `payload-manifest.json`):
+`private/var/x9/storm/payload/0.1.0/` (the immutable tree),
+`private/var/x9/storm/prep.sh`, and the `private/var/storm` symlink.
+Baking the overlay into a root image / install list remains a separate
+owner-authorized step; nothing was staged.
+
+`prep.sh` (POSIX, `sh -n` clean) runs as root on device — normally via
+`x9-jbctl --storm-prep`, which spawns it with the payload's own shell —
+copies the payload to `X9Storm/<version>` on Data, initializes the dpkg
+admindir skeleton there, and atomically flips `X9Storm/current`.
+`x9-jbctl --status` now probes the storm paths and prints both symlink
+targets; jbctl compiles clean for arm64/iOS 16.

@@ -1,0 +1,56 @@
+{
+  "comment": "Pinned upstream sources for the storm bootstrap. Versions follow ProcursusTeam/Procursus recipes at the pinned commit; sha256 is of the exact tarball build.py downloads. apt.procursus.org prebuilt debs are NOT used (host unreachable from the build Mac, 2026-11-27).",
+  "procursus_recipes": {
+    "repository": "ProcursusTeam/Procursus",
+    "commit": "b6185221bf1ce3dda8b4baeee61e75e3f7c7d399",
+    "url": "https://codeload.github.com/ProcursusTeam/Procursus/tar.gz/b6185221bf1ce3dda8b4baeee61e75e3f7c7d399",
+    "sha256": "860b586c4af20b1f27f5106df8d876b1d8c3fc225c1ac415e961f5f39c81a9e4",
+    "use": "build_patch/dpkg + build_patch/dpkg-ios patch sets and version pins only; the Procursus make system itself is not run"
+  },
+  "dpkg": {
+    "version": "1.22.6",
+    "url": "https://snapshot.debian.org/archive/debian/20240601T000000Z/pool/main/d/dpkg/dpkg_1.22.6.tar.xz",
+    "sha256": "4379123466cf1804f82aaac7fbea7133c58aefa178dfbf7029cdc61a8d220655",
+    "note": "live Debian pool rotated past 1.22.6 (404); snapshot.debian.org URL is immutable"
+  },
+  "libmd": {
+    "version": "1.1.0",
+    "url": "https://archive.hadrons.org/software/libmd/libmd-1.1.0.tar.xz",
+    "sha256": "1bd6aa42275313af3141c7cf2e5b964e8b1fd488025caf2f971f43b00776b332"
+  },
+  "xz": {
+    "version": "5.4.4",
+    "url": "https://github.com/tukaani-project/xz/releases/download/v5.4.4/xz-5.4.4.tar.xz",
+    "sha256": "705d0d96e94e1840e64dec75fc8d5832d34f6649833bec1ced9c3e08cf88132e"
+  },
+  "dash": {
+    "version": "0.5.12",
+    "url": "https://snapshot.debian.org/file/e15444a93853f693774df003f87d9040ab600a5e",
+    "sha256": "6a474ac46e8b0b32916c4c60df694c82058d3297d8b385b74508030ca4a8f28a",
+    "note": "Debian orig tarball (dash_0.5.12.orig.tar.gz, snapshot file id e15444a93853f693774df003f87d9040ab600a5e) ships generated configure; kernel.org git snapshot lacks configure and the build Mac has no autotools. The earlier .tar.xz pool path does not exist (404 page was briefly pinned in error and corrected)."
+  },
+  "uikittools-ng": {
+    "version": "2.1.8",
+    "url": "https://codeload.github.com/ProcursusTeam/uikittools-ng/tar.gz/refs/tags/v2.1.8",
+    "sha256": "694fdc49582c1b3921cf36377de7e82b5f5d5801da38a30ccbc0e1d5593c0561",
+    "use": "uicache only"
+  },
+  "apt": {
+    "version": "2.9.4",
+    "url": "https://salsa.debian.org/apt-team/apt/-/archive/2.9.4/apt-2.9.4.tar.gz",
+    "sha256": "52ebe6b390f309b1f8fdb8e4aef276b2ae58703b34121d8bac026f8d831eae52",
+    "status": "pinned, build pending: needs xxhash, liblz4, zstd and the GnuTLS tree (gmp, nettle, libtasn1, p11-kit) cross-built first; build.py does not fake it"
+  },
+  "coreutils": {
+    "version": "9.5",
+    "url": "https://ftp.gnu.org/gnu/coreutils/coreutils-9.5.tar.xz",
+    "sha256": "cd328edeac92f6a665de9f323c93b712af1858bc2e0d88f3f7100469470a1b8a",
+    "status": "pinned, optional: not required for the dpkg/Sileo loop (dpkg ships its own maintainer-script helpers; maintainer scripts get sh + a minimal file-tool set from this package once built)"
+  },
+  "patch": {
+    "version": "2.7.6",
+    "url": "https://ftp.gnu.org/gnu/patch/patch-2.7.6.tar.xz",
+    "sha256": "ac610bda97abe0d9f6b7c963255a11dcb196c25e337c61f94e4778d632f1d8fd",
+    "note": "dpkg's configure hard-requires a GNU patch program (DPKG_PROG_PATCH) and bakes the found name into dpkg-source; a host build satisfies configure and a cross build ships as usr/bin/{patch,gpatch} so the baked name resolves on device"
+  }
+}
