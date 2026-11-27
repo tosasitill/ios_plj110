@@ -58,9 +58,11 @@ static int x9mm_request(const uint8_t *p,unsigned n,unsigned id){
  if(id==0x60b)return n==16;
  if(id==0xa04)return n==24&&x9mm_one(p,n,0x100,0);
  if(id==0x601){
-  /* Real SMS host-ready settings, or read-only SMSC query. No SMS/NV writes. */
+  /* Real SMS host-ready settings, the factory 0x108 config tag that
+   * follows it, or a read-only SMSC query. No SMS/NV writes. */
   return (n==40&&x9mm_one(p,n,0x100,0)&&x9mm_one(p,n,0x105,1)&&x9mm_one(p,n,0x106,2))||
-   (n==24&&x9mm_one(p,n,0x102,1));
+   (n==24&&x9mm_one(p,n,0x102,1))||
+   (n==24&&x9mm_one(p,n,0x108,1));
  }
  if(id==0x607){
   /* MD 913677c6 + 91408c60/9140702a/91407060. GSM storage:
