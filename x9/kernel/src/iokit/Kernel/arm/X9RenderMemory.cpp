@@ -204,6 +204,42 @@ IOReturn x9_render_memory_cache(X9RenderContext *c,X9RenderResource *r,const X9R
  X9RenderCacheSpan span={request->offset,request->offset+request->bytes,0};uint64_t completed=0;
  return x9_render_memory_cache_spans(c,r,&span,1,request->operation,&completed);
 }
+/* H2 coherency probe: sample one atom of a GPU-written range after the job's
+ * GPU flush. The plain loads go through the physical aperture (phystokv, the
+ * rev252ck maintenance alias): cache lines are physically tagged past L1, so
+ * they resolve to the same lines the client mapping uses, and the CIVAC
+ * below reaches those lines for the same reason the rev252ck path relies on.
+ * A mismatch is a true positive (the CPU held a line the GPU write-back did
+ * not invalidate, i.e. the ACE-Lite snoop claim fails for this resource); a
+ * match is evidence, not proof. The reference maintenance is CIVAC, never
+ * IVAC, so a concurrently dirty CPU line is written back, not discarded; the
+ * sampled atom ends up maintained exactly as the non-coherent path would
+ * maintain it, so probing can only add maintenance, never remove it. */
+bool x9_render_memory_coherency_sample(X9RenderResource *r,uint64_t offset,
+ uint64_t *match,uint64_t *mismatch) {
+ if(!r||!r->memory||!r->prepared||!match||!mismatch||(offset&(X9_RENDER_CACHE_ATOM-1))||
+    offset>r->bytes||X9_RENDER_CACHE_ATOM>r->bytes-offset)return false;
+ IOByteCount seg=0;uint64_t pa=r->memory->getPhysicalSegment(offset,&seg,kIOMemoryMapperNone);
+ if(!pa||seg<X9_RENDER_CACHE_ATOM)return false;
+ uint64_t va=phystokv(pa);if(!va)return false;
+ uint64_t ctr;__asm__ volatile("mrs %0, ctr_el0":"=r"(ctr));
+ const uint64_t line=4ULL<<((ctr>>16)&15);
+ if(line>X9_RENDER_CACHE_ATOM||(va&(line-1)))return false;
+ static const uint64_t at[4]={0,64,128,192};
+ uint64_t before[4],after[4];
+ __asm__ volatile("dmb ish":::"memory");
+ for(unsigned i=0;i<4;i++)before[i]=*(volatile uint64_t *)(va+at[i]);
+ disable_preemption();
+ __asm__ volatile("dsb sy":::"memory");
+ for(uint64_t a=va;a<va+X9_RENDER_CACHE_ATOM;a+=line)
+  __asm__ volatile("dc civac, %0"::"r"(a):"memory");
+ __asm__ volatile("dsb sy":::"memory");
+ enable_preemption();
+ __asm__ volatile("dmb ish":::"memory");
+ for(unsigned i=0;i<4;i++)after[i]=*(volatile uint64_t *)(va+at[i]);
+ for(unsigned i=0;i<4;i++)if(before[i]==after[i])(*match)++;else (*mismatch)++;
+ return true;
+}
 uint64_t x9_render_memory_publish(X9RenderContext *c) {
  if(!c||!c->page_table||c->exposed||c->disabled)return 0;
  uint64_t root=x9_render_vm_publish(c->page_table);

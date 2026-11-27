@@ -86,6 +86,20 @@ static bool render_ready() {
 /* ACE-Lite GPU->CPU snoop probe: [0] plain cached load already saw the GPU's
  * fence write (snoop works), [1] only the invalidated load saw it (no snoop). */
 static uint64_t render_snoop_probe[2];
+/* H2 (opt-in x9_coh_probe=1): extend the fence-page probe above to real
+ * client BOs. When a resource takes the coherent CIVAC skip in the post
+ * phase, sample the first and last atom of its GPU-written range and count
+ * qwords the plain CPU load already had right vs qwords only visible after
+ * a CIVAC. Log only; the skip itself is unchanged, and the helper maintains
+ * each sampled atom, so a probe build maintains MORE than production, never
+ * less. [0] match, [1] stale. */
+static uint64_t render_coh_probe[2];
+static uint64_t render_coh_probe_atoms,render_coh_probe_jobs;
+static bool render_coh_probe_enabled() {
+ static int mode=-1;
+ if(mode<0){mode=sweet_x9_arg("x9_coh_probe",0)==1?1:0;IOLog("X9 RENDER COH-PROBE: client-BO coherency sampling %s (x9_coh_probe)\n",mode?"ON":"off");}
+ return mode==1;
+}
 struct RenderParked { X9RenderContext *c; RenderKernelGroup *g; uint64_t root; };
 static RenderParked render_parked;
 static uint64_t render_park_hits,render_park_retires,render_park_cold;
@@ -666,6 +680,7 @@ struct RenderJobState {
  uint64_t private_skip[2],initial_bytes,fallback_bytes;
  uint64_t reach_saved[2],import_bytes[2],full_import_bytes[2];
  uint64_t coherent_skip[2],wc_skip[2],holes_saved[2],scope_skip[2],lc_skip[2],lc_bytes[2];
+ unsigned coh_samples;
  uint64_t scope_uncovered,scope_uncovered_bytes,scope_uncovered_max;
  uint64_t scope_hold_bytes[2];
  uint64_t dirty_entries,dirty_bytes,dirty_skip_res;
@@ -1081,7 +1096,7 @@ static IOReturn render_submit_reap(RenderJobState *st,const RenderOwner &owner) 
  auto &slot=resident->slots[g->slot];X9CSFQueueIO io=x9_csf_queue_access_io(&slot.access);
  auto *kernel_context=(RenderKernelContext *)c->engine_private;
  auto *plan=&kernel_context->cache_plan;
- st->phase="completion-wait";st->done=false;st->end=deadline_ms(10000);st->next_sync=0;st->polls=0;
+ st->phase="completion-wait";st->done=false;st->end=deadline_ms(10000);st->next_sync=0;st->polls=0;st->coh_samples=0;
  do {
   if(x9_csf_group_health(&io,&g->control,resident->epoch)!=kIOReturnSuccess)return render_submit_uncertain(st);
   st->shader_ready_seen|=gr64(st->gpu,0xa08);
@@ -1161,7 +1176,27 @@ static IOReturn render_submit_reap(RenderJobState *st,const RenderOwner &owner) 
  for(auto &r:c->resources)if(r.memory&&(r.flags&X9RenderGPUWrite)) {
   if(r.write_combined){st->wc_skip[1]+=r.bytes;continue;}
   if(st->coherent&&r.cpu_exposed) {
-   st->coherent_skip[1]+=r.write_end>r.write_begin?r.write_end-r.write_begin:0;continue;
+   st->coherent_skip[1]+=r.write_end>r.write_begin?r.write_end-r.write_begin:0;
+   if(render_coh_probe_enabled()&&st->coh_samples<4) {
+    /* H2 sample: this resource's bytes were NOT invalidated after the GPU
+     * wrote them (that is the coherent claim under test). The job's final
+     * GPU flush has already run above, both locks are held, and the helper
+     * CIVACs each sampled atom, so sampling cannot lose CPU data and
+     * cannot hide a stale line from the count. At most 4 resources and 2
+     * atoms per job: bounded, and in the post phase, off the submit path. */
+    uint64_t begin=r.write_begin,end=r.write_end,match=0,mismatch=0;unsigned atoms=0;
+    if(end>begin&&!(begin&(X9_RENDER_CACHE_ATOM-1))) {
+     if(x9_render_memory_coherency_sample(&r,begin,&match,&mismatch))atoms++;
+     uint64_t last=end-X9_RENDER_CACHE_ATOM;
+     if(last>begin&&x9_render_memory_coherency_sample(&r,last,&match,&mismatch))atoms++;
+    }
+    if(atoms) {
+     if(!st->coh_samples)render_coh_probe_jobs++;
+     st->coh_samples++;render_coh_probe_atoms+=atoms;
+     render_coh_probe[0]+=match;render_coh_probe[1]+=mismatch;
+    }
+   }
+   continue;
   }
   if(r.cpu_exposed&&render_scope_skips(st,r)){st->scope_skip[1]+=r.bytes;continue;}
   if(st->scope_on&&r.imported&&r.cpu_exposed&&render_scope_covered(st,r))st->scope_hold_bytes[1]+=r.bytes;
@@ -1241,6 +1276,9 @@ static IOReturn render_submit_reap(RenderJobState *st,const RenderOwner &owner) 
    if(x9_gpu_acelite_active)
     IOLog("X9 RENDER SNOOP: GPU->CPU fence probe coherent=%llu stale=%llu;stale>0 means GPU writes do not invalidate CPU lines\n",
      render_snoop_probe[0],render_snoop_probe[1]);
+   if(render_coh_probe[0]||render_coh_probe[1])
+    IOLog("X9 RENDER COH-PROBE: jobs=%llu atoms=%llu qwords match=%llu stale=%llu;stale>0 on a client BO falsifies the snoop claim for that memory class\n",
+     render_coh_probe_jobs,render_coh_probe_atoms,render_coh_probe[0],render_coh_probe[1]);
    IOLog("X9 RENDER cache-plan: builds=%llu reuses=%llu;mapping mutation invalidates,shared cache ops still per submission\n",plan_rebuilds,plan_reuses);
    plan_rebuilds=plan_reuses=0;
    for(unsigned i=0;i<2;i++)hole_total[i]=span_total[i]=0;
@@ -1342,9 +1380,22 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
  return render_submit_reap(&st,owner);
 }
 static IOReturn render_wait(X9RenderContext *c,const X9RenderWaitRequest *request,X9RenderCompletion *reply) {
- RenderOwner owner;if(!owner.locked||!render_ready()||!c||!request||!reply||!c->engine_private)return kIOReturnNotReady;
+ if(!c||!request||!reply||!c->engine_private)return kIOReturnNotReady;
  auto *p=(RenderKernelContext *)c->engine_private;
+ /* A history hit needs no hardware and no owner lock. The only caller is
+  * SweetX9RenderService::operation(), which externalMethod runs with
+  * context->lock held, and every history writer (the reap completion block
+  * in render_submit_reap, reached from the synchronous submit and from the
+  * async worker) also holds context->lock, so the ring is stable here.
+  * Answering a hit without sweet_x9_render_owner_enter() keeps a completed
+  * record readable while another job holds the owner lock, and after the
+  * engine has faulted (render_ready() false) -- the two cases where a
+  * waiter most needs the record, and where the old code returned
+  * kIOReturnNotReady for a completion that had in fact happened. A miss
+  * keeps the old semantics exactly: NotReady unless the owner lock is
+  * held and the engine is ready, then NotFound. */
  for(const auto &r:p->history)if(r.group==request->group&&r.submission_id==request->submission_id){*reply=r;return kIOReturnSuccess;}
+ RenderOwner owner;if(!owner.locked||!render_ready())return kIOReturnNotReady;
  return kIOReturnNotFound;
 }
 static X9RenderCloseResult render_close(X9RenderContext *c) {
