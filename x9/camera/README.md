@@ -1017,3 +1017,123 @@ host的enter/guard/leave必须真实取得跨所有CPU/firmware producers的STE/
 原SEC_INIT的`46048`不是只读enabled predicate：它写的是`base+0x8020`并等待`+0x8024`，会禁用secure bank；后续配置亦写`+0x8028/802c/8080/8088/8090/8098/809c/80a0/80a8/80ac`。这些精确分支不能当normal STRTAB/CMDQ bootstrap，也不能据本次已追的secure路径断言所有固件路径都不改normal bank。TEE4d走自己的opaque memory/IOVA配置，仍不提供当前normal storage映射。实际旧启动日志是EL1入口；shim存在清HCR的EL2分支、DT存在GZ/pKVM reservation均不证明本次EL2状态或授权，不能用它们造host lease。
 
 下一仍要提供实际normal host权限/当前映射来源、完整DMA→SMI/SMMU退休与credit/repeat、持续rate/MMQoS及native power/I2C/config/capture注册，最后接iOS前后实帧预览/照片。此安装算法不能冒充provider，不构建中间供测镜像。
+
+## 2026-11-27 冷启动黑屏归因、三摄注册与录像格式声明（分支 feat/camera-fixes，未上机）
+
+### 冷启动到第一帧：逐段归因（实测基线 = 日志 421-diag46，主摄冷开 epoch 3）
+
+日志时间戳（内核日志秒）：流开始 114.685 → SENSOR STREAM on 120.057 → 首张交付图片
+120.659，**黑屏共 ≈5.97 s**；同日志第二次打开 ≈4.8 s，无跨启动缓存收益。逐段：
+
+| 段 | 区间 | 耗时 | 性质 |
+|---|---|---|---|
+| 上电/轨道/ID 读 | 114.685→114.782 | ≈0.10 s | 硬件必需（含条件性 1 s POR 等待，本次未触发：仅 WL 轨道在进入时已被继承打开才走 `x9_camera_mt6993.inc` 的 `delay(1000000)`） |
+| EEPROM 校准预载 | 114.804→115.354 | ≈0.55 s | 每 epoch 两遍全量重读（主/长焦 3456 B 以 16 B FIFO 分块 = 432 次 I2C 读 + 头尾 fence；前置 1820 B）。Android 在 probe 期只读一次 |
+| 传感器配置 | 115.354→116.419 | ≈1.07 s | 初始化表 + 校准应用 250 写 + 预览表 + 48 采样回读；约 1300 次带 guard 的单寄存器 I2C 事务（guard 已在 20 ms 窗口内复用 WL/PMIC 观察）。属传输方式下限，非等待浪费 |
+| 接收器配置 | 116.436→117.865 | ≈1.43 s | 其中 OUTMUX cfg_done 等待 116.788→117.790 整 **1.00 s**（见修复 A） |
+| PREPARE（SMMU 等） | 117.865→118.879 | ≈1.01 s | 其中 ≈**0.9 s** 是 `cam_progress()` 在约 45 个 `prepare:`/`smmu:`/`ft:` 标记后各 `delay(20000)` 的控制台排空延时（见修复 B）；真实 SMMU 工作 ≈0.1 s |
+| 布防→stream-on | 118.879→120.057 | ≈1.18 s | 其中第二次 OUTMUX cfg_done 1 s 等待（终于 120.010）；stream-on 后 settle 在 VSYNC 到达时立即锁存（120.034 READY） |
+| 用户态尾段 | 120.070→120.659 | ≈0.59 s | 首个 RAW 帧（原生 7546 行）被桥接层帧率准入门拒绝（见修复 C），首张交付为 seq=3；其余为图启动/ISP 预热，离线不可再分 |
+
+### 已修（本分支）
+
+- **修复 A（内核 `x9_camera_outmux.inc`）**：`cam_out_commit` 原先无条件轮询 cfg_done
+  最长 1 s。该锁存靠参考 VSYNC 退休，VSYNC 只在传感器 stream-on（0100=1）后存在，
+  而启动路径的全部 commit 都发生在 stream-on 之前——等待**必然超时**，每次冷开白付
+  两次共 ≈2 s（日志 395 曾累计 10 s）。代码注释本就写明「Android never waits」。
+  现在：`session.stream` 为假时只做一次立即完成检查（上一流的退休锁存仍算数），
+  随即走既有 defer 路径，stream-on 后由 `cam_out_settle_locked` 结算（diag46 中该
+  settle 在 stream-on 时即刻锁存）；流式期间的 commit 保持 Android 的 1 s 等待不变。
+  defer 日志文案去掉「after 1s」字样（两种路径共用）。关流路径的 commit 仍走原轮询
+  （stream 标志在断电完成时才清），行为不变。
+- **修复 B（内核 `sweet_x9_camera.c`）**：`cam_progress()` 的 20 ms 排空延时是
+  diag34 时代 USB 控制台防丢日志手段，diag46 实测每冷开 ≈45 次 ≈0.9 s。改为
+  boot-arg `x9_cam_drain=1` 才启用（默认关）；`cam_drain_mark` 的停流路径延时
+  不动（关流复位仍是活跃诊断对象）。需要复现挂死定位时带 `x9_cam_drain=1` 构建。
+- **修复 C（用户态 `camera_isp.c` `isp_frame_rate`）**：标称 30 fps 的模式原生帧长
+  7546 行 × 4415 ns = 30.03 fps，严格上限算出 7550 行、按曝光步长 2 取整为 7552，
+  高于模式自身最小帧长——每次启动/切镜头的头几帧都以原生帧长到达并被准入门以
+  「太快」丢弃，直到 AE 偶然拉长帧（diag46 首张交付 seq=3）。修复：算出的最速帧长
+  仅因帧率量化误差（≤0.2%）高于原生最小值时，以原生最小值为准（主摄 7552→7546、
+  前置 7644→7642、超广 6411→6408 均落在此内）；真实客户上限远在误差外不受影响
+  （24 fps 在主摄算出 9438 行）。长焦原生 3888×8538 ns = 30.13 fps 是真实 0.43%
+  超速，不在豁免内，仍由 AE 拉长帧解决——这是正确路径而非丢帧 bug。准入门本身
+  （新帧率合同生效前不发图）保留。主机测试 `x9/camera/test_frame_rate.c` 14/14。
+- 预期（推断，未上机）：冷开黑屏 ≈5.97 s → ≈2.4 s（A 省 ≈2 s、B 省 ≈0.9 s、
+  C 省 ≈0.3–0.6 s）。剩余地板 ≈1.6 s 为单寄存器 I2C 配置事务，降它需改为
+  Android adaptor 式突发写传输，无硬件在手不盲改；EEPROM 预载缓存（≈0.5 s/次，
+  仅重复打开受益）需按「每启动每传感器校验和复核」设计，未在本轮实现。
+
+### 三摄注册与切换：现状与本轮补齐
+
+四颗传感器（主 0x9186 / 前 0x0615 / 超广 JN5 0x38e5 / 长焦 0x8202）的内核流水线、
+桥接流与 `cameractl` 路径在源码层已齐备，但出厂 boot 配置只有 `x9_camera=2`，
+**没有** `x9_camera_lenses=1`（或 `x9_camera_uw/tele=1`），故真机上超广/长焦从未
+被准入——这是「三摄没做」在用户侧的实际形态。准入后切换路径：长焦是独立
+AVCaptureDevice（`:2`，mask 含 TELE 时桥与 plist 两侧都注册）；超广没有独立设备
+（见下），经后置主流的 ZoomFactor 路由到达（0.6→超广、1→主、≥3→长焦，目标稳定
+120 ms、驻留 ≥450 ms 后整流冷切换）。全启动切换次数有硬上限 8 次（pinned epoch
+史），耗尽时桥在停流前拒绝。
+
+- **本轮代码（内核注册隔离）**：`x9_camera_register_platform` 原先任一准入传感器的
+  ID 失败都使整个相机 FAULT（干净 NACK 亦然，只是继续探完其余传感器后仍以首个
+  错误失败）。改为：可选镜头（超广/长焦）ID 阶段失败（ENXIO/ENODEV）且断电干净时，
+  只把该镜头排除出有效 `supported_mask`，双摄照常 READY；主/前失败、供电阶段错误、
+  断电不净仍按原样整机失败（WL 轨道与总线是共享资源，其状态不能按传感器分割）。
+  `GET_LENSES` 与用户态后端校验都读同一 `st.supported_mask`，排除端到端一致。
+  这使 `x9_camera_lenses=1` 可安全进入候选构建：一颗可选镜头缺失/变体只降级，
+  不再拖垮已验证的双摄。**默认 boot 配置仍未加该参数**——超广/长焦首帧均未获
+  运行验收（长焦从未上机；超广校准在原厂侧即空实现、VCM 合同未闭合），按项目
+  纪律先候选（`--boot-arg x9_camera_lenses=1`）验证再谈默认开启。
+- **超广独立设备的缺口（证据边界）**：库存根盘 D22 与 D221 的
+  `AVCaptureSession.plist` 设备表逐项相同，均无超广设备；D22 的双摄是
+  deviceType 4 的**同步**双设备（`synchronizedStreamUniqueIDs [:0,:2]`），桥无
+  并发流授权而正确丢弃。CMCapture 20H392 二进制里超广端口名为
+  `kFigCapturePortType_BackFacingSuperWideCamera`（SuperWide 而非 UltraWide），
+  但本机任何 plist 资产都没有超广设备的 deviceType 取值——臆造该整数可能使
+  CMCapture 误路由。在拿到含超广设备的板级 plist 或真机确认 deviceType→端口
+  映射之前，超广只经变焦路由可达，不合成 plist 设备。
+- 参数证据纪律：桥接描述符里的焦距/FOV（4.0/2.87/6.0 mm、65/70/28°）是代码内
+  明示的「D22 兼容描述符，非 X9 标定」，不作为本机光学事实引用；有据的只有
+  传感器表（分辨率 4096×3072 等、行时、帧长）与 Android 厂商模式表（超广预览
+  pclk 920 MHz / 线长 4784 / 帧长 6408 / 标称 30 fps 与内核表一致）。四颗传感器
+  在本内核都只有预览模式一条，原厂的 capture/hs_video（60 fps）等模式未实现、
+  不声明。对焦：仅主摄有 VCM 写路径（且未证明移动）；超广定焦为 Android 侧
+  事实但本机未验；防抖：无任何已实现 OIS 路径。均不声明。
+
+### 录像格式声明：根因与补齐
+
+- **根因（日志证据）**：全部库存日志中 profile hook 安装行出现 120 次，替换成功行
+  「D22 physical-only mask=…」**一次都没有**——`capture_plist` 在真机上从未替换过
+  plist，且其全部拒绝路径原本无日志。于是库存 D22 的 H10ISP 格式（Video-60
+  4224×2376、Video-120、FES/binning）与预设（avc1 Common / UHD30 / 1080p60）留在
+  原地，其中没有一条能与 X9 唯一 4096×3072@30 源匹配，录像自然无格式可选
+  （预览/拍照走 Photo 4032×3024，与桥格式恰好一致，故一直正常）。拒绝点候选按
+  可能性排序：① 本机身份解析出的板型是 D221，加载的是 D221 的 plist 而 hook 只
+  认 D22 路径；② plist 加载时后端 mask 尚未就绪（CMCapture 只加载一次并缓存）；
+  ③ 加载未经过 mediaserverd 内该方法。
+- **本轮修复（`x9/camera/media_profile.m`）**：路径同时接受 D22 与 D221（两份
+  plist 的设备表已逐项核对相同）；新增一次性结果日志（首个被请求的 plist 路径、
+  每种拒绝原因各一行，含 mask 值），下一轮上机即可定性①/②/③；替换内容补齐库存
+  plist 声明而旧替换曾静默丢弃的预设——Medium（480×360）、Low（192×144）、
+  352x288、iFrame960x540（540p30）、iFrame1280x720，全部 hvc1@30、挂在同一
+  `X9-Video-30` 源流上（桥渲染下限 1/32 缩放覆盖 192×144）。编码边界不变：
+  只有 Apple **软件** HEVC（VCPHEVC，经 VideoToolbox 注册，日志有
+  registration=0/result=0 实证）就绪时才声明视频；MT6993 的 VENC 硬编在本项目
+  从未实现，**不声明任何硬件编码**；上限仍 1080p30——软件 ISP + 软件编码的
+  4K 实时吞吐无证据，且 README 既有纪律是不声明 4K/60/HDR/防抖/深度/AF/闪光
+  等无提供者的能力。注意 iFrame960x540 库存为 60 fps 变体，本管线供不了，
+  只声明 30 fps 版。
+- 三颗后置传感器共用同一组录制声明：内核里每颗都只有 4096×3072@30 预览模式，
+  声明按「设备当前所选镜头背后的同一源流」成立；切换镜头不改变可枚举格式集，
+  这与 Android 多模式表（capture/60 fps 视频等）不一致但与本机实现一致，不冒充。
+
+### 本轮验证
+
+- 主机测试：`x9/camera/test_frame_rate.c` 14/14 通过（系统 clang + MacOSX26.5 SDK）。
+- 用户态桥：`x9/camera/build.py` 构建通过（libx9-camera.dylib 162,928 B）。
+- 基带主机套件 39/39 通过（系统 clang + MacOSX26.5 SDK 配方，基线不变）；
+  整树构建 `build.py all --name camera-fixes-20261127` 通过（候选 boot.img
+  已产出，仅构建验证，未 stage mailbox、未刷机）。
+- 未上机：修复 A/B/C 的实际省时、三摄准入后的首帧、plist 替换成功行与录像
+  枚举，都需下一轮真机日志确认；在此之前以上「预期」均为推断。
