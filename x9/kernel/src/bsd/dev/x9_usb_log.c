@@ -15,6 +15,7 @@ extern uint64_t sweet_log_position(void);
 extern void sweet_watchdog_pet(void);
 extern void thread_terminate_self(void);
 extern int sweet_x9_reboot_bootloader_request(void);
+extern int sweet_x9_arg(const char *,int);
 #define BIT(n) (1U<<(n))
 #define EP0 0x100
 #define FIFO 0x300
@@ -98,7 +99,31 @@ int x9_mtu3_init(int connect)
  wr(EPISR,0xffffffff);wr(COMMON,0xffffffff);usb_delay(30000);
  PU(0x344,0xffffffff,0x20);usb_delay(250);PU(0x368,0xffffffff,0x40000);PU(0x368,0xfffffff7,0);PU(0x368,0xffffffff,8);usb_delay(30);PU(0x368,0xfffbffff,0);PU(0x368,0xfffffff7,0);PU(0x368,0xfbffffff,0);PU(0x36c,0xfffeffff,0);PU(0x320,0xfffffcff,0);PU(0x368,0xfffbffff,0);PU(0x368,0xff41c30b,0);PU(0x318,0xff7fffff,0);PU(0x318,0xffffffff,0x100000);PU(0x36c,0xffffffcf,0x24);PU(0x300,0xf8ffffff,0);PU(0x318,0x3dffffff,0);PU(0x318,0xffffffff,0x40000000);usb_delay(800);
  ip[0x98/4]|=1;usb_delay(1);ip[0x98/4]&=~1U;uint32_t info=rr(0xc10);if(!(info&31)||!((info>>8)&31))return -3;
- wr(0x141c,rr(0x141c)&~BIT(0));wr(0xc,0xffffffff);wr(0x8c,0xffffffff);wr(CONFIG,rr(CONFIG)&~(0x7fU<<24));wr(EP0,64);wr(EPISR,0x10001);wr(COMMON,0xffffffff);wr(0x88,0x10001);wr(0x2418,BIT(2)|BIT(5));wr(POWER,(rr(POWER)&~BIT(6))|(connect?BIT(6):0)|BIT(5)|BIT(0));return 0;
+ wr(0x141c,rr(0x141c)&~BIT(0));wr(0xc,0xffffffff);wr(0x8c,0xffffffff);wr(CONFIG,rr(CONFIG)&~(0x7fU<<24));wr(EP0,64);wr(EPISR,0x10001);wr(COMMON,0xffffffff);wr(0x88,0x10001);wr(0x2418,BIT(2)|BIT(5));wr(POWER,(rr(POWER)&~BIT(6))|(connect?BIT(6):0)|BIT(5)|BIT(0));
+ if(sweet_x9_arg("x9_usb_phy",0)==1){
+  /* Factory gadget-time U2 PHY steps the LK-retained sequence above does not
+   * perform (OPPO phy-mtk-xsphy.c: u2_phy_instance_init + the frequency-meter
+   * slew-rate calibration run at every phy power-on; mt6993.dts u2port0 has
+   * no mediatek,eye-src, so Android takes the FM path with the driver
+   * defaults src_ref_clk=26MHz, src_coef=17). ACR5 is never written by the
+   * retained sequence, so an LK calibration would survive; this makes the
+   * XNU-side state explicit and measurable instead of assumed. Gated:
+   * x9_usb_phy=1. Default 0 keeps the verified sequence byte-identical. */
+  unsigned srctrl_before=(P(0x314)>>12)&7;
+  PU(0x300,0xffffffff,BIT(5)); /* ACR0 RG_INTR_EN */
+  PU(0x314,0xffffffff,BIT(15));usb_delay(1); /* ACR5 RG_HSTX_SRCAL_EN */
+  PU(0x110,0xffffffff,BIT(8)); /* FMMONR1 RG_FRCK_EN */
+  P(0x100)=(P(0x100)&~0xffffffU)|1024; /* FMCR0 RG_CYCLECNT */
+  PU(0x100,0xffffffff,BIT(24)); /* FMCR0 RG_FREQDET_EN */
+  unsigned fm_valid=0;for(unsigned i=0;i<25;i++){if(P(0x110)&BIT(0)){fm_valid=1;break;}usb_delay(10);}
+  uint32_t fm_out=P(0x10c); /* MMONR0 */
+  PU(0x100,0xfeffffff,0);PU(0x110,0xfffffeff,0);
+  uint32_t calib=3;if(fm_valid&&fm_out)calib=((26U*17U*1024U/fm_out)+500U)/1000U;
+  P(0x314)=(P(0x314)&~(7U<<12))|((calib&7)<<12); /* ACR5 RG_HSTX_SRCTRL */
+  PU(0x314,0xffff7fff,0); /* clear SRCAL_EN */
+  printf("X9 USB PHY: factory FM slew calib fm_valid=%u fm_out=%u srctrl %u -> %u (x9_usb_phy=1)\n",fm_valid,fm_out,srctrl_before,calib&7);
+ }
+ return 0;
 }
 uint32_t x9_mtu3_read(unsigned off){return rr(off);}
 void x9_mtu3_write(unsigned off,uint32_t v){wr(off,v);}

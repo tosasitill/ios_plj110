@@ -104,6 +104,8 @@ Lookup缺少LookupResult不当成“未安装”；receipt在首次上传前用O
 | 未设置 `x9_usb` / `x9_usb=0` | 原有 EP0 日志模式，保持默认行为 |
 | `x9_usb=1` | USB2 CDC-ECM，原生 BSD `ue0`，保留设备级 EP0 日志 |
 | `x9_usb=2` | ECM + 自有 bulk interface 2，iOS 管理员独占访问 |
+| `x9_usb=3` | Apple usbmux 画像：`05AC:12A8` + FF/FE/02 单接口，标准 mux 协议桥接本机 lockdownd（见文末专节）；无 `ue0`，EP0 日志保留 |
+| `x9_usb_phy=1` | 在既有 LK 保留 PHY 序列之外补原厂 gadget 期两步（ACR0 RG_INTR_EN + FM slew 标定，带回读打印）；默认关，仅速率 A/B 用 |
 | `x9_usb_ip=0` | 不自动给 `ue0` 配 IPv4；默认是 `192.168.7.2/24` |
 
 新 worker 与日志 worker **二选一**，不同时操作 MTU3。保留已验证的 LK
@@ -807,3 +809,105 @@ python3 -I x9/usb/pairing.py --session --device-id <ID>
 并精确pin已配对DeviceCertificate→会话内QueryType→StopSession。没有关闭证书
 验证或自动降级TLS/密钥长度。普通QueryType、Pair接受、会话成功分别报告，不互相
 冒充。证书、私钥、BUID、设备标识与SessionID不打印、不入git。
+
+
+## 速率与 usbmux 识别（2026-11-27，`feat/usb-fixes`，未实机验收）
+
+### A. 速率：协商层本来就是 HS 规格，瓶颈在轮询节拍
+
+逐项盘点（寄存器/描述符/原厂源码为准）：
+
+- **控制器**：`x9_mtu3_init` 的 POWER 末写含 `HS_ENABLE|BIT(0)`；DEV_SPEED
+  （`0x800[2:0]`，1=FS、3=HS）是硬件协商回报值，驱动只读不写。IPPC
+  U2_CTRL_0P 的 device 模式处理与原厂一致。**全树没有任何一处把设备限速到
+  FS 的配置**；MT6993 的 ssusb 在原厂 DTS 里标 `maximum-speed =
+  "super-speed"`，本机只用 USB2 通路。
+- **描述符**：bulk `wMaxPacketSize` 按协商速度在 512（HS）/64（FS）间切换，
+  other-speed 配置取反，EP0 64B、device qualifier 均在位——描述符层无 FS 残留。
+- **真机到底协商到哪一档此前从未被记录过。** 本轮加了可观测点：速度变化与
+  SET_CONFIGURATION 时打印 `X9 USB: negotiated HIGH-SPEED 480 Mbps` 或
+  `FULL-SPEED 12 Mbps -- HS NOT negotiated`；`usbctl --status` 的 speed
+  字段（1=FS、3=HS）同样可读。
+- 若真机落到 FS，嫌疑按证据排序：① LK 保留的 PHY 序列缺原厂 gadget 期做的
+  两步——`phy-mtk-xsphy.c` 的 `u2_phy_instance_init` 置 ACR0 `RG_INTR_EN`、
+  每次 power-on 跑 FM slew-rate 标定写 ACR5 `RG_HSTX_SRCTRL`（mt6993.dts 的
+  u2port0 没有 `mediatek,eye-src`，原厂走 FM 路径，参数为驱动默认
+  26MHz/17）；X9 的序列从不写 ACR5，LK 若标定过则保留、否则缺失。本轮以
+  `x9_usb_phy=1`（默认关）补齐这两步并打印 `fm_out` 与 srctrl 前后值，供
+  A/B。② SoC 与连接器之间的 MT6379 eUSB2 repeater 由 SPMI 控制，本内核无
+  SPMI 消费路径，其寄存器由 LK/固件保留，本轮未动。③ 线缆/接口等物理因素，
+  上机换线排除。
+- **吞吐瓶颈（与协商速率无关，已修）**：worker 原为固定 1ms 轮询，每端点
+  只有 1 个 GPD 在飞，一次往返被串行成约 1ms——bulk 上限约 4MB/s、ECM 约
+  1.5MB/s，即便协商到 480Mbps 也跑不出量级。本轮改为忙时（任一端点 busy 或
+  TX 队列非空）100µs 自适应轮询，`net_output`/`enqueue_raw` 入队后
+  `thread_wakeup` 唤醒 worker，空闲仍 1ms。预期量级 raw bulk 约 20MB/s、
+  ECM 7–15MB/s（上机实测为准）。每端点多 GPD 环（当前 DMA 区有 2×4KiB
+  空闲跨度）需要重审 submit/complete 的所有权模型，本轮**未做**，列为后续。
+
+### B. 识别：自研通道承载标准 mux 协议（`x9_usb=3`）
+
+原生栈路线维持原判：NATIVE10–15 组件未安装/未绑定（IOService 槽位与
+`IOUSBDeviceController` 纯虚函数问题未解），本轮不碰。改走的路线是让自研
+worker 直接说**标准 usbmux 协议**——主机侧（系统 usbmuxd、libusbmuxd、
+爱思助手）零改动。协议行为以 libimobiledevice 的 usbmuxd 源码
+（device.c/usb.c，2026-11-27 取回核对）为准，包括：版本握手（v2 用
+16 字节头 + `0xfeedface`、版本应答必须用 8 字节头）、SETUP 包、mux
+mini-TCP（主机 SYN seq=0、设备必须回 SYN|ACK 或 RST、数据包只带 ACK 标志、
+关闭=RST、主机只在客户端消费后才推进 ACK 且从不重传载荷——USB bulk 本身
+即可靠层）。
+
+识别链逐环状态：
+
+| 环 | 状态 |
+|---|---|
+| USB 身份 `05AC:12A8` + 配置 1 单接口 FF/FE/02、双 bulk（OUT 在前） | 本轮新增（`x9_usb=3`）；正是 usbmuxd 的匹配形状 |
+| Mac usbmuxd 识别接管 → ListDevices | 主机侧现成；设备侧形状已闭合，上机验 |
+| mux 协议（握手/SETUP/mini-TCP） | 本轮实现：`x9_usb_mux.h` 纯引擎 + `x9_usb_mux.inc` 内核 glue，EP1 bulk 承载，一包一 USB 传输、上限 4096B |
+| 设备侧 lockdownd:62078 | 原厂 LaunchDaemon plist 声明 v4/v6 TCP 监听；本轮以回环 TCP socket 桥接（62078 与 StartService 端口同路）。lockdownd 本体是否在跑只能上机验（判据见下） |
+| Pair / Trust 对话框 | 由原厂 lockdownd + SpringBoard 负责，不在 USB 侧实现；对话框不可用时的预置 record 后备路径见下文（本轮只写清，未预置任何东西） |
+| StartSession + TLS（证书 pin） | 主机侧 `pairing.py` 已实现，本轮无改动 |
+
+Finder 额外依赖的 lockdown 值域（DeviceName、ProductType、ProductVersion、
+BuildVersion、UniqueDeviceID、SerialNumber、ActivationState）全部由原厂
+lockdownd 在会话内应答，不经 USB 层；上机时用 `pairing.py --session` 后
+GetValue 逐项核对即可，缺哪项查哪项的设备身份种子，与本桥无关。
+
+**身份一致性注意**：usbmuxd 以 USB 序列号字符串作为 UDID 列设备，而
+lockdownd 的 UniqueDeviceID/SerialNumber 来自 `IOPlatformSerialNumber`
+（启动日志 `X9 IDENTITY:` 行）。描述符机制明确其 serial 只是 USB 字符串、
+不是 UDID。本画像启动时只自动改 VID/PID/厂商/产品串与类别码，serial 仍为
+合成默认值；**配对验证前**先用既有 description 流程（usbctl，root +
+entitlement、总线关闭时）把 serial 改成该启动日志里的值，两边才一致。
+mode 3 下 `set_description` 只接受原 ECM 身份或 `05AC` 的 Apple 身份。
+
+**Trust 对话框不可用时的后备（仅可行性，本轮不落盘）**：设备端 pair record
+位于 `/var/root/Library/Lockdown/pair_records/<SystemBUID>.plist`，需含
+HostID、SystemBUID、HostCertificate、HostPrivateKey 等键，且 DeviceCertificate
+必须来自设备自身身份材料（`data_ark.plist`）。主机 record 可由 `pairing.py`
+的 Pair 流程生成一半，另一半（设备证书）只能取自设备。是否齐全上机时先验
+原生对话框，此路仅作后备，且往 Lockdown 目录写文件需单独授权。
+
+**与日志命脉的关系**：modes 0/1/2 字节级不变；mode 3 下 EP0 厂商日志请求
+走同一 setup 路径仍可达，但 `usb_log.py` 按 `1209:0001` 找设备，mode 3 下
+需按 `05AC:12A8` 定位——mode 3 是显式选择的新画像，不影响既有抓取流程。
+
+### 上机验证清单（本轮未碰真机）
+
+候选 boot args：`x9_usb=3`（PHY A/B 时加 `x9_usb_phy=1`；与其他参数同挂时
+先核算 boot-args 总长上限）。
+
+1. 内核日志出现 `negotiated HIGH-SPEED 480 Mbps` 与
+   `X9 USB MUX: Apple usbmux profile configured`；若是 FULL-SPEED 行，先换
+   线/换口，再比对 `x9_usb_phy=1` 前后（看 FM 标定打印的 srctrl 变化）。
+2. Mac 上 `python3 -I x9/usb/pairing.py --list` 列出设备；「系统信息 → USB」
+   显示 `05AC:12A8`、速度 480Mb/s。
+3. `pairing.py --query-type --device-id <ID>` 返回 QueryType（证明 62078 桥
+   通）；失败时看内核 `X9 USB MUX: reset ...` 统计行（syn/refused/rst/
+   framing/bad_magic）定位断点。
+4. 按上文对齐 USB serial 后 `pairing.py --pair`：设备应弹原生 Trust 对话
+   框，接受后 `--session` 验证 TLS 会话与 GetValue 值域。
+5. Finder 侧边栏出现设备；爱思助手识别并显示设备信息（同一条链）。
+6. 测速：mode 3 下经 Finder/AFC 拷贝大文件计时（预期 15–25MB/s 量级）；
+   mode 1 ECM 与 mode 2 raw bulk 各回归一遍吞吐与日志抓取，确认命脉无回归。
+7. 回退：去掉 `x9_usb=3` 即恢复原画像；`x9_usb_phy` 默认关。
