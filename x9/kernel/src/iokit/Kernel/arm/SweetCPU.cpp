@@ -50,6 +50,125 @@ sweet_psci_cpu_on(uint64_t target, uint64_t entry, uint64_t context)
 	return (int32_t)x0;
 }
 
+
+/*
+ * X9 CPU offline facility (boot arg x9cpuoff; design and firmware
+ * evidence in x9/cpuoff/README.md). Only the MT6993 (x9) board is
+ * supported; on other boards every entry point keeps the legacy
+ * behaviour. Bit 0 of x9cpuoff arms the facility; with it clear,
+ * quiesceCPU/haltCPU/initCPU(!boot) panic exactly as before.
+ */
+#define SWEET_PSCI_VERSION_FID       0x84000000ULL
+#define SWEET_PSCI_CPU_SUSPEND_FID   0xC4000001ULL
+#define SWEET_PSCI_CPU_OFF_FID       0x84000002ULL
+#define SWEET_PSCI_AFFINITY_INFO_FID 0xC4000004ULL
+#define SWEET_PSCI_FEATURES_FID      0x8400000AULL
+/* DTS cpuoff arm,psci-suspend-param; also Linux cpu_psci_cpu_die's state. */
+#define SWEET_PSCI_CPUOFF_STATE      0x00010000ULL
+#define SWEET_PSCI_ALREADY_ON        (-4)
+
+enum sweet_cpuoff_state : uint32_t {
+	SWEET_CPUOFF_ONLINE = 0,
+	SWEET_CPUOFF_QUIESCING = 1,
+	SWEET_CPUOFF_OFF = 2,
+	SWEET_CPUOFF_SUSPENDED = 3,
+	SWEET_CPUOFF_ONLINING = 4,
+	SWEET_CPUOFF_PARKED = 5,
+};
+
+static volatile uint32_t sweet_cpuoff_state[MAX_CPUS];
+static volatile uint32_t sweet_cpuoff_booted[MAX_CPUS];
+static volatile int sweet_cpuoff_mask_cache = -1;
+
+static int
+sweet_x9cpuoff_mask(void)
+{
+	int cached = __atomic_load_n(&sweet_cpuoff_mask_cache, __ATOMIC_ACQUIRE);
+	if (cached >= 0) {
+		return cached;
+	}
+	int v = 0;
+	PE_parse_boot_argn("x9cpuoff", &v, sizeof(v));
+	__atomic_store_n(&sweet_cpuoff_mask_cache, v, __ATOMIC_RELEASE);
+	return v;
+}
+
+/* Also called from the overlay cpu_common.o (ml_cpu_can_exit gate). */
+extern "C" int
+sweet_x9_cpuoff_facility(void)
+{
+	return sweet_board_x9() && (sweet_x9cpuoff_mask() & 1) != 0;
+}
+
+static int64_t
+sweet_psci_call(uint64_t fid, uint64_t a1, uint64_t a2, uint64_t a3)
+{
+	register uint64_t x0 __asm__("x0") = fid;
+	register uint64_t x1 __asm__("x1") = a1;
+	register uint64_t x2 __asm__("x2") = a2;
+	register uint64_t x3 __asm__("x3") = a3;
+	__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : :
+	    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+	    "x14", "x15", "x16", "x17", "cc", "memory");
+	return (int64_t)x0;
+}
+
+extern "C" uint32_t
+sweet_x9_cpuoff_get_state(unsigned int cpu)
+{
+	if (cpu >= MAX_CPUS) {
+		return SWEET_CPUOFF_PARKED;
+	}
+	return __atomic_load_n(&sweet_cpuoff_state[cpu], __ATOMIC_ACQUIRE);
+}
+
+extern "C" void
+sweet_x9_cpuoff_note_state(unsigned int cpu, uint32_t state)
+{
+	if (cpu < MAX_CPUS) {
+		__atomic_store_n(&sweet_cpuoff_state[cpu], state, __ATOMIC_RELEASE);
+	}
+}
+
+/* AFFINITY_INFO at the CPU's own affinity level: 0=ON, 1=OFF, 2=ON_PENDING,
+ * or a negative PSCI error. Mirrors Linux cpu_psci_cpu_kill's death check. */
+extern "C" int64_t
+sweet_x9_psci_affinity_info(unsigned int cpu)
+{
+	const ml_topology_info_t *topology = ml_get_topology_info();
+	if (cpu >= topology->num_cpus) {
+		return -100;
+	}
+	return sweet_psci_call(SWEET_PSCI_AFFINITY_INFO_FID,
+	    topology->cpus[cpu].phys_id, 0, 0);
+}
+
+/* Read-only firmware probe: version, feature availability, per-CPU
+ * affinity snapshot. Logged once from startAll when the facility is on. */
+extern "C" void
+sweet_x9_cpuoff_probe(void)
+{
+	if (!sweet_x9_cpuoff_facility()) {
+		return;
+	}
+	int64_t ver = sweet_psci_call(SWEET_PSCI_VERSION_FID, 0, 0, 0);
+	int64_t f_off = sweet_psci_call(SWEET_PSCI_FEATURES_FID,
+	    SWEET_PSCI_CPU_OFF_FID, 0, 0);
+	int64_t f_sus = sweet_psci_call(SWEET_PSCI_FEATURES_FID,
+	    SWEET_PSCI_CPU_SUSPEND_FID, 0, 0);
+	IOLog("X9 CPUOFF: psci version=%lld.%lld features cpu_off=%lld "
+	    "cpu_suspend=%lld x9cpuoff=%d depth=%s\n",
+	    (long long)((ver >> 16) & 0x7fff), (long long)(ver & 0xffff),
+	    (long long)f_off, (long long)f_sus, sweet_x9cpuoff_mask(),
+	    (sweet_x9cpuoff_mask() & 16) ? "suspend" : "off");
+	const ml_topology_info_t *topology = ml_get_topology_info();
+	for (unsigned int i = 0; i < topology->num_cpus; i++) {
+		IOLog("X9 CPUOFF: affinity cpu=%u mpidr=0x%x level0=%lld\n",
+		    i, topology->cpus[i].phys_id,
+		    (long long)sweet_x9_psci_affinity_info(i));
+	}
+}
+
 class SweetCPU : public IOCPU {
 	OSDeclareDefaultStructors(SweetCPU);
 	const OSSymbol *cpuName = NULL;
@@ -62,6 +181,7 @@ public:
 	void initCPU(bool boot) APPLE_KEXT_OVERRIDE;
 	void quiesceCPU(void) APPLE_KEXT_OVERRIDE;
 	kern_return_t startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr) APPLE_KEXT_OVERRIDE;
+	uint32_t isInitialized(void) { return __atomic_load_n(&initialized, __ATOMIC_ACQUIRE); }
 	void haltCPU(void) APPLE_KEXT_OVERRIDE;
 	void signalCPU(IOCPU *target) APPLE_KEXT_OVERRIDE;
 	const OSSymbol *getCPUName(void) APPLE_KEXT_OVERRIDE;
@@ -196,6 +316,9 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
 		IOLog("SWEET CPU: cpu=%u mpidr=0x%x came alive; SGI1 OK\n",
 		    i, topology->cpus[i].phys_id);
 	}
+	if (sweet_x9_cpuoff_facility()) {
+		sweet_x9_cpuoff_probe();
+	}
 	/* Publish exactly once, after every selected CPU has completed initCPU(). */
 	ml_cpu_init_completed();
 	__atomic_load_n(&sweet_cpus[topology->boot_cpu->cpu_id], __ATOMIC_ACQUIRE)->cpusRunning();
@@ -216,7 +339,7 @@ SweetCPU::free(void)
 void
 SweetCPU::initCPU(bool boot)
 {
-	if (!boot) {
+	if (!boot && !sweet_x9_cpuoff_facility()) {
 		panic("SWEET CPU: cpu=%u resume is not implemented", getCPUNumber());
 	}
 	assert(cpu_number() == (int)getCPUNumber());
@@ -232,6 +355,12 @@ SweetCPU::initCPU(bool boot)
 	    getCPUNumber(), __builtin_arm_rsr64("MPIDR_EL1") & 0xffffULL,
 	    __builtin_arm_rsr64("CurrentEL") >> 2, ml_get_interrupts_enabled());
 	__atomic_store_n(&initialized, 1, __ATOMIC_RELEASE);
+	__atomic_store_n(&sweet_cpuoff_booted[getCPUNumber()], 1, __ATOMIC_RELEASE);
+	if (!boot) {
+		__atomic_store_n(&sweet_cpuoff_state[getCPUNumber()],
+		    SWEET_CPUOFF_ONLINE, __ATOMIC_RELEASE);
+		IOLog("X9 CPUOFF: cpu=%u hot-online complete\n", getCPUNumber());
+	}
 }
 
 void
@@ -262,9 +391,20 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
 {
 	const ml_topology_cpu_t *cpu = &ml_get_topology_info()->cpus[getCPUNumber()];
 	/* cpu_start() passes NULL,NULL: x20/x21 are set by LowResetVectorBase. */
-	if (start_paddr != 0 || arg_paddr != 0 || cpu == ml_get_topology_info()->boot_cpu ||
-	    __atomic_load_n(&initialized, __ATOMIC_ACQUIRE) != 0) {
+	if (start_paddr != 0 || arg_paddr != 0 || cpu == ml_get_topology_info()->boot_cpu) {
 		panic("SWEET CPU: cpu=%u unsupported restart", getCPUNumber());
+	}
+	unsigned int me = getCPUNumber();
+	uint32_t off_state = __atomic_load_n(&sweet_cpuoff_state[me], __ATOMIC_ACQUIRE);
+	bool hot = __atomic_load_n(&sweet_cpuoff_booted[me], __ATOMIC_ACQUIRE) != 0;
+	if (__atomic_load_n(&initialized, __ATOMIC_ACQUIRE) != 0 ||
+	    (hot && off_state != SWEET_CPUOFF_OFF &&
+	    off_state != SWEET_CPUOFF_SUSPENDED)) {
+		panic("SWEET CPU: cpu=%u unsupported restart", me);
+	}
+	if (hot) {
+		__atomic_store_n(&sweet_cpuoff_state[me], SWEET_CPUOFF_ONLINING,
+		    __ATOMIC_RELEASE);
 	}
 	vm_offset_t entry = ml_static_vtop((vm_offset_t)(sweet_board_x9() ? &sweet_x9_secondary_entry : &sweet_secondary_entry));
 	IOLog("SWEET CPU: cpu=%u CPU_ON target=0x%x entry_pa=0x%llx context=%u\n",
@@ -273,8 +413,25 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
 	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
 	IOLog("SWEET CPU: cpu=%u PSCI CPU_ON rc=%d\n", getCPUNumber(), rc);
 	/* cpu_start() discards PE_cpu_start's return; do not silently carry on. */
-	if (rc != 0) {
+	if (rc != 0 && !hot) {
 		panic("SWEET CPU: cpu=%u NOT alive: PSCI CPU_ON rc=%d", getCPUNumber(), rc);
+	}
+	if (rc != 0) {
+		/* Hot re-online failure must not panic the machine for one core.
+		 * The cpuoff manager confirms liveness itself (initialized flag
+		 * + AFFINITY_INFO) and blacklists a core that does not come
+		 * back; see x9/cpuoff/README.md. */
+		IOLog("X9 CPUOFF: cpu=%u CPU_ON rc=%d on hot re-online\n", me, rc);
+		if (rc == SWEET_PSCI_ALREADY_ON && off_state == SWEET_CPUOFF_SUSPENDED) {
+			/* Suspend-depth wake hypothesis (probe item): the SGI is
+			 * the wake event for a core parked in CPU_SUSPEND. */
+			signalCPU(this);
+			IOLog("X9 CPUOFF: cpu=%u SGI wake issued after ALREADY_ON\n", me);
+			return KERN_SUCCESS;
+		}
+		__atomic_store_n(&sweet_cpuoff_state[me], SWEET_CPUOFF_PARKED,
+		    __ATOMIC_RELEASE);
+		IOLog("X9 CPUOFF: cpu=%u re-online failed; core parked until reboot\n", me);
 	}
 	return KERN_SUCCESS;
 }
@@ -282,7 +439,61 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
 void
 SweetCPU::quiesceCPU(void)
 {
-	panic("SWEET CPU: CPU quiesce is not implemented");
+	unsigned int cpu = getCPUNumber();
+	if (!sweet_x9_cpuoff_facility() || cpu == 0) {
+		panic("SWEET CPU: CPU quiesce is not implemented");
+	}
+	/* The little cluster (cpu0-3) is never offlined: the factory core_ctl
+	 * keeps min_cpus={4,0,0}, and cpu0 is the boot CPU. */
+	if (cpu < 4) {
+		panic("SWEET CPU: cpu=%u quiesce refused (little cluster)", cpu);
+	}
+	/*
+	 * We run on the target CPU (its idle thread, on the interrupt stack)
+	 * from cpu_sleep() via PE_cpu_machine_quiesce(). The frozen path has
+	 * already migrated this CPU's timers (ml_cpu_down), disabled CPU
+	 * signaling and cleaned the D-cache to PoC. Returning from here
+	 * makes cpu_sleep() panic ("zombie processor"), so the success path
+	 * must not return: PSCI CPU_OFF / CPU_SUSPEND(powerdown) do not
+	 * return on success. If the firmware refuses, park in WFI instead
+	 * of returning; the scheduler has already removed this CPU and the
+	 * manager treats it as lost for this boot.
+	 */
+	__atomic_store_n(&sweet_cpuoff_state[cpu], SWEET_CPUOFF_QUIESCING,
+	    __ATOMIC_RELEASE);
+	__atomic_store_n(&initialized, 0, __ATOMIC_RELEASE);
+	setCPUState(kIOCPUStateStopped);
+	int suspend = (sweet_x9cpuoff_mask() & 16) != 0;
+	IOLog("X9 CPUOFF: cpu=%u quiesce depth=%s\n", cpu,
+	    suspend ? "suspend" : "off");
+	__asm__ volatile("msr DAIFSet, #0xf" ::: "memory");
+	const ml_topology_cpu_t *tcpu = &ml_get_topology_info()->cpus[cpu];
+	vm_offset_t entry = ml_static_vtop((vm_offset_t)(sweet_board_x9() ?
+	    &sweet_x9_secondary_entry : &sweet_secondary_entry));
+	int64_t rc = 0;
+	for (int attempt = 0; attempt < 4; attempt++) {
+		bool use_suspend = suspend && attempt < 2;
+		if (use_suspend) {
+			rc = sweet_psci_call(SWEET_PSCI_CPU_SUSPEND_FID,
+			    SWEET_PSCI_CPUOFF_STATE, entry, cpu);
+		} else {
+			rc = sweet_psci_call(SWEET_PSCI_CPU_OFF_FID,
+			    SWEET_PSCI_CPUOFF_STATE, 0, 0);
+		}
+		/* Any return is a refusal: a successful powerdown does not
+		 * come back here (wake re-enters at the reset vector). */
+		IOLog("X9 CPUOFF: cpu=%u psci %s attempt=%d rc=%lld\n", cpu,
+		    use_suspend ? "CPU_SUSPEND" : "CPU_OFF", attempt,
+		    (long long)rc);
+		(void)tcpu;
+	}
+	__atomic_store_n(&sweet_cpuoff_state[cpu], SWEET_CPUOFF_PARKED,
+	    __ATOMIC_RELEASE);
+	IOLog("X9 CPUOFF: cpu=%u PARKED after psci refusal rc=%lld; "
+	    "core lost until reboot\n", cpu, (long long)rc);
+	for (;;) {
+		__asm__ volatile("wfi" ::: "memory");
+	}
 }
 
 void
@@ -295,5 +506,16 @@ const OSSymbol *
 SweetCPU::getCPUName(void)
 {
 	return cpuName;
+}
+
+/* Manager-side liveness check: the target CPU's initCPU publication. */
+extern "C" uint32_t
+sweet_x9_cpu_is_initialized(unsigned int cpu)
+{
+	if (cpu >= MAX_CPUS) {
+		return 0;
+	}
+	SweetCPU *c = __atomic_load_n(&sweet_cpus[cpu], __ATOMIC_ACQUIRE);
+	return c != NULL ? c->isInitialized() : 0;
 }
 #endif /* SWEET */
