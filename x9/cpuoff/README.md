@@ -207,3 +207,74 @@ ALREADY_ON 且深度为 suspend 时，按 §5 的待探测路径发 SGI 唤醒�
   失败即回退 CPU_OFF 并拉黑 suspend 深度（本周期）。
 - ATF 的 AFFINITY_INFO 在核 suspend 时返回 ON 还是 OFF 变体：
   探测日志会记录，状态机按实测解释。
+
+## 6. As built (2026-11-27, branch feat/cpu-offline)
+
+Files:
+
+- `x9/kernel/src/iokit/Kernel/arm/SweetCPU.cpp` — PSCI facility:
+  probe (version/FEATURES/AFFINITY snapshot), quiesceCPU via CPU_OFF
+  (or CPU_SUSPEND under bit 16), initCPU resume, startCPU hot restart,
+  per-CPU state table and the exported C queries the manager uses.
+- `x9/kernel/src/osfmk/arm/cpu_common.c` — verbatim frozen overlay
+  (proven: unpatched build has identical defined/undefined symbol
+  sets to the frozen object) with the single `ml_cpu_can_exit` gate.
+- `x9/kernel/src/bsd/dev/x9_cpuoff_policy.h` — pure policy (see §3).
+- `x9/kernel/src/bsd/dev/sweet_x9_gpu_dependencies.c` — manager glue:
+  lazy setup in the governor thread, `cpuoff_tick` after each scene
+  classification, `X9 CPUOFF:` transition lines and a STAT line next
+  to the periodic `X9 SCHED:` line.
+- `x9/cpuoff/test_cpuoff_policy.py` + harness — 63 assertions.
+
+Validation (offline): kernel link with all overlays passes; whole-tree
+candidate `x9/out/cpuoff-final-20261127/boot.img` (15,663,104 B) built;
+baseband suite 42/42, sched suite OK, cpuoff suite OK (system clang +
+MacOSX26.5 SDKROOT recipe). Nothing in this branch has run on
+hardware.
+
+Manager mechanics worth knowing before the device round:
+
+- `processor_exit()` returns after the shutdown handoff; the core
+  powers off asynchronously in its idle thread. The manager confirms
+  with AFFINITY_INFO (5 s deadline) — `cpu_exit_wait()` is a no-op in
+  this build, so processor_exit success alone proves nothing.
+- A hot CPU_ON failure parks the core for this boot (state PARKED)
+  instead of panicking; the manager blacklists it and never touches
+  it again (a processor stuck in PROCESSOR_START would panic a later
+  processor_shutdown after 1 s).
+- If a confirm deadline expires but the core finishes quiescing late,
+  the next drain attempt returns success from processor_exit
+  immediately and the confirm path marks it OFF — the state machine
+  self-heals; a demand scene then onlines it normally.
+
+## 7. On-device checklist (detail)
+
+Boot-arg budget: the standard radio boot.json base leaves ~49 spare
+characters; `x9cpuoff=3` is 11.
+
+1. **Probe boot** `x9cpuoff=1` (policy off): expect the probe lines —
+   PSCI version, FEATURES(CPU_OFF/CPU_SUSPEND), per-CPU AFFINITY
+   snapshot all ON. Any FEATURES denial here re-scopes §5 before any
+   policy boot.
+2. **Policy boot** `x9cpuoff=3`: screen off 60 s → expect STAT off_mask
+   to gain cpu6 then cpu5 (deep rule), transitions counted, no
+   failures; wake → both restored within ~2 s of the scene change.
+   Repeat the cycle 20×; watch for panic, lost wake, or a core stuck
+   (STAT lost_mask must stay 0).
+3. **Standby power/temperature A/B**: 30 min screen-off, radios in a
+   fixed state, `x9cpuoff=0` vs `=3` vs `=7` (prime allowed) vs `=11`
+   (big drain allowed): compare battery % drop and shell temperature;
+   per-core off_ms from STAT attributes residency to each core.
+4. **Wake reliability**: with bigs drained — RTC alarm, incoming call,
+   USB plug, power-button wake, touch after wake: 10 trials each, all
+   must succeed; log timestamps give hot-online latency (expect
+   10s–100s of ms; the DTS cpuidle exit latencies do NOT apply to
+   hotplug re-entry).
+5. **Suspend depth** (only after 1–4 pass): `x9cpuoff=19` (bits 0+1+4)
+   with the policy draining one core first; record CPU_ON's return for
+   the suspended core and AFFINITY_INFO's value for it (the two §5
+   unknowns). If CPU_ON returns ALREADY_ON, the manager's SGI-wake
+   probe path logs it explicitly.
+6. **SPI affinity audit**: while bigs are drained, exercise audio,
+   camera, modem and display paths; any interrupt source found pinned
+   to cpu4–7 narrows the v1 candidate set (record it here).
