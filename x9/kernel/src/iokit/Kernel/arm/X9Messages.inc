@@ -77,6 +77,7 @@ struct x9m_sim {
  unsigned reg,init,diag_stage,ims_stage; uint64_t sampled,init_token,init_deadline,ready_epoch,init_epoch;
  uint64_t reg_epoch,ims_epoch,ims_token,ims_deadline,ims_admit_deadline; bool ims_hold;
  unsigned fx_stage; uint64_t fx_token,fx_deadline; bool fx_hold;
+ bool mem_sent,mem_hold; uint64_t mem_token,mem_deadline;
 };
 static x9m_sim x9m_sims[2];
 static unsigned x9m_init_stage;
@@ -283,6 +284,50 @@ static bool x9m_factory_enabled(){
  static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_factory_init",1)!=0;
  return enabled!=0;
 }
+
+/* Factory SMS memory-status report (0601 tag 0x108; the MD routes it to
+ * AT+EMEMS=1). Android's RIL sends it from handleReportSmsMemStatus when
+ * the HOST message store becomes available, as its own transaction -- it
+ * is not a step of the config sequence (radio-baseline.txt: the host-ready
+ * bundle is :1055, the memory-status report is the separate :2341 frame,
+ * after whose success the same SIM later receives 8601). The bridge
+ * equivalent of "host store available" is the host-ready declaration
+ * itself: config confirmed, modem ready, GSM handlers installed. The
+ * modem CFG IND (md_ready) is the opposite direction and precedes host
+ * config, so it cannot be the trigger. The init sequence also carries
+ * the report as X9M_FACTORY_CFG; mem_sent dedupes the two sites so each
+ * SIM reports exactly once per boot. A failure here never blocks or
+ * revokes host-ready, and is never retried. */
+static void x9m_mem_status_poll(uint8_t *p,unsigned room){
+ if(!x9m_factory_enabled())return;
+ const bool online=x9w_control_ready&&x9_md_mipc_online();
+ const uint64_t now=x9q_ms();
+ for(unsigned sim=0;sim<x9_md_sim_count();sim++){
+  x9m_sim &s=x9m_sims[sim];
+  if(s.mem_sent||s.mem_hold)continue;
+  if(s.mem_token){
+   if(now>=s.mem_deadline){s.mem_hold=true;
+    printf("X9 SMS: SIM%u memory status report timeout; token retained, no retry\n",sim+1);continue;}
+   unsigned n=0;int rc=x9_md_mipc_take(s.mem_token,p,room,&n);
+   if(!rc)continue;
+   if(rc<0){s.mem_hold=true;
+    printf("X9 SMS: SIM%u memory status report transport error; held\n",sim+1);continue;}
+   s.mem_token=0;
+   unsigned result=1;
+   bool known=x9w_wire(p,n)&&p[8]==(1u<<sim)&&x9q_u16(p+10)==0x602&&x9w_word(p,n,0,result);
+   if(!known||result){s.mem_hold=true;
+    printf("X9 SMS: SIM%u memory status report rejected known %u result %u; held\n",sim+1,known?1:0,result);}
+   else{s.mem_sent=true;
+    printf("X9 SMS: SIM%u memory status reported at host-ready (factory EMEMS point)\n",sim+1);}
+   bzero(p,room);continue;
+  }
+  if(!online||!s.ready)continue;
+  x9w_frame f(0x601,1u<<sim);f.byte(0x108,1);
+  uint64_t token=f.submit();
+  if(token){s.mem_token=token;s.mem_deadline=now+10000;}
+  else s.mem_hold=true;
+ }
+}
 static void x9m_init_transport_loss(){
   /* Loss is not registration/config retirement. Stop advancing this boot,
    * but still drain any complete results belonging to the original token. */
@@ -357,6 +402,7 @@ static void x9m_init_poll(uint8_t *response,unsigned room){
       * bundle; host-ready waits for that confirmation too. */
      s.init=X9M_FACTORY_CFG;
     }else{
+    if(s.init==X9M_FACTORY_CFG)s.mem_sent=true; /* same report as the host-ready point */
     if(snapshot&&!ready)x9m_md_ready(sim,false);
     s.init=X9M_INIT_DONE;
     if(!s.init_hold&&s.md_known&&s.md_ready&&s.init_epoch==s.ready_epoch){
@@ -1125,6 +1171,7 @@ static void x9m_poll(){
  x9m_ims_feature_poll(p,sizeof(p));
  x9m_factory_poll(p,sizeof(p));
  x9m_init_poll(p,sizeof(p)); // Consume pending readiness INDs before submitting config.
+ x9m_mem_status_poll(p,sizeof(p));
  for(x9m_incoming &in:x9m_incoming_sms)if(in.token&&!in.held){
   if(in.delivered){
    if(!in.replying&&in.ack_wait&&now>=in.ack_wait){in.ack_wait=0;
