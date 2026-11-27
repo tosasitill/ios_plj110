@@ -1227,6 +1227,30 @@ static void x9w_poll(){
  x9w_side_poll();
  x9w_retire_poll();
 }
+/* 20H392 QMIDataCommandDriver status notifications, verified against the
+ * original driver (docs/network/2026-11-27_ims-wds-report.md):
+ * 0x5566 updateCellularDataStatusInfo_sync carries TLV10/u8
+ * CellularDataStatus; 0x5568 notifyCellularDataSwitchingAllowed_sync
+ * carries TLV10/u8 DynamicCellularDataSwitchAllowed. Both Apple callbacks
+ * only check the QMI result and log on failure, and 448 established the
+ * default data session while both were rejected, so neither carries
+ * routing semantics. Record the latest byte per SIM and acknowledge.
+ * Never feed either value into DDS/0x5569 routing or bearer state: only
+ * 0x5569 names a data SIM, and DATA_SET_CONFIG 0211's default-SIM/boot
+ * fields cannot be bound to these notifications by name, so nothing is
+ * forwarded to the MD. */
+static uint8_t x9w_cellular_status[2],x9w_switch_allowed[2];
+static bool x9w_cellular_status_seen[2],x9w_switch_allowed_seen[2];
+static unsigned x9w_data_notice(unsigned id,unsigned sim,const uint8_t *req,unsigned n){
+ if(sim>=2)return X9Q_ARG;
+ x9q_view v=x9q_tlv(req,n,0x10);
+ if(n!=11||!v.p||v.n!=1)return X9Q_ARG;
+ if(id==0x5566){x9w_cellular_status[sim]=v.p[0];x9w_cellular_status_seen[sim]=true;}
+ else{x9w_switch_allowed[sim]=v.p[0];x9w_switch_allowed_seen[sim]=true;}
+ printf("X9 WDS: SIM%u %s %u recorded; notification only, no route change\n",
+  sim+1,id==0x5566?"cellular data status":"data switch allowed",v.p[0]);
+ return 0;
+}
 static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned n){
  unsigned slot=local-CBQ_PORT_BASE,id=x9q_u16(req+3);x9w_client &c=x9w_clients[slot];
  if(x9p_request(local,port,req,n,c.sim_slot))return true;
@@ -1234,7 +1258,7 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
  // Native StartNetworkIfaceV2 still constructs message20. At 1f1a8ba3c,
  // d0 is passed to getTLV<HandOverIPv6Prefix>, NOT a request constructor.
  // Never interpret a message with that unrelated ID as a data activation.
- if(id!=1&&id!=0x20&&id!=0x21&&id!=0x22&&id!=0x24&&id!=0x2d&&id!=0x30&&id!=0x37&&id!=0x44&&id!=0x4d&&id!=0x86&&id!=0xa2&&id!=0xaf&&id!=0xb0&&id!=0x5569)return false;
+ if(id!=1&&id!=0x20&&id!=0x21&&id!=0x22&&id!=0x24&&id!=0x2d&&id!=0x30&&id!=0x37&&id!=0x44&&id!=0x4d&&id!=0x86&&id!=0xa2&&id!=0xaf&&id!=0xb0&&id!=0x5566&&id!=0x5568&&id!=0x5569)return false;
  if(!c.family)c.family=4;
  x9w_bearer *own=x9w_lease_bearer(slot);
  x9w_bearer *view=x9w_lease_valid(slot)?own:nullptr;
@@ -1292,6 +1316,8 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   else if(c.sim_slot!=value-1&&(c.starting||own||c.lease_pending||c.lease_active||x9a_client_busy(slot)))error=X9Q_BUSY;
   else{c.sim_slot=(uint8_t)(value-1);x9q_clients[slot].sim_slot=c.sim_slot;
    printf("X9 DDS: WDS 5569 client 0x%x routes confirmed default SIM%u reason %u\n",local,value,reason.p[0]);}
+ }else if(id==0x5566||id==0x5568){
+  error=x9w_data_notice(id,c.sim_slot,req,n);
  }else if(id==0xaf){
   /* WDS differs from NAS/DMS: u32 1=primary, 2=secondary. DEFAULT/ANY
    * need DDS semantics, so reject them rather than silently selecting SIM1. */
