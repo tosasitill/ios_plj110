@@ -36,6 +36,10 @@ struct x9c_dial_job {
 };
 static x9c_dial_job x9c_dial_job;
 static const struct x9cw_dial_profile x9c_measured_dial_profile={1,2,1,0,0,0};
+/* SIM1 uses the identical measured ordinary-IMS scalars; only the slot
+ * differs. The RIL dial path is per-slot code with slot-independent
+ * encoder fields, and both slots carry the same factory IMS config. */
+static const struct x9cw_dial_profile x9c_sim1_dial_profile={0,2,1,0,0,0};
 static struct x9cw_outbound_state x9c_outbound;
 static struct x9cw_inbound_state x9c_inbound;
 static bool x9c_observed;
@@ -643,7 +647,7 @@ static uint16_t x9c_end_begin(unsigned slot,const uint8_t *req,unsigned len){
  }else return X9Q_ARG;
  const struct x9c_client &c=x9c_clients[slot];
  if(!c.bound||c.generation!=x9q_clients[slot].generation)return X9Q_NOT_READY;
- if(c.sim!=1)return X9Q_UNSUPPORTED; /* only the measured SIM2 mode20 subset */
+ if(c.sim>1)return X9Q_UNSUPPORTED;
  if(x9c_end_job.used||x9c_answer_job.used)return X9Q_BUSY;
  struct x9cw_outbound_state state;struct x9cw_inbound_state in;
  unsigned native_id,direction;uint64_t epoch;
@@ -924,12 +928,11 @@ static bool x9c_calllist_select_state(const struct x9cw_outbound_state &o,
                                      const struct x9cw_inbound_state &in,unsigned sim,
                                      unsigned *id,unsigned *ios_state,unsigned *direction,
                                      struct x9cw_end_reason *reason,uint64_t *epoch,uint64_t *revision){
- if(sim!=1)return false;
  if(in.sim==sim&&in.seen&&!in.blocked&&!in.pending&&in.native_id&&in.native_id<=255){
   *id=in.native_id;*ios_state=in.ios_state;*direction=2;*reason=in.end_reason;
   *epoch=in.epoch;*revision=in.revision;return true;
  }
- if(o.seen&&!o.blocked&&o.native_id&&o.native_id<=255){
+ if(o.seen&&o.sim==sim&&!o.blocked&&o.native_id&&o.native_id<=255){
   *id=o.native_id;*ios_state=o.ios_state;*direction=1;*reason=o.end_reason;
   *epoch=o.epoch;*revision=o.revision;return true;
  }
@@ -997,12 +1000,13 @@ static void x9c_error(struct x9c_dial_job &j,uint16_t err){
  if(!j.answered&&!x9c_live(j))x9c_response_release(j.reply);
  j.answered=true;bzero(j.req,sizeof(j.req));
 }
-static struct {uint64_t token,deadline,dial_token;unsigned count;} x9c_dial_ims_diag;
-static void x9c_dial_ims_submit(uint64_t dial_token){
+static struct {uint64_t token,deadline,dial_token;unsigned count,sim;} x9c_dial_ims_diag;
+static void x9c_dial_ims_submit(uint64_t dial_token,unsigned sim){
  auto &diag=x9c_dial_ims_diag;
- if(!dial_token||diag.token||diag.count>=8||sweet_x9_arg("x9_call_sip_diag",0)!=1)return;
+ if(!dial_token||sim>1||diag.token||diag.count>=8||sweet_x9_arg("x9_call_sip_diag",0)!=1)return;
+ diag.sim=sim;
  uint8_t request[24];
- x9cw_header(request,sizeof(request),0xa04,2,0);
+ x9cw_header(request,sizeof(request),0xa04,1u<<sim,0);
  x9cw_scalar(request+16,0x100,0,1);
  diag.token=x9_md_mipc_submit(request,sizeof(request));
  if(!diag.token)return;
@@ -1015,8 +1019,8 @@ static void x9c_dial_ims_poll(uint8_t *frame){
  if(!diag.token)return;
  if(x9q_ms()>=diag.deadline||!x9_md_mipc_online()){
   x9_md_mipc_ims_registration_abandon(diag.token);
-  printf("X9 CALL: SIM2 dial token %llu IMS query expired or offline\n",
-         (unsigned long long)diag.dial_token);
+  printf("X9 CALL: SIM%u dial token %llu IMS query expired or offline\n",
+         diag.sim+1,(unsigned long long)diag.dial_token);
   diag.token=0;
   return;
  }
@@ -1027,19 +1031,19 @@ static void x9c_dial_ims_poll(uint8_t *frame){
   uint32_t result=1;
   const uint8_t *type,*state;
   unsigned type_size,state_size;
-  if(x9q_ms()<diag.deadline&&x9cw_frame(frame,size,0xa05)&&frame[8]==2&&
+  if(x9q_ms()<diag.deadline&&x9cw_frame(frame,size,0xa05)&&frame[8]==(1u<<diag.sim)&&
      x9cw_word(frame,size,0,&result)&&!result&&
      x9cw_tlv(frame,size,0x100,&type,&type_size)&&type&&type_size==1&&!*type&&
      x9cw_tlv(frame,size,0x101,&state,&state_size)&&state&&state_size==1&&*state<=4)
-   printf("X9 CALL: SIM2 dial token %llu IMS raw state %u\n",
-          (unsigned long long)diag.dial_token,(unsigned)*state);
-  else printf("X9 CALL: SIM2 dial token %llu IMS query unavailable\n",
-              (unsigned long long)diag.dial_token);
+   printf("X9 CALL: SIM%u dial token %llu IMS raw state %u\n",
+          diag.sim+1,(unsigned long long)diag.dial_token,(unsigned)*state);
+  else printf("X9 CALL: SIM%u dial token %llu IMS query unavailable\n",
+              diag.sim+1,(unsigned long long)diag.dial_token);
   bzero(frame,size);
  }
  diag.token=0;
 }
-/* VOICE20 dispatch uses the measured SIM2 ordinary-IMS profile. The caller
+/* VOICE20 dispatch uses the measured per-SIM ordinary-IMS profiles. The caller
  * must already be bound/registered on a live bridge, have no changing bind or
  * outstanding dial owner, and present an owned empty GET_STATUS baseline. */
 static bool x9c_dial_submit(unsigned slot,const uint8_t *req,unsigned len,
@@ -1068,7 +1072,7 @@ static bool x9c_dial_submit(unsigned slot,const uint8_t *req,unsigned len,
  printf("X9 CALL: VOICE20 txn %u MD token %llu admitted sim %u\n",
         j.transaction,(unsigned long long)token,j.sim);
  if(!x9cw_dial_join_sent(&j.join,token)){j.held=true;x9c_error(j,X9Q_INTERNAL);}
- else x9c_dial_ims_submit(token);
+ else x9c_dial_ims_submit(token,j.sim);
  return true;
 }
 static void x9c_del(unsigned slot){
@@ -1259,11 +1263,12 @@ static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    else if(x9c_bind_pending(slot,true))err=X9Q_BUSY;
    else if(!x9c_clients[slot].bound||!x9c_clients[slot].registered||
            x9c_clients[slot].generation!=x9q_clients[slot].generation)err=X9Q_NOT_READY;
-   else if(x9c_clients[slot].sim!=1)err=X9Q_UNSUPPORTED;
+   else if(x9c_clients[slot].sim>1)err=X9Q_UNSUPPORTED;
    else if(x9c_dial_job.used)err=X9Q_BUSY;
-   else if(x9c_dial_submit(slot,req,len,x9c_measured_dial_profile)){
-    printf("X9 CALL: VOICE20 txn %u admitted on measured SIM2 route (digits %u); no audio readiness implied\n",
-     x9cw_u16(req+1),dial.length);
+   else if(x9c_dial_submit(slot,req,len,x9c_clients[slot].sim==1?
+           x9c_measured_dial_profile:x9c_sim1_dial_profile)){
+    printf("X9 CALL: VOICE20 txn %u admitted on measured SIM%u route (digits %u); no audio readiness implied\n",
+     x9cw_u16(req+1),x9c_clients[slot].sim+1,dial.length);
     return true;
    }else err=X9Q_NOT_READY;
    if(sweet_x9_arg("x9_call_sip_diag",0)==1){

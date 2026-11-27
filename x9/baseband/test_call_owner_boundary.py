@@ -40,6 +40,24 @@ static struct x9cw_dial_profile profile(void) {
     struct x9cw_dial_profile p = {1, 2, 1, 0, 0, 0};
     return p;
 }
+static struct x9cw_progress progress_m(uint32_t id, unsigned direction, unsigned mode,
+                                       unsigned event, unsigned cause, unsigned mask) {
+    struct x9cw_progress c = progress(id, direction, mode, event, cause);
+    c.mask = mask;
+    return c;
+}
+static struct x9cw_dial_profile profile_sim1(void) {
+    struct x9cw_dial_profile p = {0, 2, 1, 0, 0, 0};
+    return p;
+}
+static unsigned qmi_dial_req(uint8_t *b, const char *digits) {
+    unsigned dl = (unsigned)strlen(digits), n = 7 + 3 + dl;
+    memset(b, 0, n); b[1] = 5; b[3] = 0x20;
+    b[5] = (uint8_t)(n - 7); b[6] = (uint8_t)((n - 7) >> 8);
+    b[7] = 1; b[8] = (uint8_t)dl; b[9] = (uint8_t)(dl >> 8);
+    memcpy(b + 10, digits, dl);
+    return n;
+}
 
 static int outbound_lifecycle_and_late_end(void) {
     struct x9cw_outbound_state s; memset(&s, 0, sizeof(s));
@@ -159,6 +177,74 @@ static int number_presentation_fail_closed(void) {
     puts("PASS number_presentation_fail_closed"); return 0;
 }
 
+static int sim1_dial_admitted_and_lifecycle(void) {
+    struct x9cw_dial_profile p1 = profile_sim1();
+    CHECK(x9cw_dial_profile_valid(&p1) == 1);
+    uint8_t req[64]; unsigned rn = qmi_dial_req(req, "10086");
+    uint8_t out[104];
+    unsigned n = x9cw_dial(req, rn, out, sizeof(out), &p1, 0);
+    CHECK(n > 0 && out[8] == 1); /* SIM1 mask on the encoded 0901 */
+    CHECK(x9cw_native_dial(out, n, 2) == 1);
+    struct x9cw_dial_profile p2 = profile();
+    n = x9cw_dial(req, rn, out, sizeof(out), &p2, 0);
+    CHECK(n > 0 && out[8] == 2 && x9cw_native_dial(out, n, 2) == 1);
+    /* Join on an owned empty baseline, then the SIM1 ECPI lifecycle. */
+    struct x9cw_outbound_state s; memset(&s, 0, sizeof(s));
+    s.count_known = 1;
+    struct x9cw_dial_join j; memset(&j, 0, sizeof(j));
+    CHECK(x9cw_dial_join_begin(&j, &s, &p1) == 1 && j.started);
+    CHECK(x9cw_dial_join_sent(&j, 77) == 1);
+    j.confirmed = 1;
+    struct x9cw_progress c = progress_m(10, 0, 0, 130, 0, 1);
+    CHECK(x9cw_outbound_apply(&s, &c) == 1 && s.sim == 0 && s.native_id == 10);
+    unsigned id;
+    CHECK(x9cw_dial_join_id(&j, &s, &id) == 1 && id == 10);
+    c = progress_m(10, 0, 20, 132, 0, 1);
+    CHECK(x9cw_outbound_apply(&s, &c) == 1 && s.ios_state == 3);
+    c = progress_m(10, 0, 20, 133, 16, 1);
+    CHECK(x9cw_outbound_apply(&s, &c) == 1 && s.ended);
+    puts("PASS sim1_dial_admitted_and_lifecycle"); return 0;
+}
+static int sim1_dial_rejected_and_cross_sim_isolation(void) {
+    struct x9cw_dial_profile p1 = profile_sim1();
+    struct x9cw_dial_profile bad = {2, 2, 1, 0, 0, 0};
+    CHECK(x9cw_dial_profile_valid(&bad) == 0);
+    bad = p1; bad.call_type = 9;
+    CHECK(x9cw_dial_profile_valid(&bad) == 0);
+    uint8_t req[64]; unsigned rn = qmi_dial_req(req, "10086");
+    uint8_t out[104];
+    CHECK(x9cw_dial(req, rn, out, sizeof(out), &p1, 1) == 0); /* a call is already known */
+    unsigned n = x9cw_dial(req, rn, out, sizeof(out), &p1, 0);
+    CHECK(n > 0);
+    out[8] = 3;
+    CHECK(x9cw_native_dial(out, n, 2) == 0); /* no such single-SIM mask */
+    out[8] = 1;
+    CHECK(x9cw_native_dial(out, n, 1) == 0); /* device has two SIMs */
+    /* Join refuses a non-empty baseline and an invalid profile. */
+    struct x9cw_outbound_state s; memset(&s, 0, sizeof(s));
+    s.count_known = 1; s.native_count = 1;
+    struct x9cw_dial_join j; memset(&j, 0, sizeof(j));
+    CHECK(x9cw_dial_join_begin(&j, &s, &p1) == 0);
+    s.native_count = 0;
+    bad = p1; bad.sim = 2;
+    CHECK(x9cw_dial_join_begin(&j, &s, &bad) == 0);
+    /* Cross-SIM isolation: SIM2 progress can neither adopt, advance,
+     * end, nor poison the SIM1 epoch; after SIM1 ends, SIM2 may bind. */
+    struct x9cw_progress c = progress_m(5, 0, 0, 130, 0, 1);
+    CHECK(x9cw_outbound_apply(&s, &c) == 1 && s.sim == 0 && s.epoch == 1);
+    c = progress_m(9, 0, 0, 130, 0, 2);
+    CHECK(x9cw_outbound_apply(&s, &c) == 0 && !s.blocked && s.native_id == 5 && s.epoch == 1);
+    c = progress_m(5, 0, 20, 133, 16, 2);
+    CHECK(x9cw_outbound_apply(&s, &c) == 0 && !s.ended && !s.blocked);
+    c = progress_m(5, 0, 20, 132, 0, 2);
+    CHECK(x9cw_outbound_apply(&s, &c) == 0 && s.ios_state == 1 && !s.blocked);
+    c = progress_m(5, 0, 20, 133, 16, 1);
+    CHECK(x9cw_outbound_apply(&s, &c) == 1 && s.ended);
+    c = progress_m(7, 0, 0, 130, 0, 2);
+    CHECK(x9cw_outbound_apply(&s, &c) == 1 && s.sim == 1 && s.epoch == 2 && s.native_id == 7);
+    puts("PASS sim1_dial_rejected_and_cross_sim_isolation"); return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
     struct { const char *name; int (*fn)(void); } cases[] = {
@@ -169,6 +255,8 @@ int main(int argc, char **argv) {
         {"calllist_encoder_fail_closed", calllist_encoder_fail_closed},
         {"end_reason_only_proven_cause", end_reason_only_proven_cause},
         {"number_presentation_fail_closed", number_presentation_fail_closed},
+        {"sim1_dial_admitted_and_lifecycle", sim1_dial_admitted_and_lifecycle},
+        {"sim1_dial_rejected_and_cross_sim_isolation", sim1_dial_rejected_and_cross_sim_isolation},
     };
     for (unsigned i = 0; i < sizeof(cases)/sizeof(cases[0]); i++)
         if (!strcmp(argv[1], cases[i].name)) return cases[i].fn();
@@ -223,6 +311,22 @@ class CallOwnerBoundaryTests(unittest.TestCase):
 
     def test_number_presentation_does_not_disclose_unknown(self):
         self.run_case('number_presentation_fail_closed')
+
+    def test_sim1_dial_admitted_and_lifecycle(self):
+        self.run_case('sim1_dial_admitted_and_lifecycle')
+
+    def test_sim1_dial_rejected_and_cross_sim_isolation(self):
+        self.run_case('sim1_dial_rejected_and_cross_sim_isolation')
+
+    def test_sim1_dial_admission_fences(self):
+        source = (ROOT / 'x9/kernel/src/iokit/Kernel/arm/X9Calls.inc').read_text()
+        self.assertIn('x9c_sim1_dial_profile={0,2,1,0,0,0}', source)
+        self.assertIn('x9c_clients[slot].sim>1', source)
+        self.assertNotIn('x9c_clients[slot].sim!=1', source)
+        self.assertIn('admitted on measured SIM%u route', source)
+        # END shares the per-SIM identity/epoch discipline; only the MT
+        # answer gate keeps the measured-SIM2-only fence.
+        self.assertEqual(source.count('only the measured SIM2 mode20 subset'), 1)
 
     def test_publication_and_dial_submit_keep_runtime_fences(self):
         source = (ROOT / 'x9/kernel/src/iokit/Kernel/arm/X9Calls.inc').read_text()

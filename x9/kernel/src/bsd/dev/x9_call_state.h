@@ -188,7 +188,7 @@ static inline void x9cw_progress_identity_commit(struct x9cw_progress_identity *
 struct x9cw_outbound_state {
  uint64_t epoch,revision;
  uint32_t native_id,event,flags,mode,cause;
- unsigned ios_state,has_cause,seen,ended,blocked,count_known,native_count;
+ unsigned ios_state,has_cause,seen,ended,blocked,count_known,native_count,sim;
  struct x9cw_end_reason end_reason;
  struct x9cw_progress_identity identity;
 };
@@ -199,18 +199,21 @@ static inline void x9cw_outbound_invalidate(struct x9cw_outbound_state *s){
 static inline int x9cw_outbound_apply(struct x9cw_outbound_state *s,
                                      const struct x9cw_progress *c){
  if(!s||!c||!c->id||s->blocked)return -1;
- if(c->mask!=2)return 0; /* live AT capture proves IND2, not CMD20 */
+ if(c->mask!=1&&c->mask!=2)return 0; /* live AT capture proves per-SIM IND masks, not CMD20 */
+ const unsigned evsim=c->mask==2?1:0;
  if(c->event==130){
   if(c->direction||c->mode!=0){s->blocked=1;return -1;}
   if(s->seen&&!s->ended){
+   if(s->sim!=evsim)return 0; /* the other SIM's call is not this epoch */
    if(s->native_id==c->id&&s->event==130)return 0;
    s->blocked=1;return -1;
   }
   if(s->epoch==UINT64_MAX||s->revision==UINT64_MAX){s->blocked=1;return -1;}
-  s->epoch++;s->native_id=c->id;s->seen=1;s->ended=0;s->ios_state=1;
+  s->epoch++;s->native_id=c->id;s->sim=evsim;s->seen=1;s->ended=0;s->ios_state=1;
  }else{
   /* A foreign/unsupported event invalidates completeness but cannot adopt
    * an arbitrary ID as our MO, or complete a pending dial with it. */
+  if(s->seen&&s->sim!=evsim)return 0; /* foreign-SIM progress cannot poison this epoch */
   if(!s->seen||s->native_id!=c->id){s->count_known=0;s->blocked=1;return -1;}
   if(c->direction||(c->mode!=20&&c->mode!=0)){s->blocked=1;return -1;}
   if(c->event==129)return 0; /* RIL handleCallProgressIndicationMessage ignores ECPI 129 */

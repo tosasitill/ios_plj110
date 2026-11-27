@@ -143,7 +143,7 @@ struct x9cw_dial_profile {
  unsigned clir; /* already-owned Android raw value, not Apple CLIR/CT enum */
 };
 static inline int x9cw_dial_profile_valid(const struct x9cw_dial_profile *p){
- return p&&p->sim==1&&p->address_type==2&&p->call_type==1&&p->domain==0&&
+ return p&&p->sim<=1&&p->address_type==2&&p->call_type==1&&p->domain==0&&
         p->ecc_domain==0&&p->clir<=2;
 }
 /* Pure encoder, never submits/announces/approves. Reject a second dial while
@@ -160,7 +160,7 @@ static inline unsigned x9cw_dial(const uint8_t *qmi,unsigned n,uint8_t *out,unsi
  unsigned string_size=(d.length+12)&~7u,size=16+string_size+40;
  if(room<size)return 0;
  for(unsigned i=0;i<d.length;i++)number[i]=d.digits[i];
- x9cw_header(out,size,0x901,2,0);
+ x9cw_header(out,size,0x901,1u<<route.sim,0);
  x9cw_put16(out+16,0x8100);x9cw_put16(out+18,d.length+1);
  for(unsigned i=0;i<d.length;i++)out[20+i]=number[i];
  x9cw_zero(number,sizeof(number));
@@ -173,7 +173,7 @@ static inline unsigned x9cw_dial(const uint8_t *qmi,unsigned n,uint8_t *out,unsi
  x9cw_scalar(out+at+32,0x104,route.ecc_domain,4);return size;
 }
 static inline int x9cw_native_dial(const uint8_t *p,unsigned n,unsigned sim_count){
- if(!x9cw_frame(p,n,0x901)||sim_count!=2||p[8]!=2||n<64||
+ if(!x9cw_frame(p,n,0x901)||sim_count!=2||(p[8]!=1&&p[8]!=2)||n<64||
     x9cw_u16(p+16)!=0x8100)return 0;
  unsigned k=x9cw_u16(p+18);
  if(k<2||k>41)return 0;
