@@ -275,7 +275,7 @@ xnu:osfmk/DEVELOPMENT/caches.o
 xnu:osfmk/DEVELOPMENT/caches_asm.o
 xnu:osfmk/DEVELOPMENT/copyio.o
 xnu:osfmk/DEVELOPMENT/cpu.o
-xnu:osfmk/DEVELOPMENT/cpu_common.o
+x9:cpu_common.o
 xnu:osfmk/DEVELOPMENT/cpuid.o
 xnu:osfmk/DEVELOPMENT/data.o
 xnu:osfmk/DEVELOPMENT/dbgwrap.o
