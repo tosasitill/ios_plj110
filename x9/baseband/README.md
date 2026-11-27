@@ -91,7 +91,7 @@ AT 正文、SIM 标识、APN、APDU 和 ch10 包正文不写 USB/pstore；仅记
 | UIM CardStatus `0x2f` | CPIN READY → CRSM GET RESPONSE EF_DIR → FCP → READ RECORD → BER AID | 不从 READY 编造 AID；未知 PIN/UPIN/personalization 保持未知 |
 | UIM SlotStatus `0x47` | CPIN → READ BINARY EF_ICCID | 只支持主 SIM/card1；不冒充第二槽/eUICC/ATR |
 | UIM ReadTransparent `0x20` / ReadRecord `0x21` | 校验 session/path/file/范围 → FCP → 实际读取 → 原 SW1/SW2 与数据 | 不支持写/PIN/PUK、任意 AID/APDU、未知路径、加密/indication-token、多记录扩展 |
-| UIM RegisterEvents `0x2e` | 仅 card/slot mask bit0/4，后台真实快照 | refresh/应用/PIN/eSIM事件未实现；不能 ACK 它们 |
+| UIM RegisterEvents `0x2e` | 仅 card/slot mask bit0/4，后台真实快照；含其他 bit 的 mask 只记录所求 bit 后整笔拒绝 | refresh/应用/PIN/eSIM事件未实现；不能 ACK 它们 |
 | NAS ServingSystem `0x24` | CREG/CEREG/C5GREG、CGATT、COPS | 注册/attach 不是 WDS 会话或 iOS 路由 |
 | NAS SystemInfo `0x4d` | 仅有实际查询结果的 LTE/NR service-status TLV | 不伪造小区/TA/RSRP/SNR/IMS voice-support |
 | NAS SignalStrength `0x20` | 注册/制式查询 + CSQ → RSSI | 仅默认或零 mask；未知 99 / 额外指标请求失败 |
@@ -110,6 +110,24 @@ CardStatus 中 unknown PIN state 为 `NOT_INITIALIZED=0`，其固定 retry 字�
 没有声称 PIN disabled/verified，也没有推断真实 retry budget。完整 PIN/ACL 能力仍待原生 MD 真实接口。
 显式 `+CME ERROR: 10` 可以报告卡不存在；其他错误/锁卡不猜成不存在。
 文件属性 `0x24` 的 ACL 转译、非 provisioning AID 路由、SIM2 和其他控制操作仍返回未支持。
+
+### UIM 补全分类（2026-11-27 离线复核）
+
+按证据分三类，宁缺毋滥：不伪造 PIN 验证状态，不 ACK 未真正处理的事件。
+
+**A 已实现（有标准/样本证据）**
+- 文件属性 `0x24` 的紧凑 ACL 转译：FCP 带 ETSI TS 102 221 紧凑安全属性（tag `0x8C`）且全部条件可无歧义判定时，按卡面结果回答五项访问条件——AM bit 未置位的操作按标准缺省为 NEVer，SC=`0x00` 为 ALWays（QMI logic/mask 编码依 libqmi）。主机测试 `test_uim_acl.py` 用标准 9.2.1 的两个示例（`03/00/00`、`01/00`）及 EF_DIR 的 ADM 示例校验：含密钥引用的 SC（如 `0x90`，其 key reference 仅隐含）、专有 AM、残缺规则、单独的 DEACTIVATE/ACTIVATE bit 一律不转译，整笔退回原桥接许可回退值（read ALWAYS、其余 NEVER），并在日志注明 form 与采用来源。
+
+**B 只读/观察（不改变对外语义）**
+- FCP 扫描记录安全属性形式（`0x8B` referenced / `0x8C` compact / `0xAB` expanded / 无）到 job 状态；`0x24` 每次回答（限频）打印 file、form 与转译/回退来源，为 A 类扩展攒真实样本。
+- RegisterEvents `0x2e` 含未支持 bit 时，限频打印所求 mask 与未支持 bit 后仍整笔拒绝；不部分 ACK，不生成任何事件。
+
+**C 保持未支持（证据不足，写明缺口）**
+- referenced（`0x8B`）/expanded（`0xAB`）ACL 转译：密钥引用在 ARR 文件内，本路径不读 ARR；缺本卡 ARR 内容与逐文件引用解析证据前不转译。
+- refresh/应用/PIN/eSIM 事件（`0x2e` 其余 bit、`0x2a` Refresh 语义）：桥没有真实事件源（MD 侧 refresh 指示未接线），ACK 即伪造，保持拒绝/仅确认无事件。
+- PIN/PUK 验证、改 PIN、PIN 状态与 retry budget：CPIN 只给 READY/PIN/PUK/其他四类，固定 retry 字段不可用；没有原生 MD PIN 接口证据前不实现、不声称 disabled/verified。
+- 非 provisioning AID 路由与任意逻辑通道：读路径只接受 empty-AID 的 primary/secondary GW 与 card1/card2 MF 路由；任意 AID 属安全域扩展，缺 CommCenter 实际请求样本与 MD 通道证据。
+- SIM2 的 UIM 控制类操作（PIN 类、写类、事件类）：SIM2 读与双卡 CardStatus 已有真实链；控制类与 PIN 类同样缺 MD 接口证据，与 SIM1 一并保持未支持，不因读通而推定。
 
 总 job deadline 180 s，单次 AT 10 s；队列/邮箱满返回资源错误，离线/超时明确失败，不盲目重试。
 订阅以真实查询快照发送，不宣称立即 URC 驱动：同 client 周期至少 10 s，前台忙时延迟。
