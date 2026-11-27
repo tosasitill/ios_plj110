@@ -1021,6 +1021,36 @@ static void x9c_del(unsigned slot){
  /* Keep token/epoch even if this QRTR client slot is reused. */
 }
 static void x9c_dial_poll(uint8_t *frame);
+static void x9c_finish_reason_poll(uint8_t *frame){
+ static uint64_t token,deadline,sampled_epoch;
+ static unsigned samples;
+ const uint64_t now=x9q_ms();
+ if(token){
+  uint32_t size=0;
+  const int ready=x9_md_mipc_take(token,frame,X9_MIPC_FRAME_MAX,&size);
+  if(!ready)return;
+  if(ready==1){
+   uint32_t result=0,cause=0;
+   if(now<deadline&&x9cw_frame(frame,size,0x910)&&frame[8]==2&&
+      x9cw_word(frame,size,0,&result)&&!result&&x9cw_word(frame,size,0x100,&cause))
+    printf("X9 CALL: SIM2 0910 last finish reason %u (no call ID)\n",cause);
+   else printf("X9 CALL: SIM2 0910 finish reason unavailable\n");
+   bzero(frame,size);
+  }
+  token=0;
+ }
+ if(samples>=8||!x9c_observed||!x9c_event_transport_ready()||
+    x9c_outbound.blocked||!x9c_outbound.ended||!x9c_outbound.has_cause||
+    !x9c_outbound.cause||x9c_outbound.cause==16||x9c_outbound.epoch<=sampled_epoch)return;
+ uint8_t request[16];
+ x9cw_header(request,sizeof(request),0x90f,2,0);
+ token=x9_md_mipc_submit(request,sizeof(request));
+ if(token){
+  sampled_epoch=x9c_outbound.epoch;
+  deadline=now+10000;
+  samples++;
+ }
+}
 static void x9c_poll(){
  /* Drain raw CALL events. CMD8901 is auto-approved in the measured subset
   * (Android RSP shape); ANSWER is never sent. The MD owner has already
@@ -1045,6 +1075,7 @@ static void x9c_poll(){
  x9c_answer_poll(frame);
  x9c_dial_poll(frame);
  x9c_response_poll();
+ x9c_finish_reason_poll(frame);
 }
 static void x9c_dial_poll(uint8_t *frame){
  uint32_t n;

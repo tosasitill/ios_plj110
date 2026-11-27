@@ -409,6 +409,11 @@ X9 的 native DPMAIF PDP 对 `SIOCGIFMEDIA64`（`0xc02c6938`）仍返回
 当前已有 VOICE09、带 owner/retry fencing 的 VOICE20、CallList46、CallList 去重与 RAT gating，
 以及 RawSend20/MT 8601/8603/WMS37 的短信控制面。它们不等于 stock 电话或 Messages 已可用：
 
+- MIPC OPEN 后逐 SIM 尝试订阅 `4a01` 并读取一次 `0a04/0a05`，即使 CommCenter
+  未请求 IMSA 也能记录注册快照。有效的 `4a01` 会使在途旧快照失效。运营商 IMS
+  配置、PDN 建立和 SIP REGISTER 仍待闭合。
+- SIM2 拨出失败由完整、归属明确的 ECPI133 驱动 END。对于有非正常原因码的终态，
+  桥可发空载 `090f` 并记录同 SIM 的 `0910` 数值。该响应没有通话 ID，仅用于同卡诊断。
 - 缺独立于临时 `ims::Call` 对象的 typed provider `(clientId, UUID, native epoch/ID)` owner、
   FSM/delegate 生命周期与真实 SIP INVITE/REGISTER 证据。
 - MD→DSP `3D00` 不是 AP↔DSP REG_DMA；voice producer/payload/ACK、RV32 consumer、EMI ring、
