@@ -3195,3 +3195,12 @@ CMGR 假设链（未证明，不改 CMGR 行为）：若 EMEMS 从未上报，MD
 实现（`x9_sms_ind=1` 门控，默认关；IMS 注册未实测前不默认启用）：收件箱白名单在门控下放行 4602/4603/4606；逐卡以 REGISTER_IND(0x307) 订阅 4602/4606（镜像 4a01 的注册方式，CFG_IND 步通过后启动，拒绝/超时即停）；事件分发为 IND 合成 bit31 命名空间的主机侧 token（CMD 收件箱永不签发），与 CMD 共用 PDU 抽取、WMS 发布与主机 ACK 记账，但发布准入不查 CMD 槽位、DISCARD 路由与主机 ACK 完成都不向 MD 发 RSP（无命令可回）。4602 的 FORMAT 字节只记诊断（未观测，不照搬 CMD 的 type==3 门禁；结构校验仍由 PDU 解析把关，C2K 的 0x8105 编码仍不映射）。4603 只打印 flag/index 作证据：它出现即证明 MD 把 MT 短信存进了 DEVICE 存储而非投递主机，与 CMGR 断点互为印证。
 
 只写文档不写代码的部分：4607 CBM（桥整体未接小区广播）、4609 EXT_INFO（载荷语义未定义）、4602 的 C2K 变体、以及 prefer_no_ack 的触发条件本身（CFG 组合与 MD 固件模式的对应关系未闭合）。主机新增 `test_sms_ind.py` 覆盖门控开关、4602/4606 投递形状、合成 token 命名空间、CMD 路径无回归、注册帧序与拒绝即停；全套基带测试仅余 2 项与未改 main 相同的 SDK 环境错误。候选 `sms-ind-r287-20261127` 已离线构建（纯内核、配对 287），未刷机；上机判读点：开 `x9_sms_ind=1` 后注册确认、入站时究竟走 8601 还是 4602、4603 是否出现。
+### 2026-11-27 SIM1 拨号准入与 SIM2 对齐
+
+逐点盘点了 MO 链上的 SIM2-only 判断，并按性质分开处理。属于"先在一张卡上验证"的保守限制、且证据条件与槽位无关的，已推广到 SIM1：`x9cw_dial_profile_valid` 只认 sim==1、`x9cw_dial` 编码把帧 mask 写死 2、`x9cw_native_dial` 只认 mask 2、VOICE20 派发对 sim!=1 直接 UNSUPPORTED、`x9c_end_begin` 的同名门、CallList 发布选择对 sim!=1 返回 false、拨号窗 IMS 快照把 0a04 写死 mask 2。推广方式逐条保持原纪律：SIM1 用同一组实测标量（address_type 2、call_type 1、domain/ecc 0、CLIR 原始值），只换槽位；编码 mask 由已验证的 profile 决定；派发按客户端所属 SIM 选 profile，日志逐卡打印。
+
+状态层补了一个此前不存在的约束：`x9cw_outbound_state` 现在记录当前 epoch 的所属 SIM（ECPI130 建 epoch 时绑定）。另一张卡的 progress 既不能 adopt、推进、结束，也不能 poison 本 epoch（返回 0 忽略，与此前 mask!=2 的处理一致）；epoch 结束后另一张卡的 130 可以正常绑定新 epoch。跨卡隔离由主机测试直接覆盖。
+
+未推广（SIM2 特有实测事实或独立的 MT 功能）：来电 CMD 批准（`x9c_incoming_deliver`）、接听（`x9c_answer_begin`）、`x9cw_inbound_begin/apply` 的 mask2 约束、4901 的 SIM2 CS 结束序列特例（日志 444）、4902 handover 的 low==2 失效化。这些属于 SIM1 来电（MT）功能，其 reducer 与批准形状尚无 SIM1 捕获，不与拨号一起放开；END 的推广只对 MO 方向有实际作用，MT 方向在 SIM1 上因入站状态从不建立而自然返回 NOT_READY。
+
+拨号路径本身没有独立的 RAT 新鲜度门：准入证据条件就是绑定/注册态、代际、传输就绪、无未决 dial owner 与 owned empty GET_STATUS 基线（join 的 epoch 关联），全部逐 SIM 通用。主机测试（test_call_owner_boundary）新增 SIM1 准入+生命周期、拒绝+跨卡隔离两组用例与派发层源代码围栏；候选 `sim1-dial-r287-20261127` 离线构建通过，未上机。SIM1 拨号的真实振铃/接通仍待实机验证，本节不声称已通。
