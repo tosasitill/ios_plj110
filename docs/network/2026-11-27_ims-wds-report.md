@@ -57,3 +57,30 @@ awk '
 ```
 
 本轮是静态源码与已有捕获复核。基线 `bb5c8557` 加集成工作树已有补丁，两套主机回归共 111 项通过。桥行为、镜像和设备状态未改动。
+
+## 2026-11-27 补证：P-CSCF 来源闭合与 0x2d 下发
+
+PR #13 的工厂 IMS ACT 已建立同卡承载；其 `0202` 确认帧即 P-CSCF 的 MD 侧来源。原厂基线 `radio-baseline.txt` 18:38:15.639 的 IMS ACT CNF（440 B payload）逐 TLV 解析如下（地址值在捕获中被 `2a` 掩码，只取结构；同帧 cbnet CNF 464 B 作对照）：
+
+| TLV | IMS CNF | cbnet CNF | 含义 |
+| --- | --- | --- | --- |
+| 0x000 len4 | 0 | 0 | result |
+| 0x100 len1 | 1 | 2 | CID |
+| 0x101 | len1=0 | "cbnet" | APN |
+| 0x102 len1 | 2 | 3 | PDP/APN 类型 |
+| 0x103 / 0x8104 | 无 | 有 | IPv4 地址 count/地址 |
+| 0x108 / 0x8109 | 1 / len16 | 1 / len16 | IPv6 地址 count/地址（PDN 自身地址） |
+| 0x10d / 0x810e+i | 无 | 有 | IPv4 DNS |
+| 0x112 / 0x8113+i | 2 / len16×2 | 2 / len16×2 | IPv6 DNS |
+| 0x117 / 0x8118+i | 无 | 无 | **P-CSCF IPv4** count / 地址（4 B） |
+| 0x11c / 0x811d+i | **2 / len16×2** | 无 | **P-CSCF IPv6** count / 地址（16 B） |
+| 0x123 / 0x124 | 0 / 0 | 0 / 0 | MTU v4/v6 |
+| 0x125 / 0x12a | 2 / 0xca | 3 / 0x12f | channel / trans_id |
+
+tag 归属由本机 `libmtkmipc-ril.so` 的 `RmmDcEventHandler::decodeDataCallProfile@2bcad0` 反汇编独立确认：该函数以 0x117 为 count、0x8118+i 解码 IPv4 地址后打印 `pcscfV4`，以 0x11c 为 count、0x811d+i 解码 IPv6 地址后打印 `pcscfV6`；与上表"IMS 有、cbnet 无"的分布一致。本机原厂 IMS PDN 为 IPv6-only，故只有 v6 列表（2 个 P-CSCF）。
+
+QMI 侧编码由固定 20H392 `parseField<ProxyIPv4List>`（`0x1f192539c`）与 `parseField<ProxyIPv6List>`（`0x1f1925564`）反汇编确认：均为 u8 count 后接原始地址数组（v4 每项 4 B、v6 每项 16 B，逐字节拷贝）。桥的 v4 地址在 MIPC 侧为小端存储，下发时按 `x9wr_ipv4_tlv` 既有约定逐字节反转。
+
+实现（分支 `radio/ims-runtime-settings`）：工厂序列 stage 4 在 ACT 确认后以 `x9w_pcscf_publish` 把双列表存入逐卡 `x9w_pcscf_lists`（count 上限 4、地址须通过 `x9wr_address` 校验，解码失败不覆盖）；`X9WDS` 的 `0x2d` 处理仅当该客户端 bearer 的有效 APN 为 `ims` 且同卡已有存储列表时，才在原 runtime settings 后附加 0x23/0x2e。默认数据会话输出不变。
+
+S-NSSAI（0x32）结论：**无来源，不下发**。ACT CNF 的完整 TLV 清单中没有 S-NSSAI 字段，MD 侧数据面也不携带切片信息；Apple 解析器虽读 0x32，但桥没有任何可信输入可填，继续缺省。
