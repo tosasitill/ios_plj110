@@ -875,11 +875,25 @@ GetValue 逐项核对即可，缺哪项查哪项的设备身份种子，与本�
 
 **身份一致性注意**：usbmuxd 以 USB 序列号字符串作为 UDID 列设备，而
 lockdownd 的 UniqueDeviceID/SerialNumber 来自 `IOPlatformSerialNumber`
-（启动日志 `X9 IDENTITY:` 行）。描述符机制明确其 serial 只是 USB 字符串、
-不是 UDID。本画像启动时只自动改 VID/PID/厂商/产品串与类别码，serial 仍为
-合成默认值；**配对验证前**先用既有 description 流程（usbctl，root +
-entitlement、总线关闭时）把 serial 改成该启动日志里的值，两边才一致。
-mode 3 下 `set_description` 只接受原 ECM 身份或 `05AC` 的 Apple 身份。
+（启动日志 `X9 IDENTITY:` 行）。其余身份字段只是 USB 字符串、错了对配对
+无碍，唯独 serial 被主机当作 UDID，必须与平台序列号同值。2026-11-27 晚
+修复后：`x9_usb_start` 在 mode 3 直接经 `x9_platform_serial`（平台专家已
+解码的设备树 serial-number）把 USB serial 设为硬件序列号，armed 日志行
+会打印实际呈现值；取不到时打印告警并保留合成值（此时 UDID 必然对不上，
+先查该行再谈配对）。注意 `/proc/cmdline` 的 `oplusboot.serialno` 是另一
+标识（Android 证据已坐实），绝不能用作 USB serial。description 流程
+（usbctl，root + entitlement、总线关闭时）仍可事后覆盖；mode 3 下
+`set_description` 只接受原 ECM 身份或 `05AC` 的 Apple 身份。
+
+**usb3 首轮实测（rev288）两处根因（2026-11-27 晚修复，未上机复验）**：
+① `bsd_init` 的 worker 分发只认 `x9_usb==1||==2`，mode 3 静默落进 EP0
+日志 worker（1209:0001）——device worker 根本没启动，故日志通道活、PHY
+校准行在，但无任何 mux 行、Mac 枚举不到苹果设备；分发与 `SweetX9USB`
+probe 已同补 mode 3。② mux 接口的双 bulk 端点在 alt 0，而
+`set_configuration` 原先不武装 EP1（ECM 靠 SET_INTERFACE 切 alt 1 才武装，
+主机对 alt 0 从不补发 SET_INTERFACE）——枚举即便完成也永远无流量；现于
+SET_CONFIGURATION 时直接武装 EP1 对，SET_INTERFACE(0,0) 复选亦重武装。
+glue 另加一次性留证：首个主机 mux 包与首个回环服务连接各打一行。
 
 **Trust 对话框不可用时的后备（仅可行性，本轮不落盘）**：设备端 pair record
 位于 `/var/root/Library/Lockdown/pair_records/<SystemBUID>.plist`，需含
@@ -897,16 +911,22 @@ HostID、SystemBUID、HostCertificate、HostPrivateKey 等键，且 DeviceCertif
 候选 boot args：`x9_usb=3`（PHY A/B 时加 `x9_usb_phy=1`；与其他参数同挂时
 先核算 boot-args 总长上限）。
 
-1. 内核日志出现 `negotiated HIGH-SPEED 480 Mbps` 与
-   `X9 USB MUX: Apple usbmux profile configured`；若是 FULL-SPEED 行，先换
-   线/换口，再比对 `x9_usb_phy=1` 前后（看 FM 标定打印的 srctrl 变化）。
+1. 内核日志依次出现 `X9 USB MUX: usbmux profile armed (x9_usb=3); ...
+   usb serial=<硬件序列号>`（serial 须等于 `X9 IDENTITY:` 行的值）、
+   `negotiated HIGH-SPEED 480 Mbps`、`X9 USB MUX: Apple usbmux profile
+   configured`，接上 Mac 后应再出现 `first host mux traffic` 一行；若是
+   FULL-SPEED 行，先换线/换口，再比对 `x9_usb_phy=1` 前后（看 FM 标定
+   打印的 srctrl 变化）。armed 行缺失 = 分发没进 device worker；
+   configured 缺失 = 主机没走到 SET_CONFIGURATION；traffic 缺失 =
+   usbmuxd 没开口，先按这三行定位断点。
 2. Mac 上 `python3 -I x9/usb/pairing.py --list` 列出设备；「系统信息 → USB」
    显示 `05AC:12A8`、速度 480Mb/s。
 3. `pairing.py --query-type --device-id <ID>` 返回 QueryType（证明 62078 桥
    通）；失败时看内核 `X9 USB MUX: reset ...` 统计行（syn/refused/rst/
    framing/bad_magic）定位断点。
-4. 按上文对齐 USB serial 后 `pairing.py --pair`：设备应弹原生 Trust 对话
-   框，接受后 `--session` 验证 TLS 会话与 GetValue 值域。
+4. 核对 armed 行的 serial 与 `X9 IDENTITY:` 一致后 `pairing.py --pair`：
+   设备应弹原生 Trust 对话框，接受后 `--session` 验证 TLS 会话与
+   GetValue 值域；`--query-type` 成功时 glue 应已打印首个回环连接行。
 5. Finder 侧边栏出现设备；爱思助手识别并显示设备信息（同一条链）。
 6. 测速：mode 3 下经 Finder/AFC 拷贝大文件计时（预期 15–25MB/s 量级）；
    mode 1 ECM 与 mode 2 raw bulk 各回归一遍吞吐与日志抓取，确认命脉无回归。

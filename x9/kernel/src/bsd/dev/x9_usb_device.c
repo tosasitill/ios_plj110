@@ -600,7 +600,15 @@ static int set_configuration(unsigned value)
     int error = reset_data(); if (error || !value) return error;
     /* MTU3 with a USB3 IP has separate EP0/TX/RX FIFOs even at USB2 speed.
      * Validate capacity at init, then assign 512 bytes per endpoint. */
-    if (!mux_profile) configure_endpoint(&eps[2], 512);
+    if (mux_profile) {
+        /* The mux interface carries its two bulk endpoints in alt 0, which
+         * is active by definition once configured; hosts do not follow up
+         * with SET_INTERFACE for it (unlike the ECM data interface, whose
+         * endpoints live in alt 1). Arm EP1 here or no mux packet can ever
+         * move even though enumeration completes. */
+        configure_endpoint(&eps[0], 0);
+        configure_endpoint(&eps[1], 0);
+    } else configure_endpoint(&eps[2], 512);
     if (st.raw_enabled) { configure_endpoint(&eps[3], 512); configure_endpoint(&eps[4], 1024); }
     lck_mtx_lock(&usb_lock); st.configuration = 1; st.state = X9_USB_CONFIGURED; lck_mtx_unlock(&usb_lock);
     printf("X9 USB: config=1 speed=%u (%s) QMU36 gen2=%u raw=%u\n", st.speed, st.speed == 3 ? "480Mbps HS" : st.speed == 1 ? "12Mbps FS" : "unknown", gen2, st.raw_enabled);
@@ -736,7 +744,12 @@ static void setup(void)
     } else if (type == 0x81 && req == 10 && n == 1 && !value && st.configuration && index < (st.raw_enabled ? 3u : 2u)) {
         control[0]=index==1 ? (uint8_t)st.data_alt : 0; count=1;
     } else if (type == 1 && req == 11 && !n && st.configuration && index < (st.raw_enabled ? 3u : 2u) && value <= (index == 1 ? 1u : 0u)) {
-        if (index == 1) {
+        if (mux_profile && index == 0) {
+            /* Alt 0 is the only mux setting; treat a host re-select as a
+             * re-arm of the EP1 pair (already armed at SET_CONFIGURATION). */
+            error=disable_endpoint(&eps[0]); if (!error) error=disable_endpoint(&eps[1]);
+            if (!error) { configure_endpoint(&eps[0],0); configure_endpoint(&eps[1],0); }
+        } else if (index == 1) {
             error=disable_endpoint(&eps[0]); if (!error) error=disable_endpoint(&eps[1]);
             if (!error && value) { configure_endpoint(&eps[0],0); configure_endpoint(&eps[1],0); }
             lck_mtx_lock(&usb_lock); st.data_alt=value; net_tx.head=net_tx.count=0; lck_mtx_unlock(&usb_lock);
@@ -887,7 +900,7 @@ static void worker(void *arg, wait_result_t why)
     lck_mtx_lock(&usb_lock); st.state=X9_USB_READY; lck_mtx_unlock(&usb_lock);
     W(0x2404,R(0x2404)|BIT(6));
     printf("X9 USB: MTU3 USB2 ECM%s ready, GIC INTID533 polled, QMU36 version=%#x; EP0 log retained\n",st.raw_enabled?"+private bulk":"",version);
-    if (mux_profile) printf("X9 USB MUX: usbmux profile armed (x9_usb=3); no ue0 in this profile\n");
+    if (mux_profile) printf("X9 USB MUX: usbmux profile armed (x9_usb=3); no ue0 in this profile; usb serial=%s\n", description.serial);
     for (;;) {
         bus_poll(); /* completes even if the hardware was isolated */
         lck_mtx_lock(&usb_lock); unsigned off = st.reserved & X9_USB_BUS_FORCED_OFF; lck_mtx_unlock(&usb_lock);
@@ -924,17 +937,25 @@ void x9_usb_start(void)
     started=1; st.mode=(uint32_t)sweet_x9_arg("x9_usb",0); st.raw_enabled=st.mode==2;
     mux_profile = st.mode == 3;
     if (mux_profile) {
-        /* Apple identity for the usbmux profile. The serial stays at the
-         * synthetic default on purpose: it is a USB string, not a UDID
-         * (see x9_usb_device.h). Set it to the boot log's
-         * IOPlatformSerialNumber via the description flow before pairing
-         * validation; lockdownd serves the real identity values itself. */
+        /* Apple identity for the usbmux profile. Unlike every other
+         * identity field, the USB serial must NOT stay synthetic: usbmuxd
+         * adopts it as the UDID while lockdownd answers with
+         * IOPlatformSerialNumber, so the two must be the same string or
+         * pairing records can never line up. Take the hardware serial now
+         * (never the oplusboot.serialno cmdline value, a different
+         * identifier); the description flow remains a manual override. */
         description.vendor_id = 0x5ac; description.product_id = 0x12a8;
         description.device_id = 0x100; description.bcd_usb = 0x200;
         description.device_class = 0; description.device_subclass = 0;
         description.device_protocol = 0;
         memcpy(description.manufacturer, "Apple Inc.", sizeof("Apple Inc."));
         memcpy(description.product, "iPhone", sizeof("iPhone"));
+        char serial[X9_USB_STRING_CAPACITY];
+        if (!x9_platform_serial(serial, sizeof(serial)))
+            memcpy(description.serial, serial, strlen(serial) + 1);
+        else
+            printf("X9 USB MUX: platform serial unavailable; synthetic USB "
+                "serial retained -- usbmux UDID will not match lockdownd\n");
     }
     st.state=X9_USB_INITIALIZING; st.generation=1; lck_mtx_unlock(&usb_lock);
     thread_t t; int error=kernel_thread_start(worker,NULL,&t);
