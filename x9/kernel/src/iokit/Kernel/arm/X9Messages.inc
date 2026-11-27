@@ -278,7 +278,9 @@ static uint64_t x9m_store_submit(const x9m_job &j){
  return f.submit();
 }
 static bool x9m_factory_enabled(){
- static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_factory_init",0)==1;
+ /* Default on since 2026-11-27 (owner decision): the factory provisioning
+  * is part of normal init; x9_factory_init=0 opts out for A/B. */
+ static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_factory_init",1)!=0;
  return enabled!=0;
 }
 static void x9m_init_transport_loss(){
@@ -495,7 +497,7 @@ static void x9m_rawsend_reject_diag(unsigned sim,const uint8_t *req,unsigned len
  }
 }
 
-/* Factory-init replay (x9_factory_init=1, default off). During telephony
+/* Factory-init replay (x9_factory_init, default on; =0 opts out). During telephony
  * init Android's RIL provisions each slot (this device's own capture,
  * radio-baseline.txt 2026-11-15): SIM1 first receives one zeroed
  * IMS_CFG_ADDITION_SERVICE 0a1c, then each SIM receives
