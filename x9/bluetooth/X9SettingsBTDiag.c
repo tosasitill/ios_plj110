@@ -22,6 +22,7 @@
 #define UUID_PREFS "B2ED1830-FB2B-3702-B254-17872B2E0A97"
 #define UUID_MANAGER "54FB08F7-FE66-344D-B7CE-31838CDEE572"
 #define UUID_MOBILE_BT "FDE5B98E-2257-35C8-B323-92B824492207"
+#define UUID_GESTALT "CD8ECDF2-C5B8-3246-9B8A-D30D6FAF2752"
 #define CALLBACK_VA UINT64_C(0x1d4d0c380)
 
 static const uint8_t prefs_uuid[16] = {0xb2,0xed,0x18,0x30,0xfb,0x2b,0x37,0x02,0xb2,0x54,0x17,0x87,0x2b,0x2e,0x0a,0x97};
@@ -30,6 +31,7 @@ static const uint8_t mobile_uuid[16] = {0xfd,0xe5,0xb9,0x8e,0x22,0x57,0x35,0xc8,
 static _Atomic unsigned notes;
 static const uint8_t settings_uuid[16] = {0x43,0x3b,0xd2,0x2d,0x83,0x55,0x34,0x2f,0xba,0x34,0xd2,0x47,0x1d,0xc0,0x1c,0xb0};
 static const uint8_t core_bluetooth_uuid[16] = {0x40,0x85,0x02,0x43,0x24,0xa8,0x34,0x02,0x9b,0x19,0x33,0x92,0xd4,0xaf,0x07,0x2b};
+static const uint8_t gestalt_uuid[16] = {0xcd,0x8e,0xcd,0xf2,0xc5,0xb8,0x32,0x46,0x9b,0x8a,0xd3,0x0d,0x6f,0xaf,0x27,0x52};
 
 static void note(const char *format, ...)
 {
@@ -72,6 +74,10 @@ static Ivar xpc_connection_ivar;
 static const void *xpc_connection_type;
 static const void *(*observed_xpc_get_type)(id);
 static const char *(*observed_xpc_get_name)(id);
+static int (*original_attach)(id, SEL);
+static int attach_installed, xpc_installed, ui_installed;
+static const char *(*observed_cf_get_ptr)(const void *, uint32_t);
+static long (*observed_cf_get_length)(const void *);
 
 static void connection_invalid(id object, SEL selector)
 {
@@ -132,6 +138,7 @@ static void manager_handle_state(id object, SEL selector, id args)
 static void settings_install_xpc(void *context)
 {
     const struct mach_header *header = context;
+    if (xpc_installed) return;
     settings_install_connection(header);
     Class manager = objc_getClass("CBManager");
     if (!manager) return;
@@ -151,7 +158,35 @@ static void settings_install_xpc(void *context)
     original_handle_state = (void (*)(id, SEL, id))method_getImplementation(update);
     method_setImplementation(invalid, (IMP)manager_xpc_invalid);
     method_setImplementation(update, (IMP)manager_handle_state);
+    xpc_installed = 1;
     note("CoreBluetooth manager XPC diagnostics installed");
+}
+
+static int manager_attach(id object, SEL selector)
+{
+    note("BluetoothManager _attach enter");
+    int result = original_attach(object, selector);
+    note("BluetoothManager _attach result=%d", result);
+    return result;
+}
+
+static void settings_install_attach(void *context)
+{
+    const struct mach_header *header = context;
+    if (attach_installed) return;
+    Class manager = objc_getClass("BluetoothManager");
+    Method method = manager ? class_getInstanceMethod(manager, sel_registerName("_attach")) : NULL;
+    const char *type = method ? method_getTypeEncoding(method) : NULL;
+    Dl_info info = {0};
+    if (!type || type[0] != 'B' ||
+        !dladdr((void *)method_getImplementation(method), &info) || info.dli_fbase != header) {
+        note("BluetoothManager _attach diagnostic identity rejected");
+        return;
+    }
+    original_attach = (int (*)(id, SEL))method_getImplementation(method);
+    method_setImplementation(method, (IMP)manager_attach);
+    attach_installed = 1;
+    note("BluetoothManager _attach diagnostic installed type=%s", type);
 }
 
 static int bool_ivar(id object, const char *name)
@@ -193,6 +228,7 @@ static void settings_central_state(id object, SEL selector, id manager)
 static void settings_install_ui(void *context)
 {
     const struct mach_header *header = context;
+    if (ui_installed) return;
     Class controller = objc_getClass("BTSDevicesController");
     Method method = controller ? class_getInstanceMethod(controller, sel_registerName("specifiers")) : NULL;
     Dl_info info = {0};
@@ -214,16 +250,25 @@ static void settings_install_ui(void *context)
     }
     original_central_state = (void (*)(id, SEL, id))method_getImplementation(method);
     method_setImplementation(method, (IMP)settings_central_state);
+    ui_installed = 1;
     note("Settings central callback diagnostic installed");
 }
 
 static void settings_image_added(const struct mach_header *header, intptr_t slide)
 {
     (void)slide;
+    /* Install synchronously, never via the main queue: this callback fires
+     * for every already-loaded image inside _dyld_register_func_for_add_image
+     * itself, i.e. in the constructor, before Preferences runs its own
+     * initializers. Log 444 deferred to the main queue and missed the whole
+     * first attempt: hooks landed at 30.437 s, the invalid callback arrived
+     * at 31.810 s, and not one setup or attach result was recorded. */
     if (image_uuid(header, settings_uuid))
-        dispatch_async_f(dispatch_get_main_queue(), (void *)header, settings_install_ui);
+        settings_install_ui((void *)header);
     if (image_uuid(header, core_bluetooth_uuid))
-        dispatch_async_f(dispatch_get_main_queue(), (void *)header, settings_install_xpc);
+        settings_install_xpc((void *)header);
+    if (image_uuid(header, manager_uuid))
+        settings_install_attach((void *)header);
 }
 
 /* The audit VAs are preferred Mach-O VAs, not offsets from the image header.
@@ -256,7 +301,7 @@ typedef int (*service_callbacks_fn)(void *, void *, void *);
 typedef int (*default_fn)(void *, void *);
 typedef int (*attach_fn)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 typedef void (*event_fn)(void *, uint32_t, uint32_t, void *);
-static void *originals[7];
+static void *originals[8];
 
 static int service_callbacks(void *service, void *callbacks, void *event)
 {
@@ -306,6 +351,20 @@ static void session_event(void *service, uint32_t first, uint32_t second, void *
          (first | second) ? "" : " setup-eligible");
     ((event_fn)originals[6])(service, first, second, manager);
 }
+typedef int (*mg_bool_fn)(void *);
+static int key_is_bluetooth(const void *key)
+{
+    if (!key || !observed_cf_get_ptr || !observed_cf_get_length) return 0;
+    if (observed_cf_get_length(key) != 9) return 0;
+    const char *text = observed_cf_get_ptr(key, 0x08000100u);
+    return text && !strcmp(text, "bluetooth");
+}
+static int mg_bool_answer(void *key)
+{
+    int result = ((mg_bool_fn)originals[7])(key);
+    if (key_is_bluetooth(key)) note("MGGetBoolAnswer bluetooth result=%d", result);
+    return result;
+}
 
 struct hook {
     const char *name;
@@ -328,8 +387,16 @@ static struct hook hooks[] = {
      {0xd10183ff,0xa9025ff8,0xa90357f6,0xa9044ff4}, session_attach},
     {"__btSessionEventCallback", CALLBACK_VA,
      {0xd10243ff,0xa9055ff8,0xa90657f6,0xa9074ff4}, session_event},
+    {"MGGetBoolAnswer", UINT64_C(0x19c55699c),
+     {0xd100c3ff,0xa9014ff4,0xa9027bfd,0x910083fd}, mg_bool_answer},
 };
-static struct native_image manager_image, mobile_image;
+static struct native_image manager_image, mobile_image, gestalt_image;
+static const struct native_image *hook_image(size_t k)
+{
+    if (k < 6) return &mobile_image;
+    if (k == 6) return &manager_image;
+    return &gestalt_image;
+}
 
 static void jump(uint32_t *out, uintptr_t target)
 {
@@ -363,17 +430,29 @@ static int install(void)
     if (framework_image("/System/Library/PrivateFrameworks/MobileBluetooth.framework/MobileBluetooth",
                         mobile_uuid, &mobile_image) ||
         framework_image("/System/Library/PrivateFrameworks/BluetoothManager.framework/BluetoothManager",
-                        manager_uuid, &manager_image)) return -1;
+                        manager_uuid, &manager_image) ||
+        framework_image("/usr/lib/libMobileGestalt.dylib",
+                        gestalt_uuid, &gestalt_image)) return -1;
+    observed_cf_get_ptr = (const char *(*)(const void *, uint32_t))
+        dlsym(RTLD_DEFAULT, "CFStringGetCStringPtr");
+    observed_cf_get_length = (long (*)(const void *))
+        dlsym(RTLD_DEFAULT, "CFStringGetLength");
+    if (!observed_cf_get_ptr || !observed_cf_get_length) {
+        note("MobileGestalt diagnostic CF helpers unavailable; no text changed");
+        return -1;
+    }
     const char *exports[] = {
         "BTAccessoryManagerAddCallbacks", "BTAccessoryManagerGetDefault",
         "BTLocalDeviceAddCallbacks", "BTLocalDeviceGetDefault",
         "BTServiceAddCallbacks", "BTSessionAttachWithQueue",
+        "MGGetBoolAnswer",
     };
     Dl_info info = {0};
     for (size_t k = 0; k < sizeof(hooks)/sizeof(hooks[0]); k++) {
-        const struct native_image *image = k < 6 ? &mobile_image : &manager_image;
+        const struct native_image *image = hook_image(k);
         uintptr_t expected = (uintptr_t)(image->slide + (int64_t)hooks[k].va);
-        void *symbol = k < 6 ? dlsym(RTLD_DEFAULT, exports[k]) : (void *)expected;
+        void *symbol = k == 6 ? (void *)expected
+            : dlsym(RTLD_DEFAULT, exports[k == 7 ? 6 : k]);
         if (!symbol || !dladdr(symbol, &info) ||
             (uintptr_t)symbol != expected || (uintptr_t)info.dli_fbase != image->base) {
             note("image/slide mismatch %s; no text changed", hooks[k].name); return -1;
@@ -392,7 +471,7 @@ static int install(void)
                                   VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY);
     if (kr) { note("trampoline COW failed kr=%d; no text changed", kr); return -1; }
     for (size_t k = 0; k < sizeof(hooks)/sizeof(hooks[0]); k++) {
-        const struct native_image *image = k < 6 ? &mobile_image : &manager_image;
+        const struct native_image *image = hook_image(k);
         originals[k] = trampoline(tramp + k*32, &hooks[k],
                                   (uintptr_t)(image->slide + (int64_t)hooks[k].va));
     }
@@ -401,7 +480,7 @@ static int install(void)
     if (kr) { note("trampoline R|X failed kr=%d; no text changed", kr); return -1; }
     uintptr_t pages[sizeof(hooks)/sizeof(hooks[0])]; size_t page_count = 0;
     for (size_t k = 0; k < sizeof(hooks)/sizeof(hooks[0]); k++) {
-        const struct native_image *image = k < 6 ? &mobile_image : &manager_image;
+        const struct native_image *image = hook_image(k);
         uintptr_t address = (uintptr_t)(image->slide + (int64_t)hooks[k].va);
         uintptr_t target = address & ~(page-1);
         size_t j; for (j = 0; j < page_count && pages[j] != target; j++) {}
@@ -417,7 +496,7 @@ static int install(void)
         pages[page_count++] = target;
     }
     for (size_t k = 0; k < sizeof(hooks)/sizeof(hooks[0]); k++) {
-        const struct native_image *image = k < 6 ? &mobile_image : &manager_image;
+        const struct native_image *image = hook_image(k);
         uintptr_t address = (uintptr_t)(image->slide + (int64_t)hooks[k].va);
         uint32_t words[4]; jump(words, (uintptr_t)hooks[k].replacement);
         memcpy((void *)address, words, sizeof(words));
@@ -427,7 +506,7 @@ static int install(void)
         kr = vm_protect(mach_task_self(), pages[j], page, FALSE, VM_PROT_READ|VM_PROT_EXECUTE);
         if (kr) { note("text R|X failed kr=%d", kr); abort(); }
     }
-    note("seven native hooks installed; results and manager state unchanged");
+    note("eight native hooks installed; results and manager state unchanged");
     return 0;
 }
 

@@ -25,6 +25,11 @@ spec.loader.exec_module(cache)
 PREFERRED_TEXT = {
     'MobileBluetooth': 0x1b08fc000,
     'BluetoothManager': 0x1d4d0b000,
+    'libMobileGestalt': 0x19c556440,
+}
+IMAGE_OF = {
+    '__btSessionEventCallback': 'BluetoothManager',
+    'MGGetBoolAnswer': 'libMobileGestalt',
 }
 EXPECTED = {
     'BTAccessoryManagerAddCallbacks': (0x1b0900a78, [0xd10283ff, 0xa90567fa, 0xa9065ff8, 0xa90757f6]),
@@ -34,6 +39,7 @@ EXPECTED = {
     'BTServiceAddCallbacks': (0x1b08fde4c, [0xa9bd57f6, 0xa9014ff4, 0xa9027bfd, 0x910083fd]),
     'BTSessionAttachWithQueue': (0x1b08fd88c, [0xd10183ff, 0xa9025ff8, 0xa90357f6, 0xa9044ff4]),
     '__btSessionEventCallback': (0x1d4d0c380, [0xd10243ff, 0xa9055ff8, 0xa90657f6, 0xa9074ff4]),
+    'MGGetBoolAnswer': (0x19c55699c, [0xd100c3ff, 0xa9014ff4, 0xa9027bfd, 0x910083fd]),
 }
 
 
@@ -57,7 +63,7 @@ class DiagnosticChecks(unittest.TestCase):
         source = (HERE / 'X9SettingsBTDiag.c').read_text()
         found = re.findall(r'\{"([A-Za-z_]+)", (?:UINT64_C\((0x[0-9a-f]+)\)|(CALLBACK_VA)),\s*'
                            r'\{([^}]+)\}, ([A-Za-z_]+)\}', source)
-        self.assertEqual(len(found), 7)
+        self.assertEqual(len(found), 8)
         self.assertEqual({name for name, *_ in found}, set(EXPECTED))
         for name, address, callback_va, words, wrapper in found:
             self.assertEqual(0x1d4d0c380 if callback_va else int(address, 16), EXPECTED[name][0])
@@ -88,7 +94,8 @@ class DiagnosticChecks(unittest.TestCase):
         self.assertIn('(uintptr_t)info.dli_fbase != image->base', source)
         self.assertNotIn('mobile_base', source)
         self.assertNotIn('manager_base', source)
-        for image, label in (('prefs', 'PREFS'), ('manager', 'MANAGER'), ('mobile', 'MOBILE_BT')):
+        for image, label in (('prefs', 'PREFS'), ('manager', 'MANAGER'), ('mobile', 'MOBILE_BT'),
+                             ('gestalt', 'GESTALT')):
             declared = re.search(r'#define UUID_' + label + r' "([0-9A-F-]+)"', source)
             encoded = re.search(r'\b' + image + r'_uuid\[16\] = \{([^}]+)\}', source)
             self.assertIsNotNone(declared)
@@ -97,12 +104,12 @@ class DiagnosticChecks(unittest.TestCase):
                              bytes.fromhex(declared[1].replace('-', '')))
         # Model the audited nonzero preferred bases and both zero/nonzero ASLR
         # slides. Correct addresses are slide+VA, independent of dli_fbase+VA.
-        for preferred in PREFERRED_TEXT.values():
+        for preferred_name, preferred in PREFERRED_TEXT.items():
             self.assertGreater(preferred, 0)
             for slide in (0, 0x40000000):
                 actual_base = preferred + slide
                 for name, (va, _) in EXPECTED.items():
-                    if (name == '__btSessionEventCallback') != (preferred == PREFERRED_TEXT['BluetoothManager']):
+                    if IMAGE_OF.get(name, 'MobileBluetooth') != preferred_name:
                         continue
                     self.assertEqual(actual_base - preferred + va, slide + va)
                     self.assertNotEqual(actual_base + va, slide + va)
@@ -130,6 +137,37 @@ class DiagnosticChecks(unittest.TestCase):
         candidate = (HERE / 'candidate.py').read_text()
         self.assertIn("'x9_bt_settings_diag=1'", candidate)
         self.assertIn("'x9_bt_settings_diag defaults off", candidate)
+
+    def test_synchronous_install_and_extended_forensics(self):
+        source = (HERE / 'X9SettingsBTDiag.c').read_text()
+        # Log 444's miss was a main-queue deferral; installs must be synchronous.
+        self.assertNotIn('dispatch_async_f', source)
+        self.assertNotIn('dispatch_get_main_queue', source)
+        self.assertIn('settings_install_attach((void *)header);', source)
+        self.assertIn('if (image_uuid(header, manager_uuid))', source)
+        # Each ObjC install is guarded so the add-image callback cannot
+        # double-swizzle when several images match in one process.
+        for flag in ('attach_installed', 'xpc_installed', 'ui_installed'):
+            self.assertIn('if (' + flag + ') return;', source)
+            self.assertIn(flag + ' = 1;', source)
+        # The _attach wrapper observes only; it forwards and returns the
+        # native result, and its installer verifies class, selector, a BOOL
+        # return type and the BluetoothManager image before swapping.
+        body = re.search(r'static int manager_attach\(id object, SEL selector\)\s*\{(.*?)\n\}',
+                         source, re.S)
+        self.assertIsNotNone(body)
+        self.assertIn('int result = original_attach(object, selector);', body.group(1))
+        self.assertIn('BluetoothManager _attach result=%d', body.group(1))
+        self.assertIn('return result;', body.group(1))
+        self.assertIn('sel_registerName("_attach")', source)
+        self.assertIn("type[0] != 'B'", source)
+        # The MobileGestalt hook logs only the one gated key and forwards
+        # every answer unchanged; the key test is length first, then bytes.
+        body = re.search(r'static int key_is_bluetooth\(const void \*key\)\s*\{(.*?)\n\}',
+                         source, re.S)
+        self.assertIsNotNone(body)
+        self.assertLess(body.group(1).index('!= 9'), body.group(1).index('strcmp'))
+        self.assertIn('eight native hooks installed', source)
 
     def test_payload_hash_order_and_modes(self):
         out = ROOT / 'x9/out'
@@ -167,7 +205,7 @@ class DiagnosticChecks(unittest.TestCase):
                          'preferences_uuid': 'B2ED1830-FB2B-3702-B254-17872B2E0A97',
                          'manager_uuid': '54FB08F7-FE66-344D-B7CE-31838CDEE572',
                          'mobile_bluetooth_uuid': 'FDE5B98E-2257-35C8-B323-92B824492207',
-                         'hook_count': 7, 'boot_arg': 'x9_bt_settings_diag=1',
+                         'hook_count': 8, 'boot_arg': 'x9_bt_settings_diag=1',
                          'log_interface': 'kern.x9_bt_note', 'manager_state_modified': False},
                      'power_interface': 'kern.x9_bt_power',
                      'power_lifecycle': 'closed-transport-only',

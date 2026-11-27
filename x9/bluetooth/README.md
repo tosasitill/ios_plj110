@@ -52,6 +52,30 @@ Mach 连接时直接通知 `xpcConnectionIsInvalid`，后者则在 session attac
 - 这条路径不修改蓝牙偏好、Apple 框架、Mach 服务或 HCI 状态。验证镜像可用
   `x9_bt_root=0 x9_bt_settings_diag=1`；仅在已安装诊断 dylib 与嵌入的身份相符时注入，不升级文件。
 
+2026-11-27 离线静态复核（原件逐指令核对）：state=2 的门控来源已经分清，不是 XPC 拒绝、
+也不是 session attach 失败。`CBXpcConnection initWithDelegate:queue:options:sessionType:`
+（CoreBluetooth，0x1a5e33480）在 +0xa4 先以 `MGGetBoolAnswer` 查询键 `bluetooth`
+（CFString 0x1d80619c0，字节即 "bluetooth"）；返回 0 时只在本地排一个异步的
+`xpcConnectionIsInvalid` 通知（+0x12c 分支），**根本不创建 Mach 连接**，更不发任何消息。
+`BluetoothManager _attach`（0x1d4d0ccf0）同样先查同一键（CFString 0x1dac5d058），为 0 时
+在调用 `BTSessionAttachWithQueue` 之前直接返回。因此 444 的签名（诊断 hook 已就位、
+五个 setup 与 attach 零记录、却观察到 invalid 回调）只与 MG 否定分支吻合；launchd/bluetoothd
+从未收到连接尝试。树内没有任何针对 `bluetooth` 的 MobileGestalt 应答实现（只有身份生成
+工具与本节缓存清理），答案来自 libMobileGestalt 的缓存/计算；444 的缓存为旧 epoch 保留值，
+但其 `bluetooth` 实际值从未被读出过——“陈旧缓存为假”是与 445 mgwipe 候选下用户观察到
+可搜索相互印证的首要解释，不是已读出的事实。诊断已补齐判别手段（见下）：下一轮上机
+可直接读到 Preferences 进程内该键的答案，配合 `X9 MGWIPE` epoch 行判别缓存新鲜度。
+
+诊断取证已前移（2026-11-27，`X9SettingsBTDiag.c`）：ObjC 侧安装改为在 add-image 回调内
+同步执行——该回调对已加载镜像在 `_dyld_register_func_for_add_image` 注册时即触发，
+位于构造函数内、Preferences 自身初始化之前；444 的主队列延迟正是漏采原因。三个 ObjC
+安装点各有防重复标志。新增两个只观察、不改结果与状态的记录点：`-[BluetoothManager
+_attach]` 的进入与返回值（校验类、selector、BOOL 返回类型与所属镜像后才替换），以及
+第八个 native hook `MGGetBoolAnswer`（libMobileGestalt 0x19c55699c，逐指令校验），
+只记录键为 `bluetooth` 时的答案，其余键静默转发。下一轮判别规则：若 `_attach` 进入、
+attach hook 未触发且 MG 行为 0，即坐实门控在 MG；若 MG 为 1 而 attach 仍失败，
+再看 attach/setup 的逐项 result。
+
 ## 内核实现
 
 - `x9_conn_power.c`：Wi-Fi 与 BT 共用的 connv3 lease / power-done / release；30ms → PMIC_EN →20ms →
@@ -269,6 +293,17 @@ payload 上限251按原模块声明 maxlen255/四字节wire头的安全预算设
 - 下一离线步骤是从既有原件/捕获追上述 XPC selector、序列化和 publication 字段，
   先证明首个消费者合同，再决定是否需要 X9 PCM endpoint；不得伪造 route state、
   PCM callback 或 audio_verified。
+- 2026-11-27 静态续查：stock `HFPAudioDevice` 的实现就在未修改的 bluetoothd 本体内
+  （日志串 `Creating HFPAudioDevice for device ...`、`HFPAudioDevice readHandler called
+  on data of size ...`）；它面向 CoreAudio 的发布通道是 XPC 服务
+  `com.apple.BTAudioHALPlugin.xpc`（bluetoothd 内字符串），对端为原厂 HAL 插件。
+  另见端点串 `com.apple.bluetooth.AudioPipe`，语义未解码。X9 根 payload 不删除
+  原厂 HAL 目录，只并置 `X9Audio.driver`。因此缺的不是发布合同的实现（原厂两侧
+  代码都在盘上），而是三项证据：原厂 BTAudio HAL 插件在 X9 配置下是否被 coreaudiod
+  加载并连上该服务、HFPAudioDevice 是否在 X9 上实例化、其下的 HFP 会话/ACL/SCO
+  数据链是否走通（至今零 ACL 连接验收）。该 XPC 的 selector/字典序列化未在本轮
+  逐项钉死，故不写 X9 侧 PCM consumer，fail-closed 边界不变；下一取证点是上机后
+  观察该 Mach 服务是否被激活，而不是先写端点代码。
 
 `python3 -I x9/tools/bluetooth_vendor.py --required` 是纯标准库的原件移植构建入口，生成gitignored
 `x9/kernel/generated/x9_bt_vendor.inc`。`build.py all`也接此生成器；显式`x9_bt_init=1`时要求完整原件，
@@ -334,6 +369,16 @@ SSPM索引/提取仅验证原容器，不把静态分段匹配当成当前LK移�
 单独 kernel 更新不能更换已安装的 H4 dylib；root 安装须另行授权及
 确认确切 predecessor 与 preflight。未声称扫描、配对或设备修复。
 
+2026-11-27 已按“限定首个调用点”实现局部 guard（`X9H4Transport.c`，随 H4 dylib 更新；
+未上机）：逐指令复核确认 thunk 0x1000e6aac 只查当前表（全局 0x100844850 所指）的类型字
+便尾跳 +0x60；H4 表 0x100844228 类型为 1、+0x18/+0x20 均非空（0x1000685a4/0x1000685c0）、
+唯 +0x60 为空。teardown 函数 0x1000f3b44 只有一个直接调用者（0x1000895d0），其后续步
+调用 +0x20 thunk 是安全的。guard 只改写该函数内 0x1000f3b4c 的一条 BL，目标为一个
+naked 包装：复刻 thunk 的寄存器合同（仅动 x8/x9、不碰 x30），表为空、类型 0 或 +0x60
+为空时直接返回，非空时尾跳未修改的 thunk。thunk 的第二个调用者 0x1003ca25c 与表本身
+均不触碰（不填槽）。补丁前校验 teardown/thunk 全部相关指令，BL 距离超界则整桥不装、
+不改任何表。主机测试 `test_h4_teardown_guard.py` 钉住合同字、原 BL 编码与范围边界。
+
 单文件 Settings 诊断 header 使用 `X9_BT_ROOT_SETTINGS_ONLY`：安装和回滚前要求唯一诊断目标且其 `.x9-bt-temp` 路径不存在；已有文件、符号链接或目录均拒绝，不能自动清理。写入以 `O_EXCL` 创建临时文件；通用 root header 不改变。中断后遗留临时文件须另行核实，不能将主机测试当作设备状态或安装验收。
 
 #### Settings 单文件安装预检
@@ -346,6 +391,6 @@ python3 -I x9/bluetooth/preflight_settings_diag.py --mode install \
   --root-manifest "$x9_manifest" --android-serial "$x9_adb_serial"
 ```
 
-实盘入口先复核 userdata 路径、pinned extent 和 HFSX UUID，再检查干净 journal、目标和临时路径、目录及 Apple 原件。原始读取总预算为 32 MiB，包含元数据检查使用的 64 KiB。实盘通过时 JSON 包含 `device_probed: true` 与 `live_hfsx.status`。安装候选使用 `x9_bt_root=1 x9_bt_settings_diag=1`，运行时以 `X9 BT ROOT` 安装结果及打开设置后出现的 `seven native hooks installed` 日志验收。
+实盘入口先复核 userdata 路径、pinned extent 和 HFSX UUID，再检查干净 journal、目标和临时路径、目录及 Apple 原件。原始读取总预算为 32 MiB，包含元数据检查使用的 64 KiB。实盘通过时 JSON 包含 `device_probed: true` 与 `live_hfsx.status`。安装候选使用 `x9_bt_root=1 x9_bt_settings_diag=1`，运行时以 `X9 BT ROOT` 安装结果及打开设置后出现的 `eight native hooks installed` 日志验收。
 
 替换已安装诊断时，`settings_header.py --replacement-dylib` 接受新签名 dylib，`--payload` 指向实际安装过的旧包。生成的 header 只允许一个旧版身份。PID1 在原子替换前重新验证旧文件的长度、SHA-256、模式和属主。
