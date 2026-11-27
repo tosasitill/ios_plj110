@@ -333,11 +333,13 @@ exports:
 
     def build_lz4(self):
         src = extract('lz4', self.work)
-        # Procursus lz4-setup: no literal 'ln -s' in Makefile.inc.
-        mi = src / 'Makefile.inc'
-        text = mi.read_text()
-        if 'ln -s' in text:
-            mi.write_text(text.replace('ln -s', '$(LN_S)'))
+        # Procursus lz4-setup rewrites literal 'ln -s' in Makefile.inc
+        # to '$(LN_S)' because their make environment defines LN_S.
+        # Ours does not, and the only 'ln -s' in the 1.9.4 tarball is
+        # the definition `LN_SF = ln -sf` itself: the rewrite produced
+        # `LN_SF = $(LN_S)f` = `f`, so make tried to execute a program
+        # named `f` at the versioned-links step (install Error 1).
+        # Upstream's literal works as-is on the build host; keep it.
         cc = self.env['CC']
         self.run(['make', '-j8', 'install', 'TARGET_OS=Darwin',
                   f'CC={cc}', f'CFLAGS={self.env["CFLAGS"]}',
