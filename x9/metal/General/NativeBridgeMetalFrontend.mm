@@ -243,6 +243,9 @@ static void waitForResource(id resource);
 @property(nonatomic) NSUInteger heapOffset;
 @end
 #include "X9TileProbe.inc"
+// Frame metrics (M4 step a): windowed completion rate, stutter gaps and
+// commit-ring retention for the telemetry table. See X9MetalFrameMetrics.inc.
+#include "X9MetalFrameMetrics.inc"
 // Buffer Manager metadata. Registration and reference calls are advisory: a
 // metadata miss never refuses a Metal resource, and the kernel backend still
 // owns allocation, mapping and cache maintenance.
@@ -1791,6 +1794,7 @@ static void scheduled(void *context) {[(__bridge NBCommandBuffer *)context didSc
 // The runtime's completion: the command buffer's own reference, taken at commit, is given back here.
 static void completed(void *context) {
  gCompleted++;
+ x9frame::noteCompletion(nowUs());
  if(x9TelemetryEnabled() && gCompleted.load()%kTelemetryCommits==0)
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{emitTelemetry();});
  NBCommandBuffer *commandBuffer=(__bridge_transfer NBCommandBuffer *)context;
@@ -2617,6 +2621,7 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
   (unsigned long long)timedPercentile(gTimeQueue,95),ms(gTimeQueue.slowest.load()));
  uint64_t inflight=0;@synchronized(gInFlight){inflight=gInFlight.count;}
  row("Q inflight max=%llu now=%llu",(unsigned long long)gInFlightMax.load(),(unsigned long long)inflight);
+ {char fr[128];if(x9_frame_metrics_snapshot(fr,sizeof fr,nowUs(),(uint64_t)gCommits.load()))row("%s",fr);}
  row("J scheduled wait n=%llu total=%llums max=%llums",(unsigned long long)gTimeWaitScheduled.count.load(),ms(gTimeWaitScheduled.total.load()),ms(gTimeWaitScheduled.slowest.load()));
  row("J completed wait n=%llu total=%llums max=%llums",(unsigned long long)gTimeWaitCompleted.count.load(),ms(gTimeWaitCompleted.total.load()),ms(gTimeWaitCompleted.slowest.load()));
  row("J resource wait n=%llu total=%llums max=%llums",(unsigned long long)gTimeResourceWait.count.load(),ms(gTimeResourceWait.total.load()),ms(gTimeResourceWait.slowest.load()));
