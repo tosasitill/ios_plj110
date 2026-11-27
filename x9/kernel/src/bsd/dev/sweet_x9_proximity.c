@@ -1,10 +1,16 @@
 /* OPPO sensor/2.0: front PROXIMITY=8, share_mem_info=40, data=36.
  * transceiver.c preserves value[0..2], unlike LIGHT's calibrated lux.
- * Current host mapping assumes oneshot 0=near, 1=far; this is not a verified
- * PLJ110 wire contract. Original PS6 preserves its byte through float->wire
- * conversion, and a forced-zero branch is labelled "keep far status".
- * Resolve raw near/far with device DATA before changing this mapping; keep
- * steps separate and do not infer distance from the analog sample alone.
+ * Wire polarity RESOLVED 2026-11-27 (was an unverified host assumption of
+ * oneshot 0=near): the SCP producer's far-keeping branch (log string "keep
+ * far status in high ir or strong lux") is the branch that writes byte 0,
+ * and the byte->float->wire serializer applies no inversion, so wire
+ * oneshot 0=far, 1=near. Device DATA corroborates: every recorded session
+ * has oneshot==0, including samples whose raw steps count is ~11 (nothing
+ * reflecting = physically far), while the old mapping published a permanent
+ * near and inverted every real cover event. Boot arg x9_prox_pol=0 restores
+ * the legacy mapping for on-device A/B; the HID dispatch log always prints
+ * the raw oneshot beside the interpreted near. Keep steps separate and do
+ * not infer distance from the analog sample alone.
  * Do not apply the public 24081 TCS3760 register recipe: PLJ110 live DT
  * names tcs3720 and uses different calibration/power configuration.
  * No AP I2C, MMIO or SCP reset here: one shared SCP transport owns power. */
@@ -14,6 +20,7 @@
 #include <kern/clock.h>
 #include <kern/locks.h>
 #include <libkern/libkern.h>
+#include <pexpert/pexpert.h>
 #include "../../iokit/Kernel/arm/X9Proximity.h"
 static LCK_GRP_DECLARE(prox_group, "x9_proximity");
 static LCK_MTX_DECLARE(prox_lock, &prox_group);
@@ -21,6 +28,7 @@ static struct x9_prox_sample latest;
 static struct x9_prox_status state;
 static struct x9_prox_transport transport;
 static int active, valid, native_error;
+static int prox_pol_legacy; /* 1 only via x9_prox_pol=0 (legacy 0=near A/B) */
 static uint64_t last_scp_time, request_time;
 static uint32_t pending_enabled, pending_interval;
 #define PROX_CONTROL_TIMEOUT_NS 1000000000ULL
@@ -60,7 +68,8 @@ static int receive_locked(const void *record, unsigned length, int diagnostic)
  latest.sequence++; latest.host_time=mach_absolute_time();
  latest.scp_time_ns=diagnostic?0:t; latest.oneshot=oneshot;
  latest.steps=(int32_t)prox_le32(p+16); latest.auxiliary=(int32_t)prox_le32(p+20);
- latest.near=oneshot==0; latest.diagnostic=diagnostic;
+ latest.near=prox_pol_legacy?oneshot==0:oneshot!=0;
+ latest.diagnostic=diagnostic;
  last_scp_time=t; valid=1; state.accepted++;
  return 0;
 }
@@ -71,6 +80,11 @@ int x9_prox_init(int mode)
  int error=active || state.pending?EBUSY:0;
  if (!error) {
   active=1; valid=0; last_scp_time=0;
+  int pol=1;
+  prox_pol_legacy=PE_parse_boot_argn("x9_prox_pol",&pol,sizeof(pol))&&pol==0;
+  printf("X9 PROX: wire polarity oneshot %s (x9_prox_pol=%d)\n",
+      prox_pol_legacy?"0=near (legacy A/B)":"0=far (firmware semantics)",
+      prox_pol_legacy?0:1);
   /* Keep uncertain native control across software restarts. */
   int prior=mode==3?native_error:0; bzero(&state,sizeof(state)); state.error=prior;
   state.mode=mode; state.interval_us=200000;
@@ -232,8 +246,9 @@ int x9_prox_receive_mtk(const void *record, unsigned length)
  lck_mtx_unlock(&prox_lock); return error;
 }
 /* Explicit test mode only, root-write sysctl. 1=near, 0=far, -1=invalid.
- * The synthetic record follows the current host mapping above, not a
- * physical wire-polarity proof; diagnostic output cannot validate it. */
+ * The synthetic record's wire byte follows the active polarity mapping
+ * (x9_prox_pol), so diagnostic output exercises the same decode path as
+ * physical DATA; it is not itself a wire-polarity proof. */
 static int sysctl_prox_test SYSCTL_HANDLER_ARGS
 {
 #pragma unused(arg1,arg2)
@@ -247,7 +262,8 @@ static int sysctl_prox_test SYSCTL_HANDLER_ARGS
  else if (value<0 || value>1) error=ERANGE;
  else if (!state.enabled) error=EAGAIN;
  else {
-  uint8_t record[X9_PROX_DATA_BYTES]={8,0,3,0,1}; record[12]=!value;
+  uint8_t record[X9_PROX_DATA_BYTES]={8,0,3,0,1};
+  record[12]=prox_pol_legacy?(uint8_t)!value:(uint8_t)value;
   error=receive_locked(record,sizeof(record),1);
  }
  lck_mtx_unlock(&prox_lock); return error;

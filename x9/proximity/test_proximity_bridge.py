@@ -54,6 +54,17 @@ static inline void lck_mtx_lock(lck_mtx_t *lock) { (void)lock; }
 static inline void lck_mtx_unlock(lck_mtx_t *lock) { (void)lock; }
 ''',
     'libkern/libkern.h': '#include <string.h>\n',
+    'pexpert/pexpert.h': r'''
+#include <stdint.h>
+#include <string.h>
+extern int test_prox_pol; /* -1: boot arg absent */
+static inline int PE_parse_boot_argn(const char *name, void *arg, unsigned size) {
+    if (strcmp(name, "x9_prox_pol") || test_prox_pol < 0) return 0;
+    if (size != sizeof(int)) return 0;
+    memcpy(arg, &test_prox_pol, sizeof(int));
+    return 1;
+}
+''',
 }
 
 HARNESS = r'''
@@ -62,6 +73,7 @@ HARNESS = r'''
 #include <string.h>
 #include <stdint.h>
 uint64_t test_host_time = 1000;
+int test_prox_pol = -1;
 #include "sweet_x9_proximity.c"
 
 static int req_calls, req_enabled, req_interval, req_error;
@@ -105,12 +117,12 @@ static int enable_ack_data(void) {
     CHECK(enable_ack() == 0);
     CHECK(x9_prox_native_data(r, sizeof(r)) == 0);
     struct x9_prox_sample s; CHECK(x9_prox_copy_sample(&s) == 0);
-    CHECK(s.near == 1 && s.oneshot == 0 && s.diagnostic == 0);
+    CHECK(s.near == 0 && s.oneshot == 0 && s.diagnostic == 0);
     puts("PASS enable_ack_data"); return 0;
 }
 static int on_change_no_expiry(void) {
     CHECK(native_ready() == 0); CHECK(enable_ack() == 0);
-    uint8_t r[X9_PROX_DATA_BYTES]; data(r, 100, 0);
+    uint8_t r[X9_PROX_DATA_BYTES]; data(r, 100, 1);
     CHECK(x9_prox_native_data(r, sizeof(r)) == 0);
     test_host_time += 60ULL * 1000000000ULL;
     struct x9_prox_sample s; CHECK(x9_prox_copy_sample(&s) == 0);
@@ -126,7 +138,7 @@ static int cadence_pending_enable(void) {
     data(r, 200, 1);
     CHECK(x9_prox_native_data(r, sizeof(r)) == 0);
     struct x9_prox_sample s; CHECK(x9_prox_copy_sample(&s) == 0);
-    CHECK(s.near == 0 && s.oneshot == 1);
+    CHECK(s.near == 1 && s.oneshot == 1);
     x9_prox_native_control(1, 0);
     struct x9_prox_status st; x9_prox_copy_status(&st);
     CHECK(st.enabled == 1 && st.pending == 0 && st.interval_us == 400000);
@@ -182,8 +194,9 @@ static int diagnostic_polarity(void) {
     CHECK(x9_prox_copy_sample(&s) == ENOENT);
     uint8_t r[X9_PROX_DATA_BYTES]; data(r, 100, 0);
     CHECK(x9_prox_receive_mtk(r, sizeof(r)) == EBUSY);
-    /* The diagnostic sysctl follows the existing unverified host mapping:
-     * value 1 synthesizes oneshot 0 (near), value 0 synthesizes oneshot 1. */
+    /* The diagnostic sysctl synthesizes the wire byte under the active
+     * (resolved) polarity: value 1 (near) -> oneshot 1, value 0 -> oneshot 0,
+     * and the decoder must interpret its own synthesis back to the request. */
     int value = 1;
     struct sysctl_req req = { NULL, 0, &value, sizeof(value) };
     CHECK(sysctl_prox_test(NULL, NULL, 0, &req) == 0);
@@ -194,6 +207,20 @@ static int diagnostic_polarity(void) {
     CHECK(x9_prox_copy_sample(&s) == 0);
     CHECK(s.near == 0 && s.diagnostic == 1);
     puts("PASS diagnostic_polarity"); return 0;
+}
+
+static int legacy_polarity_ab(void) {
+    test_prox_pol = 0; /* x9_prox_pol=0 restores the legacy 0=near mapping */
+    CHECK(native_ready() == 0); CHECK(enable_ack() == 0);
+    uint8_t r[X9_PROX_DATA_BYTES]; data(r, 100, 0);
+    CHECK(x9_prox_native_data(r, sizeof(r)) == 0);
+    struct x9_prox_sample s; CHECK(x9_prox_copy_sample(&s) == 0);
+    CHECK(s.near == 1 && s.oneshot == 0);
+    data(r, 200, 1);
+    CHECK(x9_prox_native_data(r, sizeof(r)) == 0);
+    CHECK(x9_prox_copy_sample(&s) == 0);
+    CHECK(s.near == 0 && s.oneshot == 1);
+    puts("PASS legacy_polarity_ab"); return 0;
 }
 
 int main(int argc, char **argv) {
@@ -207,6 +234,7 @@ int main(int argc, char **argv) {
         {"timeout_fail_closed", timeout_fail_closed},
         {"external_mode_gate", external_mode_gate},
         {"diagnostic_polarity", diagnostic_polarity},
+        {"legacy_polarity_ab", legacy_polarity_ab},
     };
     for (unsigned i = 0; i < sizeof(cases)/sizeof(cases[0]); i++)
         if (!strcmp(argv[1], cases[i].name)) return cases[i].fn();
@@ -267,8 +295,11 @@ class ProximityBridgeTests(unittest.TestCase):
     def test_external_and_native_modes_do_not_cross_admit(self):
         self.run_case('external_mode_gate')
 
-    def test_diagnostic_mapping_is_explicit_and_unverified(self):
+    def test_diagnostic_mapping_follows_resolved_polarity(self):
         self.run_case('diagnostic_polarity')
+
+    def test_legacy_polarity_boot_arg_restores_old_mapping(self):
+        self.run_case('legacy_polarity_ab')
 
 
 if __name__ == '__main__':
