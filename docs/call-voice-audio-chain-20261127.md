@@ -212,3 +212,58 @@ AD50 的提交等 voice IPI transport 与 scene 路由资格（见 L2/L6）。
   广告 UID 或复用媒体 Speaker 设备被资格规则构造性拒绝（主机测试
   含 Speaker 形状被拒一项）。将来 PCM supplier 出现时在 x9/audio 的
   HAL 插件层注册，内核侧经此合同校验。
+
+## 第二轮：L4 再取证——结案（2026-11-27 晚）
+
+本轮对固定 MD 固件（`.local/x9/modem/parts/modem_a.img`）做了比
+第一轮两个窄区间宽得多的取证，结论：**"3D00 帧协议"作为 AP 可
+实现的 producer/consumer 不存在，此路结案。**
+
+证据链：
+
+1. **ABI 头先行定性**：AP 可见的 `audio_speech_msg_id.h`
+   （oppo-modules 参考源 `drivers/misc/mediatek/audio_ipi/include/`）
+   定义 M2D 基址 0x3D00、D2M 基址 0xD300，而整个 M2D 空间**只有
+   一条消息** `IPI_MSG_M2D_CALL_DATA_READY = 0x3D00`。3D00 不是
+   帧族，是 MD↔DSP IPI 域内的一条握手消息号。
+2. **全量符号表**：用树内 dbginfo 恢复法（`x9/tools/md_call_evidence.py`
+   的解析）解出 md1_dbginfo 的全部 146,852 个符号。全固件与 AUIF
+   相关的符号**只有一个**：`SAL_ExtAUIF_SetMemAddr` @9063b446；
+   语音簇（9063xxxx–9080xxxx）内没有任何 M2D/IPI 发送符号，其发送
+   路径是 `spcIO_sendMsgViaCCCI`（即 2f20 的 SPC/CCCI 流）与 codec
+   状态通知。字符串扫描同样无 CALL_DATA_READY/M2D/D2M 协议串
+   （`m2d` 命中均为二进制噪声与无关 token）。
+3. **AUIF 的真实语义**：固件内日志串显示 `SAL_ExtAUIF_SetMemAddr`
+   按 MemType 编程内存窗口（base/ENH/OD/BLE 各一组 StartAddr/Len）——
+   它是**共享内存窗口编程接口**，不是帧通道；逐帧 PCM 不以 IPI
+   消息形式流动。窗口的输入正是 CCCI runtime feature 数据
+   （`SP_SetUSIP_MPU_Info` 从 feature 记录取 {addr,size} 调它），
+   而本桥已经经 feature 31 把 id 24 区域通告给 MD——MD 侧编程
+   AUIF 所需的数据已经在既有路径上流动。
+4. **仍未闭合但不再阻塞**：0x3D00 这条握手在 MD 内部的确切发送点
+   与同版 DSP 消费体，需要 nanoMIPS 能力的反汇编会话（Mac 上有
+   IDA 9.1）或原厂通话时的 MD 内部日志；两者都只影响 MD/DSP 内部
+   叙述，不产生任何 AP 侧实现面。后续投入转向 L5（EMI owner 已
+   落地）+ L6（Hostless 合同）路线。
+
+## 第二轮：L2 材料清单（2026-11-27 晚，仅清单不写代码）
+
+L2（AP↔DSP IPI DMA/REG_DMA）的布局已经静态闭合（header 128B、
+AP_TO_DSP entry +128、DSP_TO_AP entry +512、每 entry 384B），缺的
+纯粹是材料：**与本机固定 MD/ROM 输入同版构建的 `audio_dsp` 固件
+本体**。本机 OTA 分区表里有 audio_dsp 之名，但 .local 的分区备份、
+modem 原件与已捕获 vendor 文件里都没有这份 payload；树内现有的
+只是 task 名表与消息布局等参考输入，不是固件。
+
+- **需要哪一版**：与 `modem_a.img` 及 2026-11-15 原厂捕获同一
+  构建列车的 audio_dsp 分区 payload（同版 DSP 固件），版本错位
+  的同名固件不可用——REG_DMA 布局与 task 表都按同版解释。
+- **从哪提取**：本机（PLJ110）原厂全量包 / OTA 包的 audio_dsp
+  分区镜像；提取后先做哈希与分区表对照存档，再进探针构建。
+- **提取后第一步验证**（P0 式 residency probe，只读不消费）：
+  ① 探针构建加载该 payload 并确认驻留；② 读 runtime
+  task-info[0] 的 8 字节（scene 0），按参考平台规则由
+  core_total 判定物理 core（>1 → HiFi3_B），**不静态猜 core**；
+  ③ 核对 REG_DMA header 与 +128/+512 两条 entry 的落点与已闭合
+  布局一致。三项全过之后，才谈 AD20/scene 注册等消费者代码；
+  在此之前 L2 不写任何消费者实现。
