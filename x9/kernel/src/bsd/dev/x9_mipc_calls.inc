@@ -98,6 +98,22 @@ int x9_md_mipc_call_incoming_snapshot(struct x9cw_inbound_state *out){
 }
 static int x9mc_id(unsigned id){return id==0x8901||id==0x4901||id==0x4902||id==0x4904;}
 static void x9mc_rx(const uint8_t *p,unsigned n,unsigned id,unsigned tx){
+ /* 4904 is an optional SIP diagnostic, not a call ownership event. It can
+  * contain strings: inspect only the four fixed scalar fields and never
+  * enqueue or print the remaining payload. Malformed events are dropped. */
+ if(id==0x4904){
+  uint32_t fields[4];
+  if(sweet_x9_arg("x9_call_sip_diag",0)==1&&x9cw_frame(p,n,id)&&
+     (p[8]==1||(p[8]==2&&x9_md_sim_count()==2))&&
+     x9cw_word(p,n,0x101,&fields[0])&&x9cw_word(p,n,0x102,&fields[1])&&
+     x9cw_word(p,n,0x103,&fields[2])&&x9cw_word(p,n,0x104,&fields[3])){
+   static unsigned shown;if(shown<64){shown++;
+    printf("X9 CALL: SIP4904 SIM%u fields101/102/103/104=%u/%u/%u/%u (unattributed)\n",
+           p[8]==2?2:1,fields[0],fields[1],fields[2],fields[3]);
+   }
+  }
+  return;
+ }
  if(!x9mc_id(id)||x9_mc_poisoned)return;
  if(!x9cw_frame(p,n,id)){
   printf("X9 CALL: rx frame invalid id=0x%04x tx=%u bytes=%u; poisoned\n",id,tx,n);

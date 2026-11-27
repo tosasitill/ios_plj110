@@ -26,6 +26,25 @@ class SmsPduClassTests(unittest.TestCase):
 #include "x9_sms_storage.h"
 
 int main(void) {
+    uint8_t submit[] = {2, 0x91, 0x21, 0x41, 0x5a};
+    assert(!x9ms_submit_report(submit, sizeof(submit), 0) && submit[3] == 0x41);
+    assert(x9ms_submit_report(submit, sizeof(submit), 1) && submit[3] == 0x61);
+    assert(x9ms_submit_report(submit, sizeof(submit), 0) && submit[4] == 0x5a);
+    assert(submit[0] == 2 && submit[1] == 0x91 && submit[2] == 0x21);
+    assert(!x9ms_submit_report(submit, sizeof(submit) - 1, 1));
+    uint8_t empty_smsc[] = {0, 1, 0x33};
+    assert(x9ms_submit_report(empty_smsc, sizeof(empty_smsc), 1) && empty_smsc[1] == 0x21);
+    empty_smsc[1] = 2;
+    assert(!x9ms_submit_report(empty_smsc, sizeof(empty_smsc), 1) && empty_smsc[1] == 2);
+    assert(!x9ms_submit_report(NULL, 0, 1));
+    assert(x9ms_submit_retry(submit, sizeof(submit), 0xff));
+    assert(submit[3] == 0x65 && submit[4] == 0xff);
+    assert(!x9ms_submit_retry(submit, sizeof(submit), 0x100));
+    assert(!x9ms_submit_retry(submit, sizeof(submit) - 1, 0));
+    assert(!x9ms_submit_retry(empty_smsc, sizeof(empty_smsc), 0));
+    assert(submit[0] == 2 && submit[1] == 0x91 && submit[2] == 0x21);
+    assert(submit[3] == 0x65 && submit[4] == 0xff);
+
     uint8_t pdu[24] = {0};
     pdu[1] = 0x04; /* SMS-DELIVER */
     pdu[2] = 2;    /* two address semi-octets */

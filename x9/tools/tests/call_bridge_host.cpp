@@ -26,7 +26,10 @@ static void lck_mtx_lock(int *){
 }
 static void lck_mtx_unlock(int *){assert(lock_depth);lock_depth=0;}
 static int x9_at_enabled(){return 1;}
-static int sweet_x9_arg(const char *,int){return 1;}
+static bool sip_diagnostic_enabled;
+static int sweet_x9_arg(const char *name,int){
+ return strcmp(name,"x9_call_sip_diag")?1:sip_diagnostic_enabled;
+}
 static uint64_t fake_ms;
 static uint64_t mach_absolute_time(){return fake_ms*1000000;}
 static void absolutetime_to_nanoseconds(uint64_t t,uint64_t *ns){*ns=t;}
@@ -562,6 +565,27 @@ static void finish_reason_diagnostic(){
  x9mi_rx(cnf,sizeof(cnf));x9c_finish_reason_poll(frame);
  assert(!x9_mi_slots[0].state&&x9_mi_next==token);
  x9c_finish_reason_poll(frame);x9mi_tick();assert(writes==1&&x9_mi_next==token);
+}
+static void finish_reason_timeout(){
+ uint8_t frame[X9_MIPC_FRAME_MAX];dial_owner_fixture();
+ x9c_observed=true;x9c_outbound={};x9c_outbound.epoch=1;
+ x9c_outbound.ended=1;x9c_outbound.has_cause=1;x9c_outbound.cause=2172;
+ x9c_finish_reason_poll(frame);
+ assert(x9_mi_next==1&&x9_mi_slots[0].state==1);
+ fake_ms+=10000;x9c_finish_reason_poll(frame);x9mi_tick();
+ assert(!writes&&!x9_mi_slots[0].state&&x9_mi_next==1);
+
+ x9c_outbound.epoch=2;x9c_finish_reason_poll(frame);x9mi_tick();
+ assert(writes==1&&x9_mi_slots[0].state==2&&x9_mi_next==2);
+ fake_ms+=10000;x9c_finish_reason_poll(frame);
+ assert(!x9_mi_slots[0].state&&x9_mi_next==2);
+
+ x9c_outbound.epoch=3;x9c_finish_reason_poll(frame);x9mi_tick();
+ assert(writes==2&&x9_mi_slots[0].token==3&&x9_mi_slots[0].state==2);
+ uint8_t cnf[32];x9cw_header(cnf,sizeof(cnf),0x910,2,2);
+ x9cw_scalar(cnf+16,0,0,4);x9cw_scalar(cnf+24,0x100,2172,4);
+ x9mi_rx(cnf,sizeof(cnf));x9c_finish_reason_poll(frame);
+ assert(x9_mi_slots[0].token==3&&x9_mi_slots[0].state==2);
 }
 static void late_cnf(){
  uint8_t p[24],out[24];x9cw_header(p,16,0x907,2,0);
@@ -1321,6 +1345,42 @@ static void register_transition(){
  uint32_t r;assert(x9cw_call_register_cnf(p,32,0x307,7,&r)&&r==21);
  p[20]=0;assert(!x9cw_call_register_cnf(p,32,0x307,7,&r)); // failure TLV is not success
 }
+static void dial_ims_snapshot(){
+ uint8_t frame[X9_MIPC_FRAME_MAX];dial_owner_fixture();
+ x9c_dial_ims_submit(99);assert(!x9_mi_next);
+ sip_diagnostic_enabled=true;
+ x9c_dial_ims_submit(99);x9c_dial_ims_submit(100);x9mi_tick();
+ assert(writes==1&&last_length==24&&last_frame[8]==2&&x9cw_u16(last_frame+10)==0xa04);
+ assert(x9c_dial_ims_diag.dial_token==99&&x9c_dial_ims_diag.token==1);
+ uint8_t cnf[40];x9cw_header(cnf,sizeof(cnf),0xa05,2,1);
+ x9cw_scalar(cnf+16,0,0,4);x9cw_scalar(cnf+24,0x100,0,1);x9cw_scalar(cnf+32,0x101,2,1);
+ x9mi_rx(cnf,sizeof(cnf));x9c_dial_ims_poll(frame);
+ assert(!x9c_dial_ims_diag.token&&!x9_mi_slots[0].state&&!x9c_dial_job.used);
+ x9c_dial_ims_submit(101);x9mi_tick();fake_ms+=10000;x9c_dial_ims_poll(frame);
+ assert(writes==2&&!x9c_dial_ims_diag.token&&!x9_mi_slots[0].state&&!x9c_dial_job.used);
+}
+static void sip_diagnostic_isolation(){
+ uint8_t frame[X9_MIPC_FRAME_MAX];dial_owner_fixture();
+ x9c_init[1].stage=X9_CI_DONE;
+ x9c_sip_diag_poll(frame);assert(!x9_mi_next);
+ sip_diagnostic_enabled=true;
+ x9c_sip_diag_poll(frame);x9mi_tick();
+ assert(writes==1&&x9cw_u16(last_frame+10)==0x307&&last_frame[8]==2&&x9cw_u16(last_frame+20)==0x4904);
+ uint8_t cnf[24];x9cw_header(cnf,sizeof(cnf),0x308,2,x9cw_u16(last_frame+12));
+ x9cw_scalar(cnf+16,0,0,4);
+ x9mi_rx(cnf,sizeof(cnf));x9c_sip_diag_poll(frame);x9c_sip_diag_poll(frame);
+ assert(!x9_mi_slots[0].state&&x9_mi_next==1);
+ uint8_t p[56];x9cw_header(p,sizeof(p),0x4904,2,0xffff);
+ for(unsigned i=0;i<5;i++)x9cw_scalar(p+16+i*8,0x100+i,i==4?503:i,4);
+ for(unsigned i=0;i<32;i++)x9mc_rx(p,sizeof(p),0x4904,0xffff);
+ assert(!x9_mc_poisoned&&!x9_mc_next&&!x9_mc_outbound.blocked);
+ p[18]=0xff;x9mc_rx(p,sizeof(p),0x4904,0xffff);
+ assert(!x9_mc_poisoned&&!x9_mc_next&&!x9_mc_outbound.blocked);
+ uint8_t reg[24];assert(x9cw_call_register(reg,sizeof(reg),0x4904,1,2));
+ uint64_t token=x9_md_mipc_submit(reg,sizeof(reg));assert(token);
+ x9_md_mipc_sip_registration_abandon(token);
+ uint32_t n;assert(x9_md_mipc_take(token,p,sizeof(p),&n)<0);
+}
 static void register_begin(unsigned slot=0){
  x9c_cmd_init.held=false;x9c_init[1].held=false;x9w_control_ready=true;uint8_t q[]={0,90,0,3,0,4,0,0x13,1,0,0};
  assert(x9c_request(CBQ_PORT_BASE+slot,X9BB_PORT_BASE+9,q,sizeof(q)));
@@ -1669,7 +1729,7 @@ int main(int argc,char **argv){
   {"codec_golden",codec_golden},{"codec_invalid",codec_invalid},{"incoming_routes",incoming_routes},{"action_codec",action_codec},
   {"dial_golden",dial_golden},{"dial_invalid",dial_invalid},{"dial_whitelist",dial_whitelist},
   {"dial_roundtrip",dial_roundtrip},{"dial_tx_failure",dial_tx_failure},{"dial_cnf_invalid",dial_cnf_invalid},
-  {"progress_framing",progress_framing},{"outbound_states",outbound_states},{"finish_reason_diagnostic",finish_reason_diagnostic},{"current_arrays",current_arrays},
+  {"progress_framing",progress_framing},{"outbound_states",outbound_states},{"finish_reason_diagnostic",finish_reason_diagnostic},{"current_arrays",current_arrays},{"sip_diagnostic_isolation",sip_diagnostic_isolation},{"dial_ims_snapshot",dial_ims_snapshot},
   {"status_fence",status_fence},{"dial_join_order",dial_join_order},{"ios_join",ios_join},
   {"ios_timeout",ios_timeout},{"ios_deleted",ios_deleted},{"dial_presend_fence",dial_presend_fence},{"dial_presend_release",dial_presend_release},
   {"dial_guard_admission_release",dial_guard_admission_release},{"dial_guard_admission_timeout",dial_guard_admission_timeout},
@@ -1719,7 +1779,7 @@ int main(int argc,char **argv){
  {"calllist_generation_fence",calllist_generation_fence},
   {"failure_retained",failure_retained},{"duplicate_pending",duplicate_pending},{"changed_duplicate",changed_duplicate},
   {"duplicate_replied",duplicate_replied},{"overflow_isolated",overflow_isolated},{"bounded_tombstones",bounded_tombstones},
-  {"fifo",fifo},{"fragmented",fragmented},{"late_cnf",late_cnf},{"sms_priority",sms_priority},{"staged_ios",staged_ios},
+  {"fifo",fifo},{"fragmented",fragmented},{"late_cnf",late_cnf},{"finish_reason_timeout",finish_reason_timeout},{"sms_priority",sms_priority},{"staged_ios",staged_ios},
   {"voice20_dispatch",voice20_dispatch}};
  for(auto c:cases)if(!strcmp(argv[1],c.name)){c.run();assert(!lock_depth);return 0;}
  return 2;

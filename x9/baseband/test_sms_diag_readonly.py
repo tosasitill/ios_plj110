@@ -22,15 +22,15 @@ class DiagnosticReadOnly(unittest.TestCase):
 #include <cassert>
 #include <cstdint>
 enum { X9M_LIST=5, X9M_READ, X9M_TAG, X9M_DIAG };
-struct x9m_job { unsigned op, sim; uint64_t token, store_order; bool hold; };
+struct x9m_job { unsigned op, sim; uint64_t token, store_order; bool hold; bool follow=false; };
 static x9m_job x9m_jobs[3];
 static bool x9m_storage(unsigned op){return op==X9M_LIST||op==X9M_READ||op==X9M_TAG;}
 ''' + source[storage_start:storage_end] + source[diagnostic_start:diagnostic_end] + r'''
 int main(){
  auto &diag=x9m_jobs[0], &list=x9m_jobs[1], &other_sim=x9m_jobs[2];
  diag={X9M_DIAG,0,0,0,false};
- list={X9M_LIST,0,0,1,false};
- other_sim={X9M_READ,1,0,2,false};
+ list={X9M_LIST,0,0,1,false,true};
+ other_sim={X9M_READ,1,0,2,false,true};
  assert(x9m_diag_storage_busy(0,&diag)&&!x9m_store_blocked(list));
  diag.token=3;
  assert(x9m_store_blocked(list)&&!x9m_store_blocked(other_sim));

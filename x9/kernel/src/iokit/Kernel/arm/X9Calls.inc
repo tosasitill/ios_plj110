@@ -442,6 +442,30 @@ static uint64_t x9c_register_submit(unsigned id,unsigned sim){
  uint8_t frame[24];unsigned n=x9cw_call_register(frame,sizeof(frame),id,sim,x9_md_sim_count());
  uint64_t token=n?x9_md_mipc_submit(frame,n):0;bzero(frame,sizeof(frame));return token;
 }
+/* Optional SIP observation is independent of call registration readiness.
+ * A missing CNF is abandoned once; no indefinite ownership or retry. */
+static void x9c_sip_diag_poll(uint8_t *frame){
+ static struct {uint64_t token,deadline;bool done;} s[2];
+ if(sweet_x9_arg("x9_call_sip_diag",0)!=1)return;
+ uint64_t now=x9q_ms();bool online=x9c_event_transport_ready();
+ for(unsigned sim=0;sim<x9_md_sim_count();sim++){
+  if(s[sim].token&&(!online||now>=s[sim].deadline)){
+   x9_md_mipc_sip_registration_abandon(s[sim].token);s[sim].token=0;s[sim].done=true;
+  }
+  if(s[sim].token){
+   uint32_t n=0;int rc=x9_md_mipc_take(s[sim].token,frame,X9_MIPC_FRAME_MAX,&n);
+   if(rc){uint32_t result=1;bool ok=rc==1&&x9q_ms()<s[sim].deadline&&n>=16&&
+     frame[8]==(1u<<sim)&&x9cw_call_register_cnf(frame,n,0x307,s[sim].token,&result)&&!result;
+    printf("X9 CALL: SIM%u optional SIP4904 registration %s\n",sim+1,ok?"confirmed":"unavailable");
+    s[sim].token=0;s[sim].done=true;bzero(frame,X9_MIPC_FRAME_MAX);
+   }
+  }
+  if(online&&!s[sim].done&&!s[sim].token&&x9c_init[sim].stage==X9_CI_DONE){
+   s[sim].token=x9c_register_submit(0x4904,sim);
+   if(s[sim].token)s[sim].deadline=now+10000;
+  }
+ }
+}
 /* Header-only 042f voice-registration query (libmipc addMipcReq, no addMipcVal);
  * the 0430 CNF is matched generically by id+1/txid and parsed host-side. */
 static uint64_t x9c_voice_rat_submit(unsigned sim){
@@ -973,6 +997,48 @@ static void x9c_error(struct x9c_dial_job &j,uint16_t err){
  if(!j.answered&&!x9c_live(j))x9c_response_release(j.reply);
  j.answered=true;bzero(j.req,sizeof(j.req));
 }
+static struct {uint64_t token,deadline,dial_token;unsigned count;} x9c_dial_ims_diag;
+static void x9c_dial_ims_submit(uint64_t dial_token){
+ auto &diag=x9c_dial_ims_diag;
+ if(!dial_token||diag.token||diag.count>=8||sweet_x9_arg("x9_call_sip_diag",0)!=1)return;
+ uint8_t request[24];
+ x9cw_header(request,sizeof(request),0xa04,2,0);
+ x9cw_scalar(request+16,0x100,0,1);
+ diag.token=x9_md_mipc_submit(request,sizeof(request));
+ if(!diag.token)return;
+ diag.deadline=x9q_ms()+10000;
+ diag.dial_token=dial_token;
+ diag.count++;
+}
+static void x9c_dial_ims_poll(uint8_t *frame){
+ auto &diag=x9c_dial_ims_diag;
+ if(!diag.token)return;
+ if(x9q_ms()>=diag.deadline||!x9_md_mipc_online()){
+  x9_md_mipc_ims_registration_abandon(diag.token);
+  printf("X9 CALL: SIM2 dial token %llu IMS query expired or offline\n",
+         (unsigned long long)diag.dial_token);
+  diag.token=0;
+  return;
+ }
+ uint32_t size=0;
+ const int ready=x9_md_mipc_take(diag.token,frame,X9_MIPC_FRAME_MAX,&size);
+ if(!ready)return;
+ if(ready==1){
+  uint32_t result=1;
+  const uint8_t *type,*state;
+  unsigned type_size,state_size;
+  if(x9q_ms()<diag.deadline&&x9cw_frame(frame,size,0xa05)&&frame[8]==2&&
+     x9cw_word(frame,size,0,&result)&&!result&&
+     x9cw_tlv(frame,size,0x100,&type,&type_size)&&type&&type_size==1&&!*type&&
+     x9cw_tlv(frame,size,0x101,&state,&state_size)&&state&&state_size==1&&*state<=4)
+   printf("X9 CALL: SIM2 dial token %llu IMS raw state %u\n",
+          (unsigned long long)diag.dial_token,(unsigned)*state);
+  else printf("X9 CALL: SIM2 dial token %llu IMS query unavailable\n",
+              (unsigned long long)diag.dial_token);
+  bzero(frame,size);
+ }
+ diag.token=0;
+}
 /* VOICE20 dispatch uses the measured SIM2 ordinary-IMS profile. The caller
  * must already be bound/registered on a live bridge, have no changing bind or
  * outstanding dial owner, and present an owned empty GET_STATUS baseline. */
@@ -1002,6 +1068,7 @@ static bool x9c_dial_submit(unsigned slot,const uint8_t *req,unsigned len,
  printf("X9 CALL: VOICE20 txn %u MD token %llu admitted sim %u\n",
         j.transaction,(unsigned long long)token,j.sim);
  if(!x9cw_dial_join_sent(&j.join,token)){j.held=true;x9c_error(j,X9Q_INTERNAL);}
+ else x9c_dial_ims_submit(token);
  return true;
 }
 static void x9c_del(unsigned slot){
@@ -1025,13 +1092,18 @@ static void x9c_finish_reason_poll(uint8_t *frame){
  static uint64_t token,deadline,sampled_epoch;
  static unsigned samples;
  const uint64_t now=x9q_ms();
+ if(token&&now>=deadline){
+  x9_md_mipc_finish_reason_abandon(token);
+  printf("X9 CALL: SIM2 0910 finish reason timed out\n");
+  token=0;
+ }
  if(token){
   uint32_t size=0;
   const int ready=x9_md_mipc_take(token,frame,X9_MIPC_FRAME_MAX,&size);
   if(!ready)return;
   if(ready==1){
    uint32_t result=0,cause=0;
-   if(now<deadline&&x9cw_frame(frame,size,0x910)&&frame[8]==2&&
+   if(x9q_ms()<deadline&&x9cw_frame(frame,size,0x910)&&frame[8]==2&&
       x9cw_word(frame,size,0,&result)&&!result&&x9cw_word(frame,size,0x100,&cause))
     printf("X9 CALL: SIM2 0910 last finish reason %u (no call ID)\n",cause);
    else printf("X9 CALL: SIM2 0910 finish reason unavailable\n");
@@ -1069,6 +1141,7 @@ static void x9c_poll(){
  if(x9c_incoming_observed)x9c_mt_observe(x9c_inbound);
  x9c_approve_poll();
  x9c_init_poll(frame);
+ x9c_sip_diag_poll(frame);
  for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++)x9c_handover_flush(slot);
  for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++)x9c_calllist_flush(slot);
  x9c_end_poll(frame);
@@ -1076,6 +1149,7 @@ static void x9c_poll(){
  x9c_dial_poll(frame);
  x9c_response_poll();
  x9c_finish_reason_poll(frame);
+ x9c_dial_ims_poll(frame);
 }
 static void x9c_dial_poll(uint8_t *frame){
  uint32_t n;
@@ -1192,6 +1266,12 @@ static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
      x9cw_u16(req+1),dial.length);
     return true;
    }else err=X9Q_NOT_READY;
+   if(sweet_x9_arg("x9_call_sip_diag",0)==1){
+    const struct x9c_client &c=x9c_clients[slot];
+    const bool live=c.bound&&c.generation==x9q_clients[slot].generation;
+    printf("X9 CALL: VOICE20 txn %u rejected before MD selected SIM%u registered %u error 0x%x\n",
+     x9cw_u16(req+1),live?c.sim+1:0u,live&&c.registered?1u:0u,err);
+   }
   }else if(x9cw_u16(req+3)==0x21||x9cw_u16(req+3)==0x31){
    /* The live allocation's validated host transaction already owns its
     * target. Even a malformed retry cannot append ARG or a changed ID BUSY

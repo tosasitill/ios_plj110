@@ -35,6 +35,10 @@ void x9_md_mipc_message_mark_read_abandon(uint64_t token, unsigned owner, uint64
  * not a CNF. Other negative results do not prove the request was unsent. */
 int x9_md_mipc_take(uint64_t token, uint8_t *frame, uint32_t capacity, uint32_t *length);
 void x9_md_mipc_voice_rat_abandon(uint64_t token);
+void x9_md_mipc_finish_reason_abandon(uint64_t token);
+void x9_md_mipc_ims_registration_abandon(uint64_t token);
+void x9_md_mipc_ims_feature_abandon(uint64_t token);
+void x9_md_mipc_sip_registration_abandon(uint64_t token);
 int x9_md_mipc_event(uint8_t *frame, uint32_t capacity, uint32_t *length);
 int x9_md_mipc_online(void);
 /* SMS/IMS have a separate inbox: WDS must never consume their indications.

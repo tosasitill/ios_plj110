@@ -238,11 +238,13 @@ static bool x9m_stored(const uint8_t *p,unsigned n,x9q_view &records,unsigned &c
 }
 /* One native 0607 transaction per SIM, including the entire tag mutation.
  * Apple fans out RawRead for a list: accept bounded queued work instead of
- * returning BUSY for every message after the first. Never replay a sent token. */
+ * returning BUSY for every message after the first. Never replay a sent token.
+ * An earlier completed job retaining only its host receipt no longer owns
+ * native storage; queue backpressure must not stall later native requests. */
 static bool x9m_store_blocked(const x9m_job &j){
  for(const x9m_job &other:x9m_jobs)if(&other!=&j&&other.sim==j.sim&&
    ((other.op==X9M_DIAG&&other.token)||(x9m_storage(other.op)&&
-    (other.hold||other.token||other.store_order<j.store_order))))return true;
+    (other.hold||other.token||(other.follow&&other.store_order<j.store_order)))))return true;
  return false;
 }
 static uint64_t x9m_store_submit(const x9m_job &j){
@@ -367,8 +369,8 @@ static void x9m_init_poll(uint8_t *response,unsigned room){
 }
 /* Boot IMS observation is independent of WMS clients and SMS readiness.
  * Register the already-supported 4a01 indication, then take one 0a04
- * snapshot per SIM. Each token remains owned after timeout/transport loss;
- * no retry or invented registration state. */
+ * snapshot per SIM. A timed-out read relinquishes its owner without retry;
+ * subscriptions retain their existing ownership and no state is invented. */
 static void x9m_ims_poll(uint8_t *p,unsigned room){
  const bool online=x9w_control_ready&&x9_md_mipc_online();
  const uint64_t now=x9q_ms();
@@ -377,6 +379,10 @@ static void x9m_ims_poll(uint8_t *p,unsigned room){
   if(!online&&s.ims_stage)s.ims_hold=true;
   if(s.ims_token){
    if(now>=s.ims_deadline)s.ims_hold=true;
+   if(s.ims_hold&&s.ims_stage==3){
+    x9_md_mipc_ims_registration_abandon(s.ims_token);s.ims_token=0;
+    continue;
+   }
    unsigned n=0;int rc=x9_md_mipc_take(s.ims_token,p,room,&n);
    if(rc==1){
     s.ims_token=0;
@@ -421,6 +427,60 @@ static void x9m_ims_poll(uint8_t *p,unsigned room){
 static bool x9m_diag_enabled(){
  static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_sms_diag",0)==1;
  return enabled!=0;
+}
+/* Observe the baseband feature cache independently of the registration
+ * snapshot. Cached features do not authorize a provisioning write. */
+static void x9m_ims_feature_poll(uint8_t *p,unsigned room){
+ static struct {uint64_t token,deadline;bool done;} reads[2];
+ if(sweet_x9_arg("x9_call_sip_diag",0)!=1)return;
+ const bool online=x9w_control_ready&&x9_md_mipc_online();
+ const uint64_t now=x9q_ms();
+ for(unsigned sim=0;sim<x9_md_sim_count();sim++){
+  auto &query=reads[sim];
+  if(query.done)continue;
+  if(!query.token){
+   if(!online||(!x9m_sims[sim].reg_valid&&x9m_sims[sim].ims_stage!=4&&!x9m_sims[sim].ims_hold))continue;
+   if(!query.deadline)query.deadline=now+10000;
+   if(now<query.deadline){
+    x9w_frame f(0xa02,1u<<sim);f.word(0x100,0);
+    query.token=f.submit();
+    if(query.token)query.deadline=now+10000;
+    continue;
+   }
+  }
+  unsigned n=0,result=0;
+  int rc=0;
+  if(query.token&&online&&now<query.deadline){
+   rc=x9_md_mipc_take(query.token,p,room,&n);
+   if(!rc)continue;
+  }else if(query.token)x9_md_mipc_ims_feature_abandon(query.token);
+  x9q_view data={nullptr,0};
+  if(rc==1&&x9w_wire(p,n)&&p[8]==(1u<<sim)&&x9q_u16(p+10)==0xa03&&
+     x9w_word(p,n,0,result)&&!result)data=x9w_tlv(p,n,0x100);
+  if(data.p&&data.n==6){
+   printf("X9 IMS: SIM%u feature cache raw=%02x%02x%02x%02x%02x%02x "
+          "volte=%u vonr=%u vilte=%u vinr=%u wfc=%u viwifi=%u sms=%u ims=%u\n",
+    sim+1,data.p[0],data.p[1],data.p[2],data.p[3],data.p[4],data.p[5],
+    (data.p[0]&1)?1u:0u,(data.p[0]&2)?1u:0u,
+    (data.p[1]&1)?1u:0u,(data.p[1]&2)?1u:0u,
+    data.p[2]?1u:0u,data.p[3]?1u:0u,data.p[4]?1u:0u,data.p[5]?1u:0u);
+  }else printf("X9 IMS: SIM%u feature cache unavailable rc=%d result=0x%x\n",sim+1,rc,result);
+  query.done=true;query.token=0;bzero(p,room);
+ }
+}
+static void x9m_rawsend_reject_diag(unsigned sim,const uint8_t *req,unsigned len){
+ static unsigned remaining=32;
+ if(!remaining||!x9m_diag_enabled()||len<7)return;
+ for(unsigned at=7;remaining&&len-at>=3;){
+  const unsigned size=x9q_u16(req+at+1);
+  if(size>len-at-3)return;
+  if(req[at]!=1){
+   printf("X9 SMS DIAG: SIM%u RawSend rejected txn %u TLV 0x%02x len %u\n",
+          sim+1,x9q_u16(req+1),req[at],size);
+   remaining--;
+  }
+  at+=3+size;
+ }
 }
 static bool x9m_diag_storage_busy(unsigned sim,const x9m_job *self){
  for(const x9m_job &other:x9m_jobs)if(&other!=self&&other.sim==sim&&x9m_storage(other.op))return true;
@@ -623,14 +683,20 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   }
  }else if(service==5&&id==0x20){
   x9q_view raw=x9q_tlv(req,len,1),ims=x9q_tlv(req,len,0x13);
+  x9q_view retry=x9q_tlv(req,len,0x14),retry_id=x9q_tlv(req,len,0x15);
+  const bool is_retry=retry.p&&retry.n==1&&retry.p[0]==1;
+  const bool has_retry_id=retry_id.p&&retry_id.n==4&&x9q_u32(retry_id.p)<=255;
   if(!raw.p||raw.n<6||raw.p[0]!=6||x9q_u16(raw.p+1)!=raw.n-3||!x9m_pdu(raw.p+3,raw.n-3,1))err=X9Q_ARG;
   for(unsigned at=7;at<len;at+=3+x9q_u16(req+at+1))if(req[at]!=1&&
    !(req[at]==0x13&&x9q_u16(req+at+1)==1&&req[at+3]==0)&&
-   !(req[at]==0x14&&x9q_u16(req+at+1)==1&&req[at+3]==0)&&
+   req[at]!=0x14&&req[at]!=0x15&&
    /* LinkTimer is a dedicated-channel reuse hint, not the SMS delivery
     * timeout. Leave MTK's native link lifetime unchanged; never resend. */
    !(req[at]==0x12&&x9q_u16(req+at+1)==1&&req[at+3]<=1))err=X9Q_UNSUPPORTED;
   if(ims.p&&(ims.n!=1||ims.p[0]))err=X9Q_UNSUPPORTED;
+  if(!err&&((retry.p&&(retry.n!=1||retry.p[0]>1))||
+            (is_retry?!has_retry_id:retry_id.p!=nullptr)))err=X9Q_ARG;
+  if(err==X9Q_UNSUPPORTED)x9m_rawsend_reject_diag(sim,req,len);
   if(!err&&(!x9m_sims[sim].ready||!x9w_control_ready||!x9_md_mipc_message_online()))err=X9Q_NOT_READY;
   for(const x9m_job &j:x9m_jobs)if(j.op==X9M_SEND&&j.sim==sim)err=X9Q_BUSY;
   if(!err){
@@ -638,10 +704,17 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    if(!j)err=X9Q_BUSY;
    else if(!j->bridge_generation){bzero(j,sizeof(*j));err=X9Q_NOT_READY;}
    else{
-    x9w_frame f(0x605,1u<<sim);f.byte(0x100,0);f.tlv(0x8101,raw.p+3,raw.n-3);
+    x9w_frame f(0x605,1u<<sim);f.byte(0x100,0);
+    const unsigned pdu_offset=f.n+4;
+    f.tlv(0x8101,raw.p+3,raw.n-3);
+    if(is_retry&&f.good&&!x9ms_submit_retry(f.p+pdu_offset,raw.n-3,x9q_u32(retry_id.p))){
+     bzero(j,sizeof(*j));x9q_packet p(req,X9Q_ARG);p.send(local,port);return true;
+    }
+    const bool report=f.good&&x9ms_submit_report(f.p+pdu_offset,raw.n-3,
+                                                sweet_x9_arg("x9_sms_srr",0)==1);
     f.byte(0x102,(uint8_t)(raw.n-4-raw.p[3]));j->token=f.submit();
-    if(j->token){printf("X9 SMS: SIM%u send submitted token %llu QMI txn %u status report requested %u; waiting for modem CNF\n",
-      sim+1,(unsigned long long)j->token,x9q_u16(req+1),(raw.p[4+raw.p[3]]&0x20)?1u:0u);return true;}
+    if(j->token){printf("X9 SMS: SIM%u send submitted token %llu QMI txn %u status report requested %u retry %u; waiting for modem CNF\n",
+      sim+1,(unsigned long long)j->token,x9q_u16(req+1),report?1u:0u,is_retry?1u:0u);return true;}
     bzero(j,sizeof(*j));err=X9Q_BUSY;
    }
   }
@@ -949,6 +1022,7 @@ static void x9m_poll(){
   }
  }
  x9m_ims_poll(p,sizeof(p));
+ x9m_ims_feature_poll(p,sizeof(p));
  x9m_init_poll(p,sizeof(p)); // Consume pending readiness INDs before submitting config.
  for(x9m_incoming &in:x9m_incoming_sms)if(in.token&&!in.held){
   if(in.delivered){

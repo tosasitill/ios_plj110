@@ -411,9 +411,14 @@ X9 的 native DPMAIF PDP 对 `SIOCGIFMEDIA64`（`0xc02c6938`）仍返回
 
 - MIPC OPEN 后逐 SIM 尝试订阅 `4a01` 并读取一次 `0a04/0a05`，即使 CommCenter
   未请求 IMSA 也能记录注册快照。有效的 `4a01` 会使在途旧快照失效。运营商 IMS
-  配置、PDN 建立和 SIP REGISTER 仍待闭合。
+  配置、PDN 建立和 SIP REGISTER 仍待闭合。启动快照读超时或掉线后释放只读 token，
+  不重发，迟到的结果无法更新状态。
 - SIM2 拨出失败由完整、归属明确的 ECPI133 驱动 END。对于有非正常原因码的终态，
   桥可发空载 `090f` 并记录同 SIM 的 `0910` 数值。该响应没有通话 ID，仅用于同卡诊断。
+  等待 10 秒超时后释放 token。
+- `x9_call_sip_diag=1` 在 CALL 基线完成后尝试逐 SIM 订阅 `4904`。固定 RIL 指示表
+  包含此 ID，Android 捕获中可见四个 u32 字段。日志仅记录字段 `101–104`，每次启动
+  最多 64 条。订阅和解析不参与通话状态、注册判断或 SIP 字符串处理。
 - 缺独立于临时 `ims::Call` 对象的 typed provider `(clientId, UUID, native epoch/ID)` owner、
   FSM/delegate 生命周期与真实 SIP INVITE/REGISTER 证据。
 - MD→DSP `3D00` 不是 AP↔DSP REG_DMA；voice producer/payload/ACK、RV32 consumer、EMI ring、
@@ -421,11 +426,14 @@ X9 的 native DPMAIF PDP 对 `SIOCGIFMEDIA64`（`0xc02c6938`）仍返回
 - SMS `0606` 是 modem 接受；`0607` 诊断硬编码 index 1，只记录 shape/status/index。
   storage flag 固定 `{2,1,3,4}`；query-all/filter、混合异常 status、durable SIM storage 与
   Messages UI 持久化未验收。`0x210000` 不能当作空 inbox。
+- 存储请求按 SIM 串行化 native 事务，待发送的后续阶段、未取回的 token 和不确定操作
+  均保留顺序屏障；仅等待主机接收终态收执的完成事务不再阻塞后续 native 工作。
 - RawSend20 在 QMUX 启用原 allocation generation 的终态收执：队列满时只重试入队，
   不重发 `0605`；超时后晚到的 `0606` 不覆盖首个终态。日志
   `RawSend … terminal host queue receipt` 只证明结果入队，不证明客户端读取或短信投递。
   活跃事务的 RawSend20/VOICE20 同 ID 重试在通用 TLV 校验前由原 owner 接管，
   不允许畸形重试抢先返回 BAD；这个保护不是跨已退休事务的永久去重。
+- 新事务若显式带 GSM 重试标志 `0x14=1`，必须提供 `0x15/u32` 且可表示为 TP-MR 的一字节编号。桥在 `0605` 私有 SMS-SUBMIT 副本中设置 TP-RD、写入 TP-MR 并保留 TP-SRR。主机仍负责是否重试。参照 [WMS RawSend 字段](https://device.report/m/4c7069e926f3088f756438dce5ee45ca782a84b9dd5173d77f2c2f3903806668.pdf)和 [AOSP GSM 重试](https://android.googlesource.com/platform/frameworks/opt/telephony/+/master/src/java/com/android/internal/telephony/gsm/GsmSMSDispatcher.java)。
 
 只能在真实请求、状态、投递/存储与双向音频闭环通过后报告可通话或短信已送达，不能用 LTE/5G
 注册、VOICE20 可构造或 ACK 替代。

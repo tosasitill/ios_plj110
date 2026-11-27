@@ -12,7 +12,7 @@ static LCK_GRP_DECLARE(x9_mi_grp,"x9_mipc_bridge");
 static LCK_MTX_DECLARE(x9_mi_lock,&x9_mi_grp);
 struct x9_mi_slot {
  uint64_t token; unsigned state,len; uint16_t id,txid; uint8_t mask,cancelled;
- uint8_t call_guard;uint64_t call_revision;
+ uint8_t call_guard,sip_registration;uint64_t call_revision;
  uint64_t call_epoch;uint32_t call_id;unsigned call_direction;
  struct x9_mipc_call_owner call_owner;
  unsigned sms_guard,sms_owner;uint64_t sms_generation,sms_deadline_ms;
@@ -120,6 +120,7 @@ static int x9mi_allocate(void *context){
  if(x9_mi_online&&!x9_mi_poisoned&&x9_mi_next<65534)for(unsigned i=0;i<X9_MI_SLOTS;i++)if(!x9_mi_slots[i].state){
   struct x9_mi_slot *s=&x9_mi_slots[i];bzero(s,sizeof(*s));
   a->token=++x9_mi_next;s->token=a->token;s->txid=(uint16_t)a->token;s->id=(uint16_t)a->id;s->mask=a->frame[8];s->len=a->len;
+  s->sip_registration=a->id==0x307&&a->len==24&&x9mi_u16(a->frame+20)==0x4904;
   if(a->sms){s->sms_guard=1;s->sms_owner=a->sms->owner;s->sms_generation=a->sms->generation;s->sms_deadline_ms=a->sms->deadline_ms;}
   if(a->baseline){s->call_guard=1;s->call_revision=a->baseline->revision;s->call_owner=*a->owner;x9_mc_dial_token=a->token;x9_mc_dial_floor=a->baseline->epoch;}
   else if(a->end){s->call_guard=2;s->call_revision=a->end->revision;s->call_epoch=a->end->epoch;s->call_id=a->end->native_id;
@@ -149,6 +150,12 @@ static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbou
  }
  else if(id==0x30b){if(!x9mm_request(p,n,id)&&!x9cw_call_register_request(p,n,x9_md_sim_count()))return 0;}
  else if(id==0x601||id==0x605||id==0x607||id==0x60b||id==0xa04){if(!x9mm_request(p,n,id))return 0;}
+ /* IMS_GET_CONFIG class FEATURE reads six cached bytes for the selected SIM.
+  * Other classes require a different backend and are outside this query. */
+ else if(id==0xa02){
+  if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||n!=24||
+     x9mi_u16(p+16)!=0x100||x9mi_u16(p+18)!=4||p[20]||p[21]||p[22]||p[23])return 0;
+ }
  /* Evidence-bounded call actions. DIAL mirrors the measured PLJ110 SIM2
   * profile (2026-11-15); VOICE09/CallList publication does not imply audio
   * readiness. ANSWER{} and HANGUP{MODE0,ID} mirror Android captures.
@@ -157,7 +164,7 @@ static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbou
  else if(id==0x101){if(!x9mi_attach_request(p,n))return 0;}
  /* Existing data/SMS registrations keep their contract. CALL registrations
   * have a narrow, original-RIL-derived shape at the physical boundary. */
- else if(id==0x307&&n>=22&&(x9mi_u16(p+20)==0x4901||x9mi_u16(p+20)==0x4902)){
+ else if(id==0x307&&n>=22&&(x9mi_u16(p+20)==0x4901||x9mi_u16(p+20)==0x4902||x9mi_u16(p+20)==0x4904)){
   if(!x9cw_call_register_request(p,n,x9_md_sim_count()))return 0;
  }
  /* Read-only per-SIM provider-name query. MD 91345dbc/91345e9e:
@@ -381,11 +388,24 @@ void x9_md_sim_at_cancel(uint64_t token){
  }
  lck_mtx_unlock(&x9_mi_lock);
 }
-void x9_md_mipc_voice_rat_abandon(uint64_t token){
+static void x9mi_read_abandon(uint64_t token,unsigned id){
  lck_mtx_lock(&x9_mi_lock);
  for(unsigned slot=0;slot<X9_MI_SLOTS;slot++){
   struct x9_mi_slot *entry=&x9_mi_slots[slot];
-  if(!entry->state||entry->id!=0x42f||entry->token!=token)continue;
+  if(!entry->state||entry->id!=id||entry->token!=token)continue;
+  bzero(entry,sizeof(*entry));break;
+ }
+ lck_mtx_unlock(&x9_mi_lock);
+}
+void x9_md_mipc_voice_rat_abandon(uint64_t token){x9mi_read_abandon(token,0x42f);}
+void x9_md_mipc_finish_reason_abandon(uint64_t token){x9mi_read_abandon(token,0x90f);}
+void x9_md_mipc_ims_registration_abandon(uint64_t token){x9mi_read_abandon(token,0xa04);}
+void x9_md_mipc_ims_feature_abandon(uint64_t token){x9mi_read_abandon(token,0xa02);}
+void x9_md_mipc_sip_registration_abandon(uint64_t token){
+ lck_mtx_lock(&x9_mi_lock);
+ for(unsigned slot=0;slot<X9_MI_SLOTS;slot++){
+  struct x9_mi_slot *entry=&x9_mi_slots[slot];
+  if(!entry->state||entry->token!=token||!entry->sip_registration)continue;
   bzero(entry,sizeof(*entry));break;
  }
  lck_mtx_unlock(&x9_mi_lock);
