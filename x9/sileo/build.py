@@ -376,12 +376,23 @@ exports:
         src = extract('berkeleydb', self.work)
         build = src / 'build_unix'
         # Deviations from Procursus berkeleydb.mk, both deliberate:
-        # their nodoc.diff only drops doc install (assemble() strips
-        # usr/share/doc anyway), and their mutex Darwin/_spin_lock_try
-        # is OSSpinLock, absent from the iOS 16 SDK; POSIX/pthreads is
-        # the supported equivalent. apt needs only the C library, so
-        # no --enable-cxx/sql/stl. Headers land in include/db181,
-        # matching the BERKELEY_INCLUDE_DIRS apt.mk passes.
+        # their mutex Darwin/_spin_lock_try is OSSpinLock, absent from
+        # the iOS 16 SDK; POSIX/pthreads is the supported equivalent.
+        # apt needs only the C library, so no --enable-cxx/sql/stl.
+        # Headers land in include/db181, matching the
+        # BERKELEY_INCLUDE_DIRS apt.mk passes.
+        # Their nodoc.diff is NOT cosmetic, as first assumed: with
+        # sql/stl off, install_docs copies doc subdirs (bdb-sql,
+        # gsg_db_server) that this configuration never produces and
+        # make install fails outright. Apply its one-line change to
+        # dist/Makefile.in (drop install_docs from library_install).
+        makefile_in = src / 'dist/Makefile.in'
+        text = makefile_in.read_text()
+        needle = ('library_install: install_include install_lib '
+                  'install_utilities @ADDITIONAL_INSTALL@ install_docs')
+        assert text.count(needle) == 1
+        makefile_in.write_text(text.replace(
+            needle, needle[: -len(' install_docs')]))
         self.run([src / 'dist/configure', '--build=x86_64-apple-darwin',
                   '--host=aarch64-apple-darwin', f'--prefix={PREFIX}/usr',
                   f'--includedir={PREFIX}/usr/include/db181',
