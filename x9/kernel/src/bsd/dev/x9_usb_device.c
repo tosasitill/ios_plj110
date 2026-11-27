@@ -105,7 +105,7 @@ static struct endpoint eps[5] = {
     { .number = 2, .in = 1, .interrupt = 1 },
     { .number = 3, .in = 0 }, { .number = 3, .in = 1 }
 };
-static unsigned gen2, maxpacket, notification;
+static unsigned gen2, maxpacket, notification, printed_speed;
 static uint64_t raw_owner;
 static uint8_t control[X9LOG_BATCH_FRAME];
 static unsigned sent, length, wanted;
@@ -594,7 +594,7 @@ static int set_configuration(unsigned value)
     configure_endpoint(&eps[2], 512);
     if (st.raw_enabled) { configure_endpoint(&eps[3], 512); configure_endpoint(&eps[4], 1024); }
     lck_mtx_lock(&usb_lock); st.configuration = 1; st.state = X9_USB_CONFIGURED; lck_mtx_unlock(&usb_lock);
-    printf("X9 USB: config=1 speed=%u QMU36 gen2=%u raw=%u\n", st.speed, gen2, st.raw_enabled);
+    printf("X9 USB: config=1 speed=%u (%s) QMU36 gen2=%u raw=%u\n", st.speed, st.speed == 3 ? "480Mbps HS" : st.speed == 1 ? "12Mbps FS" : "unknown", gen2, st.raw_enabled);
     return 0;
 }
 static void update_link(void)
@@ -743,7 +743,9 @@ static void poll(void)
     if (common & (BIT(1)|BIT(4))) { suspended=0; update_link(); }
     /* Speed can settle after RESET; read the controller's result, not cable labels. */
     unsigned speed=R(0x800)&7;
-    if (speed==1 || speed==3) { lck_mtx_lock(&usb_lock); st.speed=speed; lck_mtx_unlock(&usb_lock); maxpacket=speed==3 ? 512:64; }
+    if (speed==1 || speed==3) { lck_mtx_lock(&usb_lock); st.speed=speed; lck_mtx_unlock(&usb_lock); maxpacket=speed==3 ? 512:64;
+        if (speed != printed_speed) { printed_speed=speed;
+            printf("X9 USB: negotiated %s\n", speed==3 ? "HIGH-SPEED 480 Mbps" : "FULL-SPEED 12 Mbps -- HS NOT negotiated"); } }
     /* Native PIO EP0 is dispatched later in this SAME worker, never through
      * legacy descriptor/SET_INTERFACE/halt routes or bulk request ownership. */
     if (st.native_apple_stack) return;
@@ -771,7 +773,8 @@ static errno_t net_output(ifnet_t ifp, mbuf_t m)
         error=mbuf_copydata(m,0,n,v->bytes); if (!error) { v->n=(uint32_t)n; net_tx.count++; }
     }
     if (error) st.dropped++;
-    lck_mtx_unlock(&usb_lock); mbuf_freem(m);
+    lck_mtx_unlock(&usb_lock); if (!error) thread_wakeup(&channel);
+    mbuf_freem(m);
     if (error) ifnet_stat_increment_out(ifp,0,0,1);
     return error;
 }
@@ -869,7 +872,16 @@ static void worker(void *arg, wait_result_t why)
         x9_usb_native_ep0_poll(control_available);
         x9_usb_native_worker_poll(native_available, now_ns);
         x9_usb_native_control_notify();
-        uint64_t deadline; clock_interval_to_deadline(1,NSEC_PER_MSEC,&deadline);
+        /* Throughput: the 1ms cadence serializes one GPD round trip per
+         * millisecond (~4MB/s raw, ~1.5MB/s ECM) even on a 480Mbps link.
+         * While any endpoint is busy or a TX queue holds data, poll at
+         * 100us; idle cost stays at the original 1ms. Producers also wake
+         * the worker explicitly (thread_wakeup above). */
+        lck_mtx_lock(&usb_lock); unsigned hot = net_tx.count || raw_tx.count; lck_mtx_unlock(&usb_lock);
+        for (unsigned i = 0; i < 5; i++) hot |= eps[i].busy;
+        uint64_t deadline;
+        if (hot) clock_interval_to_deadline(100,NSEC_PER_USEC,&deadline);
+        else clock_interval_to_deadline(1,NSEC_PER_MSEC,&deadline);
         (void)assert_wait_deadline(&channel,THREAD_UNINT,deadline); thread_block(THREAD_CONTINUE_NULL);
     }
 }
@@ -936,7 +948,8 @@ static int enqueue_raw(uint64_t token, uint32_t generation, const void *bytes, u
         }
         memcpy(v->bytes,bytes,n); raw_tx.count++;
     }
-    lck_mtx_unlock(&usb_lock); return error;
+    lck_mtx_unlock(&usb_lock); if (!error) thread_wakeup(&channel);
+    return error;
 }
 int x9_usb_send(uint64_t token, uint32_t generation, const void *bytes, uint32_t n)
 { return enqueue_raw(token, generation, bytes, n, NULL); }
