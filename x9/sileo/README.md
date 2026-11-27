@@ -92,8 +92,12 @@ uicache 的取舍：优先 Procursus uikittools 的 `uicache`（通用：任意 
 `build.py` (pinned sources in `sources.json`, SHA256-verified, cache under
 `.local/x9/sileo-cache`) cross-compiles for arm64-apple-ios16.0, prefix
 `/var/storm`, and `verify.py` gates the result. Current output
-(`x9/out/storm-bootstrap-20261127`): **332 files, 23 Mach-O, verify 0
-problems** — every Mach-O arm64 + iOS platform + ad-hoc signed, dpkg's
+(`x9/out/storm-bootstrap-20261127`, one clean end-to-end `build.py` run):
+**154 files, 15 Mach-O, verify 0 problems**. (An earlier incremental run
+reported 332 files; that tree had accumulated two dpkg prefix layouts in
+one sysroot and the count was wrong. The cleanroom and final runs agree
+at 154, including dpkg's 85 perl modules under `usr/share/perl5` after
+pinning `--with-perllibdir`.) — every Mach-O arm64 + iOS platform + ad-hoc signed, dpkg's
 compiled-in admindir is `/var/storm/Library/dpkg`, dpkg links the storm
 `liblzma.5`/`libmd.0`, and no file references `/var/jb`.
 
@@ -144,3 +148,62 @@ copies the payload to `X9Storm/<version>` on Data, initializes the dpkg
 admindir skeleton there, and atomically flips `X9Storm/current`.
 `x9-jbctl --status` now probes the storm paths and prints both symlink
 targets; jbctl compiles clean for arm64/iOS 16.
+
+
+## Root execution (stage 3, host-verified)
+
+`rootexec/` implements the controlled root channel:
+
+- `x9-rootexec` (the chain's only setuid binary, mode 4755) authorizes in
+  order: effective uid 0; parent process is a pinned caller (path +
+  SHA256, `caller_check.h` — the userland echo of the kernel's exec-time
+  hash verification, with the same TOCTOU caveat class as AppSync's
+  repair-style verifier); the request passes `rootexec_policy.h`. It
+  then execve's a fixed absolute binary with a scrubbed environment. No
+  shell anywhere. Audit lines go to stderr and
+  `/private/var/mobile/Library/X9Storm/rootexec.log`.
+- Policy verbs: `dpkg`, `dpkg-deb`, `apt-get`, `uicache`. Deny lists
+  block prefix escapes (`--root/--admindir/--instdir/-o/-c/--preinvoke/
+  --postinvoke/--force-all`...); uicache paths are confined to
+  `/var/storm/Applications/` and `/Applications/`. Host unit tests:
+  **21/21 passed** (`rootexec/build.py` runs them on every build).
+- `giveMeRoot` is the Sileo-facing shim, shaped by the real contract
+  (next section): argv = {"giveMeRoot", <tool path>, args...}. It is an
+  unprivileged translator to rootexec verbs — after its execve, the
+  parent of the rootexec process is still Sileo, so rootexec pins the
+  Sileo app binary itself; a tampered giveMeRoot cannot exceed policy.
+- The Sileo caller entry (`callers.json`) is deliberately unpinned
+  (sha256 null = never authorizes) until the Sileo packaging step
+  supplies the built app's real hash and as-installed path.
+- Whether the setuid bit is effective on this root volume is
+  discriminator 3; if it is not, the same interface is served by a
+  kernel-assisted launcher later (the policy/caller code is unchanged).
+
+## Sileo itself (stage 5, evaluation with evidence)
+
+Facts from the official `org.coolstar.sileo_2.5.1_iphoneos-arm64.deb`
+and the Sileo/Sileo 2.5.1 sources:
+
+- The deb is a rootless package (`./var/jb/Applications/Sileo.app`, thin
+  arm64, `Depends: coreutils, dpkg, apt, libzstd1`). Repacking it for
+  storm is **not viable**: prefix detection markers and tool paths are
+  compiled in, and its root path assumes jailbreak facilities.
+- Root path: on iOS 13+, Sileo spawns tools **directly** with
+  `posix_spawnattr_set_persona_np(99, OVERRIDE)` + persona uid/gid 0
+  (APTWrapper.swift). `giveMeRoot` (bundled in the app) is only the
+  pre-iOS-13 fallback. Whether this port's kernel honors persona-99
+  override is unknown — **discriminator 5**. If it does not, a
+  source-patched Sileo calls the giveMeRoot shim above instead.
+- Prefix: everything derives from `CommandPath.prefix`
+  (CommandPaths.swift), gated on `Bootstrap.procursus_rootless`; the
+  dpkg architecture switch keys on the same value (DpkgWrapper.swift).
+  Teaching the detection a storm case returning `/var/storm` is a small,
+  centralized source change — the intended route.
+- Build system: custom Makefile + Xcode project, codesign via **ldid**
+  (already built by this project for AppSync), one submodule
+  (Deps/DepictionKit, reachable via the proxy), swiftc present on the
+  build Mac. A source build is therefore feasible as a follow-up round;
+  it was not attempted here because (a) its `Depends` (apt, coreutils,
+  libzstd1) are not yet in the bootstrap — apt is the long pole — and
+  (b) the persona-99 question decides the spawn patch shape. Producing
+  an .app before those land would be a hollow artifact.

@@ -168,6 +168,9 @@ class Builder:
                   '--host=arm64-apple-darwin', f'--prefix={PREFIX}/usr',
                   f'--sysconfdir={PREFIX}/etc',
                   f'--with-admindir={PREFIX}/Library/dpkg',
+                  # Otherwise dpkg derives the perl module dir from the
+                  # host perl and installs to /Network/Library/Perl.
+                  f'--with-perllibdir={PREFIX}/usr/share/perl5',
                   f'--with-logdir={PREFIX}/var/log',
                   '--disable-nls', '--disable-dselect',
                   '--disable-start-stop-daemon', '--without-libselinux',
