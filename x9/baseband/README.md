@@ -201,8 +201,14 @@ EIPPORT 命令用于其他资源，未凭名字添加未知 MD 通知。当前�
 超时/DEL_CLIENT 不丢已发 token；当前代码把迟到 ACT 成功转清理、不迟到回复 host success。
 但`owned`只是现有本地状态，不是独立MD所有权证明；下述usr/CID边界解决前不据此构建新boot候选。
 partial-success/fallback cause 也清理，不冒充完整 IPv4；不明 framing/CNF 保留所有权隔离到下次 boot。
-IPv6/SLAAC、持久/原 modem profile、auth、默认 APN 发现、autoconnect、语音/IMS 未实现；
-非 Internet APN mask、未映射 profile/Start 扩展选项明确失败。RAM profile/Start20 新接线
+本节 profile 路径内：IPv6/SLAAC、持久/原 modem profile、auth、默认 APN 发现、autoconnect、语音/IMS 未实现；
+非 Internet APN mask、未映射 profile/Start 扩展选项明确失败。此句只描述本节的原生 profile/Start20 路径
+（Start20 只校验 IPv4、ACT 明确 IPv4/no-auth、Settings 不返回 IPv6 前缀），不描述 CommCenter 实际使用的
+WDS 仿真路径：后者（`X9WDS.inc` 的 lease/bearer）ACT 用 PDP 3（v4v6），448 已实测同一 SIM1 PDP 上
+IPv4/IPv6 双 client lease 与 `0x2d` 的 IPv6 runtime settings（`x9wr_serialize_ipv6`），发布侧还有
+SLAAC 归一（`x9w_v6_slaac`：全球地址由 host 按 RA 自行组装，桥不把 prefix::IID 误判为地址变化）。
+profile 路径整体尚未硬件验证，不在此凭空补 v6；其 IPv6 化须等该路径先在实机走通 IPv4 闭环后再按
+真实 ACT/GET_CALL 形状扩展。RAM profile/Start20 新接线
 仅完成源码与编译，真实 profile→ACT→IP 收发和默认数据卡切换仍须实机日志确认。
 
 #### 20H392 QoS / PCO / Start V2 核对（静态证据，不是拨号成功）
