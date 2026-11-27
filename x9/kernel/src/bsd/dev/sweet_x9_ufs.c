@@ -448,6 +448,10 @@ static int initialize(void)
  sweet_x9_torch_init();
  extern void sweet_x9_camera_init(void);
  sweet_x9_camera_init();
+ extern void sweet_x9_vdec_init(void);
+ sweet_x9_vdec_init();
+ extern void sweet_x9_vcp_probe_init(void);
+ sweet_x9_vcp_probe_init();
  extern void sweet_x9_microphone_init(void);
  sweet_x9_microphone_init();
  extern void sweet_x9_haptic_init(void);

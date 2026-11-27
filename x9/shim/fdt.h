@@ -91,6 +91,8 @@ int fdt_ram_live_tuple(unsigned,uint64_t *,uint64_t *);
 int fdt_ram_patch_adt(void *,size_t);
 
 int fdt_gpu_patch_adt(uintptr_t,void *,size_t);
+/* Current topology only; no MMIO/reset/IRQ/firmware or ownership grant. */
+int fdt_vcp_patch_adt(uintptr_t,void *,size_t);
 /* 1 layout qualified, 0 FDT mismatch, -1 missing/invalid ADT placeholder.
  * All are nonfatal to boot. No hardware access or readiness implied. */
 int fdt_scp_patch_adt(uintptr_t,void *,size_t);
