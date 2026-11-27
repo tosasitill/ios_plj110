@@ -6906,6 +6906,128 @@ sweet_x9_prepare_keybags(proc_t p,user_addr_t scratch,user_addr_t end)
  return error;
 }
 
+/* The Files local-storage root: the app-group container
+ * group.com.apple.FileProvider.LocalStorage must contain "File Provider
+ * Storage" (and its "Downloads" folder) for the LocalStorage file provider's
+ * default domain to serve "On My iPhone"; Safari's default download folder
+ * is "On My iPhone/Downloads", so both fail together when it is missing. On
+ * this root the group container exists without that folder and the stock
+ * flow never creates it. The runtime repair (x9-jbctl --ensure-local-storage,
+ * spawned from SpringBoard) creates the folders only after fileproviderd
+ * has already started; create them here instead, before launchd starts any
+ * daemon, and normalize ownership to mobile (501:501) so the provider,
+ * running as mobile, can use them. The container is discovered exactly as
+ * x9-jbctl discovers it: scan the AppGroup directory and match the MCM
+ * metadata identifier (the string is stored in clear in both XML and
+ * binary metadata plists). Nothing is created when the container is absent
+ * or the root is not writable. Opt out with x9_local_storage=0; the caller
+ * treats every failure as non-fatal. */
+static int
+x9_local_storage_contains(const char *hay, unsigned hlen, const char *needle, unsigned nlen)
+{
+ if(!nlen||hlen<nlen)return 0;
+ for(unsigned i=0;i+nlen<=hlen;i++)if(!memcmp(hay+i,needle,nlen))return 1;
+ return 0;
+}
+
+static int
+sweet_x9_prepare_local_storage(proc_t p,user_addr_t scratch,user_addr_t end)
+{
+ static const char groups[]="/private/var/mobile/Containers/Shared/AppGroup";
+ static const char suffix[]="/.com.apple.mobile_container_manager.metadata.plist";
+ static const char ident[]="group.com.apple.FileProvider.LocalStorage";
+ static const char storage[]="/File Provider Storage";
+ static const char downloads[]="/Downloads";
+ extern boolean_t sweet_x9_ufs_root_writable(void);
+ int enabled=0,error=0,fd=-1,found=0,created=0,first_error=0;
+ int32_t rv=0; user_ssize_t got=0;
+ char name[64]; unsigned namelen=0;
+ char kbuf[1000]; char kmeta[1024]; char kpath[224];
+ user_addr_t groups_u=scratch,pos_u=scratch+64,ent_u=scratch+128,meta_u=scratch+1152,path_u=scratch+2176;
+ if((enabled=sweet_x9_arg("x9_local_storage",1))!=1)return 0;
+ if(!sweet_x9_ufs_root_writable())return EROFS;
+ if(!proc_is64bit(p)||scratch>end||end-scratch<2400)return E2BIG;
+ if((error=copyout(groups,groups_u,sizeof(groups))))return error;
+ { off_t zero=0; if((error=copyout(&zero,pos_u,sizeof(zero))))return error; }
+ { struct open_args o={.path=groups_u,.flags=0,.mode=0}; error=open(p,&o,&rv); if(error)return error; fd=rv; }
+ for(int round=0;round<128&&!found;round++){
+  struct getdirentries64_args g={.fd=fd,.buf=ent_u,.bufsize=sizeof(kbuf),.position=pos_u};
+  got=0; error=getdirentries64(p,&g,&got); if(error)break;
+  if(!got)break;
+  if(got>(user_ssize_t)sizeof(kbuf)){error=EIO;break;}
+  if((error=copyin(ent_u,kbuf,(size_t)got)))break;
+  unsigned off=0;
+  while(off+21<=(unsigned)got&&!found){
+   uint16_t reclen,entry_namlen; uint8_t type;
+   memcpy(&reclen,kbuf+off+16,sizeof(reclen));
+   memcpy(&entry_namlen,kbuf+off+18,sizeof(entry_namlen));
+   type=(uint8_t)kbuf[off+20];
+   if(reclen<22||off+reclen>(unsigned)got)break;
+   if(type==4&&entry_namlen>=1&&entry_namlen<=48){
+    const char *entry=kbuf+off+21;
+    if(!(entry_namlen==1&&entry[0]=='.')&&!(entry_namlen==2&&entry[0]=='.'&&entry[1]=='.')){
+     unsigned plen=0;
+     memcpy(kpath,groups,sizeof(groups)-1); plen=sizeof(groups)-1;
+     kpath[plen++]='/'; memcpy(kpath+plen,entry,entry_namlen); plen+=entry_namlen;
+     memcpy(kpath+plen,suffix,sizeof(suffix)); plen+=sizeof(suffix)-1;
+     if(plen<sizeof(kpath)){
+      int mfd=-1;
+      if(!copyout(kpath,path_u,plen+1)){
+       struct open_args mo={.path=path_u,.flags=0,.mode=0}; int32_t mrv=0;
+       if(!open(p,&mo,&mrv)){
+        mfd=mrv;
+        { struct read_args ra={.fd=mfd,.cbuf=meta_u,.nbyte=sizeof(kmeta)-1}; user_ssize_t n=0;
+          if(!read(p,&ra,&n)&&n>0&&n<(user_ssize_t)sizeof(kmeta)){
+           if(!copyin(meta_u,kmeta,(size_t)n)&&x9_local_storage_contains(kmeta,(unsigned)n,ident,sizeof(ident)-1)){
+            memcpy(name,entry,entry_namlen); name[entry_namlen]=0; namelen=entry_namlen; found=1;
+           }
+          } }
+        { struct close_args ca={.fd=mfd}; int32_t crv=0; (void)sys_close(p,&ca,&crv); }
+       }
+      }
+     }
+    }
+   }
+   off+=reclen;
+  }
+ }
+ { struct close_args ca={.fd=fd}; int32_t crv=0; (void)sys_close(p,&ca,&crv); }
+ if(!found){
+  printf("X9 LOCALSTORAGE: %s container not found; nothing created\n",ident);
+  return error?error:ENOENT;
+ }
+ for(int step=0;step<2;step++){
+  unsigned plen=0;
+  memcpy(kpath,groups,sizeof(groups)-1); plen=sizeof(groups)-1;
+  kpath[plen++]='/'; memcpy(kpath+plen,name,namelen); plen+=namelen;
+  memcpy(kpath+plen,storage,sizeof(storage)-1); plen+=sizeof(storage)-1;
+  if(step==1){ memcpy(kpath+plen,downloads,sizeof(downloads)-1); plen+=sizeof(downloads)-1; }
+  kpath[plen]=0;
+  int step_error=0,step_created=0;
+  if((step_error=copyout(kpath,path_u,plen+1))){ if(!first_error)first_error=step_error; continue; }
+  { struct mkdir_args ma={.path=path_u,.mode=0755}; int32_t mrv=0; step_error=mkdir(p,&ma,&mrv);
+    if(!step_error)step_created=1; else if(step_error==EEXIST)step_error=0; }
+  if(!step_error){
+   vnode_t vp=NULLVP;
+   step_error=vnode_lookup(kpath,VNODE_LOOKUP_NOFOLLOW,&vp,vfs_context_kernel());
+   if(!step_error){ if(!vnode_isdir(vp))step_error=ENOTDIR; vnode_put(vp); }
+  }
+  if(!step_error){
+   struct open_args o={.path=path_u,.flags=0,.mode=0}; int32_t orv=0;
+   step_error=open(p,&o,&orv);
+   if(!step_error){
+    int dfd=orv; struct fchown_args ch={.fd=dfd,.uid=501,.gid=501}; int32_t crv=0;
+    step_error=fchown(p,&ch,&crv);
+    { struct close_args ca={.fd=dfd}; int32_t xrv=0; (void)sys_close(p,&ca,&xrv); }
+   }
+  }
+  if(step_error){ printf("X9 LOCALSTORAGE: %s errno=%d\n",kpath,step_error); if(!first_error)first_error=step_error; }
+  else created+=step_created;
+ }
+ if(!first_error)printf("X9 LOCALSTORAGE: File Provider Storage + Downloads ready in container %s (created=%d)\n",name,created);
+ return first_error;
+}
+
 /* SystemOS is already present in the native HFS Cryptex tree. Expose the
  * separately loaded original ObjC helper at its canonical path. Never
  * replace existing files/links or fabricate executable bytes. */
@@ -8979,6 +9101,10 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	{
 	 int mgwipe_error=sweet_x9_wipe_gestalt_cache(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(mgwipe_error)printf("X9 MGWIPE: cache not removed errno=%d; continuing boot\n",mgwipe_error);
+	}
+	{
+	 int localstorage_error=sweet_x9_prepare_local_storage(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+	 if(localstorage_error)printf("X9 LOCALSTORAGE: repair unavailable errno=%d; continuing boot\n",localstorage_error);
 	}
 	{
 	 int statusbar_error=sweet_x9_seed_uikit_statusbar(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
