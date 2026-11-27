@@ -502,7 +502,9 @@ static void x9m_rawsend_reject_diag(unsigned sim,const uint8_t *req,unsigned len
  * radio-baseline.txt 2026-11-15): SIM1 first receives one zeroed
  * IMS_CFG_ADDITION_SERVICE 0a1c, then each SIM receives
  * IMS_ENABLE_DATA_CHANNEL 0a18 (tag 0x100 = 0) and IMS_SET_CONFIG 0a00
- * (tag 0x100 = 0, tag 0x102 = the six aggregated feature bytes). Under iOS
+ * (tag 0x100 = 0, tag 0x102 = the six aggregated feature bytes), followed
+ * by the minimal IMS DATA_ACT_CALL (APN_TYPE 2, URSP descriptor DNN
+ * "ims") that establishes the factory IMS bearer. Under iOS
  * the MD feature cache reads all zero, so none of this ever happens. The
  * writer mirrors the factory frames and order, then re-reads the cache;
  * a config ACK alone does not prove registration, so registration
@@ -524,7 +526,7 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
  const uint64_t now=x9q_ms();
  for(unsigned sim=0;sim<x9_md_sim_count();sim++){
   x9m_sim &s=x9m_sims[sim];
-  if(s.fx_stage>=5||s.fx_hold)continue;
+  if(s.fx_stage>=6||s.fx_hold)continue;
   if(s.fx_token){
    if(now>=s.fx_deadline){s.fx_hold=true;
     printf("X9 FACTORY: SIM%u stage %u timeout; token retained, no retry\n",sim+1,s.fx_stage);continue;}
@@ -533,14 +535,16 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
    if(rc<0){s.fx_hold=true;
     printf("X9 FACTORY: SIM%u stage %u transport error; held\n",sim+1,s.fx_stage);continue;}
    s.fx_token=0;
-   unsigned expect=s.fx_stage==1?0xa1d:s.fx_stage==2?0xa19:s.fx_stage==3?0xa01:0xa03;
+   unsigned expect=s.fx_stage==1?0xa1d:s.fx_stage==2?0xa19:s.fx_stage==3?0xa01:s.fx_stage==4?0x202:0xa03;
    unsigned result=1;
-   bool known=x9w_wire(p,n)&&p[8]==(1u<<sim)&&x9q_u16(p+10)==expect&&x9w_word(p,n,0,result);
+   bool known=p[8]==(1u<<sim)&&x9q_u16(p+10)==expect&&x9w_word(p,n,0,result)&&
+    (s.fx_stage==4||x9w_wire(p,n));
    if(!known||result){s.fx_hold=true;
     printf("X9 FACTORY: SIM%u stage %u rejected known %u result %u; held\n",sim+1,s.fx_stage,known?1:0,result);
     bzero(p,room);continue;}
    if(s.fx_stage==3)printf("X9 FACTORY: SIM%u IMS config accepted by modem\n",sim+1);
-   if(s.fx_stage==4){
+   if(s.fx_stage==4)printf("X9 FACTORY: SIM%u IMS data call accepted by modem\n",sim+1);
+   if(s.fx_stage==5){
     x9q_view data=x9w_tlv(p,n,0x100);
     if(data.p&&data.n==6)
      printf("X9 FACTORY: SIM%u feature cache after write raw=%02x%02x%02x%02x%02x%02x\n",
@@ -558,7 +562,16 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
   else if(s.fx_stage==2){x9w_frame f(0xa18,1u<<sim);f.byte(0x100,0);token=f.submit();}
   else if(s.fx_stage==3){x9w_frame f(0xa00,1u<<sim);f.word(0x100,0);
    uint8_t b[6];x9m_factory_ims_bytes(b);f.tlv(0x102,b,6);token=f.submit();}
-  else if(s.fx_stage==4){x9w_frame f(0xa02,1u<<sim);f.word(0x100,0);token=f.submit();}
+  else if(s.fx_stage==4){
+   /* Factory IMS bearer (radio-baseline.txt 18:38:15.635): a minimal
+    * DATA_ACT_CALL with APN_TYPE 2 and only the URSP traffic descriptor
+    * carrying DNN "ims" (is_match_all 0, dnn_len 3 at +1, dnn at +4,
+    * rest zero) beside URSP_EVAL_FLAG 0 and tag 0x10a = 3. */
+   x9w_frame f(0x201,1u<<sim);f.word(0x10f,0);f.word(0x102,2);f.byte(0x10a,3);
+   static uint8_t td[672];bzero(td,sizeof(td));td[1]=3;memcpy(td+4,"ims",3);
+   f.tlv(0x10d,td,sizeof(td));token=f.submit();
+  }
+  else if(s.fx_stage==5){x9w_frame f(0xa02,1u<<sim);f.word(0x100,0);token=f.submit();}
   if(token){s.fx_token=token;s.fx_deadline=now+10000;}
   else s.fx_hold=true;
  }
