@@ -149,6 +149,23 @@ static void test_legacy_arm_1ms(void)
     CHECK(nfires==1, "feel=0 fires=%d want 1 (0.5 ms gap must not re-arm)", nfires);
 }
 
+static void test_hold(void)
+{
+    struct x9_haptic_stock e; x9_haptic_stock_init(&e, X9_HS_FEEL_HOLD, 1000);
+    CHECK(!x9_hs_hold_expired(&e, 1000000000ULL), "expired with no hold");
+    x9_hs_hold_begin(&e, 1000000000ULL);
+    CHECK(e.hold==1, "hold not set");
+    CHECK(!x9_hs_hold_expired(&e, 1000000000ULL+X9_HS_HOLD_NS-1),
+        "expired before 200 ms");
+    CHECK(x9_hs_hold_expired(&e, 1000000000ULL+X9_HS_HOLD_NS),
+        "not expired at 200 ms");
+    x9_hs_hold_cancel(&e);
+    CHECK(!x9_hs_hold_expired(&e, 2000000000ULL), "expired after cancel");
+    x9_hs_hold_begin(&e, 5000ULL);
+    CHECK(x9_hs_hold_expired(&e, 5000ULL+X9_HS_HOLD_NS),
+        "re-begin after cancel broken");
+}
+
 int main(void)
 {
     test_grade_light();
@@ -157,6 +174,7 @@ int main(void)
     test_grade_monotonic();
     test_legacy_fixed_full_scale();
     test_legacy_arm_1ms();
+    test_hold();
     printf("RESULT %s checks=%d failures=%d\n", failures?"FAIL":"PASS", checks, failures);
     return failures?1:0;
 }

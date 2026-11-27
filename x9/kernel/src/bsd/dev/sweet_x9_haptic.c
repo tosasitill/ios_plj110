@@ -156,11 +156,12 @@ static int start_locked(struct x9_haptic_start *s)
     if(s->version!=1 || s->conversion>X9_HAPTIC_RETUNE || s->intensity>1000 || s->sharpness>1000)return EINVAL;
     if(hs.mode<2 || !(hs.flags&X9_HAPTIC_READY))return ENXIO;
     if(now_ns()<cool_until)return EAGAIN;
+    if(stock.hold){x9_hs_hold_cancel(&stock);(void)stop_locked();}
     if((hs.flags&X9_HAPTIC_RUNNING) || hb.active)return EBUSY;
     hs.flags&=~X9_HAPTIC_THROTTLED;hs.flags|=X9_HAPTIC_RUNNING;stream_reset();
     ++hs.generation;head=count=0;sequence=0;draining=scene_active=false;stock_wave=NULL;
     x9_haptic_converter_init(&converter,hs.f0_millihz,s->conversion,s->intensity,s->sharpness);
-    x9_haptic_stock_init(&stock,feel_flags&X9_HS_FEEL_GRADE,s->intensity);
+    x9_haptic_stock_init(&stock,feel_flags&(X9_HS_FEEL_GRADE|X9_HS_FEEL_HOLD),s->intensity);
     hs.last_write_ns=now_ns();s->generation=hs.generation;return 0;
 }
 static int haptic_open(dev_t d,int f,__unused int t,struct proc *p)
@@ -190,7 +191,8 @@ static int haptic_read(dev_t d,struct uio *u,__unused int flags)
     return uiomove((char *)&s,sizeof(s),u);
 }
 static void stock_start_locked(const struct x9_haptic_stock_wave *w,uint32_t intensity)
-{stock_wave=w;scene_frame=0;scene_intensity=intensity;scene_active=true;scene_kind=1;wakeup(&count);}
+{stock_wave=w;scene_frame=0;scene_intensity=intensity;scene_active=true;scene_kind=1;
+    x9_hs_hold_cancel(&stock);wakeup(&count);}
 static int haptic_write(dev_t d,struct uio *u,__unused int flags)
 {
     if(minor(d)!=1 || !uio_isuserspace(u) || uio_iovcnt(u)!=1 ||
@@ -320,7 +322,13 @@ static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
              * Changes of amplitude/sequence do not renew continuous-on time. */
             /* Scenes only: OPPO plays RTP streams (ringtones) without a cap, and
              * log 327 patterns were cut into restarts by this 1 s limit. */
-            if(scene_active && on_at && now-on_at>=1000000000ULL) {
+            if(stock.hold && !scene_active && !draining &&
+               x9_hs_hold_expired(&stock,now)) {
+                /* Hold elapsed with no follow-up event: retire exactly
+                 * like the drained stream would have at its end. */
+                x9_hs_hold_cancel(&stock);
+                int stopped=stop_locked();if(stopped)fail_locked(stopped);
+            } else if(scene_active && on_at && now-on_at>=1000000000ULL) {
                 hs.flags|=X9_HAPTIC_THROTTLED;cool_until=now+1000000000ULL;
                 hs.throttled_rtp_frames+=count;head=count=0;
                 int e=hoff();on_at=0;quiet_stop=true;
@@ -397,7 +405,19 @@ static void haptic_worker(__unused void *arg,__unused wait_result_t wait)
                 }
                 if(e)fail_locked(e);
                 else if(draining && !count && !hb.active) {
-                    ++hs.completed_streams;int stopped=stop_locked();if(stopped)fail_locked(stopped);
+                    ++hs.completed_streams;
+                    if(hs.mode==3 && (feel_flags&X9_HS_FEEL_HOLD)) {
+                        /* Feel: a 15 ms tap must not retire the session.
+                         * Keep generation + RUNNING and hold for 200 ms
+                         * (the PCM path's silence keepalive window); the
+                         * next HAL packet continues this stream instead of
+                         * dying on EPIPE until the 500-tick reopen poll.
+                         * completed_streams still counts the finished
+                         * hardware run. */
+                        stream_summary();stream_reset();
+                        draining=false;scene_kind=0;
+                        x9_hs_hold_begin(&stock,now);
+                    } else {int stopped=stop_locked();if(stopped)fail_locked(stopped);}
                 }
             }
         }
