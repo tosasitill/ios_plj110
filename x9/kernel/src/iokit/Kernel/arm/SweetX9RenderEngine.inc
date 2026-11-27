@@ -1342,9 +1342,22 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
  return render_submit_reap(&st,owner);
 }
 static IOReturn render_wait(X9RenderContext *c,const X9RenderWaitRequest *request,X9RenderCompletion *reply) {
- RenderOwner owner;if(!owner.locked||!render_ready()||!c||!request||!reply||!c->engine_private)return kIOReturnNotReady;
+ if(!c||!request||!reply||!c->engine_private)return kIOReturnNotReady;
  auto *p=(RenderKernelContext *)c->engine_private;
+ /* A history hit needs no hardware and no owner lock. The only caller is
+  * SweetX9RenderService::operation(), which externalMethod runs with
+  * context->lock held, and every history writer (the reap completion block
+  * in render_submit_reap, reached from the synchronous submit and from the
+  * async worker) also holds context->lock, so the ring is stable here.
+  * Answering a hit without sweet_x9_render_owner_enter() keeps a completed
+  * record readable while another job holds the owner lock, and after the
+  * engine has faulted (render_ready() false) -- the two cases where a
+  * waiter most needs the record, and where the old code returned
+  * kIOReturnNotReady for a completion that had in fact happened. A miss
+  * keeps the old semantics exactly: NotReady unless the owner lock is
+  * held and the engine is ready, then NotFound. */
  for(const auto &r:p->history)if(r.group==request->group&&r.submission_id==request->submission_id){*reply=r;return kIOReturnSuccess;}
+ RenderOwner owner;if(!owner.locked||!render_ready())return kIOReturnNotReady;
  return kIOReturnNotFound;
 }
 static X9RenderCloseResult render_close(X9RenderContext *c) {
