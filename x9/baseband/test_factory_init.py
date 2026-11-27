@@ -29,7 +29,10 @@ class FactoryInit(unittest.TestCase):
 #include <cstring>
 #include <strings.h>
 struct x9m_sim { unsigned ims_stage=0, fx_stage=0; uint64_t fx_token=0, fx_deadline=0; bool ims_hold=false, fx_hold=false; };
-x9m_sim x9m_sims[2]; bool x9w_control_ready=true; bool factory_on=true; uint64_t clock_ms=1, next_token=1;
+x9m_sim x9m_sims[2];
+struct x9w_pcscf_list { uint8_t v4_count=0, v6_count=0; uint8_t v4[4][4]={}; uint8_t v6[4][16]={}; };
+x9w_pcscf_list x9w_pcscf_lists[2];
+void x9w_pcscf_publish(unsigned, const uint8_t*, unsigned){} bool x9w_control_ready=true; bool factory_on=true; uint64_t clock_ms=1, next_token=1;
 bool x9m_factory_enabled(){return factory_on;}
 unsigned x9_md_sim_count(){return 2;} bool x9_md_mipc_online(){return true;} uint64_t x9q_ms(){return clock_ms;}
 struct Rec { unsigned id=0, mask=0, tag102[6]={}, has102=0, word100=99, byte100=99, tlv100len=0; unsigned word102=99, byte10a=99, tlv10dlen=0; uint8_t td_head[8]={}; };

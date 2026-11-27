@@ -543,7 +543,13 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
     printf("X9 FACTORY: SIM%u stage %u rejected known %u result %u; held\n",sim+1,s.fx_stage,known?1:0,result);
     bzero(p,room);continue;}
    if(s.fx_stage==3)printf("X9 FACTORY: SIM%u IMS config accepted by modem\n",sim+1);
-   if(s.fx_stage==4)printf("X9 FACTORY: SIM%u IMS data call accepted by modem\n",sim+1);
+   if(s.fx_stage==4){
+    printf("X9 FACTORY: SIM%u IMS data call accepted by modem\n",sim+1);
+    x9w_pcscf_publish(sim,p,n);
+    if(x9w_pcscf_lists[sim].v4_count||x9w_pcscf_lists[sim].v6_count)
+     printf("X9 FACTORY: SIM%u P-CSCF stored from ACT CNF v4 %u v6 %u\n",sim+1,
+      x9w_pcscf_lists[sim].v4_count,x9w_pcscf_lists[sim].v6_count);
+   }
    if(s.fx_stage==5){
     x9q_view data=x9w_tlv(p,n,0x100);
     if(data.p&&data.n==6)

@@ -90,6 +90,13 @@ static bool x9w_byte(const uint8_t *p,unsigned n,unsigned tag,unsigned &v){
 static bool x9w_word(const uint8_t *p,unsigned n,unsigned tag,unsigned &v){
  x9q_view t=x9w_tlv(p,n,tag);if(!t.p||t.n!=4)return false;v=x9q_u32(t.p);return true;
 }
+/* P-CSCF lists decoded from the factory IMS ACT CNF (0202), per SIM.
+ * Written once by the factory sequence in X9Messages.inc, read by the
+ * 0x2d IMS settings path below. RAM only; empty until an ACT succeeds. */
+struct x9w_pcscf_list {
+ uint8_t v4_count,v6_count;uint8_t v4[4][4],v6[4][16];
+};
+static x9w_pcscf_list x9w_pcscf_lists[2];
 #include "X9WDSResult.inc"
 struct x9w_bearer {
  bool used,owned,active,abandoned,pending,hold,gone;
@@ -1323,7 +1330,16 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   else{
    x9q_packet p(req);uint8_t type=0;p.tlv(0x11,&type,1);p.tlv(0x14,view->apn,(unsigned)strlen(view->apn));
    bool encoded=c.family==6?x9wr_serialize_ipv6(view->runtime,p):x9wr_serialize_ipv4(view->runtime,p);
-   if(!encoded)error=X9Q_NOT_READY;else{p.send(local,port);return true;}
+   if(!encoded)error=X9Q_NOT_READY;
+   else{
+    /* IMS contexts additionally carry the factory ACT's P-CSCF lists for
+     * this SIM (ProxyIPv4List 0x23 / ProxyIPv6List 0x2e). Default-data
+     * contexts never gain them, and no S-NSSAI 0x32 is emitted: no
+     * modem-side source for it has been identified. */
+    if(x9wr_ims_settings_applicable(view->apn,x9w_pcscf_lists[c.sim_slot]))
+     encoded=x9wr_serialize_pcscf(x9w_pcscf_lists[c.sim_slot],p);
+    if(!encoded)error=X9Q_NOT_READY;else{p.send(local,port);return true;}
+   }
   }
  }else if(id==0x21){
   x9q_view h=x9q_tlv(req,n,1);
