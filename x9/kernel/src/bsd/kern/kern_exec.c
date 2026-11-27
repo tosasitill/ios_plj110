@@ -8750,8 +8750,15 @@ sweet_x9_wipe_gestalt_cache(proc_t p, user_addr_t scratch, user_addr_t end)
 	static const char legacy[] =
 	    "/var/mobile/Library/Caches/com.apple.MobileGestalt.plist";
 	static const char epoch_dir[] = "/private/var/x9/mg";
-	static const char epoch_path[] = "/private/var/x9/mg/refresh-capabilities-20261126";
-	static const char epoch_temp[] = "/private/var/x9/mg/refresh-capabilities-20261126.x9-bbfw-temp";
+	/* Marker renamed 20261126 -> 20261127 to force one cache rebuild: the
+	 * hashed tuple covers boot-arg capability flags only, not the ADT
+	 * content those flags select (the AOP ALS node behind x9_als=3) nor
+	 * the display identity CoreBrightness keys its per-display state on.
+	 * The ambient-light-sensor answer rebuilt under the current ADT is
+	 * what both the Settings auto-brightness switch (PSCapabilityManager
+	 * capabilityBoolAnswer) and CoreBrightness itself check. */
+	static const char epoch_path[] = "/private/var/x9/mg/refresh-capabilities-20261127";
+	static const char epoch_temp[] = "/private/var/x9/mg/refresh-capabilities-20261127.x9-bbfw-temp";
 	static const char ui_epoch_path[] = "/private/var/x9/mg/refresh-ui2556-20261116";
 	const bool island = sweet_x9_arg("x9_ui", 0) == 1;
 	const bool bluetooth = sweet_x9_arg("x9_bt_init", 0) == 1;
@@ -8858,6 +8865,84 @@ sweet_x9_seed_purplebuddy(proc_t p, user_addr_t scratch, user_addr_t end)
  if(!error){struct rename_args r={.from=tmp,.to=t};error=rename(p,&r,&rv);}
  if(error){struct unlink_args u={.path=tmp};(void)unlink(p,&u,&rv);}
  printf("X9 Setup seed: purplebuddy errno=%d; existing preference backed up if present\n",error);
+ return error;
+}
+
+
+/*
+ * CoreBrightness auto-brightness seed (20H392; CB runs in backboardd).
+ * The Settings switch and CB's control loop both key off state this seed
+ * root never acquired:
+ *  - The switch is capability-gated: -[DBSBrightnessManager
+ *    mainDisplayBrightnessSpecifiers] adds it only when
+ *    PSCapabilityManager capabilityBoolAnswer for the MobileGestalt
+ *    "ambient-light-sensor" answer is true, and CB logs "ALS is not
+ *    supported on this device -> ignore setting of DisplayBrightnessAuto
+ *    property" and never drives the panel while that answer is false.
+ *    The ADT AOP ALS node supplies the native answer; its persistence
+ *    risk is the MG disk cache, handled by the capabilities epoch above.
+ *  - CB loads its auto-brightness state from its own preference domain
+ *    ("auto-brightness state loaded from preferences: %d") and reads the
+ *    per-display curve as DisplayPreferences -> <display UUID> ->
+ *    AutoBrightnessCurve {Version, Lux1, Lux2, Backlight1, Backlight2}
+ *    (CBABCurve initWithConfiguration:, keys verified in the 20H392
+ *    binary). The display UUID is the container ID CBDisplayModuleHIDiOS
+ *    reads from the display service ("kUSBContainerID", with "VendorID"
+ *    and "ProductID"), which SweetFramebuffer now publishes; without it
+ *    CB creates an ad-hoc UUID per boot and no stored curve state can
+ *    ever be found again.
+ * Seed only when the file is absent: once CB has written the file it
+ * owns it (learned curve state lives there), so an existing file is
+ * probed for the state key, logged, and left byte-identical. Curve
+ * anchors are the OPPO factory lux -> normalized-level mapping for this
+ * panel (Android DisplayDeviceConfig, captured 2026-11-27: 256 lux ->
+ * 0.3718, 1024 -> 0.5159, saturation 1.0 at 4096 lux) fitted to CB's
+ * two-segment form; Backlight values are CB's normalized levels. Our
+ * HID lux is the TCS3720 driver lux; Android's fusion lux read ~1.1x
+ * higher on the one captured sample pair, inside this fit's error.
+ * Debounce/hysteresis have no CB preference counterpart (AAB-internal
+ * constants), so none is seeded. Opt out with x9_cb_seed=0; the caller
+ * treats every failure as non-fatal.
+ */
+static int
+sweet_x9_seed_corebrightness(proc_t p, user_addr_t scratch, user_addr_t end)
+{
+ static const char target[]="/private/var/mobile/Library/Preferences/com.apple.CoreBrightness.plist";
+ static const char temp[]="/private/var/mobile/Library/Preferences/com.apple.CoreBrightness.x9-seed.tmp";
+ static const char probe[]="DisplayBrightnessAuto";
+ static const char body[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>DisplayBrightnessAuto</key>\n\t<true/>\n\t<key>DisplayPreferences</key>\n\t<dict>\n\t\t<key>7C9E6993-1102-4A5B-8C7D-202611270001</key>\n\t\t<dict>\n\t\t\t<key>AutoBrightnessCurve</key>\n\t\t\t<dict>\n\t\t\t\t<key>Version</key>\n\t\t\t\t<integer>1</integer>\n\t\t\t\t<key>Lux1</key>\n\t\t\t\t<real>256.0</real>\n\t\t\t\t<key>Backlight1</key>\n\t\t\t\t<real>0.3718</real>\n\t\t\t\t<key>Lux2</key>\n\t\t\t\t<real>4096.0</real>\n\t\t\t\t<key>Backlight2</key>\n\t\t\t\t<real>1.0</real>\n\t\t\t</dict>\n\t\t</dict>\n\t</dict>\n</dict>\n</plist>\n";
+ int enabled=0,error,fd; int32_t rv=0; user_ssize_t written=0; vnode_t vp=NULLVP;
+ extern boolean_t sweet_x9_ufs_root_writable(void);
+ if((enabled=sweet_x9_arg("x9_cb_seed",1))!=1)return 0;
+ if(!sweet_x9_ufs_root_writable())return EROFS;
+ if(!proc_is64bit(p)||scratch>end||sizeof(target)+sizeof(temp)+sizeof(body)+2048>end-scratch)return E2BIG;
+ user_addr_t t=scratch,tmp=t+sizeof(target),data=tmp+sizeof(temp),buf=data+sizeof(body);
+ if((error=copyout(target,t,sizeof(target)))||(error=copyout(temp,tmp,sizeof(temp)))||(error=copyout(body,data,sizeof(body))))return error;
+ error=vnode_lookup(target,VNODE_LOOKUP_NOFOLLOW,&vp,vfs_context_kernel());
+ if(!error){
+  if(!vnode_isreg(vp)){vnode_put(vp);return EINVAL;} vnode_put(vp);
+  int has=-1;
+  struct open_args o={.path=t,.flags=0,.mode=0};
+  error=open(p,&o,&rv);
+  if(!error){
+   fd=rv; char kbuf[2048]; user_ssize_t n=0;
+   struct read_args ra={.fd=fd,.cbuf=buf,.nbyte=sizeof(kbuf)};
+   if(!read(p,&ra,&n)&&n>0&&n<=(user_ssize_t)sizeof(kbuf)&&!copyin(buf,kbuf,(size_t)n))
+    has=x9_local_storage_contains(kbuf,(unsigned)n,probe,sizeof(probe)-1);
+   { struct close_args c={.fd=fd}; int32_t crv=0; (void)sys_close(p,&c,&crv); }
+  }
+  printf("X9 CB SEED: existing com.apple.CoreBrightness.plist kept (DisplayBrightnessAuto in first 2048 bytes=%d); not modified\n",has);
+  return 0;
+ }
+ if(error!=ENOENT)return error;
+ struct open_args o={.path=tmp,.flags=O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,.mode=0600};
+ error=open(p,&o,&rv);if(error)return error;fd=rv;
+ struct fchown_args ch={.fd=fd,.uid=501,.gid=501};error=fchown(p,&ch,&rv);
+ if(!error){struct write_args w={.fd=fd,.cbuf=data,.nbyte=sizeof(body)-1};error=write(p,&w,&written);if(!error&&written!=(user_ssize_t)(sizeof(body)-1))error=EIO;}
+ { struct close_args c={.fd=fd};int ce=sys_close(p,&c,&rv);if(!error)error=ce; }
+ if(!error){struct rename_args r={.from=tmp,.to=t};error=rename(p,&r,&rv);}
+ if(error){struct unlink_args u={.path=tmp};(void)unlink(p,&u,&rv);}
+ printf("X9 CB SEED: com.apple.CoreBrightness seed written errno=%d (DisplayBrightnessAuto=1, factory curve for display 7C9E6993-1102-4A5B-8C7D-202611270001)\n",error);
  return error;
 }
 
@@ -9105,6 +9190,10 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	{
 	 int localstorage_error=sweet_x9_prepare_local_storage(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(localstorage_error)printf("X9 LOCALSTORAGE: repair unavailable errno=%d; continuing boot\n",localstorage_error);
+	}
+	{
+	 int cbseed_error=sweet_x9_seed_corebrightness(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+	 if(cbseed_error)printf("X9 CB SEED: seed unavailable errno=%d; continuing boot\n",cbseed_error);
 	}
 	{
 	 int statusbar_error=sweet_x9_seed_uikit_statusbar(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);

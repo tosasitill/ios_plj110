@@ -238,6 +238,19 @@ enum {
 #define X9_BL_DBV_MIN                   2
 #define X9_BL_DBV_MAX                   3515
 #define X9_BL_DBV_DEFAULT               1433
+/* Display identity CoreBrightness reads from the display service
+ * (CBDisplayModuleHIDiOS initWithDevice: queries "VendorID", "ProductID"
+ * and "kUSBContainerID", 20H392). Nothing published any of them: VID/PID
+ * stayed 0 (CB's default curve configuration still applies) and, with no
+ * container ID, CB created an ad-hoc UUID per boot, so its per-display
+ * preference state (DisplayPreferences -> <UUID> -> AutoBrightnessCurve)
+ * could never persist or be seeded. Stable synthetics for this panel -
+ * the MT6993 panel stack exposes no EDID identity. The container ID must
+ * match the kern_exec CoreBrightness seed verbatim; the host test
+ * x9/display/test_autobright_seed.py asserts the equality. */
+#define X9_DISPLAY_VENDOR_ID            0x5839
+#define X9_DISPLAY_PRODUCT_ID           0x0287
+#define X9_DISPLAY_CONTAINER_ID         "7C9E6993-1102-4A5B-8C7D-202611270001"
 #define SWEET_FB_NOTIFY_TYPES           8
 #define SWEET_FB_NOTIFY_VSYNC           5
 #define SWEET_FB_VSYNC_US               16667
@@ -770,6 +783,9 @@ AppleCLCD::start(IOService *provider)
 			if (fX9Bl) {
 				/* CoreBrightness level == panel DBV (0x51); 3515 = DT normal max */
 				bl->publishLevel(fBlLevel, 0, X9_BL_DBV_MAX);
+				bl->setProperty("VendorID", (unsigned long long)X9_DISPLAY_VENDOR_ID, 32);
+				bl->setProperty("ProductID", (unsigned long long)X9_DISPLAY_PRODUCT_ID, 32);
+				bl->setProperty("kUSBContainerID", X9_DISPLAY_CONTAINER_ID);
 			} else {
 				bl->publishLevel(fBlLevel, 0, 0x7ff);
 			}
@@ -1113,6 +1129,13 @@ AppleCLCD::start(IOService *provider)
 
 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
 	setProperty("external", false);
+	if (sweet_board_x9()) {
+		/* Same identity as the backlight child: CBDisplayModuleHIDiOS
+		 * may read the display service instead of the backlight one. */
+		setProperty("VendorID", (unsigned long long)X9_DISPLAY_VENDOR_ID, 32);
+		setProperty("ProductID", (unsigned long long)X9_DISPLAY_PRODUCT_ID, 32);
+		setProperty("kUSBContainerID", X9_DISPLAY_CONTAINER_ID);
+	}
 	/* VideoToolbox FigGetAlignmentForIOSurfaceOutputToDisplayService and
 	 * QuartzCore read this as a dictionary {PlaneBaseAlignmentLinear: n}.
 	 * A bare number made mediaserverd throw -[__NSCFNumber objectForKey:]
