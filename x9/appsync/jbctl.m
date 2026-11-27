@@ -8,8 +8,19 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <unistd.h>
+#import <dispatch/dispatch.h>
 #import <errno.h>
 extern int __mac_syscall(const char *, int, void *);
+
+@interface NSObject (X9FileProviderManager)
++ (id)defaultManager;
+- (void)getDomainsWithCompletionHandler:(void (^)(NSArray *domains, NSError *error))handler;
+@end
+
+@interface NSObject (X9FileProviderDomain)
+- (NSString *)identifier;
+- (BOOL)userEnabled;
+@end
 
 @interface NSObject (X9LaunchServices)
 + (id)defaultWorkspace;
@@ -136,6 +147,47 @@ static int repairContainer(NSString *bundleID) {
     return now ? 0 : 1;
 }
 
+// Read-only FileProvider domain census, logged with the storage repair so a
+// device log shows whether fileproviderd actually serves the LocalStorage
+// default domain after the folders exist. Never mutates FP state; every
+// step is selector-guarded and failure only changes the log line.
+static void reportFileProviderDomain(void) {
+    dlopen("/System/Library/Frameworks/FileProvider.framework/FileProvider", RTLD_NOW);
+    Class mgrClass = objc_getClass("FPFileProviderManager");
+    id manager = [mgrClass respondsToSelector:@selector(defaultManager)] ? [mgrClass defaultManager] : nil;
+    if (![manager respondsToSelector:@selector(getDomainsWithCompletionHandler:)]) {
+        printf("x9-jbctl: fp domains unavailable (manager API missing)\n");
+        NSLog(@"[X9 JBCTL] fp domains unavailable (manager API missing)");
+        return;
+    }
+    __block NSArray *domains = nil;
+    __block NSError *queryError = nil;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    [(NSObject *)manager getDomainsWithCompletionHandler:^(NSArray *found, NSError *error) {
+        domains = found;
+        queryError = error;
+        dispatch_semaphore_signal(done);
+    }];
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC))) {
+        printf("x9-jbctl: fp domains query timed out\n");
+        NSLog(@"[X9 JBCTL] fp domains query timed out");
+        return;
+    }
+    int localStorage = 0, localEnabled = 0;
+    for (id domain in domains ?: @[]) {
+        NSString *identifier = [domain respondsToSelector:@selector(identifier)] ? [domain identifier] : nil;
+        if ([identifier containsString:@"LocalStorage"]) {
+            localStorage = 1;
+            localEnabled = [domain respondsToSelector:@selector(userEnabled)] && [domain userEnabled];
+        }
+    }
+    printf("x9-jbctl: fp domains count=%lu localStorage=%d userEnabled=%d error=%s\n",
+           (unsigned long)(domains ? domains.count : 0), localStorage, localEnabled,
+           queryError.localizedDescription.UTF8String ?: "(none)");
+    NSLog(@"[X9 JBCTL] fp domains count=%lu localStorage=%d userEnabled=%d error=%@",
+          (unsigned long)(domains ? domains.count : 0), localStorage, localEnabled, queryError);
+}
+
 // "On My iPhone" is the Files local-storage provider's root: the app group
 // container group.com.apple.FileProvider.LocalStorage, folder "File Provider
 // Storage". On this root the group exists without that folder, so Files cannot
@@ -173,8 +225,10 @@ static int ensureLocalStorage(void) {
                            attributes:@{NSFilePosixPermissions: @0755} error:&error]) created++;
         else { fprintf(stderr, "x9-jbctl: mkdir %s: %s\n", path.UTF8String, error.localizedDescription.UTF8String); failed++; }
     }
+
     printf("x9-jbctl: local storage %s created=%d failed=%d\n", found.UTF8String, created, failed);
     NSLog(@"[X9 JBCTL] local storage %@ created=%d failed=%d", found, created, failed);
+    reportFileProviderDomain();
     return failed ? 1 : 0;
 }
 

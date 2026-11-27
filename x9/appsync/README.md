@@ -30,6 +30,28 @@ arm64e/PAC、SPTM、trust-cache-v2、DWC3 或全局 vtable 补丁。
   消耗调用者原件。`x9-jbctl --status` 只报告 AMFI 和工具文件是否存在，
   不伪造越狱成功、hook 加载、USB/Trust 或 root 权限。
 
+## 本地存储（文件 App「我的 iPhone」/ Safari 下载）
+
+症状同根：LocalStorage 文件提供者的默认域根目录是 AppGroup 容器
+`group.com.apple.FileProvider.LocalStorage` 内的 `File Provider Storage`
+（Safari 默认下载目录为其下 `Downloads`）。种子根盘里该容器只有元数据、
+没有这个文件夹，stock 流程在本机不生成它；MobileSafari 的 LS 记录同时缺
+dataContainerURL（容器在盘上存在）。v5/v6 的 jbctl 修复
+（`--repair-container`、`--ensure-local-storage`）经 AppSync 从 SpringBoard
+派生，在 r286/r287 日志中均 exit=0，但 fileproviderd 在开机约 13 s 已启动、
+修复约 18 s 才落地，且修复从未校验 FP 域是否真被提供——用户侧症状依旧。
+
+2026-11-27 起内核在 PID1（launchd 之前）做同一修复
+`sweet_x9_prepare_local_storage`（`kern_exec.c`，门控 `x9_local_storage`，
+默认开、`=0` 关闭，失败不阻塞启动）：按与 jbctl 相同的规则扫描 AppGroup
+元数据标识定位容器，预建 `File Provider Storage` 与 `Downloads`（0755）
+并把属主规范为 mobile（501:501）。jbctl 保留为二次修复，并新增只读的
+FP 域普查日志（`fp domains count=… localStorage=… userEnabled=…`），供下轮
+上机判定域是否被 fileproviderd 提供。主机测试
+`x9/tools/test_x9_local_storage_bootstrap.py` 从真实 kern_exec.c 提取函数
+验证发现/建夹/属主/门控行为。仍待上机验证：文件 App 是否出现「我的
+iPhone」、Safari 是否能下载、FP 普查日志的实际值。
+
 ## 构建（只在 Mac）
 
 ```sh
