@@ -301,9 +301,10 @@ static bool x9m_factory_enabled(){
  * SIM reports exactly once per boot. A failure here never blocks or
  * revokes host-ready, and is never retried. */
 static bool x9m_ind_enabled(){
- /* Default off: IMS registration is not yet device-proven, so the
-  * no-ack indication path stays dormant until x9_sms_ind=1 opts in. */
- static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_sms_ind",0)==1;
+ /* Default on: the no-ack indication path is the inbound-SMS
+  * discrimination surface and must be live without boot-arg juggling;
+  * x9_sms_ind=0 opts out for A/B. */
+ static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_sms_ind",1)!=0;
  return enabled!=0;
 }
 static void x9m_mem_status_poll(uint8_t *p,unsigned room){
@@ -697,12 +698,12 @@ struct x9m_publication {
  uint32_t port,node;const uint8_t *sdu;uint32_t size;
  uint8_t *owned;uint32_t room;
 };
-/* No-ack indication registration (x9_sms_ind=1, default off). The CMD
+/* No-ack indication registration (x9_sms_ind, default on; =0 opts out). The CMD
  * path registers 8601/8603 through REGISTER_CMD (0x30b); the 4606
  * family is subscribed through REGISTER_IND (0x307) per SIM, mirroring
  * the 4a01 registration, after the SIM's CFG_IND step has passed. The
- * MD only emits 4602/4606 in its prefer_no_ack mode, so this is a
- * dormant fallback until a device round proves which mode fires.
+ * MD only emits 4602/4606 in its prefer_no_ack mode; the path is live
+ * by default so a device round can prove which mode fires.
  * 4603 STORE_STATUS joins the rotation for evidence: if the MD runs
  * the store model (MT saved to ME storage, notify via 4603) instead
  * of pushing 8601, its handler already logs flag/index with no
@@ -982,7 +983,7 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
      bzero(j,sizeof(*j));x9q_packet p(req,X9Q_ARG);p.send(local,port);return true;
     }
     const bool report=f.good&&x9ms_submit_report(f.p+pdu_offset,raw.n-3,
-                                                sweet_x9_arg("x9_sms_srr",0)==1);
+                                                sweet_x9_arg("x9_sms_srr",1)!=0);
     f.byte(0x102,(uint8_t)(raw.n-4-raw.p[3]));j->token=f.submit();
     if(j->token){printf("X9 SMS: SIM%u send submitted token %llu QMI txn %u status report requested %u retry %u; waiting for modem CNF\n",
       sim+1,(unsigned long long)j->token,x9q_u16(req+1),report?1u:0u,is_retry?1u:0u);return true;}
