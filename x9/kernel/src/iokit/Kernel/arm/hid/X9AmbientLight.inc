@@ -29,6 +29,7 @@ private:
 	IOTimerEventSource *fTimer;
 	UInt32 fIntervalUs;
 	uint64_t fSequence;
+	uint32_t fLastLoggedLux;
 	bool fIngressActive;
 	bool fDataValid;
 	struct x9_als_status fStatus;
@@ -40,6 +41,7 @@ X9AmbientLight::start(IOService *provider)
 {
 	fTimer = NULL;
 	fIngressActive = false;
+	fLastLoggedLux = 0;
 	/* Compact sensor mask: bit0 ALS, bit1 pressure, bit2 GPS. Explicit
 	 * per-device arguments override it (including diagnostic mode). */
 	int sensors = 0; int has_sensors;
@@ -67,6 +69,7 @@ X9AmbientLight::start(IOService *provider)
 	/* 319: SpringBoard also matches IONameMatch=als. This is still the
 	 * Sensor/AmbientLight HID service, not a fake AppleALS user client. */
 	setName("als");
+	setProperty("Product", "X9 Ambient Light Sensor");
 	setProperty("X9ALSBackend", diagnostic ? "diagnostic" : enabled == 3 ? "mtk-scp-native" : "mtk-scp-pending");
 	setProperty("X9ALSDataValid", kOSBooleanFalse);
 	setProperty("X9ALSDiagnostic", diagnostic == 1 ? kOSBooleanTrue : kOSBooleanFalse);
@@ -177,10 +180,18 @@ X9AmbientLight::poll(OSObject *owner, IOTimerEventSource *sender)
 			self->setProperty("X9ALSBackend", sample.diagnostic ? "diagnostic" : "mtk-scp-data");
 			self->dispatchEvent(event);
 			event->release();
-			/* Log first dispatch and diagnostics, not every physical sample. */
-			if (sample.sequence == 1 || sample.diagnostic)
+			/* Log the first dispatches, diagnostics, and coarse lux
+			 * transitions (>=2x either way) so a USB log alone can prove
+			 * the stream tracks real light changes; steady-state samples
+			 * stay silent and remain visible via X9ALSLastLux. */
+			if (sample.sequence <= 3 || sample.diagnostic ||
+			    (self->fLastLoggedLux &&
+			     (sample.lux >= self->fLastLoggedLux * 2 ||
+			      sample.lux * 2 <= self->fLastLoggedLux))) {
+				self->fLastLoggedLux = sample.lux;
 				IOLog("X9 ALS: dispatch seq=%llu lux=%u source=%s\n",
 				    sample.sequence, sample.lux, sample.diagnostic ? "DIAGNOSTIC" : "MTK");
+			}
 		}
 	}
 	sender->setTimeoutUS(self->fIntervalUs);

@@ -45,7 +45,7 @@ int main(int argc,char **argv)
  else if (argc==3 && !strcmp(argv[1],"--watch") && number(argv[2],60,&watch) && watch>0) { }
  else { fprintf(stderr,"usage: proxctl [--status | --mode 0..5 | --watch 1..60(seconds)]\n"); return 2; }
  io_service_t service=IOServiceGetMatchingService(MACH_PORT_NULL,IOServiceMatching("X9Proximity"));
- if (!service) { fprintf(stderr,"X9Proximity absent (boot x9_prox=3 for native, 2 for diagnostic)\n"); return 1; }
+ if (!service) { fprintf(stderr,"X9Proximity absent (native is board-default; x9_prox=0 disables, 2 selects diagnostic, transport fault also unpublishes)\n"); return 1; }
  int result=0;
  if (mode>=0) {
   if (geteuid()) {
