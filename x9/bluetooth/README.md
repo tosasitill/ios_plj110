@@ -5,19 +5,18 @@
 
 ## 当前状态与证据（2026-11-26）
 
-- **passive 默认**：`x9/build/boot-device.json` 只有 `x9_bt=1`，注册 metadata service 与
-  `/dev/cu.bluetooth`，但不启动硬件下载。完整初始化候选必须显式追加
-  `x9_bt_init=1 x9_bt_fc=1`；`x9_bt_fc=1` 使用 MTK SW 流控。
+- **完整设备配置**：`x9/build/boot-device.json` 已含 `x9_bt=1 x9_bt_init=1 x9_bt_fc=1`。
+  `x9_bt_fc=1` 使用 MTK SW 流控；`x9_bt_init=0` 保留 metadata service 和
+  `/dev/cu.bluetooth`，不启动完整硬件会话。
 - **历史设备观察**：`~/425.txt` 对应 `x9-bt-vendor-events-20261125`（提交 `414cbe3f`）。
   FE01 被识别为 connac3 动态固件 section 请求并完成 section 2 重载；完整 capabilities 已返回；
   `0xE0..0xFF` 厂商事件在 Apple H4 parser 前消费后，先前的 reason-607 崩溃消失，bluetoothd
   存活超过 139 s。这不是当前主线或当前设备状态的重新验收。
 - **仍未验收**：Settings 灰色、`BluetoothManager.available`、实际扫描/配对/连接/BLE、
   A2DP/HFP/SCO 双向声音、睡眠与活动连接 suspend/resume。H4 只提供 HCI，不是 PCM codec。
-- **Settings 候选**：`.worktrees/bt-default-on` 的
-  `x9-bt-settings-diag-20261125-r2` 已有完整 host 构建，但未刷入、未安装 root、未运行
-  Preferences 诊断 hook。`BluetoothManager` 只有 `[self+0x18]==2` 才 available；五个原生
-  setup 调用全部成功才写 state 2，不能直接改 state 或伪造 native 返回。
+- **Settings 观察**：`~/444.txt` 已有 120 条扩展广播报告，但 Preferences 收到
+  `xpcConnectionIsInvalid` 后进入 CoreBluetooth `state=2`（unsupported）。未观察到
+  `BluetoothManager` 的 session/setup 路径；不能直接改 state 或伪造 native 返回。
 - 根 payload 的 `candidate_ready`、`stageable`、`root_installed` 与
   `runtime_verified/audio_verified` 是不同状态；当前没有搜索或音频成功证据。
 
@@ -36,6 +35,22 @@
 - `kern.x9_bt_power` 是同步的明确 ownership 请求：0=awake/resume、1=asleep、2=初始化/转换/不可用。
   只有 root/mobile 可写，sole UART worker 执行；重复目标幂等、并发转换拒绝，不重启或重下载。
   sleep 只允许关闭且 RX/TX 空、无 wire claim 的 transport，活动 daemon 返回 `EBUSY`。
+
+## Settings 能力缓存
+
+20H392 的 `CBXpcConnection initWithDelegate:queue:options:sessionType:` 和
+`BluetoothManager _attach` 都先查询 MobileGestalt 的 `bluetooth`。前者的否定分支可在未创建
+Mach 连接时直接通知 `xpcConnectionIsInvalid`，后者则在 session attach 之前返回。所以
+444 的 invalid 回调不等同于 launchd 拒绝。444 也记录了旧 epoch 保留 MobileGestalt 缓存，
+但未测出本次的 `bluetooth` 答案；陈旧缓存仍是需要实机验证的解释。
+
+- PID 1 默认 `x9_mgwipe=2`。只在上次缓存清理标记的 UI、Bluetooth、ALS、native camera
+  配置及模式匹配时保留缓存；配置变化时先废弃标记，再删除两个可重建的缓存 plist。
+  两次删除成功或文件本来不存在后才记录新标记。标记不代表 iOS 已重建缓存。
+- `x9_mgwipe=0` 不触碰缓存和标记；`x9_mgwipe=1` 单次强制清理、不写新标记；模式 3 仍需
+  `x9_camera=2`。用模式 0 或旧内核绕过该机制后，如需重新核对缓存，应使用模式 1。
+- 这条路径不修改蓝牙偏好、Apple 框架、Mach 服务或 HCI 状态。验证镜像可用
+  `x9_bt_root=0 x9_bt_settings_diag=1`；仅在已安装诊断 dylib 与嵌入的身份相符时注入，不升级文件。
 
 ## 内核实现
 
@@ -320,3 +335,17 @@ SSPM索引/提取仅验证原容器，不把静态分段匹配当成当前LK移�
 确认确切 predecessor 与 preflight。未声称扫描、配对或设备修复。
 
 单文件 Settings 诊断 header 使用 `X9_BT_ROOT_SETTINGS_ONLY`：安装和回滚前要求唯一诊断目标且其 `.x9-bt-temp` 路径不存在；已有文件、符号链接或目录均拒绝，不能自动清理。写入以 `O_EXCL` 创建临时文件；通用 root header 不改变。中断后遗留临时文件须另行核实，不能将主机测试当作设备状态或安装验收。
+
+#### Settings 单文件安装预检
+
+`preflight_settings_diag.py --mode install` 默认只检查主机输入。设备进入已授权的 rooted Android 会话后，加上 `--android-serial` 和私有 `--root-manifest` 运行实盘预检。
+
+```sh
+python3 -I x9/bluetooth/preflight_settings_diag.py --mode install \
+  --payload "$bt_payload" --apple-originals "$bt_originals" \
+  --root-manifest "$x9_manifest" --android-serial "$x9_adb_serial"
+```
+
+实盘入口先复核 userdata 路径、pinned extent 和 HFSX UUID，再检查干净 journal、目标和临时路径、目录及 Apple 原件。原始读取总预算为 32 MiB，包含元数据检查使用的 64 KiB。实盘通过时 JSON 包含 `device_probed: true` 与 `live_hfsx.status`。安装候选使用 `x9_bt_root=1 x9_bt_settings_diag=1`，运行时以 `X9 BT ROOT` 安装结果及打开设置后出现的 `seven native hooks installed` 日志验收。
+
+替换已安装诊断时，`settings_header.py --replacement-dylib` 接受新签名 dylib，`--payload` 指向实际安装过的旧包。生成的 header 只允许一个旧版身份。PID1 在原子替换前重新验证旧文件的长度、SHA-256、模式和属主。

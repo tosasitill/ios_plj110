@@ -40,7 +40,8 @@ int main(void) {
  lookup_result=ENOENT;if(x9_btr_diag_temp_absent()!=0)return 1;
  lookup_result=0;if(x9_btr_diag_temp_absent()!=EEXIST||put_count!=1)return 2;
  lookup_result=EACCES;if(x9_btr_diag_temp_absent()!=EACCES)return 3;
- x9_btr_files[0].prev_count=1;if(x9_btr_diag_temp_absent()!=EINVAL)return 4;
+ lookup_result=ENOENT;x9_btr_files[0].prev_count=1;if(x9_btr_diag_temp_absent()!=0)return 4;
+ x9_btr_files[0].prev_count=2;if(x9_btr_diag_temp_absent()!=EINVAL)return 6;
  x9_btr_files[0].prev_count=0;x9_btr_files[0].path="/wrong";
  if(x9_btr_diag_temp_absent()!=EINVAL)return 5;
  return 0;

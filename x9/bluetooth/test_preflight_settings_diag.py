@@ -8,6 +8,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import preflight_settings_diag as pf
+from stage_targeted import BLOCK, LiveView
 
 
 class FakeHFS:
@@ -75,6 +76,7 @@ class TestPreflightSettingsDiag(unittest.TestCase):
         self.base_entries = {
             '/usr': _dir(),
             '/usr/lib': _dir(),
+            '/usr/sbin': _dir(),
             '/usr/sbin/bluetoothd': _reg(self.btd_bytes),
             '/usr/sbin/BlueTool': _reg(self.bt_bytes),
         }
@@ -115,6 +117,25 @@ class TestPreflightSettingsDiag(unittest.TestCase):
         self.assertEqual(res['status'], 'rollback_ready')
         res2 = pf.audit_hfs_target(FakeHFS(self.base_entries), self.spec, 'rollback')
         self.assertEqual(res2['status'], 'already_absent')
+
+    def test_install_requires_real_sbin_directory(self):
+        entries = dict(self.base_entries)
+        entries['/usr/sbin'] = {'type': 'file', 'mode': stat.S_IFLNK | 0o755}
+        with self.assertRaises(pf.PreflightError):
+            pf.audit_hfs_target(FakeHFS(entries), self.spec, 'install')
+
+    def test_live_budget_counts_aligned_reads(self):
+        class ReadSession:
+            total = 2 * BLOCK
+
+            def read_global(self, offset, length):
+                return bytes(length)
+
+        reader = LiveView(ReadSession(), max_read_bytes=BLOCK)
+        self.assertEqual(reader.read(1, 1), b'\0')
+        self.assertEqual(reader.physical_read_bytes, BLOCK)
+        with self.assertRaises(ValueError):
+            reader.read(BLOCK + 1, 1)
 
     def test_readonly_budgeted_device_forbids_write_and_overread(self):
         dev = pf.ReadOnlyBudgetedDevice(lambda off, n: b'\x00' * n, max_bytes=16)

@@ -14,9 +14,12 @@ This tool NEVER writes to the device, HFSX image, or host root.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
+import tempfile
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -85,10 +88,7 @@ def validate_offline_inputs(payload, apple, root_manifest=None):
         if str(tools_dir) not in sys.path:
             sys.path.insert(0, str(tools_dir))
         import ufs_root_manifest
-        try:
-            ufs_root_manifest.validate(Path(root_manifest).resolve(), native=True)
-        except Exception as exc:
-            raise PreflightError(f'root manifest validation failed: {exc}') from exc
+        ufs_root_manifest.load(root_manifest, native=True)
         manifest_checked = True
     return {
         'diag': diag,
@@ -153,6 +153,7 @@ def audit_hfs_target(hfs, offline_spec, mode):
     )
 
     if mode in ('install', 'verify'):
+        _require_dir_nofollow(hfs, '/usr/sbin')
         for req in offline_spec['requires']:
             req_state = _match_regular_file(hfs, req['path'], req['size'], req['sha256'])
             if req_state != 'matched':
@@ -174,16 +175,57 @@ def audit_hfs_target(hfs, offline_spec, mode):
     }
 
 
+def audit_android_root(root_manifest, android_serial, spec, mode):
+    from hfs_target import TargetHFS
+    from stage import bounded, sha
+    from stage_targeted import LiveView, TargetSession
+    from ufs_root_manifest import validate
+
+    raw_manifest = bounded(root_manifest.resolve(), 8 * 1024 * 1024)
+    manifest = validate(json.loads(raw_manifest), native=True)
+    if android_serial != manifest['device_serial'] or not manifest.get('write_policy'):
+        raise PreflightError('Android serial or dedicated mutable-root contract mismatch')
+
+    adb_result = subprocess.run(['adb', 'devices'], capture_output=True, text=True,
+                                check=True, timeout=15)
+    devices = [line.split() for line in adb_result.stdout.splitlines()[1:] if line.strip()]
+    if devices != [[android_serial, 'device']]:
+        raise PreflightError('requires exactly the selected online Android adb device')
+
+    scratch = ROOT / 'x9/out'
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='bt-settings-preflight-', dir=scratch) as directory:
+        directory = Path(directory)
+        frozen = directory / 'root-manifest.json'
+        frozen.write_bytes(raw_manifest)
+        session = TargetSession(android_serial, manifest, frozen, directory, sha(raw_manifest))
+        session.preflight('metadata-preflight.log')
+        live = LiveView(session, max_read_bytes=DEFAULT_READ_BUDGET - session.device_read_bytes)
+        target = TargetHFS(live)
+        if target.vh[104:112].hex() != manifest['volume_uuid_hex'].lower():
+            raise PreflightError('live HFSX catalog reader resolved the wrong volume UUID')
+        report = audit_hfs_target(target, spec, mode)
+        target.require_clean_journal()
+        return {**report, 'device_read_bytes_upper_bound': session.device_read_bytes}
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--payload', type=Path, required=True)
     p.add_argument('--apple-originals', type=Path, required=True)
     p.add_argument('--root-manifest', type=Path, default=None)
+    p.add_argument('--android-serial', help='read-only live HFSX audit via rooted Android adb')
     p.add_argument('--mode', choices=('verify', 'install', 'rollback'), default='install')
     args = p.parse_args(argv)
+    if args.android_serial and args.root_manifest is None:
+        p.error('--android-serial requires --root-manifest')
     try:
         spec = validate_offline_inputs(args.payload, args.apple_originals, args.root_manifest)
-    except (OSError, ValueError, KeyError, PreflightError) as exc:
+        live = None
+        if args.android_serial:
+            os.umask(0o077)
+            live = audit_android_root(args.root_manifest, args.android_serial, spec, args.mode)
+    except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
         sys.exit(f'preflight_settings_diag failed: {exc}')
     summary = {
         'offline_ok': True,
@@ -193,8 +235,10 @@ def main(argv=None):
         'diag_sha256': spec['diag']['sha256'],
         'requires': [r['path'] for r in spec['requires']],
         'manifest_checked': spec['manifest_checked'],
-        'device_probed': False,
+        'device_probed': live is not None,
     }
+    if live is not None:
+        summary['live_hfsx'] = live
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 

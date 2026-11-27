@@ -679,8 +679,9 @@ def rollback_targeted(session, state, directory):
 
 
 class LiveView:
-    def __init__(self, session):
+    def __init__(self, session, max_read_bytes=MAX_READSET):
         self.session, self.size = session, session.total
+        self.max_read_bytes = max_read_bytes
         self.physical_read_bytes = 0
 
     def read(self, offset, length):
@@ -689,8 +690,8 @@ class LiveView:
         if not length:
             return b''
         first, end = offset & ~(BLOCK - 1), (offset + length + BLOCK - 1) & ~(BLOCK - 1)
-        if self.physical_read_bytes + end - first > MAX_READSET:
-            raise ValueError('final live path verification exceeds its reserved 128 MiB allowance')
+        if self.physical_read_bytes + end - first > self.max_read_bytes:
+            raise ValueError('live HFSX read allowance exceeded')
         self.physical_read_bytes += end - first
         data = self.session.read_global(first, end - first)
         return data[offset - first:offset - first + length]

@@ -3075,3 +3075,33 @@ codec/MD owner/物理 writer 白名单均未动。单对象 `Builder.compile_one
 串口应出现 boot registration → CMD8901 confirmed → incoming CMD owned →
 approve=1 queued → physical TX ok → MT INCOMING/CONVERSATION/END 序列；
 iOS 屏幕无来电 UI 是预期边界，不是失败。未接听的来电不应产生 0907。
+
+## 2026-11-26：SIM2 拨出失败与 IMS 初始化差异
+
+范围：基线 `ac6c45a4`，只比对已有 iOS/Android 日志和固定 modem 镜像。`0902 result=0` 与 `CallList46` 的 ORIGINATION 都不是网络接通。Android 实测 `130(mode=0) → 2 → 132/6(mode=20)`，所以首条 `130(mode=0)` 本身既不证明字段错误，也不证明通话最终走 CS。Android 已测 `0901` 的标量、TLV 和填充与现有受限编码一致，见上面的卡 2 拨出合同。
+
+| iOS 样本 | 同卡观察 | 结论边界 |
+| --- | --- | --- |
+| `435.txt:20627`、`:23813` | SIM2 `130/mode0` 60.445 s，`133/2172` 97.865 s；NAS `COPS-AcT` 由 7（拨号前）变 0 | 没有 `2`、`132` 或 `6`；不是 host 丢掉已观测到的振铃 |
+| `441.txt:22819`、`:27948` | SIM2 `130/mode0` 76.583 s，`133/2172` 110.554 s；中间同卡 `0430` 缓存值由 32768 降到 4096 再到 1 | RAT 刷新与 CallList 更新确实发生，没有让基带进入振铃或接通 |
+| `434.txt:28866`、`444.txt:21797` | 434 是 `133/2174`；444 用户触发 `0905`，最后 `133/16` | 不把不同失败码或主动挂断合并成一个超时样本 |
+
+固定 MD 的 `mm_cc_guard_timer_handler` 在 `0x91544a98` 传 `0x87c`（2172）给拒绝待处理 CC 服务的路径；`mm_dequeue_service_to_send_rej` 的 `0x9154227c` 也可按分支提供同值。`0x87e`（2174）是 `mm_map_emm_service_reject_cause_to_cm_cause` 的默认返回（`0x9153ba7c`），`mm_ratcm_conn_est_rej_handler` 也会直接使用它（`0x9153d5d4`、`0x9153d66c`）。这些是可复核的静态生产者。历史 `4901` 没有保留具体 MM 分支、网络拒绝输入或 timer 事件，不能定名为唯一的 guard 超时、CSFB 失败原因或运营商拒绝。
+
+Android `x9/out/android-calls-20261115-183941/radio-baseline.txt:55`、`:59` 和 `:1349`、`:1385` 有逐 SIM 的 `0a00 → 0a01 result=0` 真实往返。各发送行前的 RIL 记录指向 `RmmImsControlRequestHandler::requestSetImsCfg`（`0x28d6f0`）：先过 `isCurrentSlotSupportIms`，从请求对象读取各字段并经属性修正，然后在 `0x28d838..0x28d884` 用该 slot 构造 `100/u32=0`、`102/6`。固定 MD 的 `mipc_ims_set_config_req` 在 `0x91333704` 进入模式 0 的六字节分支；校验后用 SIM 索引乘 6 写入配置，再在 `0x913337b2` 选择 ILM `0xdd22`。
+
+Android 同次拨出 `live-logcat.txt:80433`、`:80436` 在 `0901` 前 136 ms 有 `Phone-1` 的注册技术 3 与 `isImsRegistered=true`，`:81041` 在送出后仍为 true。相反，X9 样本 `435/441/444` 没有 `0a04` TX 或 X9 同卡 IMS 注册快照；当前只接 `0a04/0a05` 查询和 `4a01` 状态观察，无 `0a00` writer。`AT+EIMSCFG?` 仅回 `OK`，没有配置数据。数据注册、`0430` RAT 和配置 CNF 都不能替代 IMS 注册证据；Android 基线在 SIM2 配置确认前已报告 `isImsRegistered=true`（`radio-baseline.txt:1367`），亦不能把该确认写成注册的充分条件。
+
+**下一证据**：对齐同 SIM 的拨号前真实 IMS 注册、`042f/0430` RAT，以及失败时完整的 CC/CSFB 事件。先确认是否真的有 `0a04` 请求与匹配的 `0a05`，不要从缺日志推出未注册。再追 Android `0a00` 六字段的策略 owner 与 iOS 对应输入；不把 Android 捕获值写成固定配置，不改变现有拨号域和 CallList 状态语义。
+
+**本地复核**：在主 checkout 用 `x9/out/call-ios-bridge/tools/md-dis .local/x9/modem/parts/modem_a.img START END` 离线解码：
+
+| 路径 | START | END（不含） |
+| --- | ---: | ---: |
+| CC guard | `0x91544a64` | `0x91544aa4` |
+| pending-service reject 片段 | `0x91542256` | `0x91542292` |
+| EMM reject 映射 | `0x9153b98a` | `0x9153ba88` |
+| RAT connection reject | `0x9153d024` | `0x9153d68e` |
+| IMS config request | `0x91333694` | `0x91333b54` |
+
+本次仅补证据和验收条件，未修改桥接代码或操作设备。

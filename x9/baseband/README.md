@@ -11,7 +11,8 @@
 - stock typed `ims::Call`/FSM/delegate owner、双向 voice PCM、AudioObject/IOProc 与 IMS SIP
   信令仍未接通。MD→DSP `3D00` 不是 AP↔DSP REG_DMA，不能据此声称语音传输。
 - 短信 `0606` 只表示 modem 接受，不表示对端投递；生产 WMS tag→MIPC flag 为 `{2,1,3,4}`，
-  `0x210000` 可由 CMGL AT 失败路径的转换 helper 以输入 0 产生，但尚未证明历史 0608 必经此路径，不能解释为空收件箱；详见 [静态证据](../../docs/baseband/sms-at-result-20261126.md)。
+  `0608=0x210000` 可由 CPMS 或 CMGL 的失败确认产生，不能解释为空收件箱。
+  真实失败入口仍待采证，详见 [v1 确认链与下一步](../../docs/baseband/sms-result-path-20261126.md)。
 - 没有新的完整蜂窝设备候选。当前候选、构建结果与下一动作以 [`../../NOTES.md`](../../NOTES.md)
   为准；`qcom/` 的 UniXNU 代码仅作为 portable 上游参考。
 

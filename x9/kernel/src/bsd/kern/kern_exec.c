@@ -8593,20 +8593,26 @@ sweet_x9_seed_disabled_jobs(proc_t p, user_addr_t scratch, user_addr_t end)
 	return e1 ? e1 : e2;
 }
 
-/*
- * The MobileGestalt disk cache validates its answers only against the OS
- * build and the build UUID (MobileGestaltCache.c: "cache UUID %@ doesn't
- * match build UUID %@"), and on X9 both are constants (build 20H392, the
- * synthetic unique-chip-id), so answers captured while the ADT identity was
- * wrong survive every later kernel/ADT fix: an unrecognized hw.product made
- * DeviceClassNumber default to 2 (iPod), and a cache hit returns that stale
- * value without invoking the native answer, which the current ADT already
- * supplies correctly (hw.product=iPhone10,3). x9_mgwipe=1 unlinks both cache
- * plists at PID1, in front of every daemon, so this boot rebuilds them from
- * the native answers; MobileGestaltCache.c treats a missing cache file as
- * "Cache file did not exist. Rebuilding.", and the legacy mobile path is
- * included because MG deletes it opportunistically at best. One-shot opt-in,
- * non-fatal. */
+static int
+sweet_x9_mg_unlink(proc_t p, user_addr_t scratch, user_addr_t end,
+    const char *path, size_t path_size, const char *label)
+{
+	struct unlink_args u = { .path = scratch };
+	int32_t rv = 0;
+	int error;
+
+	if (!proc_is64bit(p) || scratch > end || path_size > end - scratch) {
+		return E2BIG;
+	}
+	error = copyout(path, scratch, path_size);
+	if (error) {
+		return error;
+	}
+	error = unlink(p, &u, &rv);
+	printf("X9 MGWIPE: %s errno=%d\n", label, error);
+	return (error == 0 || error == ENOENT) ? 0 : error;
+}
+
 static int
 sweet_x9_wipe_gestalt_cache(proc_t p, user_addr_t scratch, user_addr_t end)
 {
@@ -8616,119 +8622,80 @@ sweet_x9_wipe_gestalt_cache(proc_t p, user_addr_t scratch, user_addr_t end)
 	    "com.apple.MobileGestalt.plist";
 	static const char legacy[] =
 	    "/var/mobile/Library/Caches/com.apple.MobileGestalt.plist";
-	extern boolean_t sweet_x9_ufs_root_writable(void);
-	struct unlink_args u = { .path = scratch };
-	size_t len;
-	int32_t rv = 0;
+	static const char epoch_dir[] = "/private/var/x9/mg";
+	static const char epoch_path[] = "/private/var/x9/mg/refresh-capabilities-20261126";
+	static const char epoch_temp[] = "/private/var/x9/mg/refresh-capabilities-20261126.x9-bbfw-temp";
+	static const char ui_epoch_path[] = "/private/var/x9/mg/refresh-ui2556-20261116";
+	const bool island = sweet_x9_arg("x9_ui", 0) == 1;
+	const bool bluetooth = sweet_x9_arg("x9_bt_init", 0) == 1;
+	const bool als = sweet_x9_arg("x9_als", 0) == 3;
+	const bool camera = sweet_x9_arg("x9_camera", 0) == 2;
+	const int mode = sweet_x9_arg("x9_mgwipe", 2);
+	char epoch_data[56];
+	int epoch_bytes = 0;
+	uint8_t epoch_sha[32];
 	int error;
 
-	/* x9_mgwipe=2: once per ADT capability epoch. The 11-10 ADT added
-	 * /product/camera "flash" (MobileGestalt camera-flash, which gates the
-	 * Control Center flashlight module) and /product/haptics "closed-loop"
-	 * (DeviceSupportsClosedLoopHaptics, Actuator vs legacy vibrator), both
-	 * after the last cache rebuild (11-08). The marker is written only after
-	 * both unlinks succeed, so a failed boot retries; later boots skip.
-	 * Epoch 2026-11-16 (log 328): /arm-io/aop/iop-aop-nub/als for MG
-	 * ambient-light-sensor; the flash/haptics answers rebuild with it. */
-	static const char epoch_dir[] = "/private/var/x9/mg";
-	const bool island = sweet_x9_arg("x9_ui", 0) == 1;
-	static const char als_epoch_path[] = "/private/var/x9/mg/refresh-als-20261116";
-	static const uint8_t als_epoch_data[] =
-	    "x9 MobileGestalt cache rebuilt for ADT AOP ambient light sensor\n";
-	static const char ui_epoch_path[] = "/private/var/x9/mg/refresh-ui2556-20261116";
-	static const uint8_t ui_epoch_data[] =
-	    "x9 MobileGestalt cache rebuilt for ADT artwork subtype 2556 and AOP ALS\n";
-	/* Explicit x9_mgwipe=3, native mode2 only: the new metadata-only ISP
-	 * node supplies camera-rear/front. Do not reuse the ALS marker: a prior
-	 * successful ALS refresh would preserve the old no-still-camera answer.
-	 * Leave LaunchServices and SpringBoard's icon layout/preferences intact. */
-	static const char camera_epoch_path[] = "/private/var/x9/mg/refresh-camera-20261116";
-	static const uint8_t camera_epoch_data[] =
-	    "x9 MobileGestalt cache rebuilt for native dual-camera discovery\n";
-	const char *epoch_path;
-	const uint8_t *epoch_data;
-	size_t epoch_bytes;
-	uint8_t epoch_sha[32];
-	/* Enabled UI (X9 board default or x9_ui=1) regenerates artwork once.
-	 * Explicit x9_mgwipe=0 still suppresses ALL cache writes for diagnostics. */
-	int mode = sweet_x9_arg("x9_mgwipe", island ? 2 : 0);
 	if (mode != 1 && mode != 2 && mode != 3) {
 		return 0;
 	}
-	if (mode == 3 && sweet_x9_arg("x9_camera", 0) != 2) {
+	if (mode == 3 && !camera) {
 		return EINVAL;
 	}
-	epoch_path = mode == 3 ? camera_epoch_path : island ? ui_epoch_path : als_epoch_path;
-	epoch_data = mode == 3 ? camera_epoch_data : island ? ui_epoch_data : als_epoch_data;
-	epoch_bytes = mode == 3 ? sizeof(camera_epoch_data) - 1 :
-	    island ? sizeof(ui_epoch_data) - 1 : sizeof(als_epoch_data) - 1;
 	if (!sweet_x9_ufs_root_writable()) {
 		return EROFS;
 	}
-	/* Explicit one-shot rollback (x9_ui=0 x9_mgwipe=1) invalidates the
-	 * old enabled epoch too. Otherwise re-enabling after rollback would keep
-	 * the newly regenerated 2436 cache because a stale 2556 marker survives.
-	 */
-	if (mode == 1 && !island) {
-		if (!proc_is64bit(p) || scratch > end || sizeof(ui_epoch_path) > end - scratch) return E2BIG;
-		error = copyout(ui_epoch_path, scratch, sizeof(ui_epoch_path));
-		if (error) return error;
-		error = unlink(p, &u, &rv);
-		printf("X9 MGWIPE: rollback UI epoch errno=%d\n", error);
-		if (error && error != ENOENT) return error;
-	}
-	if (mode == 2 || mode == 3) {
+	if (mode != 1) {
 		SHA256_CTX epoch_hash;
+		epoch_bytes = snprintf(epoch_data, sizeof(epoch_data),
+		    "mode=%d ui=%d bt=%d als=%d camera=%d", mode, island, bluetooth, als, camera);
+		if (epoch_bytes < 0 || (size_t)epoch_bytes >= sizeof(epoch_data)) {
+			return E2BIG;
+		}
 		SHA256_Init(&epoch_hash);
-		SHA256_Update(&epoch_hash, epoch_data, epoch_bytes);
+		SHA256_Update(&epoch_hash, epoch_data, (size_t)epoch_bytes);
 		SHA256_Final(epoch_sha, &epoch_hash);
-		error = x9_bbfw_equal(epoch_path, epoch_sha, epoch_bytes);
+		error = x9_bbfw_equal(epoch_path, epoch_sha, (uint32_t)epoch_bytes);
 		if (!error) {
-			printf("X9 MGWIPE: epoch already rebuilt; cache kept\n");
+			printf("X9 MGWIPE: %s epoch matched; cache kept\n", epoch_data);
 			return 0;
 		}
-		if (error != ENOENT) {
+		if (error != ENOENT && error != EEXIST) {
 			printf("X9 MGWIPE: epoch marker unusable errno=%d; cache kept\n", error);
 			return error;
 		}
 	}
-	if (!proc_is64bit(p) || scratch > end) {
-		return E2BIG;
-	}
-	len = sizeof(target);
-	if (len > end - scratch) {
-		return E2BIG;
-	}
-	error = copyout(target, scratch, len);
+	error = x9_bbfw_directory(p, scratch, end, epoch_dir);
 	if (error) {
 		return error;
 	}
-	error = unlink(p, &u, &rv);
-	printf("X9 MGWIPE: cache errno=%d\n", error);
-	if (error != 0 && error != ENOENT) {
-		return error;
-	}
-	len = sizeof(legacy);
-	if (len > end - scratch) {
-		return E2BIG;
-	}
-	error = copyout(legacy, scratch, len);
+	error = sweet_x9_mg_unlink(p, scratch, end, epoch_path, sizeof(epoch_path), "epoch marker");
 	if (error) {
 		return error;
 	}
-	error = unlink(p, &u, &rv);
-	printf("X9 MGWIPE: legacy errno=%d\n", error);
-	if (error != 0 && error != ENOENT) {
+	error = sweet_x9_mg_unlink(p, scratch, end, epoch_temp, sizeof(epoch_temp), "epoch temp");
+	if (error) {
 		return error;
 	}
-	if (mode == 2 || mode == 3) {
-		int created = 0;
-		error = x9_bbfw_directory(p, scratch, end, epoch_dir);
-		if (!error) {
-			error = x9_bbfw_write(p, scratch, end, epoch_path, epoch_data,
-			    epoch_bytes, epoch_sha, &created);
+	if (mode == 1 && !island) {
+		error = sweet_x9_mg_unlink(p, scratch, end, ui_epoch_path, sizeof(ui_epoch_path), "rollback UI epoch");
+		if (error) {
+			return error;
 		}
-		printf("X9 MGWIPE: epoch marker created=%d errno=%d\n", created, error);
+	}
+	error = sweet_x9_mg_unlink(p, scratch, end, target, sizeof(target), "cache");
+	if (error) {
+		return error;
+	}
+	error = sweet_x9_mg_unlink(p, scratch, end, legacy, sizeof(legacy), "legacy");
+	if (error) {
+		return error;
+	}
+	if (mode != 1) {
+		int created = 0;
+		error = x9_bbfw_write(p, scratch, end, epoch_path, (const uint8_t *)epoch_data,
+		    (uint32_t)epoch_bytes, epoch_sha, &created);
+		printf("X9 MGWIPE: %s epoch marker created=%d errno=%d\n", epoch_data, created, error);
 	}
 	return 0;
 }
