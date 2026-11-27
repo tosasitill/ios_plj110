@@ -12,7 +12,20 @@ struct x9_mm_slot {
 static struct x9_mm_slot x9_mm_slots[X9_MM_SLOTS];
 static uint32_t x9_mm_next;
 static unsigned x9_mm_poisoned;
-static int x9mm_id(unsigned id){return id==0x8601||id==0x8603||id==0x4601||id==0x4a01;}
+static int x9mm_ind_enabled(void){
+ static int enabled=-1;
+ if(enabled<0){int v=0;enabled=PE_parse_boot_argn("x9_sms_ind",&v,sizeof(v))&&v==1?1:0;}
+ return enabled;
+}
+static int x9mm_id(unsigned id){
+ if(id==0x8601||id==0x8603||id==0x4601||id==0x4a01)return 1;
+ /* The no-ack SMS indications (4606 family: 4602 NEW_SMS, 4603
+  * STORE_STATUS, 4606 STATUS_REPORT) enter the inbox only while the
+  * gated consumer is enabled; unregistered at the MD otherwise, they
+  * must never consume slots or trip the overflow quarantine. */
+ if(x9mm_ind_enabled()&&(id==0x4602||id==0x4603||id==0x4606))return 1;
+ return 0;
+}
 /* Exact padded TLVs, unique normalized tags. Enforce this again at the
  * transport boundary, not merely in the QMI adapter. */
 static int x9mm_find(const uint8_t *p,unsigned n,unsigned wanted,const uint8_t **out,unsigned *len){

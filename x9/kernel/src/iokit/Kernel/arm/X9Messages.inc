@@ -68,7 +68,7 @@ static bool x9m_storage_repeated_wire(uint32_t local,uint32_t node,uint32_t port
 }
 struct x9m_incoming {
  uint32_t token; unsigned sim,len,slot; uint64_t generation,next_delivery;
- bool delivered,replying,held; uint64_t ack_wait; uint8_t pdu[255];
+ bool delivered,replying,held,ind; uint64_t ack_wait; uint8_t pdu[255];
 };
 static x9m_incoming x9m_incoming_sms[X9M_INCOMING];
 enum { X9M_CFG_IND=0, X9M_READY_QUERY, X9M_WAIT_READY, X9M_HOST_READY, X9M_FACTORY_CFG, X9M_INIT_DONE };
@@ -77,6 +77,7 @@ struct x9m_sim {
  unsigned reg,init,diag_stage,ims_stage; uint64_t sampled,init_token,init_deadline,ready_epoch,init_epoch;
  uint64_t reg_epoch,ims_epoch,ims_token,ims_deadline,ims_admit_deadline; bool ims_hold;
  unsigned fx_stage; uint64_t fx_token,fx_deadline; bool fx_hold;
+ unsigned ind_stage; uint64_t ind_token,ind_deadline; bool ind_hold;
 };
 static x9m_sim x9m_sims[2];
 static unsigned x9m_init_stage;
@@ -281,6 +282,12 @@ static bool x9m_factory_enabled(){
  /* Default on since 2026-11-27 (owner decision): the factory provisioning
   * is part of normal init; x9_factory_init=0 opts out for A/B. */
  static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_factory_init",1)!=0;
+ return enabled!=0;
+}
+static bool x9m_ind_enabled(){
+ /* Default off: IMS registration is not yet device-proven, so the
+  * no-ack indication path stays dormant until x9_sms_ind=1 opts in. */
+ static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_sms_ind",0)==1;
  return enabled!=0;
 }
 static void x9m_init_transport_loss(){
@@ -597,6 +604,45 @@ struct x9m_publication {
  uint32_t port,node;const uint8_t *sdu;uint32_t size;
  uint8_t *owned;uint32_t room;
 };
+/* No-ack indication registration (x9_sms_ind=1, default off). The CMD
+ * path registers 8601/8603 through REGISTER_CMD (0x30b); the 4606
+ * family is subscribed through REGISTER_IND (0x307) per SIM, mirroring
+ * the 4a01 registration, after the SIM's CFG_IND step has passed. The
+ * MD only emits 4602/4606 in its prefer_no_ack mode, so this is a
+ * dormant fallback until a device round proves which mode fires. */
+static void x9m_ind_poll(uint8_t *p,unsigned room){
+ if(!x9m_ind_enabled())return;
+ const bool online=x9w_control_ready&&x9_md_mipc_online();
+ const uint64_t now=x9q_ms();
+ for(unsigned sim=0;sim<x9_md_sim_count();sim++){
+  x9m_sim &s=x9m_sims[sim];
+  if(s.ind_stage>=3||s.ind_hold)continue;
+  if(s.ind_token){
+   if(now>=s.ind_deadline){s.ind_hold=true;
+    printf("X9 SMS IND: SIM%u stage %u timeout; token retained, no retry\n",sim+1,s.ind_stage);continue;}
+   unsigned n=0;int rc=x9_md_mipc_take(s.ind_token,p,room,&n);
+   if(!rc)continue;
+   if(rc<0){s.ind_hold=true;
+    printf("X9 SMS IND: SIM%u stage %u transport error; held\n",sim+1,s.ind_stage);continue;}
+   s.ind_token=0;
+   unsigned result=1;
+   bool known=x9w_wire(p,n)&&p[8]==(1u<<sim)&&x9q_u16(p+10)==0x308&&x9w_word(p,n,0,result);
+   if(!known||result){s.ind_hold=true;
+    printf("X9 SMS IND: SIM%u stage %u rejected known %u result %u; held\n",sim+1,s.ind_stage,known?1:0,result);
+    bzero(p,room);continue;}
+   if(s.ind_stage==2)printf("X9 SMS IND: SIM%u no-ack indications registered (4602/4606)\n",sim+1);
+   s.ind_stage++;bzero(p,room);continue;
+  }
+  if(!online||s.init<X9M_READY_QUERY)continue;
+  if(!s.ind_stage)s.ind_stage=1;
+  x9w_frame f(0x307,1u<<sim);
+  uint16_t id=s.ind_stage==1?0x4602:0x4606;
+  uint8_t v[2]={(uint8_t)id,(uint8_t)(id>>8)};f.tlv(0x100,v,2);
+  uint64_t token=f.submit();
+  if(token){s.ind_token=token;s.ind_deadline=now+10000;}
+  else s.ind_hold=true;
+ }
+}
 static int x9m_publish(void *context){
  /* Trusted closure: host queue only, no allocation or MD API reentry. */
  x9m_publication &p=*static_cast<x9m_publication *>(context);
@@ -615,7 +661,9 @@ static void x9m_deliver(x9m_incoming &in,unsigned mti){
   /* One client owns the command, even when multiple clients subscribe. */
   if(c.route[cls]==0){
    /* Explicit DISCARD policy still needs the original MD command ACK.
-    * This is not an automatic successful ACK for a transfer-only route. */
+    * This is not an automatic successful ACK for a transfer-only route.
+    * A no-ack indication owes no MD reply: discard closes it locally. */
+   if(in.ind){bzero(&in,sizeof(in));return;}
    if(x9_md_mipc_message_reply(in.token,1,0)==1){
     in.replying=true;bzero(in.pdu,sizeof(in.pdu));
    }
@@ -633,7 +681,8 @@ static void x9m_deliver(x9m_incoming &in,unsigned mti){
   uint32_t room=CBQ_HDR+p.n;
   uint8_t *owned=p.good?static_cast<uint8_t *>(IOMallocData(room)):nullptr;
   x9m_publication publication={CBQ_PORT_BASE+i,X9BB_NODE,p.p,p.n,owned,room};
-  bool admitted=owned&&x9_md_mipc_message_publish(in.token,in.sim,x9m_publish,&publication)==1;
+  bool admitted=owned&&(in.ind?x9m_publish(&publication)==1:
+    x9_md_mipc_message_publish(in.token,in.sim,x9m_publish,&publication)==1);
   if(!admitted&&owned){bzero(owned,room);IOFreeData(owned,room);}
   bzero(v,sizeof(v));bzero(p.p,sizeof(p.p));
   if(!admitted){in.next_delivery=x9q_ms()+100;return;}
@@ -664,29 +713,55 @@ static void x9m_event(uint8_t *p,unsigned n,uint32_t token){
   }
   return;
  }
+ bool ind=false;
+ if(!token){
+  /* No-ack indications (4606 family) carry no MD command token. The
+   * gated path synthesizes a host-side token from a bit31 namespace the
+   * CMD inbox never issues, so WMS delivery and host-ACK matching work
+   * unchanged while no MD reply is owed or attempted. STORE_STATUS is
+   * evidence only: it proves the MD saved an MT SMS to DEVICE storage
+   * instead of delivering it to the host. */
+  if(!x9m_ind_enabled()||(id!=0x4602&&id!=0x4603&&id!=0x4606))return;
+  if(id==0x4603){
+   unsigned flag=0;bool have=x9w_byte(p,n,0x100,flag);
+   x9q_view ix=x9w_tlv(p,n,0x101);
+   unsigned index=ix.p&&ix.n>=2?(unsigned)(ix.p[0]|(ix.p[1]<<8)):0;
+   for(unsigned sim=0;sim<x9_md_sim_count();sim++)if(mask&(1u<<sim))
+    printf("X9 SMS IND: SIM%u store status flag %u index %u; no delivery change\n",
+     sim+1,have?flag:0xffu,index);
+   return;
+  }
+  static uint32_t ind_seq;
+  token=0x80000000u|(++ind_seq&0xffffffu)|(id==0x4606?0x1000000u:0u);
+  ind=true;
+ }
  if(!token)return;
  if(mask!=1&&mask!=2)return;
- x9q_view v={nullptr,0};unsigned mti=id==0x8601?0:2;
- if(id==0x8601){
-  unsigned type;if(!x9w_byte(p,n,0x100,type)||type!=3){
+ x9q_view v={nullptr,0};unsigned mti=(id==0x8601||id==0x4602)?0:2;
+ if(id==0x8601||id==0x4602){
+  unsigned type=0xfe;bool have_type=x9w_byte(p,n,0x100,type);
+  if(id==0x8601&&(!have_type||type!=3)){
    static unsigned once;if(!once++)printf("X9 SMS: non-CS command retained; type4/8105 encoding and ACK not mapped\n");return;}
+  if(id==0x4602&&x9m_diag_enabled())
+   printf("X9 SMS DIAG: 4602 SIM%u format %u; shared PDU_LIST extraction\n",mask==2?2u:1u,have_type?type:0xfeu);
   v=x9w_tlv(p,n,0x8104);
   if(!v.p||v.n<11)return;
   unsigned full=1u+v.p[8]+v.p[2];
   if(full>v.n-8||!x9m_pdu(v.p+8,full,0))return;
   v={v.p+8,full};
- }else if(id==0x8603){
+ }else if(id==0x8603||id==0x4606){
   v=x9w_tlv(p,n,0x8100);
   bool valid=x9m_pdu(v.p,v.n,2);
-  printf("X9 SMS DIAG: 8603 SIM%u token %u status report valid %u\n",mask==2?2u:1u,token,valid?1u:0u);
+  printf("X9 SMS DIAG: %04x SIM%u token %u status report valid %u\n",id,mask==2?2u:1u,token,valid?1u:0u);
   if(!valid)return;
  }
  else return;
  for(x9m_incoming &in:x9m_incoming_sms)if(!in.token){
-  bzero(&in,sizeof(in));in.token=token;in.sim=mask==2?1:0;in.len=v.n;memcpy(in.pdu,v.p,v.n);
+  bzero(&in,sizeof(in));in.token=token;in.ind=ind;in.sim=mask==2?1:0;in.len=v.n;memcpy(in.pdu,v.p,v.n);
   x9m_deliver(in,mti);return;
  }
- printf("X9 SMS: host inbox full; MD command retained without ACK\n");
+ if(ind)printf("X9 SMS IND: host inbox full; indication dropped, no MD ownership\n");
+ else printf("X9 SMS: host inbox full; MD command retained without ACK\n");
 }
 static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned len){
  unsigned service=port-X9BB_PORT_BASE;if(service!=5&&service!=0x21)return false;
@@ -835,6 +910,12 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   printf("X9 SMS: host ACK SIM%u txn %u owner %u validation %u; no payload logged\n",
    sim+1,x9q_u16(req+1),owner?1:0,err);
   if(!err){
+   if(owner->ind){
+    /* No MD command exists behind a no-ack indication: the host ACK
+     * closes the record locally and nothing is queued to the MD. */
+    printf("X9 SMS: SIM%u no-ack indication host ACK accepted; record closed without MD reply\n",sim+1);
+    bzero(owner,sizeof(*owner));return true;
+   }
    x9m_job *j=x9m_new(X9M_ACK,slot,sim,req,len);
    if(!j)err=X9Q_BUSY;
    else{
@@ -1118,6 +1199,7 @@ static void x9m_poll(){
  x9m_ims_poll(p,sizeof(p));
  x9m_ims_feature_poll(p,sizeof(p));
  x9m_factory_poll(p,sizeof(p));
+ x9m_ind_poll(p,sizeof(p));
  x9m_init_poll(p,sizeof(p)); // Consume pending readiness INDs before submitting config.
  for(x9m_incoming &in:x9m_incoming_sms)if(in.token&&!in.held){
   if(in.delivered){
