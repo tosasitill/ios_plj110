@@ -724,3 +724,10 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - **通话**：435/441 确认 SIM2 在 ECPI130 后无振铃/接通，最终 `133/2172`。固定 MD 的 CC guard 和 pending-service reject 可产 2172，EMM/RAT reject 可产 2174，历史触发分支未证。Android 成功样本同卡拨号前有 IMS 注册，且双卡有动态 `0a00/0a01` 配置；iOS 样本无对应注册快照。详见 [SIM2 离线对照](docs/call-ios-bridge.md#2026-11-26sim2-拨出失败与-ims-初始化差异)。
 - **复核**：`.worktrees/fix-bt-mgwipe` HEAD `ac6c45a4`。主 checkout 按上述两份文档的范围运行 `x9/out/call-ios-bridge/tools/md-dis .local/x9/modem/parts/modem_a.img START END`，首次覆盖复核的 17 段与两张表 `od -An -t x1` 均 exit 0；LLVM 22 `llvm-objdump -d --demangle --start-address=0x331320 --stop-address=0x331510` 及 `--start-address=0x28d6f0 --stop-address=0x28dce0` 核对固定 RIL producer。Android 三组同 SIM/事务 CNF 的 TLV 解析首轮因日志非 UTF-8 exit 1，改为二进制读取后 exit 0。
 - **下一步**：先测 §6.73 未上机蓝牙候选；短信用 §6.72 已构建的独立 CPMS/CMGR 诊断，通话补同 SIM 的真实 `0a04/0a05` 与 CC/CSFB 上下文。本轮仅补证据，无新源码行为、构建、CI、刷写、重启或 root/mailbox 操作，蓝牙镜像仍为 §6.73 的 15,417,344 B。
+
+### 6.75 通话 IMS 快照与 SIM2 失败诊断离线候选
+
+- 本地 `main` 在 `4619e78a` 上整合 Terra 并行工作，源码 `95f18613`。复核旧分支时保留主线已修订的 Bluetooth、IOSurface 和 Call 实现，SMS 入站边界已补录在 §6.46。历史 camera/haptic A/B 和 bisect 分支保留原样，原 checkout 的未提交修改保留。
+- OPEN 后逐 SIM 订阅 `4a01`，并以独立 token 读取一次 `0a04/0a05`。启动观察不需要 IMSA 客户端或 SMS host-ready。有效状态指示优先处理，过期快照不更新注册态。SIM2 已归属的非正常拨出终态可触发只读 `090f`。匹配的 `0910` 只记录同卡数值，通话 END 继续由 ECPI133 决定。尚缺运营商 IMS 配置、PDN/SIP 注册负责人、CC/CSFB 重现证据及对此类原始原因码的 Apple 映射。
+- `python3 -I x9/build/prepare-local.py --check`、`git diff 4619e78a --check` 均 exit 0。显式 MacOSX 14 SDK 下 `python3 -I -m unittest discover -s x9/baseband -p 'test_*.py' -v` 23/23，`CXX="/opt/homebrew/opt/llvm/bin/clang++ -isysroot $SDKROOT" python3 -I x9/tools/test_x9_call_bridge.py` 83/83，均 exit 0。基线全集的四个失败场景未纳入上述 83 项，本轮未动这些场景。
+- 在 `.worktrees/main-call-integration` 使用 LLVM 22 和 MacOSX 14 SDK 执行 `python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --name x9-call-ims-failure-20261127-r1`，exit 0。104/104 overlay（3 prebuilt），`boot.img` 15,400,960 B，`kernel.development.sweet` 31,996,768 B，`build.log` 在同一产物目录。284 插件 allowlist 保持。没有上机、CI 或推送记录。
