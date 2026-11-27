@@ -731,3 +731,10 @@ main HEAD `b2e58d35`。以下均为 **host 验证 / 源码边界**，不是设�
 - OPEN 后逐 SIM 订阅 `4a01`，并以独立 token 读取一次 `0a04/0a05`。启动观察不需要 IMSA 客户端或 SMS host-ready。有效状态指示优先处理，过期快照不更新注册态。SIM2 已归属的非正常拨出终态可触发只读 `090f`。匹配的 `0910` 只记录同卡数值，通话 END 继续由 ECPI133 决定。尚缺运营商 IMS 配置、PDN/SIP 注册负责人、CC/CSFB 重现证据及对此类原始原因码的 Apple 映射。
 - `python3 -I x9/build/prepare-local.py --check`、`git diff 4619e78a --check` 均 exit 0。显式 MacOSX 14 SDK 下 `python3 -I -m unittest discover -s x9/baseband -p 'test_*.py' -v` 23/23，`CXX="/opt/homebrew/opt/llvm/bin/clang++ -isysroot $SDKROOT" python3 -I x9/tools/test_x9_call_bridge.py` 83/83，均 exit 0。基线全集的四个失败场景未纳入上述 83 项，本轮未动这些场景。
 - 在 `.worktrees/main-call-integration` 使用 LLVM 22 和 MacOSX 14 SDK 执行 `python3 -I x9/build/build.py all --boot-config x9/build/boot-device.json --name x9-call-ims-failure-20261127-r1`，exit 0。104/104 overlay（3 prebuilt），`boot.img` 15,400,960 B，`kernel.development.sweet` 31,996,768 B，`build.log` 在同一产物目录。284 插件 allowlist 保持。没有上机、CI 或推送记录。
+
+### 6.76 本地分支与构建产物清理
+
+- 基线 `d4b1230f`。通过 `git merge-base --is-ancestor` 核对后删除 13 个已合入分支和 10 个关联工作树。原 checkout 的 `feat/bt-settings-offline-candidate` 仍承载未提交改动。9 个有独立提交历史的分支仍保留。
+- 清理可重建的历史 boot/kernel 产物，磁盘可用空间由 47 GiB 增至 90 GiB。已移除工作树中的保留资料见 `x9/out/retained-worktree-artifacts-20261127/`。旧路径仅作历史记录。
+- §6.73 蓝牙候选迁至 `x9/out/x9-bt-mgwipe-20261126-r2/boot.img`，仍为 15,417,344 B。§6.72 的 rev 284 mailbox 包、无线诊断候选和 §6.75 通话候选保留。设备未操作。
+- 功能分支复核：Bluetooth 默认启用与临时文件保护已在 `e93e30ba`、`03e6f889`，Call 拨号关联等价补丁已在 `55a444ff`，IOSurface send right 由 `a743b6bd` 按 MIG 成功路径处理，SMS 入站分支仅有已补录的 §6.46。未合并相机/触觉 A/B 和 bisect 改动。相机 `a0175be9` 是 VCP 启动时安全 INIT 前 reset normal bank 的对照实验，主线当前在相机会话启动时完成单次 reset。
