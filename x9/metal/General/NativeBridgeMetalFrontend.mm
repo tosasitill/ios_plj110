@@ -292,9 +292,12 @@ static void x9_release_no_copy_block(void *context,void *pointer,uint64_t length
  void (^block)(void *,NSUInteger)=(__bridge_transfer void (^)(void *,NSUInteger))context;
  if(block)block(pointer,(NSUInteger)length);
 }
-/* Frontend cache scope (rev252bx). The kernel skips per-job CPU maintenance of a
-   registered IOSurface import only while no pending command buffer acquired it
-   (and only with boot-arg x9_cache_scope=1). Values match X9RenderScopeOperation. */
+/* Frontend cache scope (rev252bx). The kernel's post phase may skip per-job CPU
+   maintenance of a registered IOSurface import only while no pending command
+   buffer acquired it (and only with boot-arg x9_cache_scope=1). The publish
+   phase never skips on scope since the 2026-11-28 round3 kernel fix, so
+   acquiring is a post-phase/telemetry signal, not a correctness prerequisite
+   for CPU->GPU visibility. Values match X9RenderScopeOperation. */
 extern "C" bool nmb_cache_scope(uint32_t operation,uint64_t address,uint64_t bytes);
 enum {NBScopeRegister=1,NBScopeUnregister=2,NBScopeAcquire=3,NBScopeRelease=4,NBScopeHoldAll=5,NBScopeReleaseAll=6};
 static std::atomic<bool> gScopeOff{false};

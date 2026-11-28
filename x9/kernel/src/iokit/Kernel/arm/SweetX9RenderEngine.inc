@@ -967,7 +967,25 @@ static IOReturn render_submit_publish(RenderJobState *st,const RenderOwner &owne
  /* Frontend cache scope (x9_cache_scope=1, rev252bx): one snapshot of this
   * task's ranges serves pre and post. A range acquired at commit stays
   * acquired until the command buffer completed, which is after this job's
-  * post maintenance, so every BO this job references is maintained. */
+  * post maintenance.
+  * 2026-11-28 round3: the publish phase NO LONGER skips maintenance for a
+  * registered, unacquired import. That skip trusted the frontend's owner
+  * enumeration to name every import a job can touch, but this walk exists
+  * precisely because indirect GPU references cannot be enumerated from a
+  * draw-resource list (see the fallback comment above); a registered
+  * import the submitting command buffer did not enumerate kept stale
+  * CPU-written bytes into the GPU. The round3 acceptance boot (acelite=1,
+  * coherent pre-skip already removed) died with the same submission-
+  * uncertain signature at 32.8 s while cache-frontend-scope reported
+  * pre_skip_avg ~16.9 MB/job over the fatal window and COH-PROBE read 0 -
+  * the probe counts only the coherent class (render_coh_pre_skip), never
+  * this one, so the two lines never measured the same skip. The snapshot
+  * now feeds only the covered/uncovered accounting below and the post
+  * phase (where a job's own acquires are still held, so the skip there
+  * never fired in any recorded boot). scope_skip[0] therefore stays 0,
+  * the frontend-scope line's pre_skip_avg reads 0, and covered bytes land
+  * in scope_hold_bytes[0] (cache-scope-hold pre_avg), maintained like
+  * everything else. */
  if(render_dirty_enabled())render_dirty_consume(st);
  bool scope_hold=true;unsigned scope_count=0;
  const bool scope_on=x9_render_scope_enabled();
@@ -976,12 +994,11 @@ static IOReturn render_submit_publish(RenderJobState *st,const RenderOwner &owne
  st->scope_uncovered=0;st->scope_uncovered_bytes=0;st->scope_uncovered_max=0;
  for(auto &r:c->resources)if(r.memory) {
   if(r.write_combined){st->wc_skip[0]+=r.bytes;continue;}   // never cached, see X9RenderResource
-  if(r.cpu_exposed&&render_scope_skips(st,r)){st->scope_skip[0]+=r.bytes;continue;}
   if(scope_on&&r.imported&&r.cpu_exposed) {
    if(!render_scope_covered(st,r)) {
     /* rev252cb: imported CPU-exposed BOs that no registered range covers (what the frontend does not name yet). */
     st->scope_uncovered++;st->scope_uncovered_bytes+=r.bytes;if(r.bytes>st->scope_uncovered_max)st->scope_uncovered_max=r.bytes;
-   }else st->scope_hold_bytes[0]+=r.bytes;   /* covered, held by a pending command buffer: maintained anyway */
+   }else st->scope_hold_bytes[0]+=r.bytes;   /* covered by a registered range: maintained anyway (no publish skip since the round3 fix) */
   }
   /* No coherent skip in the pre phase (2026-11-28 fix): the CPU->GPU
    * snoop assumption failed on device (B/C submission faults); exposed
