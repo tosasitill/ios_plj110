@@ -153,10 +153,14 @@ static int resident_begin(vm_offset_t gpu) {
   // default-on only once that fix is verified on device.
   // x9_gpu_coherent=0 keeps ACE-Lite but restores per-submit CIVAC.
   // With it: AMBA protocol ACE-Lite, TRANSCFG PTW_SH
-  // outer (install_as), render-VM leaves outer shareable (X9RenderPageTable),
-  // no CPU clean of render page tables, and (unless x9_gpu_coherent=0) no
-  // per-submit CIVAC of CPU-exposed client bytes. CSF-private queue/firmware
-  // memory keeps its explicit maintenance (its PTEs stay non-shareable).
+  // outer (install_as), render-VM leaves outer shareable (X9RenderPageTable;
+  // dirty page tables are still CPU-cleaned at publish - see
+  // X9RenderPageTable.cpp), and (unless x9_gpu_coherent=0) no post-submit
+  // CIVAC of CPU-exposed client bytes. The pre-submit clean is NOT skipped:
+  // the CPU->GPU snoop direction is unprobed, and its skip caused the
+  // 2026-11-28 B/C submission faults (see SweetX9RenderEngine.inc).
+  // CSF-private queue/firmware memory keeps its explicit maintenance (its
+  // PTEs stay non-shareable).
   {
    uint32_t amba_features=gr(gpu,0x300),amba_before=gr(gpu,0x304),amba_after=amba_before;
    uint64_t l2_ready=gr64(gpu,0x908)|gr64(gpu,0x910);

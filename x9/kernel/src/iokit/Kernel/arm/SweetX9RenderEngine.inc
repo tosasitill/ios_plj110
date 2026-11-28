@@ -120,6 +120,7 @@ static bool render_coh_probe_enabled() {
 struct RenderParked { X9RenderContext *c; RenderKernelGroup *g; uint64_t root; };
 static RenderParked render_parked;
 static uint64_t render_park_hits,render_park_retires,render_park_cold;
+static uint64_t render_pipeline_pairs;
 /* rev252cn diagnostics: retire reasons (101.txt: cold ~55% of submits, the
  * per-frame map/unmap churn of P1-A). Counted by the why string of
  * render_park_release_for; everything else lumps into "other". */
@@ -951,9 +952,17 @@ static IOReturn render_submit_publish(RenderJobState *st,const RenderOwner &owne
   * Unmapped bytes cannot be touched through this context. An alias reachable
   * through another resource is maintained through that resource's descriptor.
   * The runtime must isolate independently owned resources to cache atoms.
-  * The coherent path below is the ONLY exception: it assumes the GPU
-  * snoops CPU caches, so exposed client bytes need no CIVAC here. Command and
-  * fence storage keep their explicit syncs regardless, and flush_gpu, group
+  * The coherent exception applies ONLY to the post phase (in
+  * render_submit_reap): it assumes the GPU snoops CPU caches, so exposed
+  * client bytes need no CIVAC after GPU writes - the direction the H2
+  * probe samples (imported atoms matched 113936/113936 in the 2026-11-28
+  * B boot). The pre phase below ALWAYS cleans: the CPU->GPU direction
+  * has no probe, and the 2026-11-28 acelite deaths (C: CS
+  * DATA_INVALID_FAULT; B: AS1 MMU fault at VA 0x40) are the signature of
+  * the GPU executing/dereferencing stale CPU-written client data whose
+  * clean was skipped here. Upstream kbase likewise maintains every BO
+  * that was not allocated coherent at submit time. Command and fence
+  * storage keep their explicit syncs regardless, and flush_gpu, group
   * start/halt and every uncertainty check stay unchanged. */
  /* Frontend cache scope (x9_cache_scope=1, rev252bx): one snapshot of this
   * task's ranges serves pre and post. A range acquired at commit stays
@@ -974,15 +983,12 @@ static IOReturn render_submit_publish(RenderJobState *st,const RenderOwner &owne
     st->scope_uncovered++;st->scope_uncovered_bytes+=r.bytes;if(r.bytes>st->scope_uncovered_max)st->scope_uncovered_max=r.bytes;
    }else st->scope_hold_bytes[0]+=r.bytes;   /* covered, held by a pending command buffer: maintained anyway */
   }
-  if(coherent&&r.cpu_exposed) {
-   /* H2 step c accounting: this pre-phase clean is skipped on the same
-    * snoop assumption as the post phase, in the CPU->GPU direction the
-    * probe cannot observe. Count the exposure per class while the probe
-    * is on; the verdict line reports it as assumed, never as probed. */
-   if(render_coh_probe_enabled())
-    render_coh_pre_skip[r.imported?1:0]+=r.cache_end>r.cache_begin?r.cache_end-r.cache_begin:0;
-   st->coherent_skip[0]+=r.cache_end>r.cache_begin?r.cache_end-r.cache_begin:0;continue;
-  }
+  /* No coherent skip in the pre phase (2026-11-28 fix): the CPU->GPU
+   * snoop assumption failed on device (B/C submission faults); exposed
+   * client bytes are always cleaned below before the GPU reads them.
+   * The post phase in render_submit_reap keeps its probe-validated
+   * skip. render_coh_pre_skip stays 0, so the COH-PROBE verdict line
+   * reports the (now zero) unprobed exposure truthfully. */
   if(!r.cpu_exposed&&r.initial_cache_clean){st->private_skip[0]+=r.bytes;continue;}
   if(r.cpu_exposed&&r.dirty_maintained){st->dirty_skip_res++;continue;}   /* x9dc: maintained above */
   /* x9lc: an IOSurface import needs a clean only when the CPU may have written
@@ -1044,7 +1050,7 @@ static IOReturn render_submit_publish(RenderJobState *st,const RenderOwner &owne
    body[12]=x9_cs_wait(0xffff);body[13]=render_cs_store_timestamp(address,ts+8-0x8100);
    marker(14,0x8200,0x58490104);
    marker(18,0x8280,0x58490105);
-   body[22]=x9_cs_move48(address,render_va(g,i)+0x8000);body[23]=x9_cs_move32(data,(uint32_t)request->submission_id);
+   body[22]=x9_cs_move48(address,render_va(g,i)+render_fence_offset(st->fence_slot));body[23]=x9_cs_move32(data,(uint32_t)request->submission_id);
    body[24]=x9_cs_move32(data+1,(uint32_t)(request->submission_id>>32));body[25]=x9_cs_sync_set64(address,data);body[26]=x9_cs_wait(1);
    marker(27,0x8180,0x58490103);
    body[31]=0;
@@ -1059,12 +1065,18 @@ static IOReturn render_submit_publish(RenderJobState *st,const RenderOwner &owne
    * GPU-control full flush succeeds; do not issue a second CS flush here. */
   body[16]=0;body[17]=0;body[18]=0;
   marker(19,0x8280,0x58490105);
-  body[23]=x9_cs_move48(address,render_va(g,i)+0x8000);body[24]=x9_cs_move32(data,(uint32_t)request->submission_id);
+  body[23]=x9_cs_move48(address,render_va(g,i)+render_fence_offset(st->fence_slot));body[24]=x9_cs_move32(data,(uint32_t)request->submission_id);
   body[25]=x9_cs_move32(data+1,(uint32_t)(request->submission_id>>32));body[26]=x9_cs_sync_set64(address,data);body[27]=x9_cs_wait(1);
   marker(28,0x8180,0x58490103);
   }
   /* Clear only this job's fence slot: with two jobs in flight (x9if) the
-   * other slot holds the previous job's still-unreaped fence value. */
+   * other slot holds the previous job's still-unreaped fence value. The
+   * SYNC_SET64 above must target the same per-slot address
+   * (render_fence_offset(st->fence_slot)): it was hardcoded to +0x8000
+   * (slot 0) when per-slot fences landed in rev252cn, so a paired job 2
+   * wrote its fence into slot 0 while its reap polled a slot nothing
+   * ever wrote - a guaranteed completion-wait timeout. Dormant only
+   * because pairs form rarely; fixed 2026-11-28. */
   bzero(base+render_fence_offset(st->fence_slot),16);bzero(base+0x8080,8);bzero(base+0x8100,8);bzero(base+0x8180,8);
   bzero(base+0x8200,8);bzero(base+0x8280,8);render_storage_clean(g->storage[i]);
  }
@@ -1598,6 +1610,7 @@ static void render_async_worker(void *,wait_result_t) {
     *s2=RenderJobState{};
     X9RenderCompletion reply2={};
     s2->c=c;s2->request=&job2.req;s2->reply=&reply2;s2->fence_slot=1;s2->pipeline=true;
+    render_pipeline_pairs++;
     s2->times[0]=mach_absolute_time();
     render_parked={c,st->g,st->root};   /* arm the resume detection for job 2 */
     IOReturn kr2=render_submit_publish(s2,owner);
@@ -1630,9 +1643,9 @@ static void render_async_worker(void *,wait_result_t) {
   } /* release owner BEFORE c->lock; never drain a worker while owning it */
   IOLockUnlock(c->lock);
   if(render_async_stats[0]<=4||render_async_stats[0]%600==0)
-   IOLog("X9 RENDER ASYNC: jobs=%llu failed=%llu queue_full_waits=%llu drain_waits=%llu enqueued=%llu completed=%llu\n",
+   IOLog("X9 RENDER ASYNC: jobs=%llu failed=%llu queue_full_waits=%llu drain_waits=%llu enqueued=%llu completed=%llu pairs=%llu\n",
     render_async_stats[0],render_async_stats[1],render_async_stats[2],render_async_stats[3],
-    render_async_enqueued,__atomic_load_n(&render_async_completed,__ATOMIC_ACQUIRE));
+    render_async_enqueued,__atomic_load_n(&render_async_completed,__ATOMIC_ACQUIRE),render_pipeline_pairs);
  }
 }
 static IOReturn render_submit_async(X9RenderContext *c,const X9RenderSubmission *request,X9RenderCompletion *reply) {

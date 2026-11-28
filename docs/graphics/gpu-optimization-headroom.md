@@ -262,3 +262,44 @@ form the second tier, aimed at stutter, first frame and copies rather than throu
 platter defect is still unattributed, so it must be treated as open regardless of any refactor.
 Nothing in this report was run on the device; every number above is either a rev231/rev244/rev246
 device log row or a code reading, and the ordering assumes we first land the metrics in §4 P3.
+
+
+## 2026-11-28 acelite/x9if submission-fault fix (B/C deaths)
+
+C (both defaults on) died at kernel 35.759s and B (x9if=0, acelite on) at
+133.300s with the same chain: GPU submission uncertain -> session poisoned
+-> backboardd Metal DeviceLost, screen dead, system alive. Root cause is
+the pre-submit (CPU->GPU) coherent CIVAC skip: it skipped ~34 GB of cleans
+in B with no probe coverage (H2 step c), and both deaths are hard GPU
+faults from the GPU consuming stale CPU-written client data (C: CS
+DATA_INVALID_FAULT; B: AS1 MMU fault at VA 0x40, whose reap then died in
+fence-cache-acquire because the fault poisoned no_faults). NOT the cause:
+the completion path itself - fence value, extract pointer and ACK words
+are all read only after explicit invalidate/sync, the skip never covered
+control memory, and dirty render page tables are still cleaned at publish
+even with ACE-Lite. The GPU->CPU (post) skip is retained: the COH-PROBE
+sampled 113936/113936 imported atoms matching in B. The fence-page SNOOP
+staleness seen in B (growing count) is real but cannot strand a reap,
+because every completion read invalidates first.
+
+Fixes (this change): (1) publish pre phase always cleans CPU-exposed
+client bytes; the coherent skip now applies to the post phase only.
+x9_gpu_coherent=0 still restores both phases; x9_gpu_acelite=0 still
+disables ACE-Lite entirely. (2) The packet body's SYNC_SET64 fence target
+was hardcoded to slot 0 (+0x8000) since per-slot fences landed in
+rev252cn: a paired job 2 wrote its fence into slot 0 while its reap
+polled slot 1 - a guaranteed timeout, dormant only because pairs rarely
+form. It now uses render_fence_offset(st->fence_slot) in both body
+branches. (3) Pair formations are counted (pairs= in the RENDER ASYNC
+stats line) so a device boot can prove the paired path was exercised.
+Depth-2 also amplifies (1) without being its cause: job 2 is published
+immediately after job 1, shrinking the CPU-write->GPU-read latency that
+otherwise lets dirty lines drain (C died after ~521 jobs, B after ~2152,
+at similar job rates).
+
+Acceptance (device, logged boot, acelite + x9if explicitly on,
+x9_coh_probe=1): survive the cold-boot import churn plus >=10 min of
+app-switcher/scroll churn with zero "submission uncertain", zero CSF
+fault lines, COH-PROBE imported stale=0, pre_skip_bytes=0, post_skip_avg
+> 0, ASYNC failed=0 with pairs > 0, and GPUTS service/wait distributions
+no worse than the acelite-on build beyond the restored pre_cache cost.

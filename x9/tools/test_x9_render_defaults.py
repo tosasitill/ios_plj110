@@ -52,5 +52,32 @@ class RenderDefaultsTests(unittest.TestCase):
         self.assertIn('if(render_coh_probe_enabled())', src)
 
 
+class RenderCoherentFixTests(unittest.TestCase):
+    def test_pre_phase_never_skips_on_coherent(self):
+        """2026-11-28 B/C acelite deaths: the publish (CPU->GPU) phase must
+        always clean CPU-exposed client bytes; the coherent CIVAC skip is
+        retained only in the reap's post phase (GPU->CPU, probe-validated)."""
+        src = ENGINE.read_text()
+        self.assertNotIn('if(coherent&&r.cpu_exposed)', src)
+        self.assertIn('if(st->coherent&&r.cpu_exposed)', src)
+
+    def test_fence_sync_set64_targets_own_slot(self):
+        """Per-slot fences (rev252cn): the packet body's SYNC_SET64 target
+        must be render_fence_offset(st->fence_slot) in both body branches;
+        the hardcoded slot-0 address stranded paired job 2's completion."""
+        src = ENGINE.read_text()
+        self.assertEqual(
+            src.count('render_va(g,i)+render_fence_offset(st->fence_slot)'), 2)
+        self.assertNotIn('render_va(g,i)+0x8000', src)
+
+    def test_pipeline_pairs_counted(self):
+        """Pair formation is counted in the ASYNC stats line so an
+        on-device boot can prove the two-jobs-in-flight path (and its
+        per-slot fence) was actually exercised."""
+        src = ENGINE.read_text()
+        self.assertIn('render_pipeline_pairs++', src)
+        self.assertIn('pairs=%llu', src)
+
+
 if __name__ == '__main__':
     unittest.main()
