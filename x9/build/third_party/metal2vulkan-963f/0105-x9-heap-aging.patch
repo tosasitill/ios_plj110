@@ -1,0 +1,240 @@
+diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -11,7 +11,12 @@
+ //!   a working set that dips by a block and comes back a frame later (a frame's buffers, returned
+ //!   as its command buffer completes) makes and frees no block for it. Every kept empty block but
+ //!   one goes once it stayed empty for [`KEPT_EMPTY_FOR`] ([`Pool::stale`]), and every one of a
+-//!   memory type goes before a block of that type fails to be made ([`place`]).
++//!   memory type goes before a block of that type fails to be made ([`place`]). A kept empty
++//!   block that stayed empty for [`AGED_EMPTY_FOR`] goes even where it is its pool's last one
++//!   ([`Pool::aged`]): swept as a block is made ([`place`], bounded by
++//!   [`AGED_SWEEP_PER_PLACE`]) and from the room keeper ([`age_spares`], unbounded) — the
++//!   return of a burst's retained base, which the leave-one rule otherwise kept for the
++//!   process's life while a per-client budget counted it.
+ //! - **Entry point.** [`allocate`] with the resource's memory requirements and its
+ //!   [`MemoryClass`]; [`Memory::free`] with the placement it gave. Buffers use it in step 1;
+ //!   textures and heaps add their classes and callers in their own steps. Imported host memory
+@@ -92,6 +97,22 @@
+ /// How long a kept empty pooled block beyond its pool's one stays empty before it is freed
+ /// ([`Pool::stale`]): a frame's dip comes back well within it.
+ pub(super) const KEPT_EMPTY_FOR: Duration = Duration::from_secs(1);
++
++/// How long a kept empty pooled block stays empty before it is freed even where it is its
++/// pool's last one ([`Pool::aged`], [`Memory::age_aged`]): the age the X9 kernel's per-client
++/// accounting calls old (its LIVE line's `old30s`), so the two layers agree on "old".
++/// [`KEPT_EMPTY_FOR`]'s leave-one rule keeps a working set's dip cheap and keeps the room
++/// [`keep_room`] made; this longer period returns the base a burst left behind — blocks
++/// nothing had placed in for minutes, counted against the client's budget until they go,
++/// which is what filled the A image's backboardd budget at 168 s.
++pub(super) const AGED_EMPTY_FOR: Duration = Duration::from_secs(30);
++
++/// The most aged empty blocks one [`place`] frees before it makes its block
++/// ([`Memory::age_aged`]). Making a block already waits on the driver, and freeing a block
++/// that carries a buffer of addresses first destroys it and parks its memory, so the sweep
++/// on the allocation path stays in the order of the frees one release makes (a release frees
++/// its own block and one stale one); the room keeper's pass is unbounded and drains the rest.
++const AGED_SWEEP_PER_PLACE: usize = 4;
+ 
+ /// The least bytes of a pooled placement the memory log names as it is placed and returned
+ /// (`memory_log.rs`): a few such placements fill a block, so their comings and goings are what
+@@ -722,6 +743,22 @@
+                 Some((index, block.emptied?))
+             })
+             .filter(|&(_, at)| now.saturating_duration_since(at) >= KEPT_EMPTY_FOR)
++            .min_by_key(|&(_, at)| at)?;
++        self.take(index)
++    }
++
++    /// At `now`, the payload of the kept empty pooled block that emptied earliest, where it
++    /// stayed empty for [`AGED_EMPTY_FOR`], taken out to be freed: unlike [`Pool::stale`] it
++    /// takes its pool's last kept block too, a burst's retained base being that block in each
++    /// pool. A block added with nothing placed in it has no emptied time and is never taken:
++    /// it is the room the room keeper made, whose standing is [`keep_room`]'s own policy.
++    pub(super) fn aged(&mut self, now: Instant) -> Option<T> {
++        let (index, _) = (self.blocks.iter().enumerate())
++            .filter_map(|(index, block)| {
++                let block = block.as_ref().filter(|block| block.kept())?;
++                Some((index, block.emptied?))
++            })
++            .filter(|&(_, at)| now.saturating_duration_since(at) >= AGED_EMPTY_FOR)
+             .min_by_key(|&(_, at)| at)?;
+         self.take(index)
+     }
+@@ -811,11 +848,15 @@
+     OwnPages = 5,
+     /// Freed as the device was destroyed, its queues idle ([`Memory::destroy`]).
+     Teardown = 6,
++    /// A kept empty pooled block freed after [`AGED_EMPTY_FOR`] without a placement, its
++    /// pool's last one included ([`Memory::age_aged`]): the aged return of a burst's
++    /// retained base, which [`FreeCause::KeptStale`]'s leave-one rule never gave back.
++    KeptAged = 7,
+ }
+ 
+ impl FreeCause {
+     /// How many causes there are: every block this allocator frees is counted under exactly one.
+-    pub(super) const COUNT: usize = 7;
++    pub(super) const COUNT: usize = 8;
+ }
+ 
+ /// How many size classes [`MemoryKinds`] counts a block in: at most 16, 32, 40, 48, 56 and
+@@ -1999,6 +2040,31 @@
+         }
+     }
+ 
++    /// Free the kept empty pooled blocks that stayed empty for [`AGED_EMPTY_FOR`] at `now`,
++    /// at most `limit` of them, the earliest emptied first over the pools: how many went and
++    /// their bytes. A block of images is freed here, not kept spare: a spare is kept for the
++    /// next dedicated image and ages by [`SPARE_FOR`], while this sweep is what gives memory
++    /// back, and a block that reaches it has already had both keepings. Each block goes under
++    /// [`FreeCause::KeptAged`] where it is counted.
++    fn age_aged(&mut self, device: &ash::Device, now: Instant, limit: usize) -> (usize, u64) {
++        let (mut went, mut bytes) = (0, 0);
++        for at in 0..self.pools.len() {
++            while went < limit {
++                let Some(block) = self.pools[at].aged(now) else {
++                    break;
++                };
++                bytes += block.size;
++                went += 1;
++                // SAFETY: nothing is placed in a kept empty block, and no command reads it.
++                drop(unsafe { self.let_go(device, block, FreeCause::KeptAged, None) });
++            }
++            if went >= limit {
++                break;
++            }
++        }
++        (went, bytes)
++    }
++
+     /// Free the spare blocks that stayed spare for [`SPARE_FOR`] at `now`.
+     fn age_spare(&mut self, device: &ash::Device, now: Instant) {
+         let stale: Vec<Spare> = (self.spare)
+@@ -2829,6 +2895,14 @@
+         let before = lock(memory).frees_before(type_index, block_size);
+         if let Some(frees) = before {
+             frees.wait();
++        }
++        // X9: the aged fully-free blocks go first (at most [`AGED_SWEEP_PER_PLACE`]): the
++        // native per-client budget counts a kept empty block until it is freed, and the base
++        // a burst left behind otherwise stayed for the process's life, so a block is made
++        // only after what has been empty for [`AGED_EMPTY_FOR`] was given back.
++        {
++            let mut memory = lock(memory);
++            memory.age_aged(device, Instant::now(), AGED_SWEEP_PER_PLACE);
+         }
+         // The type's kept empty blocks go, and the frees posted complete, before a block of it
+         // fails to be made.
+@@ -2883,12 +2957,16 @@
+ /// Free the spare blocks whose time is up, from the room worker: a device that releases nothing
+ /// more still lets its spares go after [`SPARE_FOR`]. The kept empty pooled blocks beyond each
+ /// pool's one go as they do at a release ([`Pool::stale`]), which a pool that releases nothing
+-/// more never reached: its second empty block stayed for good.
++/// more never reached: its second empty block stayed for good. The kept blocks empty for
++/// [`AGED_EMPTY_FOR`] go too, each pool's last one included ([`Memory::age_aged`]), unbounded
++/// here: this pass is off the allocation path, so it drains what [`place`]'s bounded sweep
++/// left.
+ pub(super) fn age_spares(memory: &Mutex<Memory>, device: &ash::Device) {
+     let mut memory = lock(memory);
+     let now = Instant::now();
+     memory.age_kept(device, now);
+     memory.age_spare(device, now);
++    memory.age_aged(device, now, usize::MAX);
+ }
+ 
+ /// Keep room for any pooled placement (half a block) in each pool the runtime's encodings and
+diff --git a/crates/metal2vulkan-runtime/src/work_counts.rs b/crates/metal2vulkan-runtime/src/work_counts.rs
+--- a/crates/metal2vulkan-runtime/src/work_counts.rs
++++ b/crates/metal2vulkan-runtime/src/work_counts.rs
+@@ -3617,6 +3617,11 @@
+     /// Kept empty pooled blocks freed so that a block of their memory type could be made, as one
+     /// failed to be made: the allocator giving memory back under pressure.
+     pub kept_for_room: u64,
++    /// Kept empty pooled blocks freed after the long quiet period (`memory.rs`'s
++    /// `AGED_EMPTY_FOR`), each pool's last one included: a burst's retained base given back,
++    /// which the short quiet period's leave-one rule never returned while a per-client
++    /// budget counted it.
++    pub kept_aged: u64,
+     /// Imports of the caller's host memory, a dedicated block each, freed as their placement went
+     /// (`memory::import_host`).
+     pub host_import: u64,
+@@ -6505,6 +6510,7 @@
+                 pooled_emptied: frees[FreeCause::PooledEmptied as usize],
+                 kept_stale: frees[FreeCause::KeptStale as usize],
+                 kept_for_room: frees[FreeCause::KeptForRoom as usize],
++                kept_aged: frees[FreeCause::KeptAged as usize],
+                 host_import: frees[FreeCause::HostImport as usize],
+                 own_pages: frees[FreeCause::OwnPages as usize],
+                 teardown: frees[FreeCause::Teardown as usize],
+diff --git a/crates/metal2vulkan-runtime/src/tests/memory.rs b/crates/metal2vulkan-runtime/src/tests/memory.rs
+--- a/crates/metal2vulkan-runtime/src/tests/memory.rs
++++ b/crates/metal2vulkan-runtime/src/tests/memory.rs
+@@ -1,9 +1,9 @@
+ use crate::memory::{
+     candidates, host_cached, host_cached_placement, host_incoherent, overflow_candidates,
+-    MemoryClass, Pool, KEPT_EMPTY_BLOCKS, KEPT_EMPTY_FOR,
++    MemoryClass, Pool, AGED_EMPTY_FOR, KEPT_EMPTY_BLOCKS, KEPT_EMPTY_FOR,
+ };
+ use ash::vk;
+-use std::time::Instant;
++use std::time::{Duration, Instant};
+ 
+ fn ty(flags: vk::MemoryPropertyFlags) -> vk::MemoryType {
+     vk::MemoryType {
+@@ -408,6 +408,56 @@
+     assert_eq!(taken, ["second", "third"]);
+     assert_eq!(pool.blocks(), 0);
+     assert_eq!(pool.turnover(), (3, 3));
++}
++
++/// A kept empty block that stayed empty for `AGED_EMPTY_FOR` goes even where it is its pool's
++/// last one — what `stale` never takes — the earliest emptied first; one that emptied later
++/// stays until its own time is up. A block added with nothing placed in it, which has no
++/// emptied time, is never taken.
++#[test]
++fn a_kept_empty_block_aged_out_goes_even_the_last_one() {
++    let start = Instant::now();
++    let mut pool: Pool<&str> = Pool::default();
++    let first = pool.add(256, false, "first", 256);
++    let second = pool.add(256, false, "second", 256);
++    assert_eq!(pool.release(first, 0, 256, start), None);
++    assert_eq!(pool.release(second, 0, 256, start + AGED_EMPTY_FOR / 2), None);
++    assert_eq!(
++        pool.aged(start + AGED_EMPTY_FOR - Duration::from_nanos(1)),
++        None,
++        "neither stayed empty so long"
++    );
++    assert_eq!(
++        pool.aged(start + AGED_EMPTY_FOR),
++        Some("first"),
++        "the earliest emptied goes first"
++    );
++    assert_eq!(
++        pool.aged(start + AGED_EMPTY_FOR),
++        None,
++        "the second has not been empty so long yet"
++    );
++    assert_eq!(
++        pool.stale(start + AGED_EMPTY_FOR * 2),
++        None,
++        "stale keeps the last kept block, however long"
++    );
++    assert_eq!(
++        pool.aged(start + AGED_EMPTY_FOR * 2),
++        Some("second"),
++        "the last kept block goes too"
++    );
++    assert_eq!(pool.blocks(), 0);
++    assert_eq!(pool.turnover(), (2, 2));
++    // The room a keeper made: added empty, never placed in, no emptied time.
++    let mut pool: Pool<&str> = Pool::default();
++    let _room = pool.add(256, false, "room", 0);
++    assert_eq!(
++        pool.aged(start + AGED_EMPTY_FOR * 4),
++        None,
++        "a block that never held a placement is not taken"
++    );
++    assert_eq!(pool.blocks(), 1);
+ }
+ 
+ #[test]
