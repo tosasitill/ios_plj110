@@ -13,7 +13,10 @@
  *  - Packet framing: {protocol,length} big-endian; at protocol version 2
  *    the header grows {magic=0xfeedface, tx_seq, rx_seq}. The host sends
  *    VERSION first (8-byte header), the device replies VERSION with the
- *    8-byte header; for major 2 the host then sends SETUP (protocol 2,
+ *    8-byte header; the version payload is struct version_header
+ *    {major, minor, padding} = 12 bytes, so a version packet is 20 bytes
+ *    in total and the daemon drops shorter ones as "version packet too
+ *    small". For major 2 the host then sends SETUP (protocol 2,
  *    payload 0x07) and all later packets use 16-byte headers.
  *  - The host matches VID 0x05AC and an interface of class 0xFF /
  *    subclass 0xFE / protocol 2 with exactly two bulk endpoints.
@@ -386,19 +389,25 @@ static inline void x9_mux_process_packet(struct x9_mux_engine *e,
         if (proto != X9_MUX_PROTO_VERSION || plen < 8)
             return;
         uint32_t major = x9_mux_rd32(payload + 0);
-        uint8_t reply[8];
+        /* The version payload is the daemon's struct version_header:
+         * {major, minor, padding} = 12 bytes. The daemon enforces a
+         * minimum version packet of 8 + 12 = 20 bytes and discards
+         * shorter replies as "version packet too small", so the reply
+         * must carry the padding word even though it is never read. */
+        uint8_t reply[12];
         x9_mux_wr32(reply + 0, major == 2 ? 2u : 1u);
         x9_mux_wr32(reply + 4, 0);
+        x9_mux_wr32(reply + 8, 0);
         /* The version reply always uses the 8-byte header: the host is
          * still parsing at version 0 when it reads it. Build it manually
          * instead of x9_mux_build(). */
-        uint8_t pkt16[16];
-        x9_mux_wr32(pkt16 + 0, X9_MUX_PROTO_VERSION);
-        x9_mux_wr32(pkt16 + 4, 16);
-        memcpy(pkt16 + 8, reply, 8);
-        if (e->ops.tx_packet(e->ctx, pkt16, 16) <= 0) {
-            memcpy(e->pend_pkt, pkt16, 16);
-            e->pend_pkt_len = 16;
+        uint8_t pkt20[20];
+        x9_mux_wr32(pkt20 + 0, X9_MUX_PROTO_VERSION);
+        x9_mux_wr32(pkt20 + 4, 20);
+        memcpy(pkt20 + 8, reply, 12);
+        if (e->ops.tx_packet(e->ctx, pkt20, 20) <= 0) {
+            memcpy(e->pend_pkt, pkt20, 20);
+            e->pend_pkt_len = 20;
         }
         e->stat_version++;
         if (major == 2) {
