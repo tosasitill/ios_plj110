@@ -305,6 +305,69 @@ fault lines, COH-PROBE imported stale=0, pre_skip_bytes=0, post_skip_avg
 no worse than the acelite-on build beyond the restored pre_cache cost.
 
 
+## 2026-11-28 round3: frontend-scope was a second pre-phase skip
+
+The round3 acceptance boot (acelite=1, x9_coh_probe=1, the coherent fix
+and the heap-aging package in) died at kernel 32.824 s with the same
+signature (AS1 MMU fault at VA 0, insert/extract delta 16, id=303) -
+earlier than C (~521 jobs) and B (~2152). COH-PROBE reported
+pre_skip_bytes=0, and that reading is exact but narrow: the probe's
+step-c accounting (render_coh_pre_skip) counts only the coherent class.
+The same windows showed cache-frontend-scope pre_skip_avg up to
+16,953,160 B/job (134-job window): a second, independent publish-phase
+skip, from the frontend cache scope (rev252bx, x9_cache_scope=1, part
+of the standard boot args). For every mapped imported CPU-exposed BO
+whose host range was fully covered by a frontend-registered range with
+no pending command buffer referencing it, publish skipped the fallback
+clean entirely (render_scope_skips) - before even the x9lc seed check.
+Its safety rested on the frontend's per-command-buffer owner
+enumeration naming every import a job can touch; the fallback walk it
+bypassed exists precisely because indirect GPU references cannot be so
+enumerated. The fatal context (backboardd, group 1) held 21 imported
+BOs / 36 MB at death. The scope skip was large in every recorded boot
+(A ~48 MB/job, B ~40 MB/job, C ~27-33 MB/job); A survived it with full
+coherent maintenance and x9if off, so it is not claimed to be the sole
+cause in isolation - but it is the only remaining publish-phase skip
+whose premise the design itself disclaims, and the project's own
+acceptance bar ("no skipped pre stage clean bytes") already forbade
+it.
+
+Fix (this change): publish no longer skips on scope. The snapshot
+feeds only the covered/uncovered accounting (covered bytes now land in
+cache-scope-hold pre_avg) and the post phase, where the skip is
+retained and has never fired (a job's own acquires are still held at
+reap; post_skip_avg=0 in A/B/C/round3). Frontend protocol unchanged;
+x9_cache_scope=0 still disables the accounting. The remaining
+pre-phase skips are the audited ones: write-combined BOs (uncached
+mappings), x9dc recorded ranges (cleaned in publish by
+render_dirty_consume before the walk; the channel recorded zero
+entries in round3) and the x9lc seed (the IOSurface lock contract -
+the platform's own CPU-write tracking, not an enumeration claim).
+
+Suspects cleared this round: the post/reap scope skip (inert, above);
+SNOOP stale=3/714 (GPU->CPU fence-page samples; every completion read
+invalidates first, and the CSF fault precedes the completion wait, so
+it cannot strand this reap); pairs=0 - pair formation needs a second
+same-context/group job already queued when job 1's publish returns,
+and the client's submit-then-wait pattern keeps the FIFO empty at
+that instant (inflight_max=0 in every window), so x9if's depth-2 is
+structurally inert today and the earlier "depth-2 compresses the
+latency ~4x" reading of C vs B is not supported; the per-slot fence
+fix stays dormant but correct. Uncontrolled difference vs A: the
+round3 plugin build also carried the heap-aging runtime (0105).
+
+Revised acceptance (device, logged boot, acelite explicitly on,
+x9_coh_probe=1): cache-frontend-scope pre_skip_avg=0 in every window
+with cache-scope-hold pre_avg risen to roughly the old skip+hold sum;
+COH-PROBE pre_skip_bytes=0 and imported stale=0; zero "submission
+uncertain", zero CSF fault lines; survive > 4.5x B's 133 s AND > 2x
+B's 2152 group submissions under >=10 min of churn. pairs>0 is
+dropped as a criterion until the client pipelines submissions. If the
+signature still fires with both pre counters at 0, the next suspects
+in order are the x9lc seed coverage for writes that bypass IOSurface
+locking and the heap-aging runtime's memory lifetime.
+
+
 ## 2026-11-28 per-client budget death (A image) and soft backpressure
 
 A (both acelite and x9if off, production shape) lost its screen at
