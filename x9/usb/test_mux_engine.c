@@ -136,10 +136,11 @@ static uint32_t build_tcp(uint16_t sport, uint16_t dport, uint32_t seq,
 
 static void feed_handshake_v2(void)
 {
-    uint8_t ver[8];
+    uint8_t ver[12];
     x9_mux_wr32(ver + 0, 2);
     x9_mux_wr32(ver + 4, 0);
-    uint32_t n = build_mux(0, ver, 8, 0, 0);
+    x9_mux_wr32(ver + 8, 0);
+    uint32_t n = build_mux(0, ver, 12, 0, 0);
     x9_mux_feed(&eng, host_pkt, n);
     uint8_t setup = 0x07;
     n = build_mux(2, &setup, 1, 1, 0);
@@ -172,19 +173,23 @@ int main(void)
 {
     struct parsed P;
 
-    /* 1. Version handshake v2, byte-exact reply. */
+    /* 1. Version handshake v2, byte-exact reply. The reply must total
+     * 20 bytes: the daemon's version_header is {major, minor, padding}
+     * and it discards shorter version packets as "too small". */
     reset_all();
     {
-        uint8_t ver[8];
+        uint8_t ver[12];
         x9_mux_wr32(ver + 0, 2);
         x9_mux_wr32(ver + 4, 0);
-        uint32_t n = build_mux(0, ver, 8, 0, 0);
+        x9_mux_wr32(ver + 8, 0);
+        uint32_t n = build_mux(0, ver, 12, 0, 0);
         x9_mux_feed(&eng, host_pkt, n);
         CHECK(tx_pkt_count == 1);
         uint32_t pn;
         const uint8_t *p = pkt_at(0, &pn);
-        static const uint8_t want[16] = {0,0,0,0, 0,0,0,16, 0,0,0,2, 0,0,0,0};
-        CHECK(pn == 16 && memcmp(p, want, 16) == 0);
+        static const uint8_t want[20] = {0,0,0,0, 0,0,0,20, 0,0,0,2,
+            0,0,0,0, 0,0,0,0};
+        CHECK(pn == 20 && memcmp(p, want, 20) == 0);
         CHECK(eng.state == 1);
         uint8_t setup = 0x07;
         n = build_mux(2, &setup, 1, 1, 0);
@@ -330,10 +335,11 @@ int main(void)
     /* 10. Byte-by-byte and coalesced stream reassembly. */
     reset_all();
     {
-        uint8_t ver[8];
+        uint8_t ver[12];
         x9_mux_wr32(ver + 0, 2);
         x9_mux_wr32(ver + 4, 0);
-        uint32_t n = build_mux(0, ver, 8, 0, 0);
+        x9_mux_wr32(ver + 8, 0);
+        uint32_t n = build_mux(0, ver, 12, 0, 0);
         uint8_t saved[64];
         memcpy(saved, host_pkt, n);
         for (uint32_t i = 0; i < n; i++)
@@ -354,15 +360,16 @@ int main(void)
     /* 11. Version 1 handshake: 8-byte headers throughout. */
     reset_all();
     {
-        uint8_t ver[8];
+        uint8_t ver[12];
         x9_mux_wr32(ver + 0, 1);
         x9_mux_wr32(ver + 4, 0);
-        uint32_t n = build_mux(0, ver, 8, 0, 0);
+        x9_mux_wr32(ver + 8, 0);
+        uint32_t n = build_mux(0, ver, 12, 0, 0);
         x9_mux_feed(&eng, host_pkt, n);
         CHECK(eng.state == 2 && eng.version == 1);
         uint32_t pn;
         const uint8_t *p = pkt_at(0, &pn);
-        CHECK(pn == 16 && x9_mux_rd32(p + 8) == 1);
+        CHECK(pn == 20 && x9_mux_rd32(p + 8) == 1);
         tx_pkt_count = 0; tx_len = 0;
         n = build_tcp(0x4444, 62078, 0, 0, X9_MUX_TH_SYN, 512, NULL, 0);
         x9_mux_feed(&eng, host_pkt, n);
