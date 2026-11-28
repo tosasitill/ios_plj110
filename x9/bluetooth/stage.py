@@ -166,21 +166,21 @@ def inputs(a):
     entries = payload.get('files')
     originals = payload.get('original_jobs')
     cache_backup = payload.get('original_launchd_cache')
-    if (not isinstance(entries, list) or len(entries) != 7 or
+    if (not isinstance(entries, list) or len(entries) != 9 or
             [entry.get('path') for entry in entries] != expected or
             payload.get('install_order') != expected or
             not isinstance(originals, list) or len(originals) != 2 or
             [entry.get('path') for entry in originals] != job_paths or
             not isinstance(cache_backup, dict) or cache_backup.get('path') != CACHE_PATH):
-        raise ValueError('only four executables, two Program-only jobs and their append-only service cache are permitted')
+        raise ValueError('only six executables, two Program-only jobs and their append-only service cache are permitted')
     files, stock_jobs = {}, {}
     for index, entry in enumerate(entries):
         data = bounded(member(package, entry['source']), 64 * 1024 * 1024)
-        mode = '0755' if index < 4 else '0644'
+        mode = '0755' if index < 6 else '0644'
         if (entry.get('size') != len(data) or entry.get('sha256') != sha(data) or
                 entry.get('mode') != mode or entry.get('uid') != 0 or entry.get('gid') != 0):
             raise ValueError('payload bytes/ownership/mode differ from the manifest')
-        if index < 4 and entry.get('precondition') != {'absent': True}:
+        if index < 6 and entry.get('precondition') != {'absent': True}:
             raise ValueError('new executable must have an absent-target precondition')
         files[entry['path']] = data
     for entry, job in zip(originals, JOBS):
