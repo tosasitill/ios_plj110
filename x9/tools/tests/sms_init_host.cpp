@@ -90,6 +90,7 @@ static uint64_t bridge_ack_generation=1;
 static bool bridge_ack_live=true;
 static unsigned ack_queue_calls;
 static uint64_t bb_x9_sms_ack_identity(uint32_t,uint32_t){assert(!lock_depth);return bridge_ack_live?bridge_ack_generation:0;}
+static int bb_x9_sms_event_depth(uint32_t){assert(!lock_depth);return 0;}
 static bool bb_x9_sms_ack_result(uint32_t,uint32_t,uint64_t generation,const uint8_t *p,unsigned n,uint8_t *owned,unsigned room){
  assert(!lock_depth&&owned&&room==n+CBQ_HDR&&n==14&&p[0]==2&&x9q_u16(p+3)==0x37);ack_queue_calls++;
  if(!bridge_ack_live||generation!=bridge_ack_generation||!queue_accept)return false;

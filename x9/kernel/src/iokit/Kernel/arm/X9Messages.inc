@@ -1308,8 +1308,8 @@ static void x9m_poll(){
  for(x9m_incoming &in:x9m_incoming_sms)if(in.token&&!in.held){
   if(in.delivered){
    if(!in.replying&&in.ack_wait&&now>=in.ack_wait){in.ack_wait=0;
-    printf("X9 SMS: SIM%u command token %u host ACK still absent after 30s client-live %u; ownership retained\n",
-     in.sim+1,in.token,x9m_live(in.slot,in.generation)?1:0);}
+    printf("X9 SMS: SIM%u command token %u host ACK still absent after 30s client-live %u; ownership retained; host queue depth %d\n",
+     in.sim+1,in.token,x9m_live(in.slot,in.generation)?1:0,bb_x9_sms_event_depth(CBQ_PORT_BASE+in.slot));}
   }else if(in.replying){int result=0;if(x9_md_mipc_message_reply_take(in.token,&result)==1){
    if(result){in.held=true;printf("X9 SMS: SIM%u command token %u discard ACK TX failed; retained without retry\n",in.sim+1,in.token);}
    else bzero(&in,sizeof(in));}}

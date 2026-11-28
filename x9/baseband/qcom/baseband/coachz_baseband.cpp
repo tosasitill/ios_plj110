@@ -742,6 +742,19 @@ static void bb_complete(thread_call_param_t, thread_call_param_t)
     }
     IOLockUnlock(bb_lock);
     if (!found) return;
+    // ACK-trace (bounded): prove a queued WMS EventReport indication was
+    // actually drained by a host read (see bb_x9_sms_event). Matches the
+    // QMUX header (IF type 1, service 5) and an indication SDU for
+    // message 1; header fields only, never payload.
+    if (frame.data && frame.len >= CBQ_HDR + 7 && frame.data[0] == 1 && frame.data[4] == 5 &&
+        frame.data[CBQ_HDR] == CBQ_QMI_INDICATION && cbq_rd16(frame.data + CBQ_HDR + 3) == 1) {
+      static unsigned sms_read_traced;
+      if (sms_read_traced < 4) {
+        sms_read_traced++;
+        printf("X9 SMS: host read MT indication cid %u len %u; CommCenter consumption starts here\n",
+               frame.data[5], frame.len);
+      }
+    }
     bb_finish_read(&read, kIOReturnSuccess, frame.data, frame.len);
     IOFreeData(frame.data, frame.len);
   }
@@ -1721,11 +1734,40 @@ static bool bb_x9_sms_event(uint32_t dst_port, uint32_t src_node, const uint8_t 
         IOLockWakeup(bb_lock, ch, false);
         if (ch->reads_waiting && bb_complete_call) thread_call_enter(bb_complete_call);
         admitted = true;
+        // ACK-trace (bounded): the 2026-11-28 A round proved admission is
+        // not consumption -- admitted MT indications drew no WMS37 and no
+        // host reaction. Record the exact queue coordinates so the next
+        // round can split "never read" from "read and dropped inside
+        // CommCenter" (pairs with the bb_complete read trace and the 30 s
+        // queue depth on the X9Messages ACK-wait line). Header fields only;
+        // the PDU is never logged.
+        static unsigned sms_event_traced;
+        if (sms_event_traced < 4) {
+          sms_event_traced++;
+          printf("X9 SMS: MT indication queued slot %u cid %u channel %u depth %u reads-waiting %u len %u; admission only, not host consumption\n",
+                 slot, r.cid, r.channel + 1, ch->count, ch->reads_waiting, size);
+        }
       } else ch->frames_dropped++;
     }
   }
   IOLockUnlock(bb_lock);
   return admitted;
+}
+// Queue depth of the channel a WMS client's indications land on, for the
+// ACK-wait timeout line: depth > 0 long after admission means the host
+// never drained the frame; 0 means it was read and the loss is inside
+// CommCenter. -1 when the port has no live WMS client.
+static int bb_x9_sms_event_depth(uint32_t dst_port)
+{
+  const uint32_t slot = dst_port - CBQ_PORT_BASE;
+  if (!bb_lock || dst_port < CBQ_PORT_BASE || slot >= CBQ_MAX_CLIENTS) return -1;
+  IOLockLock(bb_lock);
+  const cbq_client &c = bb_qmux.client[slot];
+  int depth = -1;
+  if (c.used && !c.release_pending && c.service == 5 && c.channel < 2)
+    depth = (int)bb_ch[c.channel == 0 ? CBH_QMUX1 : CBH_QMUX2].count;
+  IOLockUnlock(bb_lock);
+  return depth;
 }
 #endif
 
