@@ -155,6 +155,14 @@ the `X9 RENDER SNOOP` fence line and, under `x9_coh_probe=1`, the
 COH-PROBE per-class verdicts; stale>0 in either falsifies the claim
 for that direction/class.*
 
+*Update 2026-11-28 (later, same day): the default was reverted to
+opt-in after on-device A/B/C boots convicted acelite -- B (acelite
+only, `x9if=0`) died at 133 s and C (both on) at 36 s, both
+submission uncertain -> DeviceLost, while A (both off) survived.
+`x9if` stays default-on (it was not required for the failure). The
+coherent skip returns to default-on only once the completion-path
+root-cause fix is verified on device.*
+
 **P0-C — Stop tearing down the address space per job (targets `start`+`retire` 7.3% + unlocks everything else).**
 The constraint is structural: `map()`/`unmap()` refuse while `vm->attached`
 ([K/X9RenderPageTable.cpp:96-97](/Users/tosasitill/ios_plj110/x9/kernel/src/iokit/Kernel/arm/X9RenderPageTable.cpp#L96),
