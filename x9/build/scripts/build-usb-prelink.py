@@ -4,8 +4,11 @@
     python3 -I x9/build/scripts/build-usb-prelink.py <name> [--boot-arg TOKEN ...]
 
 1. build.py kernel against .local/dxb-iosabi (iOS kext C++ ABI; x9/xnu/build-xnu.sh ios)
-2. .local/references/XnuPrelink/emit_prelink.py links IOUSBDeviceFamily and
-   AppleUSBDeviceMux (and their dependency AppleUSBCommon) out of
+2. .local/references/XnuPrelink/emit_prelink.py links IOUSBDeviceFamily,
+   AppleUSBDeviceMux (and their dependency AppleUSBCommon) and
+   IOStorageFamily (APFS P0: IOMedia publication for the extent root;
+   its declared libraries are KPIs only, so it pulls no further kexts)
+   out of
    .local/x9/usb/native-20H392/kernelcache.macho into the kernel's empty
    __PRELINK_* segments at a fixed slide
 3. build.py boot packages the prelinked kernel with x9/build/boot-device.json
@@ -102,7 +105,7 @@ def main():
     prelinked = out / 'kernel.prelinked'
     run('prelink', [py, str(LOCAL / 'references/XnuPrelink/emit_prelink.py'), '--kernel', str(kernel),
                     '--prelinked', str(LOCAL / 'x9/usb/native-20H392/kernelcache.macho'),
-                    '--root', 'com.apple.iokit.IOUSBDeviceFamily', '--root', 'com.apple.driver.AppleUSBDeviceMux',
+                    '--root', 'com.apple.iokit.IOUSBDeviceFamily', '--root', 'com.apple.driver.AppleUSBDeviceMux', '--root', 'com.apple.iokit.IOStorageFamily',
                     f'--slide={hex(PRELINK_BASE - KC_BASE)}', '--output', str(prelinked)])
     print('__PRELINK_INFO at', hex(align_prelink_info(prelinked)), flush=True)
     # build.py boot expects the kernel output's sidecar metadata next to the kernel.

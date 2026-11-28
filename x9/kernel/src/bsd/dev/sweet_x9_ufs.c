@@ -467,6 +467,53 @@ boolean_t sweet_x9_ufs_root_active(void)
 {
  return xu.ready && !xu.failed;
 }
+
+/* APFS P0 media accessors for the IOKit storage publication
+ * (iokit/Kernel/arm/SweetX9Storage.cpp). Byte-granular transport over
+ * the same host/extents the strategy path uses, under the same mutex
+ * and with the same ready/failed/writable gating; poison still marks
+ * the device failed. The BSD block device above is unaffected. */
+int sweet_x9_media_info(uint64_t *bytes,int *writable)
+{
+ if(!xu.ready||xu.failed)return ENXIO;
+ if(bytes)*bytes=xu.bytes;
+ if(writable)*writable=xu.writable?1:0;
+ return 0;
+}
+int sweet_x9_media_read(uint64_t offset,void *data,size_t length)
+{
+ if(!xu.ready||xu.failed||!data||offset>xu.bytes||length>xu.bytes-offset)return EINVAL;
+ if(!length)return 0;
+ lck_mtx_lock(&x9ufs_lock);
+ if(xu.failed){lck_mtx_unlock(&x9ufs_lock);return ENXIO;}
+ pet();
+ int result=x9u_image_read_mapped(&xu.host,2,&xu.partition,xu.extents,xu.extent_count,xu.bytes/4096,offset,data,length);
+ if(xu.host.poisoned)xu.failed=true;
+ lck_mtx_unlock(&x9ufs_lock);
+ return result?EIO:0;
+}
+int sweet_x9_media_write(uint64_t offset,const void *data,size_t length)
+{
+ if(!xu.ready||xu.failed||!data||offset>xu.bytes||length>xu.bytes-offset)return EINVAL;
+ if(!xu.writable)return EROFS;
+ if(!length)return 0;
+ lck_mtx_lock(&x9ufs_lock);
+ if(xu.failed){lck_mtx_unlock(&x9ufs_lock);return ENXIO;}
+ pet();
+ int result=x9u_image_write(&xu.host,offset,data,length);
+ if(xu.host.poisoned)xu.failed=true;
+ lck_mtx_unlock(&x9ufs_lock);
+ return result?EIO:0;
+}
+int sweet_x9_media_sync(void)
+{
+ if(!xu.ready||xu.failed)return ENXIO;
+ if(!xu.writable)return 0;
+ lck_mtx_lock(&x9ufs_lock);
+ pet();int error=x9u_sync_image(&xu.host);
+ lck_mtx_unlock(&x9ufs_lock);
+ return error?EIO:0;
+}
 int sweet_x9_ufs_rootdev(dev_t *device)
 {
  if(xu.failed)return ENXIO;
@@ -480,6 +527,16 @@ int sweet_x9_ufs_rootdev(dev_t *device)
   }
  }
  log_start();
+ /* APFS P0: optionally publish the extent window as an IOKit block
+  * storage device so IOStorageFamily can attach an IOMedia (the APFS
+  * container scheme matches on IOMedia). Gated by x9_iomedia=1,
+  * default off: the publication runs after the BSD root is fully
+  * initialized, and the rd=/mountroot path above and below is
+  * unchanged whether or not it runs. */
+ if(sweet_x9_arg("x9_iomedia",0)) {
+  extern void sweet_x9_storage_publish(void);
+  sweet_x9_storage_publish();
+ }
  *device=xu.device;return 0;
 }
 #endif
