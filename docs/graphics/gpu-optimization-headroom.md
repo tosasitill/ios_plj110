@@ -130,6 +130,11 @@ acquisition instead of polling, and a second priority class for display-critical
 Expected: −3…5 ms/job. **Risk: high** (fence ordering, wedged-DMA quarantine) and the spec forbids
 unverified fence/queue changes → single-variable A/B, one boot-arg gate.
 
+*Update 2026-11-28: the in-flight half of this item is now a default --
+`x9if` (two jobs in flight on the publish/reap split) is default-on;
+`x9if=0` restores the depth-1 pipeline. Event/IRQ-driven fence
+acquisition remains open; A/B now runs as default vs `x9if=0`.*
+
 **P0-B — Turn cache maintenance off *by proof*, not by assumption (targets 38%).**
 `pre_cache`+`post_cache` = 4,626 µs/job on 59.2+33.5 MB. `x9_gpu_coherent=1` already skips CIVAC for
 exposed buffers but is documented as an unverified assumption
@@ -140,6 +145,15 @@ exposed buffers but is documented as an unverified assumption
 memory), then either (i) widen the coherent path with evidence and delete the reach-set walks, or
 (ii) keep maintenance and remove the opt-in. Today's state is simultaneously the top perf item and
 the top correctness risk (`refactor-issues.md` CACHE-3). Expected: −2…4 ms/job.
+
+*Update 2026-11-28: by user directive the default was flipped before
+the proof completed -- `x9_gpu_acelite` is default-on, so the coherent
+CIVAC skip is active by default (`x9_gpu_acelite=0` opts out;
+`x9_gpu_coherent=0` keeps ACE-Lite but restores per-submit
+maintenance). The snoop evidence is now collected in production via
+the `X9 RENDER SNOOP` fence line and, under `x9_coh_probe=1`, the
+COH-PROBE per-class verdicts; stale>0 in either falsifies the claim
+for that direction/class.*
 
 **P0-C — Stop tearing down the address space per job (targets `start`+`retire` 7.3% + unlocks everything else).**
 The constraint is structural: `map()`/`unmap()` refuse while `vm->attached`
