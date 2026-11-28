@@ -98,3 +98,38 @@
    最低档，则 Backlight 值的单位假设（归一化）错误，种子曲线需按
    nits 量纲（×490）重标——种子是 create-only，改值前需先删设备上的
    CB plist 或 bump 种子版本。
+
+## 2026-11-28 addendum: CB seed merge-write + MG answer chain re-check
+
+- **CB seed is now merge-write, not create-only.** `sweet_x9_seed_corebrightness`
+  reads an existing com.apple.CoreBrightness.plist whole (8 KiB cap), and:
+  already has DisplayBrightnessAuto -> untouched; XML without the key ->
+  fragment (state key + factory curve, or state key alone when
+  DisplayPreferences already exists) inserted before the root </dict>,
+  all other keys preserved; binary plist (bplist00, which is what
+  backboardd/cfprefsd actually write) -> original hard-linked to
+  com.apple.CoreBrightness.x9-before-seed.plist and replaced with the
+  XML seed, following the keyboard-dictation seed's in-tree pattern.
+  Host tests: x9/display/test_autobright_seed.py 11/11 (merge simulated
+  in Python: unrelated keys survive, curve lands complete, existing
+  DisplayPreferences not duplicated). Gate unchanged (x9_cb_seed=0).
+- **MGWIPE `als=1` semantics corrected.** The X9 MGWIPE log line prints
+  the epoch tuple of boot-arg flags (als = (x9_als==3)), not a measured
+  MG answer. probe2's als=1 never proved the cached
+  ambient-light-sensor answer was true; its missing switch is
+  consistent with the answer being false then too.
+- **MG answer chain.** The port constructs no MG answers; stock
+  libMobileGestalt (20H392 DSC extract) computes them natively. The
+  exact string IODeviceTree:/arm-io/aop/iop-aop-nub/als is referenced
+  by exactly two obfuscated question getters; our published node is
+  path-only (phandle + device_type, no als-colorCfg). Whether the
+  getter's predicate is existence-only or also reads a property (L3),
+  and whether the synthetic ADT's aop subtree reaches the IODeviceTree
+  plane (L2), remain unverified offline -- a cache rebuild alone
+  recomputes the same false if either link fails. Display identity is
+  published at BOTH candidate read sites (backlight child and
+  framebuffer service, SweetFramebuffer.cpp), so identity is excluded
+  as the missing link. Next logged round: watch for CB's own
+  "ALS is not supported on this device" line and the new CB SEED
+  merge/replace log lines; MG answer A/B = force an epoch rebuild with
+  the ADT als content toggled and diff which CacheExtra key flips.
