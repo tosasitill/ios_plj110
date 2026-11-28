@@ -5,7 +5,10 @@
  * Releases captured GPIO3 touch reset once and waits vendor 100ms.
  * MT6661 touch rails configured via captured PMIF-P; existing app firmware
  * selected without flash writes. Bounded startup; no hardware reset loops.
- * 16 KiB independent, FIFO only; existing iOS16 IOHIDEvent ABI retained. */
+ * 16 KiB independent, FIFO only; existing iOS16 IOHIDEvent ABI retained.
+ * Read-only probe (x9_touch_probe, default on): per-heartbeat aggregation
+ * of poll outcomes and ATTN samples for the intermittent no-touch fault.
+ * It adds no bus traffic and no MMIO writes, and takes no recovery action. */
 #include <sys/systm.h>
 #include <kern/clock.h>
 #include <kern/thread.h>
@@ -319,6 +322,18 @@ static int startup_identity(uint8_t *response,unsigned *n)
 extern int sweet_x9_perf(unsigned bit);   /* x9g mask, pexpert/arm/pe_serial.c */
 extern void sweet_x9_ui_touch(void);      /* UI boost activity, sweet_x9_gpu_dependencies.c */
 static void release_all(void){for(int i=0;i<10;i++)if(downmask&(1u<<i))sweet_hid_touch(i,0,lastx[i],lasty[i]);downmask=0;}
+/* Probe state: written and read only by the touch thread, so no locking.
+ * ATTN is the S3910 IRQ line on GPIO4, active-low: level 0 = asserted =
+ * the controller says a message is pending. Upstream hbp/syna_tcm2 is
+ * ATTN-IRQ driven and has no host liveness check to port (the framework
+ * ESD check exists only for Goodix); this port polls by design, so the
+ * poll stream itself is aggregated as the liveness evidence. */
+static int touch_probe_on;
+static unsigned probe_polls,probe_idle,probe_report,probe_other,probe_err;
+static unsigned probe_irq_assert,probe_hid;
+static unsigned probe_assert_report,probe_assert_idle,probe_assert_err,
+  probe_deassert_report;
+static unsigned touch_irq_level(void){return (mmrd(touch_gpio,0x200)>>4)&1;}
 static void touch_run(void)
 {
  uint8_t response[512],code;unsigned n;
@@ -370,9 +385,13 @@ static void touch_run(void)
  if(request(0x27,NULL,0,response,&n)){printf("X9 TOUCH: rezero failed\n");return;}
  if(request(5,&report,1,response,&n)){printf("X9 TOUCH: enable report rejected\n");return;}
  printf("X9 TOUCH: LBP reporting enabled; waiting for actual contacts\n");
+ touch_probe_on=sweet_x9_arg("x9_touch_probe",1)==1;
  unsigned reports=0,stream_errors=0;uint64_t heartbeat=0;clock_interval_to_deadline(10,NSEC_PER_SEC,&heartbeat);
  for(;;){
+  unsigned irq_before=1;
+  if(touch_probe_on){irq_before=touch_irq_level();probe_polls++;if(!irq_before)probe_irq_assert++;}
   if(message(&code,response,&n)){
+   if(touch_probe_on){probe_err++;if(!irq_before)probe_assert_err++;}
    /* A failed continued read invalidates the whole frame. Release contacts
     * and retry from a fresh TCM header, never reuse a partial payload.
     * Only a fully validated touch report replenishes the retry budget;
@@ -384,6 +403,11 @@ static void touch_run(void)
    (void)assert_wait_deadline(&downmask,THREAD_UNINT,retry_deadline);thread_block(THREAD_CONTINUE_NULL);
    continue;
   }
+  if(touch_probe_on){
+   if(code==0x11){probe_report++;if(!irq_before)probe_assert_report++;else probe_deassert_report++;}
+   else if(code==0||code==2||code==4){probe_idle++;if(!irq_before)probe_assert_idle++;}
+   else{probe_other++;if(!irq_before)probe_assert_idle++;}
+  }
   if(code==0x11){
    if(n!=objects*5){release_all();printf("X9 TOUCH: invalid touch payload len=%u expected=%u\n",n,objects*5);return;}
    if(stream_errors){printf("X9 TOUCH: validated touch stream resumed after %u errors\n",stream_errors);stream_errors=0;}
@@ -392,8 +416,9 @@ static void touch_run(void)
     unsigned status=response[i*5],x=le16(response+i*5+1),y=le16(response+i*5+3);
     if((status==1||status==2)&&x<=maxx&&y<=maxy){
      mask|=1u<<i;lastx[i]=(int)((uint64_t)x*1255/maxx);lasty[i]=(int)((uint64_t)y*2759/maxy);
+     if(touch_probe_on)probe_hid++;
      sweet_hid_touch((int)i,1,lastx[i],lasty[i]);
-    }else if(downmask&(1u<<i))sweet_hid_touch((int)i,0,lastx[i],lasty[i]);
+    }else if(downmask&(1u<<i)){if(touch_probe_on)probe_hid++;sweet_hid_touch((int)i,0,lastx[i],lasty[i]);}
    }
    reports++;
    if(mask!=downmask||reports<=3)printf("X9 TOUCH: report=%u contacts=%03x previous=%03x HID dispatched\n",reports,mask,downmask);
@@ -404,6 +429,15 @@ static void touch_run(void)
   }
   if(mach_absolute_time()>=heartbeat){
    printf("X9 TOUCH: alive reports=%u contacts=%03x irq=%u\n",reports,downmask,(mmrd(touch_gpio,0x200)>>4)&1);
+   if(touch_probe_on){
+    printf("X9 TOUCH: probe=1 polls=%u idle=%u report=%u other=%u err=%u irq_assert=%u a_rep=%u a_idle=%u a_err=%u d_rep=%u hid=%u din=%08x ies=%08x\n",
+      probe_polls,probe_idle,probe_report,probe_other,probe_err,probe_irq_assert,
+      probe_assert_report,probe_assert_idle,probe_assert_err,probe_deassert_report,
+      probe_hid,mmrd(touch_gpio,0x200),mmrd(touch_iocfg,0x60));
+    probe_polls=probe_idle=probe_report=probe_other=probe_err=0;
+    probe_irq_assert=probe_hid=0;
+    probe_assert_report=probe_assert_idle=probe_assert_err=probe_deassert_report=0;
+   }
    clock_interval_to_deadline(10,NSEC_PER_SEC,&heartbeat);
   }
   /* gpu-wait (x9g bit 8), from hackios-xnu-kernel 66b8e63: the window
