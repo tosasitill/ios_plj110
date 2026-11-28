@@ -990,7 +990,8 @@ static void x9c_calllist_flush(unsigned slot){
   c.calllist_direction=direction;c.calllist_id=id;c.calllist_technology=technology;
   printf("X9 CALL: CallList46 sim=%u id=%u state=%u dir=%u ct=%u ep=%llu rev=%llu\n",
          c.sim+1,id,ios_state,direction,technology,(unsigned long long)epoch,
-         (unsigned long long)revision);}
+         (unsigned long long)revision);
+  x9_md_call_probe(c.sim,id,ios_state);}
  bzero(sdu,sizeof(sdu));
 }
 static void x9c_error(struct x9c_dial_job &j,uint16_t err){

@@ -78,6 +78,9 @@ int x9_md_mipc_call_event(uint8_t *frame, uint32_t capacity, uint32_t *length, u
 /* Monotonic RX cursor / ordered drain for generation-scoped subscriptions.
  * CMD reply token remains separate from the sequence for ordinary INDs. */
 int x9_md_mipc_call_cursor(uint32_t *sequence);
+/* Call-audio probe (x9_call_probe=1|2, default off; x9_call_probe.h):
+ * fed with every successful CallList46 publication; observation only. */
+void x9_md_call_probe(unsigned sim, unsigned id, unsigned ios_state);
 /* Trusted synchronous CALL publication only: the callback must not allocate
  * or reenter MD. 1=actual queue admission, 0=queue reject, -1=dead/future fence. */
 typedef int (*x9_md_mipc_call_publish_cb)(void *context);
