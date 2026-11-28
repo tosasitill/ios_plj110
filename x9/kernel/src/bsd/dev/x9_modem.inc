@@ -502,7 +502,9 @@ static int x9md_voice_usip_bind(void){
  * while pinned, or 0 when the gate is off / the owner is unbound /
  * the map failed. No region content is accessed. */
 static volatile uint32_t *x9md_voice_usip_acquire(void){
- if(sweet_x9_arg("x9_voice_usip",0)!=1)return 0;
+ /* x9_call_probe pins per call (observation only); x9_voice_usip keeps
+  * the boot-lifetime pin. Either gate admits the map. */
+ if(sweet_x9_arg("x9_voice_usip",0)!=1&&sweet_x9_arg("x9_call_probe",0)<1)return 0;
  int rc=x9_voice_usip_acquire(&x9md_vusip);
  if(rc==0)return x9md_vusip_map;
  if(rc<0)return 0;
@@ -523,6 +525,73 @@ static void x9md_voice_usip_release(void){
  x9md_vusip_map=0;
  x9_voice_usip_unmap_done(&x9md_vusip);
  printf("X9 VOICE: usip emi unpinned and unmapped pa=%llx\n",x9md_vusip.pa);
+}
+
+/* ---- call-audio probe (x9_call_probe=1|2, default off) ----
+ * Observation only (x9_call_probe.h): CCCI per-channel RX counters, ch4
+ * (CCCI_PCM_RX, /dev/ccci_aud) packet heads while a call is up, USIP EMI
+ * statistics through the L5 owner's pin (x9_call_probe binds it; level 1
+ * reads only AP_USIP_PARAMETER, the part Android's HAL itself accesses;
+ * level 2 adds ADSP_PHONECALL/SMARTPA), and the media AFE software state.
+ * Never transmits, writes EMI, or touches AFE/ADSP registers. */
+#include "x9_call_probe.h"
+#include "x9_speaker_afe.h"
+static uint32_t x9md_ch_rx[X9CP_CH];          /* modem thread only writes */
+static struct x9_call_probe x9md_cp;
+static LCK_GRP_DECLARE(x9md_cp_grp,"x9_call_probe");
+static LCK_MTX_DECLARE(x9md_cp_lock,&x9md_cp_grp);
+static volatile uint32_t *x9md_cp_emi;
+
+static void x9md_cp_snapshot(const char *tag,int level){
+ uint32_t now[X9CP_CH],d[16][2];
+ for(unsigned c=0;c<X9CP_CH;c++)now[c]=x9md_ch_rx[c];
+ unsigned n=x9cp_channel_deltas(&x9md_cp,now,d,16);
+ char line[192];unsigned lp=0;line[0]=0;
+ for(unsigned i=0;i<n&&lp+24<sizeof(line);i++)
+  lp+=(unsigned)snprintf(line+lp,sizeof(line)-lp," ch%u+%u",d[i][0],d[i][1]);
+ struct x9_speaker_afe_status s;bzero(&s,sizeof(s));
+ int se=x9_speaker_afe_status(&s);
+ printf("X9 CALLPROBE: %s call#%u sim%u id%u state%u | ccci_aud rx total %u | rx deltas:%s | afe %s prepared=%u running=%u memif=%u\n",
+  tag,x9md_cp.calls,x9md_cp.sim+1,x9md_cp.id,x9md_cp.state,now[X9CP_CCCI_PCM_RX],
+  n?line:" none",se?"n/a":"sw",s.prepared,s.running,s.memif);
+ if(!x9md_cp_emi){
+  if(!strcmp(tag,"start"))printf("X9 CALLPROBE: usip emi not pinned (owner unbound or map failed); EMI not observed\n");
+  return;
+ }
+ static const char *const name[3]={"param","phonecall","smartpa"};
+ for(unsigned k=0;k<(level>=2?3u:1u);k++){
+  uint32_t off=0,size=0;
+  if(x9_voice_usip_subrange((enum x9_voice_usip_sub)k,&off,&size))continue;
+  struct x9cp_region r;
+  x9cp_region_stat(x9md_cp_emi+off/4,size/4,&r);
+  const char *delta="baseline";
+  if(x9md_cp.emi_valid&(1u<<k))
+   delta=(r.signature!=x9md_cp.emi[k].signature||r.nonzero!=x9md_cp.emi[k].nonzero)?"CHANGED":"same";
+  else x9md_cp.emi_start[k]=r;
+  printf("X9 CALLPROBE: emi %s +%x/%x nonzero=%u sig=%08x first=%x %s%s\n",name[k],off,size,
+   r.nonzero,r.signature,r.first_nonzero,delta,
+   (!strcmp(tag,"end")&&(x9md_cp.emi_start[k].signature!=r.signature))?" (differs from call start)":"");
+  x9md_cp.emi[k]=r;x9md_cp.emi_valid|=1u<<k;
+ }
+}
+
+/* CallList46 publication hook (X9Calls.inc). sim is 0-based. */
+void x9_md_call_probe(unsigned sim,unsigned id,unsigned ios_state){
+ int level=sweet_x9_arg("x9_call_probe",0);
+ if(level<1)return;
+ lck_mtx_lock(&x9md_cp_lock);
+ for(int pass=0;pass<2;pass++){
+  enum x9cp_action a=x9cp_observe(&x9md_cp,sim,id,ios_state);
+  if(a==X9CP_START){x9md_cp_emi=x9md_voice_usip_acquire();x9md_cp_snapshot("start",level);}
+  else if(a==X9CP_SNAP)x9md_cp_snapshot("state",level);
+  else if(a==X9CP_END){
+   x9md_cp_snapshot("end",level);
+   if(x9md_cp_emi){x9md_voice_usip_release();x9md_cp_emi=0;}
+   continue;   /* a different call may start on the same observation */
+  }
+  break;
+ }
+ lck_mtx_unlock(&x9md_cp_lock);
 }
 
 static int x9md_smem_init(void){
@@ -623,6 +692,11 @@ static int x9md_smem_init(void){
    if(x9_voice_usip_ad50_build(&x9md_vusip,X9_VOICE_USIP_SCENE_SUB,frame)==0)
     printf("X9 VOICE: usip AD50 scene19 constructed (not submitted; Android DT config=3 sets CORE_SEPARATE)\n");
   }
+ }
+ else if(sweet_x9_arg("x9_call_probe",0)>=1){
+  /* Probe only: bind the descriptor now; the call probe takes and drops
+   * its own pin around each call. No boot pin, no AD50 construction. */
+  (void)x9md_voice_usip_bind();
  }
  return 0;
 }
@@ -930,6 +1004,13 @@ static void x9md_listen(unsigned ms_total,int serve){
     uint32_t *h=(uint32_t *)pkt;
     unsigned chn=h[2]&0xffff,seq=(h[2]>>16)&0x7fff;
     pk++;
+    if(chn<X9CP_CH)x9md_ch_rx[chn]++;
+    /* ch4 heads while a call is up; aud_logged is a diagnostic budget, a
+     * benign race with the probe thread at worst prints one line more. */
+    if(chn==X9CP_CCCI_PCM_RX&&!exp&&sweet_x9_arg("x9_call_probe",0)>=1&&x9cp_log_aud(&x9md_cp))
+     printf("X9 CALLPROBE: ccci_aud rx %u ms q%u len %u seq %u rsv=%08x | %08x %08x %08x %08x %08x %08x\n",
+      (unsigned)(ns/1000000),qi,len,seq,h[3],len>16?h[4]:0,len>20?h[5]:0,len>24?h[6]:0,
+      len>28?h[7]:0,len>32?h[8]:0,len>36?h[9]:0);
     if(chn!=10&&chn!=216&&(pk<=400&&(pk<=60||(chn!=14&&chn!=32))||(chn!=14&&chn!=32&&pk<=3000)))
      printf("X9 MODEM: PKT %u ms %sq%u len %u ch %u seq %u d0=%08x d1=%08x rsv=%08x | %08x %08x %08x %08x\n",
       (unsigned)(ns/1000000),exp?"exp ":"",qi,len,chn,seq,h[0],h[1],h[3],

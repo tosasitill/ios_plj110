@@ -320,3 +320,23 @@ Android 侧只读提取并归档：`x9/out/voice-audio-dsp-stage/audio_dsp_a.img
 3. 通话中（probe 之后）：核 SpeechOn af20 result 0 是否复现、
    4901 进度帧与 48k PCM 时钟是否起转——无声音时先分 DSP 未在线 /
    SpeechOn 未达 / PCM 未流三层，不合并归因。
+
+## 通话音频探针（2026-11-28，已落地，未上机）
+
+目的：没有声音时先分清是哪一层，不合并归因（对应上面「下轮真机判别清单」第 3 条）。
+门控 `x9_call_probe=1`（默认关闭；`=2` 额外读 ADSP_PHONECALL/SMARTPA 两个子区）。只做观察：
+不发任何 CCCI、不写 EMI、不碰 AFE/ADSP 寄存器。
+
+- **触发点**：每次 CallList46 发布成功（`X9Calls.inc`），按 iOS 状态 1/2/3/5/9 驱动；
+  同一通话、同一状态被多个 client 重复发布时去重；中途换成另一通话时，先结束旧的再开始新的
+  （`x9_call_probe.h`，主机测试 `x9/baseband/test_call_probe.py`）。
+- **L3**：CCCI 每通道 RX 计数（0..511），每次快照只打印非零增量；通话期间打印 ch4
+  （CCCI_PCM_RX，即 Android `/dev/ccci_aud`，SpeechOn 2f20/af20 的承载）包头，每通最多 32 个。
+  通话全程 ch4 都是 0，说明 MD 没有在 speech 通道上说话（与「AP 从未发 2f20」一致）；
+  有包的话，包头直接给出消息号。
+- **L5**：通话开始时经 L5 owner 固定 USIP EMI（探针自己 bind，不需要 `x9_voice_usip`），
+  每次快照输出各子区的非零字数和签名，标注 baseline/same/CHANGED，结束时对比开始；
+  通话结束后释放固定。level 1 只读 AP_USIP_PARAMETER（Android HAL 自己访问的部分）。
+- **L6**：同时记录媒体 AFE 的软件状态（prepared/running/memif），不读寄存器。
+- 日志前缀 `X9 CALLPROBE:`。boot-args 只剩 27 字节余量：`x9_apfs=1 x9_call_probe=1`
+  合起来正好 606/607 字节。
