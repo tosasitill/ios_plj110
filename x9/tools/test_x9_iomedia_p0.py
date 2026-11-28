@@ -125,6 +125,23 @@ class BindingDesignTests(unittest.TestCase):
             self.assertIn('OSMetaClassDefineReservedUnused(SweetX9BlockStorageDevice, %d);' % i, CPP)
 
 
+class ExplicitLoadTriggerTests(unittest.TestCase):
+    def test_load_request_precedes_fail_closed(self):
+        # Creating the prelinked OSKext object at InitIOKit does not load
+        # it, and no IOMedia/IOBlockStorageDevice nub exists in this port
+        # before the publish to trigger a load by matching, so the publish
+        # path must request the IOStorageFamily load itself.  The request
+        # is in-kernel only (allowDefer=false) and the metaclass is looked
+        # up again afterwards; only then may the publish fail closed.
+        load = CPP.index('OSKext::loadKextWithIdentifier(')
+        fail = CPP.index('IOBlockStorageDevice metaclass not ')
+        self.assertLess(load, fail)
+        self.assertIn('"com.apple.iokit.IOStorageFamily", false);', CPP)
+        self.assertIn('OSKext::lookupKextWithIdentifier(', CPP)
+        self.assertIn('X9 IOMEDIA: IOStorageFamily kext object %s;', CPP)
+        self.assertEqual(CPP.count('x9_storage_family_meta_by_name();'), 2)
+
+
 class VendoredHeaderTests(unittest.TestCase):
     def test_osx_blocks_forced_off(self):
         marker = '#if 0 /* X9: TARGET_OS_OSX forced off -- iOS layout */'

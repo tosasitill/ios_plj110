@@ -64,6 +64,7 @@
 
 #include <IOKit/storage/IOBlockStorageDevice.h>
 #include <IOKit/IOLib.h>
+#include <libkern/c++/OSKext.h>
 
 extern "C" {
 int sweet_x9_media_info(uint64_t *bytes, int *writable);
@@ -531,6 +532,19 @@ SweetX9BlockStorageDevice::doGetProvisionStatus(UInt64 block,
 	return kIOReturnUnsupported;
 }
 
+/* The family's IOBlockStorageDevice metaclass, looked up by name;
+ * NULL while IOStorageFamily has not been loaded. */
+static const OSMetaClass *
+x9_storage_family_meta_by_name(void)
+{
+	const OSSymbol *name = OSSymbol::withCString("IOBlockStorageDevice");
+	const OSMetaClass *family = name ?
+	    OSMetaClass::getMetaClassWithName(name) : NULL;
+	if (name)
+		name->release();
+	return family;
+}
+
 static bool x9_storage_published;
 
 extern "C" void
@@ -551,11 +565,38 @@ sweet_x9_storage_publish(void)
 	/* Bind to the family's registered metaclass by name.  If the
 	 * family is not in this kernel image, publish nothing: the BSD
 	 * root is already up and must not be disturbed. */
-	const OSSymbol *name = OSSymbol::withCString("IOBlockStorageDevice");
-	const OSMetaClass *family = name ?
-	    OSMetaClass::getMetaClassWithName(name) : NULL;
-	if (name)
-		name->release();
+	const OSMetaClass *family = x9_storage_family_meta_by_name();
+	if (!family) {
+		/* The prelinked family's OSKext object is created during
+		 * InitIOKit (KLDBootstrap::readPrelinkedExtensions), but
+		 * creating the object does not load it, and in this port
+		 * nothing ever requests the load: every IOStorageFamily
+		 * personality matches on an IOMedia/IOBlockStorageDevice
+		 * provider, no such nub exists before this publish (the
+		 * root storage is a BSD extent device, not an IOKit nub),
+		 * and checking for the metaclass first would wait forever
+		 * -- the check-then-publish order deadlocks.  Stock
+		 * systems break the cycle with a real storage controller
+		 * nub; here the load must be requested explicitly.
+		 * allowDefer=false keeps the request in-kernel: a
+		 * prelinked kext loads synchronously, and a missing OSKext
+		 * object fails at once instead of deferring to a kextd
+		 * request that is never answered.  The log line separates
+		 * the two failure modes on the next boot: object absent =
+		 * the prelink creation path never ran; object present but
+		 * metaclass still missing after a successful load = the
+		 * family's own structors did not register it. */
+		OSKext *kext = OSKext::lookupKextWithIdentifier(
+		    "com.apple.iokit.IOStorageFamily");  // must release
+		OSReturn loadResult = OSKext::loadKextWithIdentifier(
+		    "com.apple.iokit.IOStorageFamily", false);
+		IOLog("X9 IOMEDIA: IOStorageFamily kext object %s; "
+		    "explicit load result 0x%x\n",
+		    kext ? "present" : "absent", (unsigned)loadResult);
+		if (kext)
+			kext->release();
+		family = x9_storage_family_meta_by_name();
+	}
 	if (!family) {
 		IOLog("X9 IOMEDIA: IOBlockStorageDevice metaclass not "
 		    "registered (IOStorageFamily absent?); not publishing\n");
