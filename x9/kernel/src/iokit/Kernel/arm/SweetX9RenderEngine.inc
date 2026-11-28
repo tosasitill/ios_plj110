@@ -662,10 +662,13 @@ static bool render_dirty_enabled() {
  * (parked-resume path: no AS/CSG programming) while S is still running, so the
  * GPU never idles between jobs. The reap order stays FIFO and a completion
  * still means CPU-visible results. Requires park (the resume path is the only
- * publish that touches no AS state) and async submission. */
+ * publish that touches no AS state) and async submission. Default-on
+ * since 2026-11-28 (user directive); x9if=0 restores the depth-1
+ * pipeline. Both prerequisites already default on (x9_gpu_park,
+ * x9_submit_async). */
 static bool render_pipeline_enabled() {
  static int mode=-1;
- if(mode<0){mode=sweet_x9_arg("x9if",0)==1?1:0;
+ if(mode<0){mode=sweet_x9_arg("x9if",1)==1?1:0;
   IOLog("X9 RENDER PIPELINE: two jobs in flight %s (x9if; needs x9_gpu_park and x9_submit_async)\n",mode?"ON":"off");}
  return mode==1;
 }
@@ -948,7 +951,7 @@ static IOReturn render_submit_publish(RenderJobState *st,const RenderOwner &owne
   * Unmapped bytes cannot be touched through this context. An alias reachable
   * through another resource is maintained through that resource's descriptor.
   * The runtime must isolate independently owned resources to cache atoms.
-  * The opt-in coherent path below is the ONLY exception: it assumes the GPU
+  * The coherent path below is the ONLY exception: it assumes the GPU
   * snoops CPU caches, so exposed client bytes need no CIVAC here. Command and
   * fence storage keep their explicit syncs regardless, and flush_gpu, group
   * start/halt and every uncertainty check stay unchanged. */
@@ -1295,7 +1298,7 @@ static IOReturn render_submit_reap(RenderJobState *st,const RenderOwner &owner) 
     count,count?dirty_total_entries/count:0,count?dirty_total_bytes/count:0,count?dirty_total_skip/count:0);
    IOLog("X9 RENDER cache-reach: jobs=%llu pre_skip_avg=%llu post_skip_avg=%llu import_pre_avg=%llu import_pre_full_avg=%llu import_post_avg=%llu import_post_full_avg=%llu;kernel mapping bounds,not dirty tracking\n",
     count,reach_total[0]/count,reach_total[1]/count,import_total[0]/count,full_import_total[0]/count,import_total[1]/count,full_import_total[1]/count);
-   IOLog("X9 RENDER cache-coherent: jobs=%llu active=%u pre_skip_avg=%llu post_skip_avg=%llu;opt-in skips CIVAC on exposed client bytes,assumes GPU snoop\n",
+   IOLog("X9 RENDER cache-coherent: jobs=%llu active=%u pre_skip_avg=%llu post_skip_avg=%llu;skips CIVAC on exposed client bytes,assumes GPU snoop\n",
     count,st->coherent?1:0,coherent_total[0]/count,coherent_total[1]/count);
    IOLog("X9 RENDER cache-lc: jobs=%llu pre_skip_avg=%llu post_skip_avg=%llu seed_clean_avg=%llu;IOSurface imports kept by the lock protocol (x9lc)\n",
     count,lc_total[0]/count,lc_total[1]/count,lc_clean_total/count);

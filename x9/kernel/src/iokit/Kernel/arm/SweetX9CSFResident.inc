@@ -145,7 +145,9 @@ static int resident_begin(vm_offset_t gpu) {
   // (b0 ACE-Lite, b1 ACE, b5 shareable cache), not COHERENCY_NUM_GROUPS, and
   // 0x308 is not a group type: the old groups/group0_type gate read the wrong
   // registers (measured AMBA_FEATURES=00000001, AMBA_ENABLE=0000001f from LK).
-  // Opt-in x9_gpu_acelite=1. With it: AMBA protocol ACE-Lite, TRANSCFG PTW_SH
+  // Default-on since 2026-11-28 (user directive; x9_gpu_acelite=0 opts
+  // out, x9_gpu_coherent=0 keeps ACE-Lite but restores per-submit CIVAC).
+  // With it: AMBA protocol ACE-Lite, TRANSCFG PTW_SH
   // outer (install_as), render-VM leaves outer shareable (X9RenderPageTable),
   // no CPU clean of render page tables, and (unless x9_gpu_coherent=0) no
   // per-submit CIVAC of CPU-exposed client bytes. CSF-private queue/firmware
@@ -153,7 +155,7 @@ static int resident_begin(vm_offset_t gpu) {
   {
    uint32_t amba_features=gr(gpu,0x300),amba_before=gr(gpu,0x304),amba_after=amba_before;
    uint64_t l2_ready=gr64(gpu,0x908)|gr64(gpu,0x910);
-   int acelite_arg=sweet_x9_arg("x9_gpu_acelite",0),coherent_arg=sweet_x9_arg("x9_gpu_coherent",1);
+   int acelite_arg=sweet_x9_arg("x9_gpu_acelite",1),coherent_arg=sweet_x9_arg("x9_gpu_coherent",1);
    bool capable=(amba_features&1u)&&amba_features!=~0u;
    const char *why="not requested";
    if(acelite_arg==1&&!x9_gpu_acelite_active) {
