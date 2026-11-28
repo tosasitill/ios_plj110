@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / 'x9/kernel/src/iokit/Kernel/arm/SweetX9RenderEngine.inc'
 RESIDENT = ROOT / 'x9/kernel/src/iokit/Kernel/arm/SweetX9CSFResident.inc'
+SERVICE = ROOT / 'x9/kernel/src/iokit/Kernel/arm/SweetX9RenderService.cpp'
 
 
 class RenderDefaultsTests(unittest.TestCase):
@@ -77,6 +78,21 @@ class RenderCoherentFixTests(unittest.TestCase):
         src = ENGINE.read_text()
         self.assertIn('render_pipeline_pairs++', src)
         self.assertIn('pairs=%llu', src)
+
+
+class RenderBudgetTests(unittest.TestCase):
+    def test_soft_budget_staged_refusal(self):
+        """Soft backpressure (2026-11-28 A-image budget death): large
+        native allocations are refused recoverably at 7/8 of the client
+        budget, small ones keep the last 1/8; default on, =0 disables,
+        imports exempt, hard cap unchanged below it."""
+        src = SERVICE.read_text()
+        self.assertIn('x9_gpu_soft_budget', src)
+        self.assertIn('client_budget()*7/8', src)
+        self.assertIn('X9 RENDER MEM: soft-budget', src)
+        self.assertIn(
+            'selector==X9RenderAllocate&&soft_budget_enabled()'
+            '&&request.bytes>=(4u<<20)', src)
 
 
 if __name__ == '__main__':

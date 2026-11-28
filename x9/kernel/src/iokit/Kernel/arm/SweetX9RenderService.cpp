@@ -317,6 +317,15 @@ class SweetX9RenderUserClient : public IOUserClient {
   }
   return budget;
  }
+ /* Soft backpressure (2026-11-28): at 7/8 of the budget, large native
+  * allocations are refused early with the same recoverable NoMemory the
+  * hard cap uses, while small allocations keep the last 1/8 as runway.
+  * x9_gpu_soft_budget=0 disables. See the refusal site for the evidence. */
+ static bool soft_budget_enabled() {
+  static int enabled=-1;
+  if(enabled<0){int arg=1;PE_parse_boot_argn("x9_gpu_soft_budget",&arg,sizeof(arg));enabled=arg!=0;}
+  return enabled!=0;
+ }
  static bool write_combined_bos() {
   static int enabled=-1;
   if(enabled<0){int arg=1;PE_parse_boot_argn("x9_bo_wc",&arg,sizeof(arg));enabled=arg!=0;}
@@ -339,10 +348,10 @@ class SweetX9RenderUserClient : public IOUserClient {
    if(r.bytes>=(8u<<20))big++;
   }
   IOLog("X9 RENDER LIVE: pid=%d why=%s resources=%u MiB=%llu wc=%u/%lluMiB imported=%u/%lluMiB big8M=%u old30s=%u/%lluMiB "
-   "window alloc=%u/%lluMiB release=%u/%lluMiB mappings=%u budget=%lluMiB\n",
+   "window alloc=%u/%lluMiB release=%u/%lluMiB mappings=%u budget=%lluMiB soft=%u\n",
    pid_from_task(context->owner),why,count,bytes>>20,wc,wc_bytes>>20,imported,imported_bytes>>20,big,aged,aged_bytes>>20,
    context->window_allocs,context->window_alloc_bytes>>20,context->window_releases,context->window_release_bytes>>20,
-   context->mapping_count,client_budget()>>20);
+   context->mapping_count,client_budget()>>20,context->soft_refusals);
   context->window_allocs=context->window_releases=0;context->window_alloc_bytes=context->window_release_bytes=0;
  }
  X9RenderResource *resource(uint32_t handle) {
@@ -398,6 +407,28 @@ class SweetX9RenderUserClient : public IOUserClient {
    if(selector==X9RenderAllocate&&request.host_address)return kIOReturnBadArgument;
    if(selector==X9RenderImportHost&&(!request.host_address||(request.host_address&16383)||request.host_address+request.bytes<request.host_address||
       request.host_address>=0x0000800000000000ULL||request.bytes>0x0000800000000000ULL-request.host_address))return kIOReturnBadArgument;
+   // Soft backpressure: refuse a large native allocation (the >=4 MiB
+   // heap-block class) once it would cross 7/8 of the budget, with the
+   // same recoverable NoMemory as the hard cap below. A-image evidence
+   // (2026-11-28): at the hard cap, 99% of 331 refusals were >=8 MiB
+   // heap-block requests and the frontend absorbed them for 47 s before
+   // one left a resource path with no fallback; meanwhile the old set
+   // (old30s 649 MiB) is never returned, so the hard cap is a cliff, not
+   // a signal the heap can act on early. The soft line is that signal -
+   // and where a frontend purge-on-OOM engages once heap aging lands -
+   // while small allocations keep the final 1/8 as runway. Imports are
+   // exempt: they alias existing surfaces, they do not grow the heap.
+   if(selector==X9RenderAllocate&&soft_budget_enabled()&&request.bytes>=(4u<<20)) {
+    uint64_t soft=client_budget()*7/8;
+    if(context->allocated_bytes>=soft||request.bytes>soft-context->allocated_bytes) {
+     if(context->soft_refusals<4||context->soft_refusals%128==0)
+      IOLog("X9 RENDER MEM: soft-budget size=%llu used=%llu soft=%llu limit=%llu;no handle published,recoverable\n",
+       (unsigned long long)request.bytes,(unsigned long long)context->allocated_bytes,(unsigned long long)soft,(unsigned long long)client_budget());
+     context->soft_refusals++;
+     live_report("soft-budget",false);
+     return kIOReturnNoMemory;
+    }
+   }
    // Budget exhaustion is not a malformed request or a lost GPU. Nothing has
    // been pinned, published or exposed yet: userspace may free and retry.
    if(context->allocated_bytes>client_budget()||request.bytes>client_budget()-context->allocated_bytes) {

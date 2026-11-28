@@ -303,3 +303,56 @@ app-switcher/scroll churn with zero "submission uncertain", zero CSF
 fault lines, COH-PROBE imported stale=0, pre_skip_bytes=0, post_skip_avg
 > 0, ASYNC failed=0 with pairs > 0, and GPUTS service/wait distributions
 no worse than the acelite-on build beyond the restored pre_cache cost.
+
+
+## 2026-11-28 per-client budget death (A image) and soft backpressure
+
+A (both acelite and x9if off, production shape) lost its screen at
+168.372s by a third mechanism: backboardd hit the 1024 MiB per-client
+budget (used=limit=1073741824). LIVE at the refusal: resources=2420,
+wc=2246/919MiB, old30s=2233/649MiB. The growth pattern from the LIVE
+series: ~1200 resources created during the first minute's animation
+burst are never released afterwards; later churn allocates and releases
+only recent blocks on top of that retained base. The kernel refusal is
+recoverable by design (kIOReturnNoMemory, no handle published; the
+kmod shim does not poison the device for it), and the frontend absorbed
+331 refusals over 47s at the cap - 99% of them >=8 MiB heap-block
+requests - before one 8 MiB request reached a native-metal path with no
+OOM fallback and was escalated to DeviceLost. The budget therefore
+worked as a cliff, not as a signal: nothing in the stack ever returns
+the old set. (B's 42s episode is the same family, transient: a 4 MiB
+refusal, brief DeviceLost spam, self-recovery because the session was
+never poisoned.)
+
+Implemented here (kernel): staged soft backpressure. At 7/8 of the
+client budget, native allocations >=4 MiB (the heap-block class) are
+refused with the same recoverable NoMemory; smaller allocations keep
+the final 1/8 as runway; imports are exempt; the hard cap is unchanged.
+x9_gpu_soft_budget=0 disables. LIVE lines gain a cumulative soft=
+counter and soft refusals log as "X9 RENDER MEM: soft-budget". This
+moves the survivable OOM signal ~128 MiB earlier and keeps the UI's
+small-allocation lifeline open, but by itself it does not shrink the
+retained set - it buys runway and an engagement point, not a cure.
+
+The cure is frontend heap aging (follow-up, metal2vulkan layer - the
+crates that decide vkAllocateMemory/vkFreeMemory over PanVK): release
+fully-free blocks that have been idle for >30s (the same age the
+kernel's old30s metric reports, so both layers agree on "old"), swept
+(a) when a block becomes fully free and aged, checked on new block
+allocations, and (b) immediately on OUT_OF_DEVICE_MEMORY: purge all
+aged free blocks and retry the allocation once before surfacing OOM.
+Kernel-side complement if aging proves insufficient: an ABI pressure
+query so the heap can poll used/budget and age proactively at the soft
+line instead of waiting for a refusal.
+
+Acceptance (device, A shape - acelite and x9if off - logged boot):
+>=10 min of the churn profile that killed A at 168s (boot animation
+burst, app switching, camera, scrolling), then continued mixed use.
+Pass: zero DeviceLost/permanent presentation stop; LIVE for the
+backboardd pid shows used plateauing below the hard cap with old30s
+bytes FALLING after churn peaks (reclamation actually happening, not
+just slower growth); soft= counter increments during peaks while
+hard "RENDER MEM: budget" refusals stay at zero. With frontend aging
+landed, additionally: a purge burst (window release bytes >> alloc
+bytes in LIVE) follows the first soft refusal, and the same boot
+survives >=3x A's 320s with used never reaching the hard cap.

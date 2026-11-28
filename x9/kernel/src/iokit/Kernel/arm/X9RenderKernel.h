@@ -67,6 +67,7 @@ struct X9RenderContext {
  /* Live-resource telemetry window (X9 RENDER LIVE), under the context lock. */
  uint64_t live_report_at,window_alloc_bytes,window_release_bytes;
  uint32_t window_allocs,window_releases;
+ uint32_t soft_refusals;   /* staged (soft) budget refusals, cumulative */
  X9RenderPageTable *page_table;
  void *engine_private;
  bool exposed,disabled,engine_open;
