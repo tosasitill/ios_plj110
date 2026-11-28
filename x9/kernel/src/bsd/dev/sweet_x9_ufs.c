@@ -53,6 +53,20 @@ static struct {
  unsigned write_trace_count;
  uint64_t class_bytes[4][2], class_report_us;
 } xu;
+/* APFS container window (2026-11-28, x9_apfs=1). A second pinned+immutable
+ * file in userdata, mapped by /chosen x9-ufs-apfs-{bytes,extents} and listed
+ * exactly in x9-ufs-protected-extents. Reads go through the root host with
+ * the window's own extent map; writes use a bookkeeping copy of the root host
+ * bound to the window's extents only (same pattern as the disk log). Never
+ * initializes hardware and never touches the root window. */
+#define X9_APFS_EXT_MAX 8192U
+static struct {
+ struct x9u_host host;
+ struct x9u_extent extents[X9_APFS_EXT_MAX];
+ unsigned count;
+ uint64_t bytes;
+ bool ready,failed,writable;
+} xa;
 static LCK_GRP_DECLARE(x9ufs_grp,"x9_ufs");
 static LCK_MTX_DECLARE(x9ufs_lock,&x9ufs_grp);
 static uint8_t header_data[65536];
@@ -473,44 +487,65 @@ boolean_t sweet_x9_ufs_root_active(void)
  * the same host/extents the strategy path uses, under the same mutex
  * and with the same ready/failed/writable gating; poison still marks
  * the device failed. The BSD block device above is unaffected. */
-int sweet_x9_media_info(uint64_t *bytes,int *writable)
+/* window 0 = root extent window, window 1 = APFS container window. */
+static bool media_window_ok(unsigned window)
 {
- if(!xu.ready||xu.failed)return ENXIO;
- if(bytes)*bytes=xu.bytes;
- if(writable)*writable=xu.writable?1:0;
+ if(!xu.ready||xu.failed)return false;
+ if(window==0)return true;
+ return window==1&&xa.ready&&!xa.failed;
+}
+static void media_poison_check(struct x9u_host *host)
+{
+ if(host->poisoned||xu.host.poisoned){xu.host.poisoned=1;xu.failed=true;xa.failed=true;}
+}
+int sweet_x9_media_info(unsigned window,uint64_t *bytes,int *writable)
+{
+ if(!media_window_ok(window))return ENXIO;
+ if(bytes)*bytes=window?xa.bytes:xu.bytes;
+ if(writable)*writable=(window?xa.writable:xu.writable)?1:0;
  return 0;
 }
-int sweet_x9_media_read(uint64_t offset,void *data,size_t length)
+int sweet_x9_media_read(unsigned window,uint64_t offset,void *data,size_t length)
 {
- if(!xu.ready||xu.failed||!data||offset>xu.bytes||length>xu.bytes-offset)return EINVAL;
+ if(!media_window_ok(window))return ENXIO;
+ uint64_t size=window?xa.bytes:xu.bytes;
+ if(!data||offset>size||length>size-offset)return EINVAL;
  if(!length)return 0;
  lck_mtx_lock(&x9ufs_lock);
- if(xu.failed){lck_mtx_unlock(&x9ufs_lock);return ENXIO;}
+ if(!media_window_ok(window)){lck_mtx_unlock(&x9ufs_lock);return ENXIO;}
  pet();
- int result=x9u_image_read_mapped(&xu.host,2,&xu.partition,xu.extents,xu.extent_count,xu.bytes/4096,offset,data,length);
- if(xu.host.poisoned)xu.failed=true;
+ int result=window?
+  x9u_image_read_mapped(&xu.host,2,&xu.partition,xa.extents,xa.count,xa.bytes/4096,offset,data,length):
+  x9u_image_read_mapped(&xu.host,2,&xu.partition,xu.extents,xu.extent_count,xu.bytes/4096,offset,data,length);
+ media_poison_check(&xu.host);
  lck_mtx_unlock(&x9ufs_lock);
  return result?EIO:0;
 }
-int sweet_x9_media_write(uint64_t offset,const void *data,size_t length)
+int sweet_x9_media_write(unsigned window,uint64_t offset,const void *data,size_t length)
 {
- if(!xu.ready||xu.failed||!data||offset>xu.bytes||length>xu.bytes-offset)return EINVAL;
- if(!xu.writable)return EROFS;
+ if(!media_window_ok(window))return ENXIO;
+ uint64_t size=window?xa.bytes:xu.bytes;
+ if(!data||offset>size||length>size-offset)return EINVAL;
+ if(!(window?xa.writable:xu.writable))return EROFS;
  if(!length)return 0;
  lck_mtx_lock(&x9ufs_lock);
- if(xu.failed){lck_mtx_unlock(&x9ufs_lock);return ENXIO;}
+ if(!media_window_ok(window)){lck_mtx_unlock(&x9ufs_lock);return ENXIO;}
  pet();
- int result=x9u_image_write(&xu.host,offset,data,length);
- if(xu.host.poisoned)xu.failed=true;
+ struct x9u_host *host=window?&xa.host:&xu.host;
+ int result=x9u_image_write(host,offset,data,length);
+ media_poison_check(host);
  lck_mtx_unlock(&x9ufs_lock);
  return result?EIO:0;
 }
-int sweet_x9_media_sync(void)
+int sweet_x9_media_sync(unsigned window)
 {
- if(!xu.ready||xu.failed)return ENXIO;
- if(!xu.writable)return 0;
+ if(!media_window_ok(window))return ENXIO;
+ if(!(window?xa.writable:xu.writable))return 0;
  lck_mtx_lock(&x9ufs_lock);
- pet();int error=x9u_sync_image(&xu.host);
+ if(!media_window_ok(window)){lck_mtx_unlock(&x9ufs_lock);return ENXIO;}
+ struct x9u_host *host=window?&xa.host:&xu.host;
+ pet();int error=x9u_sync_image(host);
+ media_poison_check(host);
  lck_mtx_unlock(&x9ufs_lock);
  return error?EIO:0;
 }
@@ -536,6 +571,14 @@ int sweet_x9_ufs_rootdev(dev_t *device)
  if(sweet_x9_arg("x9_iomedia",0)) {
   extern void sweet_x9_storage_publish(void);
   sweet_x9_storage_publish();
+ }
+ /* APFS on userdata: publish the separate container window (never the
+  * root window) when x9_apfs=1. Any contract failure leaves the window
+  * unpublished; the root path is unaffected either way. */
+ if(sweet_x9_arg("x9_apfs",0)) {
+  extern int sweet_x9_apfs_prepare(void);
+  extern void sweet_x9_storage_publish_window(unsigned window);
+  if(sweet_x9_apfs_prepare()==0)sweet_x9_storage_publish_window(1);
  }
  *device=xu.device;return 0;
 }
@@ -633,6 +676,67 @@ int sweet_x9_bbfw_read(uint64_t offset,void *data,size_t length)
  if(!error){pet();if(x9u_image_read_mapped(&xu.host,2,&xu.partition,xbf.extents,xbf.count,xbf.bytes/4096,offset,data,length))error=EIO;}
  if(xu.host.poisoned)xu.failed=true;
  lck_mtx_unlock(&x9ufs_lock);return error;
+}
+
+/* APFS container window contract. Called once, after the root window is
+ * ready, with the controller already owned. Validates the frozen map against
+ * every other reservation, then (only if the root itself is writable) binds a
+ * write view to exactly these extents. Refuses to publish unless block 0 of
+ * the window is an APFS container superblock. */
+static bool overlaps(const struct x9u_extent *a,uint64_t p,uint64_t n)
+{return a->part<p+n&&p<a->part+a->count;}
+static int apfs_prepare_locked(void)
+{
+ DTEntry chosen;const void *raw=NULL,*reserved=NULL;unsigned n=0,rn=0;uint64_t bytes=0;
+ if(SecureDTLookupEntry(NULL,"/chosen",&chosen)!=kSuccess||prop(chosen,"x9-ufs-apfs-bytes",&bytes,8))return ENOENT;
+ if(bytes<(64ULL<<20)||bytes>(64ULL<<30)||(bytes&4095)||
+    SecureDTGetProperty(chosen,"x9-ufs-apfs-extents",&raw,&n)!=kSuccess||!n||
+    n%sizeof(struct x9u_extent)||n/sizeof(struct x9u_extent)>X9_APFS_EXT_MAX||
+    SecureDTGetProperty(chosen,"x9-ufs-protected-extents",&reserved,&rn)!=kSuccess||
+    !rn||rn%16||rn/16>32768)return EINVAL;
+ xa.count=n/sizeof(struct x9u_extent);memcpy(xa.extents,raw,n);xa.bytes=bytes;
+ if(x9u_extent_validate(xa.extents,xa.count,bytes/4096,xu.partition.count))return EINVAL;
+ for(unsigned i=0;i<xa.count;i++){
+  const struct x9u_extent *a=&xa.extents[i];bool found=false;
+  for(unsigned j=0;j<xu.extent_count;j++)if(overlaps(a,xu.extents[j].part,xu.extents[j].count))return EPERM;
+  for(unsigned j=0;j<xl.extent_count;j++)if(overlaps(a,xl.extents[j].part,xl.extents[j].count))return EPERM;
+  for(unsigned j=0;j<sizeof(x9_update_extents)/sizeof(x9_update_extents[0]);j++)
+   if(overlaps(a,x9_update_extents[j].part,x9_update_extents[j].count))return EPERM;
+  /* The root's exclusion list must carry the exact window extents; any
+   * other protected run (bbfw, log, mailbox) must not intersect it. */
+  for(unsigned j=0;j<rn/16;j++){
+   uint64_t p,c;memcpy(&p,(const uint8_t *)reserved+j*16,8);memcpy(&c,(const uint8_t *)reserved+j*16+8,8);
+   if(!c||p>=xu.partition.count||c>xu.partition.count-p)return EINVAL;
+   if(p==a->part&&c==a->count){found=true;continue;}
+   if(overlaps(a,p,c))return EPERM;
+  }
+  if(!found)return EPERM;
+ }
+ pet();
+ if(x9u_image_read_mapped(&xu.host,2,&xu.partition,xa.extents,xa.count,bytes/4096,0,header_data,4096))return EIO;
+ if(memcmp(header_data+32,"NXSB",4))return EFTYPE;
+ xa.writable=false;
+ if(xu.writable){
+  xa.host=xu.host;xa.host.write_enabled=0;
+  if(x9u_bind_extent_writes(&xa.host,2,&xu.partition,xa.extents,xa.count,bytes/4096))return EINVAL;
+  xa.writable=true;
+ }
+ return 0;
+}
+int sweet_x9_apfs_prepare(void)
+{
+ static bool attempted;
+ if(xa.ready)return 0;
+ if(attempted||!xu.ready||xu.failed)return ENXIO;
+ attempted=true;
+ lck_mtx_lock(&x9ufs_lock);
+ int error=xu.failed?ENXIO:apfs_prepare_locked();
+ if(xu.host.poisoned)xu.failed=true;
+ if(!error&&!xu.failed)xa.ready=true;
+ lck_mtx_unlock(&x9ufs_lock);
+ if(error)printf("X9 APFS window: contract rejected errno=%d; not publishing\n",error);
+ else printf("X9 APFS window: %llu MiB, %u extents, %s\n",xa.bytes>>20,xa.count,xa.writable?"read-write":"read-only");
+ return error;
 }
 
 /* Read-only access to a named GPT partition on LUN2 (modem DRDI image for the

@@ -110,9 +110,41 @@ def validate(data, native=False):
                     raise ValueError('root extension overlaps root/plugin/log/firmware/reserved extent')
             position+=n
         if position!=length//4096:raise ValueError('root extension map size mismatch')
-    if policy and len(policy['protected_extents'])+len(data.get('log_policy',{}).get('extents',[]))+len(data.get('firmware_policy',{}).get('extents',[]))>32768:
+    apfs=data.get('apfs_policy')
+    if apfs is not None:
+        # 2026-11-28: dedicated pinned+immutable APFS container file in
+        # userdata, published by the kernel as its own block device
+        # (x9_apfs=1). Its extents go into x9-ufs-protected-extents exactly.
+        if (not native or not policy or apfs.get('version')!=1 or
+            apfs.get('kind')!='dedicated-apfs-container' or
+            apfs.get('pinned') is not True or apfs.get('immutable') is not True or
+            apfs.get('initial_content_verified') is not True or
+            len(bytes.fromhex(apfs.get('image_sha256','')))!=32):
+            raise ValueError('invalid APFS container contract')
+        length=apfs.get('bytes',0);aruns=apfs.get('extents',[]);position=0
+        if type(length)!=int or not 64*1024**2<=length<=64*1024**3 or length%4096:
+            raise ValueError('invalid APFS container size')
+        if not 1<=len(aruns)<=8192:raise ValueError('invalid APFS container extent count')
+        reserved=(runs+policy['protected_extents']+data.get('log_policy',{}).get('extents',[])+
+                  data.get('firmware_policy',{}).get('extents',[])+data.get('extension_policy',{}).get('extents',[]))
+        for i,a in enumerate(aruns):
+            f,p,n=(a[k] for k in ['file_block','partition_block','blocks'])
+            if any(type(x)!=int for x in [f,p,n]) or f!=position or p<0 or n<=0 or p>=count or n>count-p:
+                raise ValueError('invalid APFS container extent')
+            for b in reserved+aruns[:i]:
+                if p<b['partition_block']+b['blocks'] and b['partition_block']<p+n:
+                    raise ValueError('APFS container overlaps root/plugin/log/firmware/extension/reserved extent')
+            position+=n
+        if position!=length//4096:raise ValueError('APFS container map size mismatch')
+    if policy and len(adt_protected(data))>32768:
         raise ValueError('combined protected extent count exceeds kernel limit')
     return data
+
+
+def adt_protected(data):
+    """x9-ufs-protected-extents: root exclusions plus every dedicated window."""
+    return (data['write_policy']['protected_extents']+data.get('log_policy',{}).get('extents',[])+
+            data.get('firmware_policy',{}).get('extents',[])+data.get('apfs_policy',{}).get('extents',[]))
 
 
 def device(data):
@@ -167,7 +199,7 @@ def add_native_adt(tree,manifest):
            ('x9-ufs-root-extents',b''.join(struct.pack('<3Q',e['file_block'],e['partition_block'],e['blocks']) for e in runs))]
     if data.get('write_policy'):
         props += [('x9-ufs-root-write-contract',struct.pack('<2Q',1,total)),
-                  ('x9-ufs-protected-extents',b''.join(struct.pack('<2Q',e['partition_block'],e['blocks']) for e in data['write_policy']['protected_extents']+data.get('log_policy',{}).get('extents',[])+data.get('firmware_policy',{}).get('extents',[])))]
+                  ('x9-ufs-protected-extents',b''.join(struct.pack('<2Q',e['partition_block'],e['blocks']) for e in adt_protected(data)))]
     if data.get('log_policy'):
         log=data['log_policy']
         props += [('x9-ufs-log-bytes',struct.pack('<Q',log['bytes'])),
@@ -177,6 +209,10 @@ def add_native_adt(tree,manifest):
         props += [('x9-ufs-bbfw-bytes',struct.pack('<Q',firmware['bytes'])),
                   ('x9-ufs-bbfw-payload-bytes',struct.pack('<Q',firmware['payload_bytes'])),
                   ('x9-ufs-bbfw-extents',b''.join(struct.pack('<3Q',e['file_block'],e['partition_block'],e['blocks']) for e in firmware['extents']))]
+    if data.get('apfs_policy'):
+        apfs=data['apfs_policy']
+        props += [('x9-ufs-apfs-bytes',struct.pack('<Q',apfs['bytes'])),
+                  ('x9-ufs-apfs-extents',b''.join(struct.pack('<3Q',e['file_block'],e['partition_block'],e['blocks']) for e in apfs['extents']))]
     for name,value in props:chosen.props.append((name,0,value))
     return tree
 

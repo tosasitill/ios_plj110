@@ -6327,6 +6327,11 @@
    "template": "bsd-c-5"
   },
   {
+   "name": "sweet_prelink_kpi.o",
+   "source": "bsd/kern/sweet_prelink_kpi.c",
+   "template": "bsd-c-5"
+  },
+  {
    "name": "hfs_readwrite.o",
    "source": "bsd/sweet_hfs/core/hfs_readwrite.c",
    "template": "bsd-c-8"
