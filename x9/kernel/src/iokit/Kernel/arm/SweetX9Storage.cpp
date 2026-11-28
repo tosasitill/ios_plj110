@@ -67,11 +67,21 @@
 #include <libkern/c++/OSKext.h>
 
 extern "C" {
-int sweet_x9_media_info(uint64_t *bytes, int *writable);
-int sweet_x9_media_read(uint64_t offset, void *data, size_t length);
-int sweet_x9_media_write(uint64_t offset, const void *data, size_t length);
-int sweet_x9_media_sync(void);
+int sweet_x9_media_info(unsigned window, uint64_t *bytes, int *writable);
+int sweet_x9_media_read(unsigned window, uint64_t offset, void *data,
+    size_t length);
+int sweet_x9_media_write(unsigned window, uint64_t offset, const void *data,
+    size_t length);
+int sweet_x9_media_sync(unsigned window);
 }
+
+/* Window 0 = root extent window (x9_iomedia=1), window 1 = APFS container
+ * window (x9_apfs=1).  The window is derived from the object identity, not
+ * a data member: the class mirrors IOBlockStorageDevice's layout and must
+ * not grow.  Slots are written once, before registerService. */
+#define X9_MEDIA_WINDOWS 2
+class SweetX9BlockStorageDevice;
+static SweetX9BlockStorageDevice *x9_storage_devices[X9_MEDIA_WINDOWS];
 
 #define X9_MEDIA_BLOCK_SIZE 4096ULL
 #define X9_MEDIA_BOUNCE_BYTES (128ULL * 1024ULL)
@@ -173,6 +183,11 @@ protected:
 
 private:
 	IOReturn mediaInfo(UInt64 *bytes, bool *writable) const;
+	/* Non-virtual: adds no vtable slot and no storage. */
+	unsigned window(void) const
+	{
+		return (x9_storage_devices[1] == this) ? 1 : 0;
+	}
 };
 
 OSMetaClassDefineReservedUsed(SweetX9BlockStorageDevice, 0);
@@ -255,7 +270,7 @@ SweetX9BlockStorageDevice::mediaInfo(UInt64 *bytes, bool *writable) const
 	uint64_t b = 0;
 	int w = 0;
 
-	if (sweet_x9_media_info(&b, &w) != 0)
+	if (sweet_x9_media_info(window(), &b, &w) != 0)
 		return kIOReturnNotAttached;
 	if (bytes)
 		*bytes = b;
@@ -295,7 +310,7 @@ SweetX9BlockStorageDevice::doGetFormatCapacities(UInt64 *capacities,
 IOReturn
 SweetX9BlockStorageDevice::doSynchronizeCache(void)
 {
-	return (sweet_x9_media_sync() == 0) ? kIOReturnSuccess :
+	return (sweet_x9_media_sync(window()) == 0) ? kIOReturnSuccess :
 	    kIOReturnIOError;
 }
 
@@ -310,7 +325,8 @@ SweetX9BlockStorageDevice::getProductString(void)
 {
 	/* Cosmetic (ioreg / IOMedia properties): the "device" is a file
 	 * window over the userdata partition, not a physical drive. */
-	return (char *)"Extent Root Window";
+	return (char *)(window() ? "APFS Container Window" :
+	    "Extent Root Window");
 }
 
 char *
@@ -445,7 +461,7 @@ SweetX9BlockStorageDevice::doAsyncReadWrite(IOMemoryDescriptor *buffer,
 		if (chunk > X9_MEDIA_BOUNCE_BYTES)
 			chunk = X9_MEDIA_BOUNCE_BYTES;
 		if (reading) {
-			if (sweet_x9_media_read(offset + done, bounce,
+			if (sweet_x9_media_read(window(), offset + done, bounce,
 			    (size_t)chunk) != 0) {
 				status = kIOReturnIOError;
 				break;
@@ -461,7 +477,7 @@ SweetX9BlockStorageDevice::doAsyncReadWrite(IOMemoryDescriptor *buffer,
 				status = kIOReturnIOError;
 				break;
 			}
-			if (sweet_x9_media_write(offset + done, bounce,
+			if (sweet_x9_media_write(window(), offset + done, bounce,
 			    (size_t)chunk) != 0) {
 				status = kIOReturnIOError;
 				break;
@@ -545,19 +561,28 @@ x9_storage_family_meta_by_name(void)
 	return family;
 }
 
-static bool x9_storage_published;
+static bool x9_storage_published[X9_MEDIA_WINDOWS];
+
+extern "C" void sweet_x9_storage_publish_window(unsigned window);
 
 extern "C" void
 sweet_x9_storage_publish(void)
 {
+	sweet_x9_storage_publish_window(0);
+}
+
+extern "C" void
+sweet_x9_storage_publish_window(unsigned window)
+{
 	uint64_t bytes = 0;
 	int writable = 0;
+	const char *name = window ? "X9APFSContainer" : "X9ExtentRoot";
 
-	if (x9_storage_published)
+	if (window >= X9_MEDIA_WINDOWS || x9_storage_published[window])
 		return;
-	x9_storage_published = true;
+	x9_storage_published[window] = true;
 
-	if (sweet_x9_media_info(&bytes, &writable) != 0 || bytes == 0) {
+	if (sweet_x9_media_info(window, &bytes, &writable) != 0 || bytes == 0) {
 		IOLog("X9 IOMEDIA: extent media not ready; not publishing\n");
 		return;
 	}
@@ -604,8 +629,26 @@ sweet_x9_storage_publish(void)
 	}
 	sweet_storage_family_meta = family;
 
+	if (window == 1) {
+		/* Same reasoning as the family load above: request the
+		 * prelinked APFS closure in-kernel before the nub exists, so
+		 * the container scheme's class is registered when the IOMedia
+		 * matches, instead of a deferred kextd request that never
+		 * returns.  The closure's interface registrations are declined
+		 * by the prelink rebinding (sweet_prelink_kpi.c). */
+		OSReturn apfsResult = OSKext::loadKextWithIdentifier(
+		    "com.apple.filesystems.apfs", false);
+		/* Publish regardless: the log line is the diagnostic, and the
+		 * root path does not depend on this window. */
+		IOLog("X9 IOMEDIA: apfs explicit load result 0x%x\n",
+		    (unsigned)apfsResult);
+	}
+
 	SweetX9BlockStorageDevice *device =
 	    new SweetX9BlockStorageDevice(family);
+	/* Window identity must be visible before init/start/IO. */
+	if (device)
+		x9_storage_devices[window] = device;
 	IOService *root = IOService::getServiceRoot();
 	if (!device || !root || !device->init(0) || !device->attach(root) ||
 	    !device->start(root)) {
@@ -614,16 +657,18 @@ sweet_x9_storage_publish(void)
 				device->detach(root);
 			device->release();
 		}
-		IOLog("X9 IOMEDIA: publish failed\n");
+		x9_storage_devices[window] = NULL;
+		IOLog("X9 IOMEDIA: publish failed (%s)\n", name);
 		return;
 	}
-	device->setName("X9ExtentRoot");
+	device->setName(name);
 	device->setProperty("x9-extent-media", true);
+	device->setProperty("x9-media-window", (unsigned long long)window, 32);
 	device->registerService(kIOServiceSynchronous);
 	/* The device object is intentionally never released: it lives
 	 * for the life of the kernel, like the BSD device it mirrors. */
-	IOLog("X9 IOMEDIA: published IOBlockStorageDevice X9ExtentRoot "
+	IOLog("X9 IOMEDIA: published IOBlockStorageDevice %s "
 	    "bytes=%llu writable=%d; IOBlockStorageDriver/IOMedia "
 	    "should attach above it\n",
-	    (unsigned long long)bytes, writable);
+	    name, (unsigned long long)bytes, writable);
 }

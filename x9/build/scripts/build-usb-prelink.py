@@ -56,6 +56,11 @@ PRELINK_BASE_FLOOR = 0xfffffe000a400000  # historical anchor; the live base is d
 KC_BASE = 0xfffffff004dc8000        # unslid base of the 20H392 kernelcache (__PRELINK_TEXT va)
 DEFAULT_ROOTS = ['com.apple.iokit.IOStorageFamily']
 USB_ROOTS = ['com.apple.iokit.IOUSBDeviceFamily', 'com.apple.driver.AppleUSBDeviceMux']
+# APFS on userdata (2026-11-28): closure = apfs + AppleEffaceableStorage,
+# CoreAnalyticsFamily, IOCryptoAcceleratorFamily, IOStorageFamily,
+# kec.corecrypto, CoreTrust, AppleImage4.  Needs the kernel's
+# vfs_getvfs_with_vfsops and the prelink_rebind.py decline table.
+APFS_ROOTS = ['com.apple.filesystems.apfs']
 PAGE = 0x4000
 
 
@@ -99,6 +104,10 @@ def main():
                     help='extra boot-arg token for this image (repeatable), passed to build.py kernel and boot')
     ap.add_argument('--usb-roots', action='store_true',
                     help='also link the historical USB roots (default: IOStorageFamily only)')
+    ap.add_argument('--apfs', action='store_true',
+                    help='also link the APFS closure, through prelink_rebind.py (kernel-owned interface registrations declined)')
+    ap.add_argument('--root-manifest', type=Path,
+                    help='override local.json root_manifest for this build only (e.g. the private manifest apfs_userdata.py provision emits)')
     ap.add_argument('--boot-config', type=Path, default=ROOT / 'x9/build/boot-device.json',
                     help='boot-device json for the boot step (default: x9/build/boot-device.json)')
     a = ap.parse_args()
@@ -109,6 +118,8 @@ def main():
     cfg = json.loads((ROOT / 'x9/build/local.json').read_text())
     cfg['dxb'] = str(LOCAL / 'dxb-iosabi')
     cfg.pop('compiler_launcher', None)
+    if a.root_manifest:
+        cfg['root_manifest'] = str(a.root_manifest.resolve())
     cfg_path = out / 'local-iosabi.json'
     cfg_path.write_text(json.dumps(cfg, indent=1) + '\n')
     env = dict(os.environ, DEVELOPER_DIR=cfg['developer_dir'], X9_HOMEBREW=cfg.get('homebrew', '/opt/homebrew'))
@@ -133,10 +144,12 @@ def main():
     if end + 0x40000 > prelink_base:
         sys.exit(f'native kernel ends at {end:#x}, too close to the prelink base {prelink_base:#x}')
     print(f'native kernel ends at {end:#x}; prelink base {prelink_base:#x}; slide {prelink_base - KC_BASE:#x}', flush=True)
-    roots = list(DEFAULT_ROOTS) + (list(USB_ROOTS) if a.usb_roots else [])
+    roots = list(DEFAULT_ROOTS) + (list(USB_ROOTS) if a.usb_roots else []) + (list(APFS_ROOTS) if a.apfs else [])
     root_args = [x for r in roots for x in ('--root', r)]
     prelinked = out / 'kernel.prelinked'
-    run('prelink', [py, str(LOCAL / 'references/XnuPrelink/emit_prelink.py'), '--kernel', str(kernel),
+    emitter = ([py, '-I', str(ROOT / 'x9/build/scripts/prelink_rebind.py')] if a.apfs
+               else [py, str(LOCAL / 'references/XnuPrelink/emit_prelink.py')])
+    run('prelink', [*emitter, '--kernel', str(kernel),
                     '--prelinked', str(LOCAL / 'x9/usb/native-20H392/kernelcache.macho'),
                     *root_args,
                     f'--slide={hex(prelink_base - KC_BASE)}', '--output', str(prelinked)])

@@ -626,6 +626,7 @@ xnu:bsd/DEVELOPMENT/kern_credential.o
 xnu:bsd/DEVELOPMENT/kern_crossarch.o
 xnu:bsd/DEVELOPMENT/kern_cs.o
 x9:sweet_amfi.o
+x9:sweet_prelink_kpi.o
 xnu:bsd/DEVELOPMENT/BTree.o
 xnu:bsd/DEVELOPMENT/BTreeAllocate.o
 xnu:bsd/DEVELOPMENT/BTreeMiscOps.o

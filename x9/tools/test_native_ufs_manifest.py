@@ -47,4 +47,31 @@ class NativeManifestTests(unittest.TestCase):
             bad=copy.deepcopy(m);bad['write_policy'][key]=value
             with self.assertRaises(ValueError):validate(bad,True)
 
+    def apfs_manifest(self):
+        m=self.manifest();m['write_policy']={'version':1,'kind':'dedicated-mutable-copy','initial_content_verified':True,
+            'protected_extents':[{'partition_block':100,'blocks':200}]}
+        m['apfs_policy']={'version':1,'kind':'dedicated-apfs-container','pinned':True,'immutable':True,
+            'initial_content_verified':True,'image_sha256':'ab'*32,'bytes':(64+4)*1024**2,
+            'extents':[{'file_block':0,'partition_block':9000000,'blocks':16384},
+                       {'file_block':16384,'partition_block':9100000,'blocks':1024}]}
+        return m
+    def test_apfs_window_adt_appends_exact_protected_runs(self):
+        m=self.apfs_manifest();self.assertEqual(validate(m,True),m)
+        tree=add_native_adt(mkadt.build(seed=bytes(64)),m)
+        obj,_=adt.parse(adt.serialize(tree));chosen=next(n for n in obj.children if n.name=='chosen')
+        self.assertEqual(struct.unpack('<Q',chosen.prop('x9-ufs-apfs-bytes')),(68*1024**2,))
+        self.assertEqual(struct.unpack('<6Q',chosen.prop('x9-ufs-apfs-extents')),(0,9000000,16384,16384,9100000,1024))
+        self.assertEqual(chosen.prop('x9-ufs-protected-extents'),struct.pack('<6Q',100,200,9000000,16384,9100000,1024))
+    def test_apfs_window_rejects_overlap_gap_size_and_weak_contract(self):
+        cases=[]
+        for target,value in [((0,'partition_block'),1000000),((0,'partition_block'),150),((1,'file_block'),16385),
+                             ((1,'partition_block'),9000100)]:
+            bad=self.apfs_manifest();bad['apfs_policy']['extents'][target[0]][target[1]]=value;cases.append(bad)
+        for key,value in [('bytes',32*1024**2),('bytes',68*1024**2+512),('version',2),('kind','x'),
+                          ('pinned',False),('immutable',None),('initial_content_verified',False),('image_sha256','')]:
+            bad=self.apfs_manifest();bad['apfs_policy'][key]=value;cases.append(bad)
+        bad=self.apfs_manifest();del bad['write_policy'];cases.append(bad)
+        for bad in cases:
+            with self.assertRaises(ValueError):validate(bad,True)
+
 if __name__=='__main__':unittest.main()
