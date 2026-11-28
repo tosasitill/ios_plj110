@@ -76,7 +76,7 @@ struct x9m_sim {
  bool wanted,ready,reg_valid,md_known,md_ready,init_hold,init_timed_out;
  unsigned reg,init,diag_stage,ims_stage; uint64_t sampled,init_token,init_deadline,ready_epoch,init_epoch;
  uint64_t reg_epoch,ims_epoch,ims_token,ims_deadline,ims_admit_deadline; bool ims_hold;
- unsigned fx_stage; uint64_t fx_token,fx_deadline; bool fx_hold,fx_pre,fx_cfg;
+ unsigned fx_stage; uint64_t fx_token,fx_deadline; bool fx_hold,fx_pre,fx_cfg,fx_dds,fx_data;
  bool fx_act_open,fx_barrier_noted;
  uint64_t fx_local_since; bool fx_local_noted;
  bool mem_sent,mem_hold; uint64_t mem_token,mem_deadline;
@@ -294,6 +294,40 @@ static bool x9m_factory_cfg211(){
   * x9_factory_cfg211=0 drops the 0211 step for A/B. */
  static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_factory_cfg211",1)!=0;
  return enabled!=0;
+}
+static bool x9m_factory_dds_cfg(){
+ /* Default off: mirror the DATA_SET_CONFIG {DEFAULT_DATA_SIM_CARD106
+  * =1, IMS_TEST_MODE103=0} designation as a waited fx sub-state on
+  * the designated data SIM ahead of its ACT. The WDS path side-sends
+  * the same frame unwaited when a bearer configures (X9WDS.inc
+  * x9w_start_next X9W_CONFIG); in the 2026-11-28 barrier round that
+  * side-send only fired at 54.3 s, ~29 s after both IMS ACTs were
+  * refused, so at ACT time the designation existed only as the 020d
+  * boot selection (confirmed, X9DSDS.inc). x9_factory_dds_cfg=1
+  * tests the 0211 form as the missing prelude. A/B only. */
+ static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_factory_dds_cfg",0)!=0;
+ return enabled!=0;
+}
+static bool x9m_factory_data_act_first(){
+ /* Default off: establish a plain data call on the same SIM and let
+  * it conclude (accepted or not) before the IMS ACT, mirroring the
+  * factory order (radio-baseline.txt 2026-11-15: SIM1 data ACT
+  * 18:38:15.050, CNF result 0 at 15.614, IMS ACT at 15.635). The
+  * data outcome never holds the sequence -- the IMS ACT follows
+  * either way -- so one boot discriminates the branch. A/B only. */
+ static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_factory_data_act_first",0)!=0;
+ return enabled!=0;
+}
+static bool x9m_fx_dds_sim(unsigned sim){
+ /* Which SIM holds the default-data role at fx time: the same boot
+  * policy X9DSDS.inc acts on (x9_dds_boot_slot: 1/2 select, 0
+  * disables, default 1). The host's WDS 5569 routing confirmation
+  * named the same SIM in the barrier round. A host QMI switch can
+  * move the role later; fx is a boot-time sequence and runs first. */
+ return sweet_x9_arg("x9_dds_boot_slot",1)==(int)sim+1;
+}
+static bool x9m_fx_dds_pending(const x9m_sim &s,unsigned sim){
+ return x9m_factory_dds_cfg()&&!s.fx_dds&&x9m_fx_dds_sim(sim);
 }
 static bool x9m_factory_act_barrier(){
  /* Default off: the factory RIL provisions the two SIMs on separate
@@ -599,10 +633,23 @@ static void x9m_rawsend_reject_diag(unsigned sim,const uint8_t *req,unsigned len
  * plane never established on either SIM. The second factory 0211
  * (DEFAULT_DATA_SIM_CARD106=1) is a global data-SIM designation the
  * WDS path side-sends for its own bearers, not a per-bearer
- * prerequisite; which SIM holds that role is not established by tree
- * evidence, so fx does not mirror it. x9_factory_act_barrier=1
- * additionally serializes the two SIMs' stage-4 ACTs as an A/B
- * variable (default off; see the helper). */
+ * prerequisite at the time that was written; the role is in fact
+ * established -- the DSDS boot policy selects SIM1 via 020d
+ * (x9_dds_boot_slot, X9DSDS.inc) and the host's WDS 5569 routing
+ * confirmation names the same SIM -- and the 2026-11-28 barrier
+ * round showed the 020d designation confirmed (020e result 0)
+ * BEFORE both ACTs were refused, while the WDS side-sent 0211{106}
+ * only fired at 54.3 s, ~29 s AFTER the refusals. Decision-tree
+ * status: the 0211 config prelude is excluded (round3: accepted on
+ * both SIMs, ACT still refused) and the barrier is excluded
+ * (2026-11-28: serialization held, ACT still refused). Two gated
+ * preludes remain, both default off and A/B only: the DDS 0211 as a
+ * waited sub-state on the designated data SIM (x9_factory_dds_cfg)
+ * and a same-SIM data call concluded before the IMS ACT
+ * (x9_factory_data_act_first; its outcome never holds the
+ * sequence). x9_factory_act_barrier=1 additionally serializes the
+ * two SIMs' stage-4 ACTs as an A/B variable (default off; see the
+ * helper). */
 static void x9m_factory_ims_bytes(uint8_t out[6]){
  /* Aggregation inputs are this device's factory-observed carrier policy
   * for its SIMs: VoLTE/VoNR/ViLTE/ViNR on, WFC/ViWiFi off, IMS SMS on,
@@ -629,14 +676,35 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
     printf("X9 FACTORY: SIM%u stage %u transport error; held\n",sim+1,s.fx_stage);continue;}
    s.fx_token=0;
    unsigned expect=s.fx_stage==1?0xa1d:s.fx_stage==2?0xa19:s.fx_stage==3?0xa01:
-    s.fx_stage==4?(!s.fx_cfg&&x9m_factory_cfg211()?0x212:s.fx_pre?0x202:0x21c):0xa03;
+    s.fx_stage==4?(x9m_fx_dds_pending(s,sim)||(!s.fx_cfg&&x9m_factory_cfg211())?0x212:!s.fx_pre?0x21c:0x202):0xa03;
    unsigned result=1;
    bool known=p[8]==(1u<<sim)&&x9q_u16(p+10)==expect&&x9w_word(p,n,0,result)&&
     (s.fx_stage==4||x9w_wire(p,n));
    if(s.fx_stage==4&&s.fx_pre)s.fx_act_open=false; /* this CNF concludes the ACT, accepted or not */
+   if(s.fx_stage==4&&s.fx_pre&&x9m_factory_data_act_first()&&!s.fx_data){
+    /* This CNF concludes the gated data ACT, accepted or not. Its
+     * outcome never holds the sequence: the IMS ACT is submitted
+     * next either way, so a single boot discriminates the branch. */
+    s.fx_data=true;
+    if(known&&!result){
+     printf("X9 FACTORY: SIM%u data call accepted; IMS ACT follows\n",sim+1);
+     /* Mirror the WDS ACT-CNF harvest (X9WDS.inc): cache the DNN
+      * the MD actually used, for later ACTs. */
+     x9q_view a=x9w_tlv(p,n,0x101);
+     if(a.p&&a.n>1&&a.n<=101){unsigned l=(unsigned)strnlen((const char *)a.p,a.n);
+      if(l+1==a.n&&x9w_apn(a.p,l)){memcpy(x9w_last_dnn[sim],a.p,l);x9w_last_dnn[sim][l]=0;}}
+    }
+    else printf("X9 FACTORY: SIM%u data call rejected known %u result %u; IMS ACT follows anyway\n",sim+1,known?1:0,result);
+    bzero(p,room);continue;
+   }
    if(!known||result){s.fx_hold=true;
     printf("X9 FACTORY: SIM%u stage %u rejected known %u result %u; held\n",sim+1,s.fx_stage,known?1:0,result);
     bzero(p,room);continue;}
+   if(s.fx_stage==4&&x9m_fx_dds_pending(s,sim)){
+    s.fx_dds=true;
+    printf("X9 FACTORY: SIM%u DATA_SET_CONFIG default-data-SIM accepted; ACT prelude continues\n",sim+1);
+    bzero(p,room);continue;
+   }
    if(s.fx_stage==4&&!s.fx_cfg&&x9m_factory_cfg211()){
     s.fx_cfg=true;
     printf("X9 FACTORY: SIM%u DATA_SET_CONFIG accepted; RETRY_TIMER follows\n",sim+1);
@@ -673,6 +741,17 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
   else if(s.fx_stage==2){x9w_frame f(0xa18,1u<<sim);f.byte(0x100,0);token=f.submit();}
   else if(s.fx_stage==3){x9w_frame f(0xa00,1u<<sim);f.word(0x100,0);
    uint8_t b[6];x9m_factory_ims_bytes(b);f.tlv(0x102,b,6);token=f.submit();}
+  else if(s.fx_stage==4&&x9m_fx_dds_pending(s,sim)){
+   /* Gated DDS prelude (x9_factory_dds_cfg, default off): the WDS
+    * CONFIG op side-sends DATA_SET_CONFIG {DEFAULT_DATA_SIM_CARD106
+    * =1, IMS_TEST_MODE103=0} to the data SIM next to the MOBILE_DATA
+    * one (X9WDS.inc x9w_start_next), unwaited; fx mirrors the frame
+    * byte for byte as a WAITED sub-state on the designated data SIM
+    * only, so its 0212 is known to have landed before the ACT. The
+    * 020d designation itself is not re-sent: the X9DSDS boot policy
+    * already confirmed it before the ACT in the barrier round. */
+   x9w_frame f(0x211,1u<<sim);f.byte(0x106,1);f.byte(0x103,0);token=f.submit();
+  }
   else if(s.fx_stage==4&&!s.fx_cfg&&x9m_factory_cfg211()){
    /* Datacycle prerequisite, first half (X9WDS.inc x9w_start_next,
     * Android datacycle): 0211 -> successful 0212 -> 021b -> successful
@@ -693,6 +772,38 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
     * refused even a byte-exact ACT with result 0x15000A (radio3). The
     * frame mirrors the WDS MODE=1 construction byte for byte. */
    x9w_frame f(0x21b,1u<<sim);f.byte(0x100,1);f.tlv(0x101,"ims",4);token=f.submit();
+  }
+  else if(s.fx_stage==4&&s.fx_pre&&x9m_factory_data_act_first()&&!s.fx_data){
+   /* Gated data-ACT prelude (x9_factory_data_act_first, default
+    * off): the factory established a plain data call on the same
+    * SIM 585 ms before its IMS ACT (radio-baseline.txt 2026-11-15
+    * 18:38:15.050 -> 15.635, CNF result 0 at 15.614); fx goes
+    * straight to the IMS ACT. Mirror the WDS ACT construction field
+    * for field (X9WDS.inc x9w_start_next X9W_ACT): APN_TYPE 1, the
+    * MD-reported DNN when a WDS ACT CNF cached one, else the
+    * network-default empty APN with a match-all URSP descriptor --
+    * the same fallback the WDS builder uses. The bearer is left up
+    * (no DEACT): this is a precondition probe, not a data service,
+    * and its CNF outcome never holds the sequence (see the CNF
+    * handler). Note the factory dump truncates at 478 B; its length
+    * field implies 824 B on the wire against this construction's
+    * 808 B, a 16 B tail difference inside the un-dumped region that
+    * the visible TLV chain (identical, including the 672 B
+    * descriptor length) cannot account for. */
+   x9w_frame f(0x201,1u<<sim);
+   static const char no_credentials[]="";
+   static const uint8_t r11e[8]={0x0f,0,0,0,0,0,0,0};
+   f.tlv(0x8106,no_credentials,sizeof(no_credentials));
+   f.tlv(0x11e,r11e,sizeof(r11e));f.word(0x10f,0);
+   f.tlv(0x8107,no_credentials,sizeof(no_credentials));
+   f.byte(0x108,0x7f);
+   const char *apn=x9w_last_dnn[sim];
+   f.tlv(0x101,apn,(unsigned)strlen(apn)+1);
+   f.word(0x109,0x7ffdffff);f.word(0x102,1);f.byte(0x10a,0);f.byte(0x103,3);f.word(0x10c,0);f.byte(0x104,3);
+   static uint8_t td[672];bzero(td,sizeof(td));
+   unsigned dl=(unsigned)strnlen(apn,100);
+   if(dl){td[1]=(uint8_t)dl;memcpy(td+4,apn,dl);}else td[0]=1; /* no DNN known: match all, as WDS */
+   td[414]=0xff;f.tlv(0x10d,td,sizeof(td));token=f.submit();
   }
   else if(s.fx_stage==4){
    if(x9m_factory_act_barrier()){
@@ -725,7 +836,7 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
   }
   else if(s.fx_stage==5){x9w_frame f(0xa02,1u<<sim);f.word(0x100,0);token=f.submit();}
   if(token){s.fx_token=token;s.fx_deadline=now+10000;s.fx_local_since=0;s.fx_local_noted=false;
-   if(s.fx_stage==4&&s.fx_pre){s.fx_act_open=true;s.fx_barrier_noted=false;}}
+   if(s.fx_stage==4&&s.fx_pre&&(!x9m_factory_data_act_first()||s.fx_data)){s.fx_act_open=true;s.fx_barrier_noted=false;}}
   else{
    /* Local rejection means the frame never left the host: the shared
     * allocator (X9_MI_SLOTS) is momentarily exhausted during the

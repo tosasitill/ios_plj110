@@ -28,7 +28,7 @@ class FactoryInit(unittest.TestCase):
 #include <cstdio>
 #include <cstring>
 #include <strings.h>
-struct x9m_sim { unsigned ims_stage=0, fx_stage=0; uint64_t fx_token=0, fx_deadline=0; bool ims_hold=false, fx_hold=false, fx_pre=false, fx_cfg=false; bool fx_act_open=false, fx_barrier_noted=false; uint64_t fx_local_since=0; bool fx_local_noted=false; };
+struct x9m_sim { unsigned ims_stage=0, fx_stage=0; uint64_t fx_token=0, fx_deadline=0; bool ims_hold=false, fx_hold=false, fx_pre=false, fx_cfg=false, fx_dds=false, fx_data=false; bool fx_act_open=false, fx_barrier_noted=false; uint64_t fx_local_since=0; bool fx_local_noted=false; };
 x9m_sim x9m_sims[2];
 struct x9w_pcscf_list { uint8_t v4_count=0, v6_count=0; uint8_t v4[4][4]={}; uint8_t v6[4][16]={}; };
 x9w_pcscf_list x9w_pcscf_lists[2];
@@ -37,6 +37,11 @@ bool x9m_factory_enabled(){return factory_on;}
 bool cfg211_on=true; bool barrier_on=false;
 bool x9m_factory_cfg211(){return cfg211_on;}
 bool x9m_factory_act_barrier(){return barrier_on;}
+bool x9m_factory_dds_cfg(){return false;}
+bool x9m_factory_data_act_first(){return false;}
+bool x9m_fx_dds_pending(const x9m_sim&,unsigned){return false;}
+static char x9w_last_dnn[2][101];
+bool x9w_apn(const uint8_t*,unsigned){return true;}
 unsigned x9_md_sim_count(){return 2;} bool x9_md_mipc_online(){return true;} uint64_t x9q_ms(){return clock_ms;}
 struct Rec { unsigned id=0, mask=0, tag102[6]={}, has102=0, word100=99, byte100=99, tlv100len=0; unsigned word102=99, byte10a=99, byte101=99, byte103=99, tlv10dlen=0; uint8_t td_head[8]={}; unsigned tlv101len=0; uint8_t apn101[8]={}; };
 Rec recs[64]; unsigned count=0; uint64_t tok_req[64]={}; unsigned tok_sim[64]={}; int reject_sim=-1; unsigned reject_id=0; int fail_sim=-1; unsigned fail_id=0; int fail_times=0;
@@ -103,7 +108,7 @@ assert(x9m_sims[0].fx_stage==6&&x9m_sims[1].fx_stage==6);
 #include <cstdio>
 #include <cstring>
 #include <strings.h>
-struct x9m_sim { unsigned ims_stage=0, fx_stage=0; uint64_t fx_token=0, fx_deadline=0; bool ims_hold=false, fx_hold=false, fx_pre=false, fx_cfg=false; bool fx_act_open=false, fx_barrier_noted=false; uint64_t fx_local_since=0; bool fx_local_noted=false; };
+struct x9m_sim { unsigned ims_stage=0, fx_stage=0; uint64_t fx_token=0, fx_deadline=0; bool ims_hold=false, fx_hold=false, fx_pre=false, fx_cfg=false, fx_dds=false, fx_data=false; bool fx_act_open=false, fx_barrier_noted=false; uint64_t fx_local_since=0; bool fx_local_noted=false; };
 x9m_sim x9m_sims[2];
 struct x9w_pcscf_list { uint8_t v4_count=0, v6_count=0; uint8_t v4[4][4]={}; uint8_t v6[4][16]={}; };
 x9w_pcscf_list x9w_pcscf_lists[2];
@@ -112,6 +117,11 @@ bool x9m_factory_enabled(){return factory_on;}
 bool cfg211_on=true; bool barrier_on=false;
 bool x9m_factory_cfg211(){return cfg211_on;}
 bool x9m_factory_act_barrier(){return barrier_on;}
+bool x9m_factory_dds_cfg(){return false;}
+bool x9m_factory_data_act_first(){return false;}
+bool x9m_fx_dds_pending(const x9m_sim&,unsigned){return false;}
+static char x9w_last_dnn[2][101];
+bool x9w_apn(const uint8_t*,unsigned){return true;}
 unsigned x9_md_sim_count(){return 2;} bool x9_md_mipc_online(){return true;} uint64_t x9q_ms(){return clock_ms;}
 struct Rec { unsigned id=0, mask=0, tag102[6]={}, has102=0, word100=99, byte100=99, tlv100len=0; unsigned word102=99, byte10a=99, byte101=99, byte103=99, tlv10dlen=0; uint8_t td_head[8]={}; unsigned tlv101len=0; uint8_t apn101[8]={}; };
 Rec recs[64]; unsigned count=0; uint64_t tok_req[64]={}; unsigned tok_sim[64]={}; int reject_sim=-1; unsigned reject_id=0; int fail_sim=-1; unsigned fail_id=0; int fail_times=0;
@@ -178,7 +188,7 @@ int main(){uint8_t p[64]={};
 #include <cstdio>
 #include <cstring>
 #include <strings.h>
-struct x9m_sim { unsigned ims_stage=0, fx_stage=0; uint64_t fx_token=0, fx_deadline=0; bool ims_hold=false, fx_hold=false, fx_pre=false, fx_cfg=false; bool fx_act_open=false, fx_barrier_noted=false; uint64_t fx_local_since=0; bool fx_local_noted=false; };
+struct x9m_sim { unsigned ims_stage=0, fx_stage=0; uint64_t fx_token=0, fx_deadline=0; bool ims_hold=false, fx_hold=false, fx_pre=false, fx_cfg=false, fx_dds=false, fx_data=false; bool fx_act_open=false, fx_barrier_noted=false; uint64_t fx_local_since=0; bool fx_local_noted=false; };
 x9m_sim x9m_sims[2];
 struct x9w_pcscf_list { uint8_t v4_count=0, v6_count=0; uint8_t v4[4][4]={}; uint8_t v6[4][16]={}; };
 x9w_pcscf_list x9w_pcscf_lists[2];
@@ -187,6 +197,11 @@ bool x9m_factory_enabled(){return factory_on;}
 bool cfg211_on=true; bool barrier_on=false;
 bool x9m_factory_cfg211(){return cfg211_on;}
 bool x9m_factory_act_barrier(){return barrier_on;}
+bool x9m_factory_dds_cfg(){return false;}
+bool x9m_factory_data_act_first(){return false;}
+bool x9m_fx_dds_pending(const x9m_sim&,unsigned){return false;}
+static char x9w_last_dnn[2][101];
+bool x9w_apn(const uint8_t*,unsigned){return true;}
 unsigned x9_md_sim_count(){return 2;} bool x9_md_mipc_online(){return true;} uint64_t x9q_ms(){return clock_ms;}
 struct Rec { unsigned id=0, mask=0, tag102[6]={}, has102=0, word100=99, byte100=99, tlv100len=0; unsigned word102=99, byte10a=99, byte101=99, byte103=99, tlv10dlen=0; uint8_t td_head[8]={}; unsigned tlv101len=0; uint8_t apn101[8]={}; };
 Rec recs[64]; unsigned count=0; uint64_t tok_req[64]={}; unsigned tok_sim[64]={}; int reject_sim=-1; unsigned reject_id=0; int fail_sim=-1; unsigned fail_id=0; int fail_times=0;
@@ -234,7 +249,7 @@ int main(){uint8_t p[64]={};
 #include <cstdio>
 #include <cstring>
 #include <strings.h>
-struct x9m_sim { unsigned ims_stage=0, fx_stage=0; uint64_t fx_token=0, fx_deadline=0; bool ims_hold=false, fx_hold=false, fx_pre=false, fx_cfg=false; bool fx_act_open=false, fx_barrier_noted=false; uint64_t fx_local_since=0; bool fx_local_noted=false; };
+struct x9m_sim { unsigned ims_stage=0, fx_stage=0; uint64_t fx_token=0, fx_deadline=0; bool ims_hold=false, fx_hold=false, fx_pre=false, fx_cfg=false, fx_dds=false, fx_data=false; bool fx_act_open=false, fx_barrier_noted=false; uint64_t fx_local_since=0; bool fx_local_noted=false; };
 x9m_sim x9m_sims[2];
 struct x9w_pcscf_list { uint8_t v4_count=0, v6_count=0; uint8_t v4[4][4]={}; uint8_t v6[4][16]={}; };
 x9w_pcscf_list x9w_pcscf_lists[2];
@@ -243,6 +258,11 @@ bool x9m_factory_enabled(){return factory_on;}
 bool cfg211_on=true; bool barrier_on=false;
 bool x9m_factory_cfg211(){return cfg211_on;}
 bool x9m_factory_act_barrier(){return barrier_on;}
+bool x9m_factory_dds_cfg(){return false;}
+bool x9m_factory_data_act_first(){return false;}
+bool x9m_fx_dds_pending(const x9m_sim&,unsigned){return false;}
+static char x9w_last_dnn[2][101];
+bool x9w_apn(const uint8_t*,unsigned){return true;}
 unsigned x9_md_sim_count(){return 2;} bool x9_md_mipc_online(){return true;} uint64_t x9q_ms(){return clock_ms;}
 struct Rec { unsigned id=0, mask=0, tag102[6]={}, has102=0, word100=99, byte100=99, tlv100len=0; unsigned word102=99, byte10a=99, byte101=99, byte103=99, tlv10dlen=0; uint8_t td_head[8]={}; unsigned tlv101len=0; uint8_t apn101[8]={}; };
 Rec recs[64]; unsigned count=0; uint64_t tok_req[256]={}; unsigned tok_sim[256]={}; int reject_sim=-1; unsigned reject_id=0; int fail_sim=-1; unsigned fail_id=0; int fail_times=0;

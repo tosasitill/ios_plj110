@@ -51,7 +51,7 @@ static const unsigned X9_MIPC_FRAME_MAX=4096;
 struct x9q_view { const uint8_t *p; unsigned n; };
 uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n);
 ''' + wds[w0:w1] + r'''
-struct x9m_sim { unsigned ims_stage=0, fx_stage=0; uint64_t fx_token=0, fx_deadline=0; bool ims_hold=false, fx_hold=false, fx_pre=false, fx_cfg=false; bool fx_act_open=false, fx_barrier_noted=false; uint64_t fx_local_since=0; bool fx_local_noted=false; };
+struct x9m_sim { unsigned ims_stage=0, fx_stage=0; uint64_t fx_token=0, fx_deadline=0; bool ims_hold=false, fx_hold=false, fx_pre=false, fx_cfg=false, fx_dds=false, fx_data=false; bool fx_act_open=false, fx_barrier_noted=false; uint64_t fx_local_since=0; bool fx_local_noted=false; };
 x9m_sim x9m_sims[2];
 struct x9w_pcscf_list { uint8_t v4_count=0, v6_count=0; uint8_t v4[4][4]={}; uint8_t v6[4][16]={}; };
 x9w_pcscf_list x9w_pcscf_lists[2];
@@ -60,6 +60,11 @@ bool x9w_control_ready=true;
 bool x9m_factory_enabled(){return true;}
 bool x9m_factory_cfg211(){return true;}
 bool x9m_factory_act_barrier(){return false;}
+bool x9m_factory_dds_cfg(){return false;}
+bool x9m_factory_data_act_first(){return false;}
+bool x9m_fx_dds_pending(const x9m_sim&,unsigned){return false;}
+static char x9w_last_dnn[2][101];
+bool x9w_apn(const uint8_t*,unsigned){return true;}
 unsigned x9_md_sim_count(){return 2;}
 bool x9_md_mipc_online(){return true;}
 uint64_t x9q_ms(){return 1000;}
