@@ -8891,58 +8891,138 @@ sweet_x9_seed_purplebuddy(proc_t p, user_addr_t scratch, user_addr_t end)
  *    and "ProductID"), which SweetFramebuffer now publishes; without it
  *    CB creates an ad-hoc UUID per boot and no stored curve state can
  *    ever be found again.
- * Seed only when the file is absent: once CB has written the file it
- * owns it (learned curve state lives there), so an existing file is
- * probed for the state key, logged, and left byte-identical. Curve
- * anchors are the OPPO factory lux -> normalized-level mapping for this
- * panel (Android DisplayDeviceConfig, captured 2026-11-27: 256 lux ->
- * 0.3718, 1024 -> 0.5159, saturation 1.0 at 4096 lux) fitted to CB's
- * two-segment form; Backlight values are CB's normalized levels. Our
- * HID lux is the TCS3720 driver lux; Android's fusion lux read ~1.1x
- * higher on the one captured sample pair, inside this fit's error.
- * Debounce/hysteresis have no CB preference counterpart (AAB-internal
- * constants), so none is seeded. Opt out with x9_cb_seed=0; the caller
- * treats every failure as non-fatal.
+ * Merge behaviour (2026-11-28): the file CB wrote itself during pre-seed
+ * boots is the steady state on this device, and a create-only seed left
+ * it without the state key forever, so an existing file is now merged,
+ * following the keyboard-dictation seed's read-modify-write pattern in
+ * this file. The whole file is read (X9_CB_PREFS_MAX cap; a larger file
+ * is left alone) and searched for the state key -- the old probe only
+ * covered the first 2048 bytes. A file that already carries
+ * DisplayBrightnessAuto is left byte-identical. An XML file missing the
+ * key gets the state key inserted before the root </dict> (plus the
+ * fitted curve under DisplayPreferences, unless that dict already
+ * exists), so every other key survives. A binary plist cannot be
+ * key-merged from PID1 (there is no bplist writer in the kernel), so --
+ * exactly like the keyboard seed's bplist case -- the original is
+ * hard-linked to .x9-before-seed and replaced with the XML seed; CB
+ * regenerates its runtime state and the backup keeps the original
+ * recoverable. Every write goes through a temp file renamed over the
+ * target. Curve anchors are the OPPO factory lux -> normalized-level
+ * mapping for this panel (Android DisplayDeviceConfig, captured
+ * 2026-11-27: 256 lux -> 0.3718, 1024 -> 0.5159, saturation 1.0 at
+ * 4096 lux) fitted to CB's two-segment form; Backlight values are CB's
+ * normalized levels. Our HID lux is the TCS3720 driver lux; Android's
+ * fusion lux read ~1.1x higher on the one captured sample pair, inside
+ * this fit's error. Debounce/hysteresis have no CB preference
+ * counterpart (AAB-internal constants), so none is seeded. Opt out with
+ * x9_cb_seed=0; the caller treats every failure as non-fatal.
  */
+#define X9_CB_PREFS_MAX 8192
 static int
 sweet_x9_seed_corebrightness(proc_t p, user_addr_t scratch, user_addr_t end)
 {
  static const char target[]="/private/var/mobile/Library/Preferences/com.apple.CoreBrightness.plist";
+ static const char backup[]="/private/var/mobile/Library/Preferences/com.apple.CoreBrightness.x9-before-seed.plist";
  static const char temp[]="/private/var/mobile/Library/Preferences/com.apple.CoreBrightness.x9-seed.tmp";
  static const char probe[]="DisplayBrightnessAuto";
+ static const char dp_probe[]="DisplayPreferences";
+ static const char frag_auto[]="\t<key>DisplayBrightnessAuto</key>\n\t<true/>\n";
+ static const char frag_full[]="\t<key>DisplayBrightnessAuto</key>\n\t<true/>\n\t<key>DisplayPreferences</key>\n\t<dict>\n\t\t<key>7C9E6993-1102-4A5B-8C7D-202611270001</key>\n\t\t<dict>\n\t\t\t<key>AutoBrightnessCurve</key>\n\t\t\t<dict>\n\t\t\t\t<key>Version</key>\n\t\t\t\t<integer>1</integer>\n\t\t\t\t<key>Lux1</key>\n\t\t\t\t<real>256.0</real>\n\t\t\t\t<key>Backlight1</key>\n\t\t\t\t<real>0.3718</real>\n\t\t\t\t<key>Lux2</key>\n\t\t\t\t<real>4096.0</real>\n\t\t\t\t<key>Backlight2</key>\n\t\t\t\t<real>1.0</real>\n\t\t\t</dict>\n\t\t</dict>\n\t</dict>\n";
  static const char body[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>DisplayBrightnessAuto</key>\n\t<true/>\n\t<key>DisplayPreferences</key>\n\t<dict>\n\t\t<key>7C9E6993-1102-4A5B-8C7D-202611270001</key>\n\t\t<dict>\n\t\t\t<key>AutoBrightnessCurve</key>\n\t\t\t<dict>\n\t\t\t\t<key>Version</key>\n\t\t\t\t<integer>1</integer>\n\t\t\t\t<key>Lux1</key>\n\t\t\t\t<real>256.0</real>\n\t\t\t\t<key>Backlight1</key>\n\t\t\t\t<real>0.3718</real>\n\t\t\t\t<key>Lux2</key>\n\t\t\t\t<real>4096.0</real>\n\t\t\t\t<key>Backlight2</key>\n\t\t\t\t<real>1.0</real>\n\t\t\t</dict>\n\t\t</dict>\n\t</dict>\n</dict>\n</plist>\n";
  int enabled=0,error,fd; int32_t rv=0; user_ssize_t written=0; vnode_t vp=NULLVP;
+ char *src=NULL; size_t srclen=0,ins=0,bodylen=0; int replaced=0,curve_skipped=0;
+ const char *frag=NULL; size_t fraglen=0;
  extern boolean_t sweet_x9_ufs_root_writable(void);
  if((enabled=sweet_x9_arg("x9_cb_seed",1))!=1)return 0;
  if(!sweet_x9_ufs_root_writable())return EROFS;
- if(!proc_is64bit(p)||scratch>end||sizeof(target)+sizeof(temp)+sizeof(body)+2048>end-scratch)return E2BIG;
- user_addr_t t=scratch,tmp=t+sizeof(target),data=tmp+sizeof(temp),buf=data+sizeof(body);
- if((error=copyout(target,t,sizeof(target)))||(error=copyout(temp,tmp,sizeof(temp)))||(error=copyout(body,data,sizeof(body))))return error;
+ if(!proc_is64bit(p)||scratch>end)return E2BIG;
  error=vnode_lookup(target,VNODE_LOOKUP_NOFOLLOW,&vp,vfs_context_kernel());
- if(!error){
-  if(!vnode_isreg(vp)){vnode_put(vp);return EINVAL;} vnode_put(vp);
-  int has=-1;
-  struct open_args o={.path=t,.flags=0,.mode=0};
-  error=open(p,&o,&rv);
-  if(!error){
-   fd=rv; char kbuf[2048]; user_ssize_t n=0;
-   struct read_args ra={.fd=fd,.cbuf=buf,.nbyte=sizeof(kbuf)};
-   if(!read(p,&ra,&n)&&n>0&&n<=(user_ssize_t)sizeof(kbuf)&&!copyin(buf,kbuf,(size_t)n))
-    has=x9_local_storage_contains(kbuf,(unsigned)n,probe,sizeof(probe)-1);
-   { struct close_args c={.fd=fd}; int32_t crv=0; (void)sys_close(p,&c,&crv); }
+ if(error==ENOENT){
+  src=NULL;
+ }else if(error){
+  return error;
+ }else{
+  struct vnode_attr va; struct uio *auio; user_ssize_t left; size_t got=0;
+  if(!vnode_isreg(vp)){vnode_put(vp);return EINVAL;}
+  VATTR_INIT(&va); VATTR_WANTED(&va,va_data_size);
+  if(vnode_getattr(vp,&va,vfs_context_kernel())!=0||va.va_data_size<=0||
+      va.va_data_size>(off_t)(X9_CB_PREFS_MAX-sizeof(frag_full)))
+   {vnode_put(vp);printf("X9 CB SEED: existing com.apple.CoreBrightness.plist too large to merge; left alone\n");return 0;}
+  srclen=(size_t)va.va_data_size;
+  src=kalloc_data(srclen,Z_WAITOK);
+  if(src==NULL){vnode_put(vp);return ENOMEM;}
+  auio=uio_create(1,0,UIO_SYSSPACE,UIO_READ);
+  if(auio==NULL||uio_addiov(auio,CAST_USER_ADDR_T(src),srclen)!=0||
+      VNOP_READ(vp,auio,0,vfs_context_kernel())!=0){error=EIO;}
+  else{ left=uio_resid(auio); got=left<0?0:srclen-(size_t)left; if(got!=srclen)error=EIO; }
+  if(auio!=NULL)uio_free(auio);
+  vnode_put(vp);
+  if(error){kfree_data(src,srclen);return error;}
+  if(x9_local_storage_contains(src,(unsigned)srclen,probe,sizeof(probe)-1)){
+   printf("X9 CB SEED: existing com.apple.CoreBrightness.plist already has DisplayBrightnessAuto; not modified\n");
+   kfree_data(src,srclen);return 0;
   }
-  printf("X9 CB SEED: existing com.apple.CoreBrightness.plist kept (DisplayBrightnessAuto in first 2048 bytes=%d); not modified\n",has);
-  return 0;
+  if(srclen>=8&&!memcmp(src,"bplist00",8)){
+   /* A binary plist cannot be key-merged from PID1; like the keyboard
+    * seed's bplist case, fall through with replaced=1: the common path
+    * hard-links the original to .x9-before-seed and renames the XML
+    * seed over it. */
+   replaced=1;
+  }else{
+   /* insert before the last </dict> so the rest of the file survives */
+   for(size_t i=srclen>=7?srclen-7:0;;i--){
+    if(!memcmp(src+i,"</dict>",7)){ins=i;break;}
+    if(i==0){ins=(size_t)-1;break;}
+   }
+   if(ins==(size_t)-1){
+    printf("X9 CB SEED: no </dict> in the existing com.apple.CoreBrightness.plist; left alone\n");
+    kfree_data(src,srclen);return 0;
+   }
+   if(x9_local_storage_contains(src,(unsigned)srclen,dp_probe,sizeof(dp_probe)-1)){
+    frag=frag_auto;fraglen=sizeof(frag_auto)-1;curve_skipped=1;
+   }else{
+    frag=frag_full;fraglen=sizeof(frag_full)-1;
+   }
+   bodylen=srclen+fraglen;
+  }
  }
- if(error!=ENOENT)return error;
- struct open_args o={.path=tmp,.flags=O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,.mode=0600};
- error=open(p,&o,&rv);if(error)return error;fd=rv;
- struct fchown_args ch={.fd=fd,.uid=501,.gid=501};error=fchown(p,&ch,&rv);
- if(!error){struct write_args w={.fd=fd,.cbuf=data,.nbyte=sizeof(body)-1};error=write(p,&w,&written);if(!error&&written!=(user_ssize_t)(sizeof(body)-1))error=EIO;}
- { struct close_args c={.fd=fd};int ce=sys_close(p,&c,&rv);if(!error)error=ce; }
- if(!error){struct rename_args r={.from=tmp,.to=t};error=rename(p,&r,&rv);}
- if(error){struct unlink_args u={.path=tmp};(void)unlink(p,&u,&rv);}
- printf("X9 CB SEED: com.apple.CoreBrightness seed written errno=%d (DisplayBrightnessAuto=1, factory curve for display 7C9E6993-1102-4A5B-8C7D-202611270001)\n",error);
+ if(src==NULL||replaced)bodylen=sizeof(body)-1;
+ if((size_t)(end-scratch)<sizeof(target)+sizeof(backup)+sizeof(temp)+bodylen){
+  if(src!=NULL)kfree_data(src,srclen);return E2BIG;
+ }
+ {
+  user_addr_t t=scratch,b=t+sizeof(target),tmp=b+sizeof(backup),data=tmp+sizeof(temp);
+  error=0;
+  if((error=copyout(target,t,sizeof(target)))||(error=copyout(backup,b,sizeof(backup)))||(error=copyout(temp,tmp,sizeof(temp))))goto out;
+  if(src==NULL||replaced){
+   error=copyout(body,data,sizeof(body));
+   if(error)goto out;
+  }else{
+   if(ins>0&&(error=copyout(src,data,ins)))goto out;
+   if((error=copyout(frag,data+ins,fraglen)))goto out;
+   if(srclen>ins&&(error=copyout(src+ins,data+ins+fraglen,srclen-ins)))goto out;
+  }
+  error=vnode_lookup(target,VNODE_LOOKUP_NOFOLLOW,&vp,vfs_context_kernel());
+  if(!error){
+   if(!vnode_isreg(vp)){vnode_put(vp);error=EINVAL;goto out;} vnode_put(vp);
+   struct link_args l={.path=t,.link=b};error=link(p,&l,&rv);if(error&&error!=EEXIST)goto out;
+  }else if(error!=ENOENT)goto out;
+  struct open_args o={.path=tmp,.flags=O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,.mode=0600};
+  error=open(p,&o,&rv);if(error)goto out;fd=rv;
+  struct fchown_args ch={.fd=fd,.uid=501,.gid=501};error=fchown(p,&ch,&rv);
+  if(!error){struct write_args w={.fd=fd,.cbuf=data,.nbyte=bodylen};error=write(p,&w,&written);if(!error&&written!=(user_ssize_t)bodylen)error=EIO;}
+  {struct close_args c={.fd=fd};int ce=sys_close(p,&c,&rv);if(!error)error=ce;}
+  if(!error){struct rename_args r={.from=tmp,.to=t};error=rename(p,&r,&rv);}
+  if(error){struct unlink_args u={.path=tmp};(void)unlink(p,&u,&rv);}
+  if(src==NULL)
+   printf("X9 CB SEED: com.apple.CoreBrightness seed written errno=%d (DisplayBrightnessAuto=1, factory curve for display 7C9E6993-1102-4A5B-8C7D-202611270001)\n",error);
+  else if(replaced)
+   printf("X9 CB SEED: existing com.apple.CoreBrightness.plist is a binary plist (%zu bytes) without DisplayBrightnessAuto; replaced with XML seed errno=%d; original backed up\n",srclen,error);
+  else
+   printf("X9 CB SEED: existing com.apple.CoreBrightness.plist merged (DisplayBrightnessAuto added%s; %zu existing bytes preserved) errno=%d; original backed up\n",curve_skipped?"":" + factory curve",srclen,error);
+ }
+out:
+ if(src!=NULL)kfree_data(src,srclen);
  return error;
 }
 

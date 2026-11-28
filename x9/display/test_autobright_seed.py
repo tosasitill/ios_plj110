@@ -11,8 +11,15 @@ Checks, without a device:
   * the seeded two-segment curve approximates the OPPO factory
     lux -> level table (Android DisplayDeviceConfig, captured
     2026-11-27) within tolerance;
-  * the seed is create-only (existing CB plist is probed, never renamed
-    over).
+  * the merge design (2026-11-28): an existing CB plist is read whole
+    (not just the first 2048 bytes) and searched for the state key; a
+    file already carrying DisplayBrightnessAuto is left untouched; an
+    XML file missing the key is merged by inserting the fragment
+    before the root </dict> (simulated here in Python: unrelated keys
+    survive, the curve lands complete, and a pre-existing
+    DisplayPreferences dict is not duplicated); a binary plist falls
+    back to backup (.x9-before-seed) + replace, per the keyboard
+    dictation seed's in-tree pattern.
 """
 import plistlib
 import re
@@ -40,12 +47,29 @@ def seed_function():
     return KERN[start:end]
 
 
+def unescape_c(raw):
+    return raw.encode().decode("unicode_escape")
+
+
 def seed_plist():
     fn = seed_function()
     m = re.search(r'static const char body\[\]="(.*?)";', fn, re.S)
     assert m, "body string not found"
-    raw = m.group(1).encode().decode("unicode_escape")
-    return plistlib.loads(raw.encode())
+    return plistlib.loads(unescape_c(m.group(1)).encode())
+
+
+def seed_fragment(name):
+    fn = seed_function()
+    m = re.search(r'static const char %s\[\]="(.*?)";' % name, fn, re.S)
+    assert m, "%s string not found" % name
+    return unescape_c(m.group(1))
+
+
+def merge_insert(existing_xml, fragment):
+    """Mirror the kernel merge: insert before the LAST </dict>."""
+    ins = existing_xml.rfind("</dict>")
+    assert ins >= 0
+    return existing_xml[:ins] + fragment + existing_xml[ins:]
 
 
 def two_segment(lux, lux1, bl1, lux2, bl2, floor):
@@ -97,11 +121,71 @@ class TestCoreBrightnessSeed(unittest.TestCase):
         self.assertIn('sweet_x9_arg("x9_cb_seed",1)', fn)
         self.assertIn("sweet_x9_seed_corebrightness(p,scratch_addr", KERN)
 
-    def test_create_only(self):
+    def test_whole_file_probe_and_untouched_when_key_present(self):
         fn = seed_function()
-        kept = fn.index("not modified")
+        # the state-key search runs over the whole read (srclen), not a
+        # fixed 2048-byte prefix probe
+        self.assertIn("x9_local_storage_contains(src,(unsigned)srclen,probe", fn)
+        self.assertNotIn("first 2048 bytes", fn)
+        # a file already carrying the key returns before any rename
+        has = fn.index("already has DisplayBrightnessAuto; not modified")
         rename = fn.index("rename_args")
-        self.assertLess(kept, rename)
+        self.assertLess(has, rename)
+
+    def test_merge_paths_present(self):
+        fn = seed_function()
+        self.assertIn("com.apple.CoreBrightness.x9-before-seed.plist", fn)
+        self.assertIn("merged (DisplayBrightnessAuto added", fn)
+        self.assertIn("too large to merge; left alone", fn)
+        self.assertIn("no </dict> in the existing", fn)
+        # binary plist fallback: detect bplist00, replace with backup
+        self.assertIn('"bplist00"', fn)
+        self.assertIn("is a binary plist", fn)
+        self.assertIn("original backed up", fn)
+
+    def test_merge_simulation_preserves_existing_keys(self):
+        existing = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<plist version="1.0">\n<dict>\n'
+            "\t<key>CBBlueReductionStatus</key>\n\t<integer>2</integer>\n"
+            "\t<key>SomeLearnedValue</key>\n\t<real>0.5</real>\n"
+            "</dict>\n</plist>\n"
+        )
+        merged = merge_insert(existing, seed_fragment("frag_full"))
+        p = plistlib.loads(merged.encode())
+        # unrelated pre-existing keys survive untouched
+        self.assertEqual(p["CBBlueReductionStatus"], 2)
+        self.assertEqual(p["SomeLearnedValue"], 0.5)
+        # state key + complete fitted curve landed
+        self.assertIs(p["DisplayBrightnessAuto"], True)
+        curve = p["DisplayPreferences"][UUID]["AutoBrightnessCurve"]
+        self.assertEqual(curve["Version"], 1)
+        self.assertEqual(curve["Lux1"], 256.0)
+        self.assertEqual(curve["Backlight1"], 0.3718)
+        self.assertEqual(curve["Lux2"], 4096.0)
+        self.assertEqual(curve["Backlight2"], 1.0)
+
+    def test_merge_simulation_keeps_existing_display_preferences(self):
+        existing = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<plist version="1.0">\n<dict>\n'
+            "\t<key>DisplayPreferences</key>\n\t<dict>\n"
+            "\t\t<key>ADHOC-UUID</key>\n\t\t<dict/>\n\t</dict>\n"
+            "</dict>\n</plist>\n"
+        )
+        # kernel picks frag_auto when DisplayPreferences already exists
+        merged = merge_insert(existing, seed_fragment("frag_auto"))
+        p = plistlib.loads(merged.encode())
+        self.assertIs(p["DisplayBrightnessAuto"], True)
+        self.assertEqual(list(p["DisplayPreferences"].keys()), ["ADHOC-UUID"])
+
+    def test_fragment_matches_body(self):
+        # the merge fragment must carry the same state + curve as the
+        # create-only body, so both write paths converge
+        frag = seed_fragment("frag_full")
+        wrapped = ('<plist version="1.0">\n<dict>\n' + frag + "</dict>\n</plist>\n")
+        p = plistlib.loads(wrapped.encode())
+        self.assertEqual(p, seed_plist())
 
     def test_curve_fit(self):
         curve = seed_plist()["DisplayPreferences"][UUID]["AutoBrightnessCurve"]
