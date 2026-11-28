@@ -4,7 +4,7 @@
 
 ## 1. 当前状态
 
-- 本地 `main` 为 `1b13021f`，`origin/main` 为 `bb5c8557`，集成工作树在 `.worktrees/main-call-integration`。原 checkout 的 `feat/bt-settings-offline-candidate` 承载未提交改动。
+- 2026-11-28 清理：分支全部合入或淘汰，只剩 `main`；worktree 已全部移除，产物移至 `x9/out/retained-worktree-artifacts-20261128/<名>/`，未提交补丁存于 `.local/archive/worktree-wip-20261128/`。
 - 下表首个通话／短信候选已上机，见 `~/445.txt`。刷写前确认 Android `PLJ110`、`_b`、`sys.boot_completed=1`，`adb reboot bootloader` exit 0。核对唯一设备、bootloader b 槽、64 MiB `boot_b` 后启动唯一 USB logger（会话 57101），`fastboot flash boot_b` 和 `fastboot reboot` 均 exit 0。
 - `445.txt` 确认 SpringBoard 启动，6.575 s MobileGestalt epoch marker 写入成功，25.969/25.971 s 双卡 IMS 快照均为 0，26.017/26.022 s 双卡 `4904` 诊断订阅确认。用户确认蓝牙可搜到设备，配对、重连和音频未测。
 - 用户报告拨号时卡死。`445.txt` 在 48.518 s 触摸抬起处截断，1,605,591 B。采集器随后报 libusb -99 并断开，保留会话。末段未见 `VOICE20`、`0901` 或 panic。只读确认设备现为唯一 bootloader fastboot，`is-userspace: no`、`current-slot: b`。未发送新重启或刷写命令。下一次授权启动时先采 prior reset/pstore，再定位拨号入口。
@@ -18,11 +18,11 @@
 
 | 离线候选 | 镜像与边界 |
 | --- | --- |
-| 通话 / 短信流程更新 | `.worktrees/main-call-integration/x9/out/x9-call-sms-flow-20261127-r1/boot.img`，15,400,960 B，基线 `bb5c8557` 加本工作树补丁，启用 `x9_call_sip_diag=1` |
-| IMS 配置缓存 raw 解码 | `.worktrees/main-call-integration/x9/out/x9-radio-feature-decode-20261127-r1/boot.img`，15,388,672 B，内核 31,997,672 B，基线 `bb5c8557` 加工作树补丁。启用 `x9_call_sip_diag=1 x9_sms_diag=1 x9_sms_srr=1`，未刷写 |
-| 拨号窗口 IMS / 短信诊断 | `.worktrees/main-call-integration/x9/out/x9-radio-dial-sms-diag-20261127-r1/boot.img`，15,405,056 B，内核 31,997,464 B，基线 `bb5c8557` 加工作树补丁。启用 `x9_call_sip_diag=1 x9_sms_diag=1`，本轮刷入 |
-| 双卡 SMS 状态报告请求 | `.worktrees/main-call-integration/x9/out/x9-radio-sms-srr-20261127-r1/boot.img`，15,405,056 B，内核 31,997,464 B，基线 `bb5c8557` 加工作树补丁。启用 `x9_call_sip_diag=1 x9_sms_diag=1 x9_sms_srr=1`，本轮刷入 |
-| 通话 IMS / SIM2 失败诊断 | `.worktrees/main-call-integration/x9/out/x9-call-ims-failure-20261127-r1/boot.img`，15,400,960 B，源码 `95f18613`，标准设备配置 |
+| 通话 / 短信流程更新 | `x9/out/retained-worktree-artifacts-20261128/main-call-integration/x9-call-sms-flow-20261127-r1/boot.img`，15,400,960 B，基线 `bb5c8557` 加本工作树补丁，启用 `x9_call_sip_diag=1` |
+| IMS 配置缓存 raw 解码 | `x9/out/retained-worktree-artifacts-20261128/main-call-integration/x9-radio-feature-decode-20261127-r1/boot.img`，15,388,672 B，内核 31,997,672 B，基线 `bb5c8557` 加工作树补丁。启用 `x9_call_sip_diag=1 x9_sms_diag=1 x9_sms_srr=1`，未刷写 |
+| 拨号窗口 IMS / 短信诊断 | `x9/out/retained-worktree-artifacts-20261128/main-call-integration/x9-radio-dial-sms-diag-20261127-r1/boot.img`，15,405,056 B，内核 31,997,464 B，基线 `bb5c8557` 加工作树补丁。启用 `x9_call_sip_diag=1 x9_sms_diag=1`，本轮刷入 |
+| 双卡 SMS 状态报告请求 | `x9/out/retained-worktree-artifacts-20261128/main-call-integration/x9-radio-sms-srr-20261127-r1/boot.img`，15,405,056 B，内核 31,997,464 B，基线 `bb5c8557` 加工作树补丁。启用 `x9_call_sip_diag=1 x9_sms_diag=1 x9_sms_srr=1`，本轮刷入 |
+| 通话 IMS / SIM2 失败诊断 | `x9/out/retained-worktree-artifacts-20261128/main-call-integration/x9-call-ims-failure-20261127-r1/boot.img`，15,400,960 B，源码 `95f18613`，标准设备配置 |
 | 蓝牙能力缓存 | `x9/out/x9-bt-mgwipe-20261126-r2/boot.img`，15,417,344 B，复用 444 已装诊断 dylib，`x9_bt_root=0 x9_bt_settings_diag=1` |
 | rev 284 无线诊断 | `x9/out/x9-radio-284-diag-20261126/boot.img`，15,417,344 B，`x9_bt_root=1 x9_bt_settings_diag=1 x9_sms_diag=1` |
 | rev 284 mailbox 包 | `x9/out/x9-metal2vk-mailbox284-20261126/`，保留 stage 日志及匹配包 |
