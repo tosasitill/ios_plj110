@@ -675,6 +675,37 @@ sweet_sandbox_priv_grant(kauth_cred_t cred __unused, int priv)
 		}
 		return 0;
 	}
+	/*
+	 * Skywalk privileges are entitlement-backed on iOS; the privilege <->
+	 * entitlement pairs are the ones sk_priv_chk() (skywalk.c) names.
+	 * Grant only when the calling process's own signature carries the
+	 * entitlement. bt-audio-20261128: bluetoothd (which holds
+	 * register-user-pipe) was denied 12000 at boot, so its "Audio skywalk
+	 * server channel" was never created; stock code keeps the NULL channel
+	 * and the first A2DP/HFP start calls os_channel_get_fd(NULL) -> SIGSEGV.
+	 */
+	const char *sk_ent = NULL;
+	switch (priv) {
+	case PRIV_SKYWALK_REGISTER_USER_PIPE:   sk_ent = "com.apple.private.skywalk.register-user-pipe"; break;
+	case PRIV_SKYWALK_REGISTER_KERNEL_PIPE: sk_ent = "com.apple.private.skywalk.register-kernel-pipe"; break;
+	case PRIV_SKYWALK_REGISTER_NET_IF:      sk_ent = "com.apple.private.skywalk.register-net-if"; break;
+	case PRIV_SKYWALK_REGISTER_FLOW_SWITCH: sk_ent = "com.apple.private.skywalk.register-flow-switch"; break;
+	case PRIV_SKYWALK_LOW_LATENCY_CHANNEL:  sk_ent = "com.apple.private.skywalk.low-latency-channel"; break;
+	case PRIV_SKYWALK_OBSERVE_ALL:          sk_ent = "com.apple.private.skywalk.observe-all"; break;
+	case PRIV_SKYWALK_OBSERVE_STATS:        sk_ent = "com.apple.private.skywalk.observe-stats"; break;
+	default: break;
+	}
+	if (sk_ent != NULL &&
+	    sweet_amfi_query_boolean_with_proc(current_proc(), sk_ent) == KERN_SUCCESS) {
+		static int sweet_sk_priv_logged;
+		if (sweet_sk_priv_logged < 16) {
+			char n3[20];
+			proc_selfname(n3, sizeof(n3));
+			sweet_sk_priv_logged++;
+			printf("SWEET Sandbox: %s privilege %d granted (skywalk entitlement)\n", n3, priv);
+		}
+		return 0;
+	}
 	char name[20];
 	proc_selfname(name, sizeof(name));
 	for (int i = 0; i < sweet_priv_logged_count; i++) {
