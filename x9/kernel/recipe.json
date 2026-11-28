@@ -6477,6 +6477,11 @@
    "template": "iokit-cxx-3"
   },
   {
+   "name": "SweetX9Storage.o",
+   "source": "iokit/Kernel/arm/SweetX9Storage.cpp",
+   "template": "iokit-cxx-3"
+  },
+  {
    "name": "x9_usb_log.o",
    "source": "bsd/dev/x9_usb_log.c",
    "template": "bsd-c-11"
