@@ -267,3 +267,56 @@ modem 原件与已捕获 vendor 文件里都没有这份 payload；树内现有�
   ③ 核对 REG_DMA header 与 +128/+512 两条 entry 的落点与已闭合
   布局一致。三项全过之后，才谈 AD20/scene 注册等消费者代码；
   在此之前 L2 不写任何消费者实现。
+
+## 第三轮：L2 材料到位——audio_dsp 固件已归档（2026-11-28，仅取证）
+
+L2 材料清单（见第二轮 L2 节）所缺的同版 `audio_dsp` payload 已从本机
+Android 侧只读提取并归档：`x9/out/voice-audio-dsp-stage/audio_dsp_a.img`
+（+ORIGIN.md，含完整证据链）。要点：
+
+- **同版判定**：设备 modem_a 分区与本桥固定输入 `modem_a.img` 全量
+  sha256 逐字相同；audio_dsp_a 与之同属槽 A 固件集，故为所要求的
+  同列车 payload。两槽 audio_dsp 首 1 MiB 哈希一致。
+- **形态**：MTK 镜像链（0x58881688 头 + 0x200 头块 + 数据 16B 对齐），
+  与 `x9_modem_s3.inc` 既有链约定同式；双核 adsp_0/adsp_1 的
+  sram+dram 四段齐全、各随 cert1/cert2 签名段，全链 12 段止于
+  0x15a4f00，其后全零；build 戳 `build#dad9c7+795d31`，路径串证实
+  MT6993 RISC-V ADSP（非 HiFi——scene0 的 core 更须以 task-info
+  回读为准，禁止套参考平台的核名）。
+- **状态变化**：L2 的缺口由"缺材料"变为"缺探针与消费者"，材料不再
+  是阻塞项。本轮未改任何门控、未写加载/发送代码，fail-closed 不变。
+
+## PCM 供应者接线方案（离线钉定部分，2026-11-28）
+
+- **合同**（已实测，见第二轮 L6/L1 节）：`modemPcmOpen` +
+  Hostless_Speech DL/UL，2ch/48000/S16_LE、period 1024 帧 x2
+  （4096 B/周期、8192 B/缓冲）。
+- **原厂数据面**：PCM 在 AP AFE 与 MD 之间走 Hostless_Speech 硬件
+  通路，不经 AP 可见的共享内存环；ADSP 增强（sph_info +3=3/+55=0，
+  本机值已钉）经 USIP EMI 的 ADSP_USIP_PHONECALL 区
+  （EMI+0x30000/0x8000）与 DSP 交换。REG_DMA 两条 64K region 仍
+  禁止认作 PCM 环（第一轮结论不变）。
+- **本树接线顺序（依赖序）**：(1) L2 residency probe（固件已到位）
+  证明 DSP 在线并读 task-info[0] 定 scene0 core；(2) voice IPI
+  transport owner 落地后才许 AD50 真提交（现 `x9_ipi_dma` 为
+  SmartPA 专用，AD50 仍只构造不发送）；(3) SpeechOn 2f20 的
+  SPC/CCCI 承载 owner（sph 字节已闭合、未发送）；(4) x9/audio 侧
+  AFE modem-PCM owner 作为 PCM supplier，按 `x9_voice_bbdev.h`
+  资格合同注册（双向真实 stream + 真实 IOProc），合格后 iOS
+  Baseband Voice 才有 ingress。四项缺一，bbdev registry 保持空、
+  fail-closed。
+- **仍未知**：AFE<->MD voice 硬件通路在本树 XNU 音频栈上的可驱动性
+  （x9/audio 现有 AFE/ADSP core0 transport 属媒体面，未证可承载
+  modem PCM）；AD50 提交后的 DSP 侧回执形态（BYPASS_ACK 语义下
+  send 成功不等于回执）。
+
+## 下轮真机判别清单
+
+1. 带 `x9_voice_diag=1` 开机：核 SMEM id24 描述子行与 Android 值
+   （AP f0d00000 / MD 42d00000 / size 0x60000 / flags 2）一致。
+2. residency probe 构建上机：固件驻留确认行；task-info[0] 8B 回读
+   值与 core 判定（以回读为准）；REG_DMA header 与 +128/+512 两条
+   entry 落点与已闭合布局核对。
+3. 通话中（probe 之后）：核 SpeechOn af20 result 0 是否复现、
+   4901 进度帧与 48k PCM 时钟是否起转——无声音时先分 DSP 未在线 /
+   SpeechOn 未达 / PCM 未流三层，不合并归因。

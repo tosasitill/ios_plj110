@@ -34,6 +34,7 @@ if source_head=='963f0e64f103d2e682cd0cc454a8fe50f52c8cbb' or (source/'crates/me
   '0102-unixnu-share-neutral-zero-buffers.patch',
   '0103-unixnu-render-heap-cache.patch',
   '0104-refresh-host-test-fixtures.patch',
+  '0105-x9-heap-aging.patch',
  ))
  want=''.join(hashlib.sha256(q.read_bytes()).hexdigest()+' '+q.name+'\n' for q in patches)
  stamp=source/'.x9-patches-applied'
