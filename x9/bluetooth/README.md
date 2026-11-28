@@ -394,3 +394,82 @@ python3 -I x9/bluetooth/preflight_settings_diag.py --mode install \
 实盘入口先复核 userdata 路径、pinned extent 和 HFSX UUID，再检查干净 journal、目标和临时路径、目录及 Apple 原件。原始读取总预算为 32 MiB，包含元数据检查使用的 64 KiB。实盘通过时 JSON 包含 `device_probed: true` 与 `live_hfsx.status`。安装候选使用 `x9_bt_root=1 x9_bt_settings_diag=1`，运行时以 `X9 BT ROOT` 安装结果及打开设置后出现的 `eight native hooks installed` 日志验收。
 
 替换已安装诊断时，`settings_header.py --replacement-dylib` 接受新签名 dylib，`--payload` 指向实际安装过的旧包。生成的 header 只允许一个旧版身份。PID1 在原子替换前重新验证旧文件的长度、SHA-256、模式和属主。
+
+### BTAudio XPC 只读记录钩子（X9BTAudioDiag，2026-11-28）
+
+目的：实录一台真实 HFP 设备 Publish/StartAudio 的信封原值，补齐写消费端前
+缺的五项未知（DeviceType 值域、DeviceUid 构造、属性键值类型全集、StartAudio
+双向 shmem 布局、AudioPipe 角色）。此前汇报称该钩子已随候选存在系误报：
+树内与候选内均无（kBTAudioMsg 零命中），本节即从零实现的版本。
+
+**注入点判定（原件工件证据）**：消费点在 **coreaudiod 内的 driver**，不是
+bluetoothd。三条证据：① driver 的 Info.plist 在
+`AudioServerPlugIn_MachServices` 下声明 `com.apple.BTAudioHALPlugin.xpc`，
+服务由 HAL driver 在 coreaudiod 进程内托管；② driver 二进制含
+`BTHAL got kBTAudioMsgProperty...`、`HAL received ...` 日志串，是解析方；
+③ driver 的 libxpc 导入只有读侧 {apply, get_int64, get_string, get_value}
+（外加 create/set 用于回复），bluetoothd 则导入完整 set_* 族（它是组装方）。
+bluetoothd 侧仅保留为第二点（同一 dylib 被注入 bluetoothd 时按其 UUID
+AA9424E8 绑定它自己的读侧指针，覆盖回复读取）；未知项的权威值以 driver
+收到的为准。
+
+**钩子形态**：`X9BTAudioDiag.dylib`（build.py 与 Settings 诊断同批编译，
+install_name `/usr/lib/X9BTAudioDiag.dylib`，build.json 带
+`audio_diagnostic_contract`）。构造器仅在进程名为 coreaudiod/bluetoothd
+且 env `X9_BT_AUDIO_DIAG=1` 时经 `_dyld_register_func_for_add_image` 等待
+钉住 UUID 的镜像（driver 9899D1C1-2F49-3AAB-9223-DFAD564CFE2E），解析其
+Mach-O 间接符号表，只重绑定 `__la_symbol_ptr`/`__got` 中四个读侧符号的
+槽位（vm_protect 写后恢复只读；不改任何指令、无跳板）。每个替代函数先调
+原函数、原样返回其结果，再在字典含 `kBTAudioMsgId` 时整棵转储信封
+（深度 3、data 只记长度+16B 首部、shmem 经 xpc_shmem_map 记长度+48B
+首部）；不写字典、不改返回值、errno 保留、记录失败一律 fail-open。
+上限：每进程 16 条消息、每条 220 行、同一字典 2 秒内只录一次。日志走
+`kern.x9_bt_note` + os_log，前缀 `X9 BTAUDIO:`。类型判定用创建探针对象
+取 xpc_get_type，不引用任何 `_xpc_type_*` 符号。主机测试
+`test_btaudio_diag.py` 锁上述合同。
+
+**重构 BT 候选接线（照此做，本次未并入 package/root 合同）**：
+
+1. payload：`package.py` 的 `BINARIES` 加
+   `'X9BTAudioDiag.dylib': '/usr/lib/X9BTAudioDiag.dylib'`，并像
+   settings_diagnostic 一样校验 build.json 的
+   `audio_diagnostic`/`audio_diagnostic_default`/`audio_diagnostic_contract`；
+   root payload 文件数 8→9，同步 `root_header.py` 的文件表、
+   `test_settings_diag.py` 的 payload 断言（entries 9、modes
+   `['0755']*6 + ['0644']*3`）与 stage 的文件计数口径。
+2. 内核注入器：仿 `x9_bt_settings_exec_env.inc` 新增
+   `x9_bt_audio_exec_env.inc`，目标 exec 路径 `/usr/sbin/coreaudiod`，
+   门控 `sweet_x9_arg("x9_bt_audio_diag",0)!=1` 直接返回；env 已有
+   `DYLD_INSERT_LIBRARIES=` 或 `X9_BT_AUDIO_DIAG=` 时按 settings 惯例跳过
+   并打日志；`x9_btr_check` 校验嵌入的 `/usr/lib/X9BTAudioDiag.dylib`
+   字节后才追加 `X9_BT_AUDIO_DIAG=1` 与
+   `DYLD_INSERT_LIBRARIES=/usr/lib/X9BTAudioDiag.dylib`。在 kern_exec.c 中
+   于 `x9_bluetooth_root.inc` 之后、与 settings 注入器同位置 include 并
+   调用。可选第二目标 `/usr/sbin/bluetoothd`（原件经 X9BluetoothLaunch
+   exec，注入器按 exec 路径匹配仍然成立），默认不开。
+3. 参数：`x9_bt_audio_diag=1` 共 18 字符 + 1 空格 = **19 字符增量**；
+   `settings_boot.py` 的 `SCOPED_KEYS` 加 `x9_bt_audio_diag` 并纳入
+   verify/install/rollback 派生（rollback 置 0）。与 settings diag 同轮
+   开启时两开关合计 +38 字符，按其 COMPACT 挤压顺序核算 608 上限。
+
+**实录判读法**（USB 日志 grep `X9 BTAUDIO:`）：
+
+- `recorder armed process=coreaudiod`：注入成功。随后 driver 被加载时
+  `hooked BTAudioHALPlugin image=... rebound=4 of 4`：4 个读侧符号全绑；
+  rebound<4 记缺哪个；rebound=0 说明 GOT 写被拒，改走文本 prologue
+  路线再议。
+- 连接前应先见握手类 `msg ... id=13`（method 13 注册），`process=` 应为
+  bluetoothd 侧进程串。
+- Publish：`msg ... id=2 uid=<值>` 一行定 DeviceUid 构造格式；转储中
+  `d1 kBTAudioMsgArgDeviceType = i64 <值>` 定 DeviceType——同一台 HFP
+  耳机与一台 A2DP-only 设备各录一次，差分即 HFP 值；
+  `dict kBTAudioMsgArgDeviceProperties keys=<N>` 下每行
+  `d2 kBTAudioMsgProperty* = <类型> <值>` 汇总即属性键值类型全集。
+- StartAudio：`msg ... id=5` 的 Args 中
+  `kBTAudioMsgArgDeviceSharedMemoryInput/Output = shmem len=<N> head=<hex>`
+  定双向 shmem 大小与首部布局；AudioPipe 角色由 Input/Output 两键与
+  `kBTAudioMsgPropertyDirection` 的实测值对照定。
+- 阴性判读：有 armed 无 hooked = driver 未被 coreaudiod 加载（HAL 枚举
+  问题，与钩子无关）；有 hooked 无 msg = bluetoothd 未向该 MachService
+  发消息（查服务注册/握手）；有 msg 无 id=2/5 = 设备未走
+  Publish/StartAudio（连接类型不对或 SCO 未起）。
