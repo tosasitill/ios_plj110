@@ -1,17 +1,37 @@
 #!/usr/bin/env python3
-"""iOS-ABI X9 kernel + XnuPrelink of the original 20H392 USB device kexts + boot.img.
+"""iOS-ABI X9 kernel + XnuPrelink of selected original 20H392 kexts + boot.img.
 
     python3 -I x9/build/scripts/build-usb-prelink.py <name> [--boot-arg TOKEN ...]
 
 1. build.py kernel against .local/dxb-iosabi (iOS kext C++ ABI; x9/xnu/build-xnu.sh ios)
-2. .local/references/XnuPrelink/emit_prelink.py links IOUSBDeviceFamily,
-   AppleUSBDeviceMux (and their dependency AppleUSBCommon) and
-   IOStorageFamily (APFS P0: IOMedia publication for the extent root;
-   its declared libraries are KPIs only, so it pulls no further kexts)
-   out of
-   .local/x9/usb/native-20H392/kernelcache.macho into the kernel's empty
-   __PRELINK_* segments at a fixed slide
-3. build.py boot packages the prelinked kernel with x9/build/boot-device.json
+2. .local/references/XnuPrelink/emit_prelink.py links the selected roots
+   out of .local/x9/usb/native-20H392/kernelcache.macho into the kernel's
+   empty __PRELINK_* segments at a slide anchored above the native kernel
+3. build.py boot packages the prelinked kernel (--boot-config, default
+   x9/build/boot-device.json)
+
+Roots: the default root set is com.apple.iokit.IOStorageFamily only -- the
+APFS P0 line needs the IOStorageFamily classes in-kernel, and its declared
+libraries are KPIs only, so the closure is exactly one module (~114 KiB).
+The historical USB roots (IOUSBDeviceFamily, AppleUSBDeviceMux, +
+AppleUSBCommon) are NOT linked by default: the current kernel carries its
+own USB mux and production candidates ship with an empty __PRELINK_INFO, so
+nothing in the current kernel consumes them; pass --usb-roots to reproduce
+the old USB experiment set.
+
+Prelink base: PRELINK_BASE_FLOOR (0xfffffe000a400000) was the fixed anchor
+of the 284-era kernel. The native kernel has since grown past it (its
+__LINKEDIT now ends above the anchor), so emit plan() reported the rebased
+components colliding with the native __LINKEDIT and this script's guard
+aborted -- for every root set. Nothing else in the chain pins the anchor:
+the shim validator, mkpayload and XNU all derive the kernel layout from
+the Mach-O segment table. The base is therefore derived per build:
+max(PRELINK_BASE_FLOOR, 16K-align(kernel end + 0x40000)), keeping the
+historical 256 KiB guard gap above the native kernel. The blob's VA span
+is set by the kernelcache coalesced geometry (__PRELINK_TEXT ..
+__PRELINK_DATA = 0x2df4000); native kernel + gap + blob + __PRELINK_INFO
+totals ~100 MiB, far inside the shim's first contiguous RAM extent
+(~972 MiB), and mkpayload's kernel_end follows the segment table.
 
 Every input is under the repository; outputs: x9/out/<name>-kernel (native kernel),
 x9/out/<name>-prelink (prelinked kernel, logs), x9/out/<name> (boot.img).
@@ -32,8 +52,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 LOCAL = ROOT / '.local'
-PRELINK_BASE = 0xfffffe000a400000   # where the kexts land (above the native kernel)
-KC_BASE = 0xfffffff004dc8000        # unslid base of the 20H392 kernelcache
+PRELINK_BASE_FLOOR = 0xfffffe000a400000  # historical anchor; the live base is derived in main()
+KC_BASE = 0xfffffff004dc8000        # unslid base of the 20H392 kernelcache (__PRELINK_TEXT va)
+DEFAULT_ROOTS = ['com.apple.iokit.IOStorageFamily']
+USB_ROOTS = ['com.apple.iokit.IOUSBDeviceFamily', 'com.apple.driver.AppleUSBDeviceMux']
 PAGE = 0x4000
 
 
@@ -75,6 +97,10 @@ def main():
     ap.add_argument('name')
     ap.add_argument('--boot-arg', action='append', default=[], metavar='TOKEN',
                     help='extra boot-arg token for this image (repeatable), passed to build.py kernel and boot')
+    ap.add_argument('--usb-roots', action='store_true',
+                    help='also link the historical USB roots (default: IOStorageFamily only)')
+    ap.add_argument('--boot-config', type=Path, default=ROOT / 'x9/build/boot-device.json',
+                    help='boot-device json for the boot step (default: x9/build/boot-device.json)')
     a = ap.parse_args()
     name = a.name
     extra = [x for t in a.boot_arg for x in ('--boot-arg', t)]
@@ -100,19 +126,26 @@ def main():
     run('kernel', [py, '-I', 'x9/build/build.py', 'kernel', '--name', kname, '--config', str(cfg_path), '-j', '8'] + extra)
     kernel = ROOT / 'x9/out' / kname / 'kernel.development.sweet'
     end = max(va + vs for _, _, va, vs in segments(kernel.read_bytes()) if vs)
-    if end + 0x40000 > PRELINK_BASE:
-        sys.exit(f'native kernel ends at {end:#x}, too close to the prelink base {PRELINK_BASE:#x}')
+    # 16K-align so every rebased coalesced segment stays 16K-aligned (the
+    # kernelcache segment VAs are 16K-aligned and the shim validator
+    # requires 16K-aligned segment vmaddrs); the slide stays 16K-aligned.
+    prelink_base = max(PRELINK_BASE_FLOOR, (end + 0x40000 + PAGE - 1) & ~(PAGE - 1))
+    if end + 0x40000 > prelink_base:
+        sys.exit(f'native kernel ends at {end:#x}, too close to the prelink base {prelink_base:#x}')
+    print(f'native kernel ends at {end:#x}; prelink base {prelink_base:#x}; slide {prelink_base - KC_BASE:#x}', flush=True)
+    roots = list(DEFAULT_ROOTS) + (list(USB_ROOTS) if a.usb_roots else [])
+    root_args = [x for r in roots for x in ('--root', r)]
     prelinked = out / 'kernel.prelinked'
     run('prelink', [py, str(LOCAL / 'references/XnuPrelink/emit_prelink.py'), '--kernel', str(kernel),
                     '--prelinked', str(LOCAL / 'x9/usb/native-20H392/kernelcache.macho'),
-                    '--root', 'com.apple.iokit.IOUSBDeviceFamily', '--root', 'com.apple.driver.AppleUSBDeviceMux', '--root', 'com.apple.iokit.IOStorageFamily',
-                    f'--slide={hex(PRELINK_BASE - KC_BASE)}', '--output', str(prelinked)])
+                    *root_args,
+                    f'--slide={hex(prelink_base - KC_BASE)}', '--output', str(prelinked)])
     print('__PRELINK_INFO at', hex(align_prelink_info(prelinked)), flush=True)
     # build.py boot expects the kernel output's sidecar metadata next to the kernel.
     for p in (ROOT / 'x9/out' / kname).glob('*.json'):
         (out / p.name).write_bytes(p.read_bytes())
     run('boot', [py, '-I', 'x9/build/build.py', 'boot', '--kernel', str(prelinked), '--name', name,
-                 '--config', str(cfg_path), '--boot-config', str(ROOT / 'x9/build/boot-device.json')] + extra)
+                 '--config', str(cfg_path), '--boot-config', str(a.boot_config)] + extra)
     print('done', out, flush=True)
 
 

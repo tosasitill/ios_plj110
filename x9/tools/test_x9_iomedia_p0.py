@@ -154,7 +154,16 @@ class BuildWiringTests(unittest.TestCase):
         self.assertEqual(order.count('x9:SweetX9Storage.o'), 1)
 
     def test_prelink_root_includes_storage_family(self):
-        self.assertIn("'--root', 'com.apple.iokit.IOStorageFamily'", PRELINK)
+        # IOStorageFamily is the default (and only default) prelink root;
+        # the historical USB roots are behind --usb-roots.
+        self.assertIn("DEFAULT_ROOTS = ['com.apple.iokit.IOStorageFamily']", PRELINK)
+        self.assertIn("root_args = [x for r in roots for x in ('--root', r)]", PRELINK)
+
+    def test_prelink_base_derived_above_kernel_end(self):
+        # The fixed 284-era anchor (0xfffffe000a400000) is only a floor: the
+        # live base must clear the grown native kernel end + guard gap.
+        self.assertIn('PRELINK_BASE_FLOOR = 0xfffffe000a400000', PRELINK)
+        self.assertIn('prelink_base = max(PRELINK_BASE_FLOOR, (end + 0x40000 + PAGE - 1) & ~(PAGE - 1))', PRELINK)
 
 
 if __name__ == '__main__':
