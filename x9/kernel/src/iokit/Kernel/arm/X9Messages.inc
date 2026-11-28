@@ -76,7 +76,8 @@ struct x9m_sim {
  bool wanted,ready,reg_valid,md_known,md_ready,init_hold,init_timed_out;
  unsigned reg,init,diag_stage,ims_stage; uint64_t sampled,init_token,init_deadline,ready_epoch,init_epoch;
  uint64_t reg_epoch,ims_epoch,ims_token,ims_deadline,ims_admit_deadline; bool ims_hold;
- unsigned fx_stage; uint64_t fx_token,fx_deadline; bool fx_hold,fx_pre;
+ unsigned fx_stage; uint64_t fx_token,fx_deadline; bool fx_hold,fx_pre,fx_cfg;
+ bool fx_act_open,fx_barrier_noted;
  uint64_t fx_local_since; bool fx_local_noted;
  bool mem_sent,mem_hold; uint64_t mem_token,mem_deadline;
  unsigned ind_stage; uint64_t ind_token,ind_deadline; bool ind_hold;
@@ -284,6 +285,24 @@ static bool x9m_factory_enabled(){
  /* Default on since 2026-11-27 (owner decision): the factory provisioning
   * is part of normal init; x9_factory_init=0 opts out for A/B. */
  static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_factory_init",1)!=0;
+ return enabled!=0;
+}
+static bool x9m_factory_cfg211(){
+ /* Default on: the factory RIL establishes the DATA_SET_CONFIG plane
+  * ahead of every bearer ACT (Android datacycle, X9WDS.inc), and that
+  * plane was never established on either SIM when fx issued its ACT.
+  * x9_factory_cfg211=0 drops the 0211 step for A/B. */
+ static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_factory_cfg211",1)!=0;
+ return enabled!=0;
+}
+static bool x9m_factory_act_barrier(){
+ /* Default off: the factory RIL provisions the two SIMs on separate
+  * sender threads, interleaved in time (radio-baseline.txt 2026-11-15:
+  * SIM2's 0a18/0a00 land between SIM1's steps), so serialization is
+  * not factory behaviour. x9_factory_act_barrier=1 serializes the
+  * stage-4 ACTs -- one SIM's ACT must conclude before the other SIM
+  * may submit its own -- as an A/B variable. */
+ static int enabled=-1;if(enabled<0)enabled=sweet_x9_arg("x9_factory_act_barrier",0)!=0;
  return enabled!=0;
 }
 
@@ -570,9 +589,20 @@ static void x9m_rawsend_reject_diag(unsigned sim,const uint8_t *req,unsigned len
  * local submit failure (the shared MIPC allocator momentarily out of
  * slots during the registration storm) is not a modem answer: the stage
  * is retried under a 30 s budget before holding. The ACT itself is
- * preceded per SIM by DATA_RETRY_TIMER 021b MODE=1 (APN "ims") and its
- * 021c, mirroring the RIL/WDS datacycle; the bare ACT was refused with
- * result 0x15000A even when byte-exact (radio3). */
+ * preceded per SIM by the full RIL/WDS datacycle config chain:
+ * DATA_SET_CONFIG 0211 {MOBILE_DATA=1, DATA_ROAMING=1,
+ * IMS_TEST_MODE=0} and its successful 0212, then DATA_RETRY_TIMER
+ * 021b MODE=1 (APN "ims") and its 021c. The bare ACT was refused with
+ * result 0x15000A even when byte-exact (radio3), and with only the
+ * 021b prelude added the stage-4 ACT was still refused 0x15000A on
+ * three device rounds (final-merged A/B/C) with the data config
+ * plane never established on either SIM. The second factory 0211
+ * (DEFAULT_DATA_SIM_CARD106=1) is a global data-SIM designation the
+ * WDS path side-sends for its own bearers, not a per-bearer
+ * prerequisite; which SIM holds that role is not established by tree
+ * evidence, so fx does not mirror it. x9_factory_act_barrier=1
+ * additionally serializes the two SIMs' stage-4 ACTs as an A/B
+ * variable (default off; see the helper). */
 static void x9m_factory_ims_bytes(uint8_t out[6]){
  /* Aggregation inputs are this device's factory-observed carrier policy
   * for its SIMs: VoLTE/VoNR/ViLTE/ViNR on, WFC/ViWiFi off, IMS SMS on,
@@ -598,13 +628,20 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
    if(rc<0){s.fx_hold=true;
     printf("X9 FACTORY: SIM%u stage %u transport error; held\n",sim+1,s.fx_stage);continue;}
    s.fx_token=0;
-   unsigned expect=s.fx_stage==1?0xa1d:s.fx_stage==2?0xa19:s.fx_stage==3?0xa01:s.fx_stage==4?(s.fx_pre?0x202:0x21c):0xa03;
+   unsigned expect=s.fx_stage==1?0xa1d:s.fx_stage==2?0xa19:s.fx_stage==3?0xa01:
+    s.fx_stage==4?(!s.fx_cfg&&x9m_factory_cfg211()?0x212:s.fx_pre?0x202:0x21c):0xa03;
    unsigned result=1;
    bool known=p[8]==(1u<<sim)&&x9q_u16(p+10)==expect&&x9w_word(p,n,0,result)&&
     (s.fx_stage==4||x9w_wire(p,n));
+   if(s.fx_stage==4&&s.fx_pre)s.fx_act_open=false; /* this CNF concludes the ACT, accepted or not */
    if(!known||result){s.fx_hold=true;
     printf("X9 FACTORY: SIM%u stage %u rejected known %u result %u; held\n",sim+1,s.fx_stage,known?1:0,result);
     bzero(p,room);continue;}
+   if(s.fx_stage==4&&!s.fx_cfg&&x9m_factory_cfg211()){
+    s.fx_cfg=true;
+    printf("X9 FACTORY: SIM%u DATA_SET_CONFIG accepted; RETRY_TIMER follows\n",sim+1);
+    bzero(p,room);continue;
+   }
    if(s.fx_stage==4&&!s.fx_pre){
     s.fx_pre=true;
     printf("X9 FACTORY: SIM%u DATA_RETRY_TIMER ims accepted; ACT follows\n",sim+1);
@@ -636,6 +673,18 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
   else if(s.fx_stage==2){x9w_frame f(0xa18,1u<<sim);f.byte(0x100,0);token=f.submit();}
   else if(s.fx_stage==3){x9w_frame f(0xa00,1u<<sim);f.word(0x100,0);
    uint8_t b[6];x9m_factory_ims_bytes(b);f.tlv(0x102,b,6);token=f.submit();}
+  else if(s.fx_stage==4&&!s.fx_cfg&&x9m_factory_cfg211()){
+   /* Datacycle prerequisite, first half (X9WDS.inc x9w_start_next,
+    * Android datacycle): 0211 -> successful 0212 -> 021b -> successful
+    * 021c -> 0201; the config steps are bearer-owned prerequisites,
+    * not best-effort side queries. Stages 1-3 established the IMS
+    * config plane and the step below the retry timer, but the data
+    * config plane was never established on either SIM when fx issued
+    * its ACT. The frame mirrors the WDS CONFIG construction byte for
+    * byte (the bridge admission shape for 0211, 40 B): MOBILE_DATA100
+    * =1, DATA_ROAMING101=1, IMS_TEST_MODE103=0. */
+   x9w_frame f(0x211,1u<<sim);f.byte(0x100,1);f.byte(0x101,1);f.byte(0x103,0);token=f.submit();
+  }
   else if(s.fx_stage==4&&!s.fx_pre){
    /* Datacycle prerequisite (X9WDS.inc x9w_start_next, Android capture):
     * every 0201 is preceded by DATA_RETRY_TIMER 021b MODE=1 carrying the
@@ -646,6 +695,19 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
    x9w_frame f(0x21b,1u<<sim);f.byte(0x100,1);f.tlv(0x101,"ims",4);token=f.submit();
   }
   else if(s.fx_stage==4){
+   if(x9m_factory_act_barrier()){
+    /* A/B only (default off): hold this SIM's ACT until the other
+     * SIM's ACT has concluded. Waiting is not a submit failure: no
+     * frame is built, no token is consumed and the local-retry
+     * budget is untouched. A held peer never concludes its ACT, so
+     * it must not block: fx_hold peers are excluded above. */
+    const x9m_sim &o=x9m_sims[sim^1];
+    if(o.fx_act_open&&!o.fx_hold){
+     if(!s.fx_barrier_noted){s.fx_barrier_noted=true;
+      printf("X9 FACTORY: SIM%u ACT barrier: SIM%u ACT still open; waiting\n",sim+1,(sim^1)+1);}
+     continue;
+    }
+   }
    /* Factory IMS bearer (radio-baseline.txt 18:38:15.635): a minimal
     * DATA_ACT_CALL with APN_TYPE 2 and only the URSP traffic descriptor
     * carrying DNN "ims" (is_match_all 0, dnn_len 3 at +1, dnn at +4)
@@ -662,7 +724,8 @@ static void x9m_factory_poll(uint8_t *p,unsigned room){
    f.tlv(0x10d,td,sizeof(td));token=f.submit();
   }
   else if(s.fx_stage==5){x9w_frame f(0xa02,1u<<sim);f.word(0x100,0);token=f.submit();}
-  if(token){s.fx_token=token;s.fx_deadline=now+10000;s.fx_local_since=0;s.fx_local_noted=false;}
+  if(token){s.fx_token=token;s.fx_deadline=now+10000;s.fx_local_since=0;s.fx_local_noted=false;
+   if(s.fx_stage==4&&s.fx_pre){s.fx_act_open=true;s.fx_barrier_noted=false;}}
   else{
    /* Local rejection means the frame never left the host: the shared
     * allocator (X9_MI_SLOTS) is momentarily exhausted during the
