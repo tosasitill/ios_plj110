@@ -60,7 +60,7 @@ static void shifted_layout(UIView *wrapper, SEL sel)
     bar.frame = frame;
     if (observations++ < 4)
         os_log_with_type(ui_log, OS_LOG_TYPE_DEFAULT,
-            "X9 UI: entire inner status bar shifted 20 native px (%{public}.6f pt), y=%{public}.6f; wrapper clips=%d",
+            "X9 UI: entire inner status bar shifted 50 native px (%{public}.6f pt), y=%{public}.6f; wrapper clips=%d",
             dy, (double)frame.origin.y, wrapper.clipsToBounds);
 }
 
@@ -84,5 +84,5 @@ __attribute__((constructor)) static void install_statusbar(void)
     original_layout = (void (*)(id, SEL))method_getImplementation(method);
     method_setImplementation(method, (IMP)shifted_layout);
     os_log_with_type(ui_log, OS_LOG_TYPE_DEFAULT,
-        "X9 UI: 20H392 Modern root layout hook installed; 20 native px, portrait main display only");
+        "X9 UI: 20H392 Modern root layout hook installed; 50 native px, portrait main display only");
 }
