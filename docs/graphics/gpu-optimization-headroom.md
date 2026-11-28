@@ -356,3 +356,41 @@ hard "RENDER MEM: budget" refusals stay at zero. With frontend aging
 landed, additionally: a purge burst (window release bytes >> alloc
 bytes in LIVE) follows the first soft refusal, and the same boot
 survives >=3x A's 320s with used never reaching the hard cap.
+
+### 2026-11-28 frontend heap aging landed (0105-x9-heap-aging.patch)
+
+Implemented in the metal2vulkan series as `0105-x9-heap-aging.patch`
+(memory.rs/work_counts.rs of the runtime crate), against the structure
+actually there rather than the sketch above — three of the sketch's
+mechanisms already existed and are unchanged: kept empty pooled blocks
+beyond a pool's one already go after a 1 s quiet period (`Pool::stale`),
+image spares already age at 10 s with a 64 MiB native cap, and the
+allocation-failure path already purges every kept block and spare and
+retries once (`place`'s `make_room`). The gap the A death actually
+used is narrower: `Pool::stale` never takes a pool's *last* kept empty
+block, so every pool retained up to one full block (8–64 MiB) for the
+process's life — a burst's base, counted by the kernel budget the
+whole time.
+
+The patch adds `Pool::aged` / `Memory::age_aged`: a kept empty block
+empty for `AGED_EMPTY_FOR` = 30 s (the kernel old30s age, so both
+layers agree on "old") is freed even when it is its pool's last one,
+counted apart as `FreeCause::KeptAged` (`WorkCounts::memory_frees`
+.kept_aged; returned bytes are the same sweep's drops in
+`device_memory_allocated` and the census's empty bytes). Sweeps: in
+`place`, bounded at 4 blocks before a block is made — a release frees
+at most two blocks, and a freed block that carries a buffer of
+addresses first destroys it and parks the memory, so the allocation
+path stays in that order — and unbounded in `age_spares`, the room
+keeper's pass, which drains the rest off the allocation path. Two
+deliberate exclusions: a block added with nothing placed in it (the
+room `keep_room` made) carries no emptied time and is never taken —
+it is standing room, one per pool, re-derived by `keep_room` itself;
+and an aged image block is freed, not kept spare — a spare is for the
+next dedicated image under its own 10 s rule, and a block that reaches
+the aged sweep has already had both keepings.
+
+Acceptance is the A-shape paragraph above, with one added read: the
+frontend's `memory_frees.kept_aged` counter must move during the run
+(the sweep engaging), alongside LIVE old30s bytes falling after churn
+peaks.
