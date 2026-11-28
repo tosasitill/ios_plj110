@@ -51,24 +51,36 @@ extern "C" int x9_usb_dma_alloc(void **va, uint64_t *pa)
 
 /* The usbmux profile's USB serial string must equal IOPlatformSerialNumber:
  * usbmuxd adopts the USB serial as the UDID while lockdownd answers with the
- * platform value, so a synthetic serial could enumerate but never pair. The
- * platform expert has already decoded the device-tree serial-number by the
- * time BSD init runs; fall back to those raw bytes (the very input of
+ * platform value, so a synthetic serial could enumerate but never pair.
+ * XNU publishes that key on the platform expert's PROVIDER (the device-tree
+ * root nub), not on the platform expert object itself:
+ * IOPlatformExpertDevice::configureDefaults and
+ * IOPlatformExpert::publishPlatformUUIDAndSerial both setProperty it on the
+ * provider, so both objects are consulted here. Fall back to the raw
+ * device-tree serial-number bytes (the very input of
  * createSystemSerialNumberString) if the property is not reachable. */
 extern "C" int x9_platform_serial(char *out, unsigned capacity)
 {
     if (!out || capacity < 2) return EINVAL;
     char value[32] = {};
     IOService *platform = IOService::getPlatform();
-    auto *serial = platform ? OSDynamicCast(OSString,
-        platform->getProperty("IOPlatformSerialNumber")) : nullptr;
+    OSObject *serial_prop = platform ?
+        platform->getProperty("IOPlatformSerialNumber") : nullptr;
+    if (!serial_prop && platform && platform->getProvider())
+        serial_prop = platform->getProvider()->getProperty(
+            "IOPlatformSerialNumber");
+    auto *serial = OSDynamicCast(OSString, serial_prop);
     if (serial && serial->getLength() && serial->getLength() < sizeof(value))
         memcpy(value, serial->getCStringNoCopy(), serial->getLength() + 1);
     if (!value[0]) {
         IORegistryEntry *entry = IORegistryEntry::fromPath("IODeviceTree:/");
         auto *data = entry ? OSDynamicCast(OSData,
             entry->getProperty("serial-number")) : nullptr;
-        if (data && data->getLength() && data->getLength() < sizeof(value)) {
+        /* mkadt emits serial-number as the ASCII serial NUL-padded to
+         * exactly 32 bytes (product_identity.serial_property), so a strict
+         * length < sizeof(value) rejects every real unit. Accept the full
+         * buffer; the NUL scan below still bounds the copied string. */
+        if (data && data->getLength() && data->getLength() <= sizeof(value)) {
             const char *bytes = (const char *)data->getBytesNoCopy();
             unsigned n = 0;
             while (n < data->getLength() && bytes[n]) n++;
