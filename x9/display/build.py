@@ -49,7 +49,7 @@ def main():
         'schema': 1, 'ios_build': '20H392', 'bytes': len(data),
         'sha256': digest.hex(), 'ios_path': path, 'boot_arg': 'x9_ui=1',
         'disable_boot_arg': 'x9_ui=0',
-        'artwork_subtype': 2556, 'offset_native_pixels': 20,
+        'artwork_subtype': 2556, 'offset_native_pixels': 50,
         'portrait_main_display_only': True, 'runtime_verified': False,
         'device_installation_executed': False, 'argv': command,
     }, indent=2) + '\n')

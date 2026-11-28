@@ -45,8 +45,8 @@ class DisplayTests(unittest.TestCase):
             source.write_text('''#include <assert.h>
 #include "statusbar_geometry.h"
 int main(void) {
-    assert(fabs(x9_statusbar_offset(3, 1) * 3 - 20) < 1e-12);
-    assert(x9_statusbar_offset(2, 1) == 10);
+    assert(fabs(x9_statusbar_offset(3, 1) * 3 - 50) < 1e-12);
+    assert(x9_statusbar_offset(2, 1) == 25);
     assert(x9_statusbar_offset(3, 0) == 0);
     assert(x9_statusbar_offset(0, 1) == 0);
     assert(x9_statusbar_offset(NAN, 1) == 0);
@@ -54,7 +54,7 @@ int main(void) {
     for (int i=0; i<10000; i++) {
         double original_y = 0; /* Apple's reset EACH layout */
         double final_y = original_y + x9_statusbar_offset(3, 1);
-        assert(fabs(final_y - 20.0/3.0) < 1e-12);
+        assert(fabs(final_y - 50.0/3.0) < 1e-12);
     }
     return 0;
 }''')

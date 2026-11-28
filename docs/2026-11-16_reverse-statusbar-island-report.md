@@ -162,3 +162,35 @@ merge `84e1aad5` 已推送，display-fill 本地/远端分支及工作树已删�
 - `packaged-verification.json`：三份镜像的实际 payload cmdline/subtype 和 SHA 检查。
 
 这是一份可上机验证的候选实现，不是原生灵动岛已运行的证明。
+
+## 2026-11-28 附记：状态栏再下移 10 pt 与岛中央遮挡诊断
+
+用户真机反馈：状态栏仍偏高，要求再下移 10 pt；灵动岛中间像有遮罩、内容显示不全。
+
+**状态栏（已改）**：偏移源头只有一处——`x9/display/statusbar_geometry.h` 的
+`x9_statusbar_offset()` 返回 `N / nativeScale` pt，N 为物理像素。原 N=20
+（@3x 为 6.667 pt，真机日志证明桥在每轮 SpringBoard exec 均有 appended 记录，
+偏移实际生效）。用户要的 +10 pt 在本机 @3x 下恰为 +30 物理 px，故 N 改为
+**50**（总 16.667 pt），`statusbar.m` 日志串、`build.py` 的
+`offset_native_pixels` 元数据与 `test_display.py` 的 C 断言同步更新。
+范围不变：仅 SpringBoard 竖屏主屏的内层状态栏；横屏/外屏/safe-area 不动；
+**原生岛窗口不随状态栏移动**（两者不同源，见正文），本次下移会使状态栏
+两侧条目与岛的垂直间距再拉开 10 pt，这是用户指令的应有之义。
+
+**岛中央遮挡（诊断，未改几何）**：机制为物理挖孔遮挡，与软件遮罩无关。
+原厂 Android dumpsys（x9/out/android-evidence-20261127/auto-brightness/
+dumpsys-display.txt）给出本机面板 cutout：boundingRect = Rect(590, 0 − 666, 140)
+（1256×2760 面板 px），即水平居中（圆心 x=628 = 面板中线）、宽 76 px、
+自顶部深 140 px。映射到 iOS 画布（1242×2760 px = 414×920 pt @3x，水平
+pixel-centre stretch、垂直 1:1）：挖孔占 x ≈ 194.5–219.5 pt（宽 ≈25 pt，
+中心 207 pt = 画布中线）、y = 0–46.7 pt。而原生岛由 stock SystemAperture
+按 artwork subtype 2556（D22）内部几何渲染，其内容布局按 D22 真深感
+摄像头（位于药丸内偏右）避让传感器区；本机真实挖孔在正中央，恰好穿过
+岛的中央内容带（居中文本/图标），形成"中间有遮罩、显示不全"的观感。
+本 port 发布的参数（ADT subtype、MG、画布）中没有任何一项能向
+SystemAperture 传递摄像头位置，其几何为 stock 内部常量；既有设计亦明确
+不做 aperture hook。故本轮不动岛几何。待测判别：下轮上机截一张带岛活动
+（计时器/充电）的图，量黑色圆形遮挡的圆心与直径——预测圆心 x ≈ 621 画布
+px（207 pt）、直径 ≈75 画布 px（25 pt）、纵向落在 0–140 画布 px 内，
+吻合即定案；后续若要治理，须单独立项做 SystemAperture 布局 hook 或等效
+方案，不在本轮范围。
