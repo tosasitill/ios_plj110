@@ -64,6 +64,11 @@ struct NmbShaderCacheStats {
 bool nmb_device_shader_cache_stats(const NmbDevice *, struct NmbShaderCacheStats *);
 size_t nmb_last_warning(char *out, size_t size);
 bool nmb_device_max_threads_per_threadgroup(const NmbDevice *, uint64_t out[3]);
+/* The measured texture-dimension limits, in the order of the base class's limits struct fields:
+ * 1D width, 2D width, 2D height, 3D width, 3D height, 3D depth, cube dimension, array layers.
+ * Vulkan reports one dimension per image kind, so the 2D height repeats the 2D dimension and the
+ * 3D height and depth repeat the 3D dimension. false: no answer (null device or out). */
+bool nmb_device_texture_limits(const NmbDevice *, uint32_t out[8]);
 /* Device queries the runtime answers by Metal selector: Apple's private counts and flags where the device has an answer of its own,
  * and the public queries. A selector's kind says its result and argument. */
 enum {NMB_ANSWER_COUNT = 0, NMB_ANSWER_FLAG = 1, NMB_ANSWER_COUNT_ARG = 2, NMB_ANSWER_FLAG_ARG = 3};

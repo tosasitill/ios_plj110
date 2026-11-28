@@ -509,6 +509,32 @@ pub extern "C" fn nmb_device_max_threads_per_threadgroup(device: *const NmbDevic
     })
 }
 
+/// The measured texture-dimension limits for the base class's limits struct (the header's eight
+/// words). Vulkan reports one dimension per image kind: the 2D height repeats the 2D dimension
+/// and the 3D height and depth repeat the 3D dimension.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_device_texture_limits(device: *const NmbDevice, out: *mut u32) -> bool {
+    guard(false, || {
+        if out.is_null() {
+            return Err("null limits".into());
+        }
+        let l = &get(device)?.0.properties().description.limits;
+        let dims = [
+            l.max_image_dimension_1d,
+            l.max_image_dimension_2d,
+            l.max_image_dimension_2d,
+            l.max_image_dimension_3d,
+            l.max_image_dimension_3d,
+            l.max_image_dimension_3d,
+            l.max_image_dimension_cube,
+            l.max_image_array_layers,
+        ];
+        // SAFETY: the header's eight words.
+        unsafe { std::slice::from_raw_parts_mut(out, 8) }.copy_from_slice(&dims);
+        Ok(true)
+    })
+}
+
 /// The device selectors `nmb_device_answer` takes beyond Apple's private counts and flags: the selector and its kind
 /// (the header's NMB_ANSWER_* values).
 const PUBLIC_ANSWERS: &[(&str, u32)] = &[

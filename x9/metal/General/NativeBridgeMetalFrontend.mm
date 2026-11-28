@@ -2048,7 +2048,24 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 // and feature tables from a hardware profile (`featureProfile`, `indirectArgumentBufferCapabilities`, a table of Apple GPUs) that this device
 // has not got: running them would claim an Apple GPU's capabilities. They are empty here, so a limit or feature the runtime measured is answered
 // by this file's own answers (installAnswers) and any other stays the base class's neutral 0/NO. Nothing is claimed that nothing measured.
-- (void)initLimits {}
+// One exception, initLimits: the base class's limits is an inline struct in the device object and not every
+// consumer asks the device a selector. PhotosUICore takes its texture-redraw size straight from the struct
+// (maxTextureWidth2D/Height2D at limits+0x84/0x88), so a struct left at zero makes it create a 0x0 context
+// and trip its own assertion (MobileSlideShow aborts in PXGCreateContext, PXGTextureUtilities.m:290). So
+// initLimits writes the texture dimensions the Vulkan device measured into the struct — only those fields,
+// only measured values. The field offsets are the 20H392 Metal binary's own (from its accessors: +0x80 1D
+// width, +0x84/+0x88 2D width/height, +0x8c/+0x90/+0x94 3D width/height/depth, +0x98 cube, +0x9c layers);
+// the struct's offset in the object comes from the runtime. The profile's other fields stay neutral 0.
+- (void)initLimits {
+ uint32_t dims[8]={};
+ if(!nmb_device_texture_limits(gDevice,dims)){NBLOG(@"native-metal: initLimits: no texture limits: %@",lastError());return;}
+ Ivar ivar=class_getInstanceVariable(object_getClass(self),"_limits");
+ if(!ivar){NBLOG(@"native-metal: initLimits: base class has no _limits ivar; limits struct left zero");return;}
+ static const uint8_t fieldOffsets[8]={0x80,0x84,0x88,0x8c,0x90,0x94,0x98,0x9c};
+ uint32_t *fields=(uint32_t *)((char *)(__bridge void *)self+ivar_getOffset(ivar));
+ for(int i=0;i<8;i++)fields[fieldOffsets[i]/4]=dims[i];
+ NBLOG(@"native-metal: initLimits: texture limits 2D %ux%u, 1D %u, 3D %u, cube %u, layers %u",dims[1],dims[2],dims[0],dims[3],dims[6],dims[7]);
+}
 - (void)initFeatureQueries {}
 - (void)initGPUFamilySupport {}
 - (void)initWorkarounds {}
