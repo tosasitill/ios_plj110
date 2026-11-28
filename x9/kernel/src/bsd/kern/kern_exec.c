@@ -396,6 +396,7 @@ static int x9_camera_exec_env(struct image_params *, int);
 static int x9_appsync_exec_env(struct image_params *, int);
 static int x9_ui_exec_env(struct image_params *, int);
 static int x9_bt_settings_exec_env(struct image_params *, int);
+static int x9_bt_audio_exec_env(struct image_params *, int);
 static void x9_hevc_exec_env(struct image_params *);
 #endif
 
@@ -5854,6 +5855,8 @@ exec_extract_strings(struct image_params *imgp)
 	if (error) goto bad;
 	error = x9_bt_settings_exec_env(imgp, new_ptr_size);
 	if (error) goto bad;
+	error = x9_bt_audio_exec_env(imgp, new_ptr_size);
+	if (error) goto bad;
 #endif
 	if (imgp->ip_argspace < new_ptr_size) {
 		error = E2BIG;
@@ -7127,6 +7130,7 @@ sweet_x9_prepare_wallpaper_collections(proc_t p,user_addr_t scratch,user_addr_t 
 #include "x9_speaker_install.inc"
 #include "x9_bluetooth_root.inc"
 #include "x9_bt_settings_exec_env.inc"
+#include "x9_bt_audio_exec_env.inc"
 /* Explicit opt-in: seed migration preferences before original launchd starts.
  * Preserve any previous preference through a same-directory hard-link backup. */
 static int

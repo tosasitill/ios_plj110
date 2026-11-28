@@ -428,7 +428,7 @@ Mach-O 间接符号表，只重绑定 `__la_symbol_ptr`/`__got` 中四个读侧�
 取 xpc_get_type，不引用任何 `_xpc_type_*` 符号。主机测试
 `test_btaudio_diag.py` 锁上述合同。
 
-**重构 BT 候选接线（照此做，本次未并入 package/root 合同）**：
+**重构 BT 候选接线（2026-11-28 已按此落地：payload 9 文件、coreaudiod 注入器、settings_boot/candidate 参数与回滚均已接线，主机测试锁定）**：
 
 1. payload：`package.py` 的 `BINARIES` 加
    `'X9BTAudioDiag.dylib': '/usr/lib/X9BTAudioDiag.dylib'`，并像
