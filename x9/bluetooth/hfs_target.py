@@ -19,6 +19,7 @@ import struct
 BINARIES = frozenset((
     '/usr/bin/x9-btctl', '/usr/lib/X9H4Transport.dylib',
     '/usr/libexec/X9BluetoothLaunch', '/usr/libexec/X9BlueTool',
+    '/usr/lib/X9SettingsBTDiag.dylib', '/usr/lib/X9BTAudioDiag.dylib',
 ))
 TARGETS = BINARIES | frozenset((
     '/System/Library/LaunchDaemons/com.apple.bluetoothd.plist',

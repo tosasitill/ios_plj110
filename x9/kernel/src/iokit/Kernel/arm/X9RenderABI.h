@@ -27,9 +27,11 @@ enum X9RenderOperation {
   * imported host range the frontend tracks; Acquire/Release count command
   * buffers that reference it (commit .. completion); HoldAll/ReleaseAll pin
   * every range of the task (a command buffer whose surfaces are not all known).
-  * With boot-arg x9_cache_scope=1, submission maintenance skips an imported BO
-  * only when a registered range of the same task covers it, no overlapping
-  * range is acquired and nothing is held. Anything else keeps full maintenance. */
+  * With boot-arg x9_cache_scope=1, the post phase may skip an imported BO
+  * when a registered range of the same task covers it, no overlapping range
+  * is acquired and nothing is held. The publish (CPU->GPU) phase never skips
+  * on scope since the 2026-11-28 round3 fix; there registration only feeds
+  * the covered/uncovered accounting. Anything else keeps full maintenance. */
  X9RenderScope=14
 };
 enum X9RenderScopeOperation { X9ScopeRegister=1u, X9ScopeUnregister=2u, X9ScopeAcquire=3u, X9ScopeRelease=4u,

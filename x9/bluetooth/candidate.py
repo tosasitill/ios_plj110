@@ -36,6 +36,7 @@ LIMITATIONS = [
     'SSPM/profile/ownership, UART PIO/escape throughput and Android vendor completions remain hardware-unverified on XNU',
     '20H392 native injection, initialization, scan, pairing, BLE, A2DP, HFP and SCO require actual iOS validation',
     'x9_bt_settings_diag defaults off; =1 injects only Preferences after exact root-payload hash verification; rollback disables it',
+    'x9_bt_audio_diag defaults off; =1 injects only coreaudiod after exact root-payload hash verification; the recorder is read-only; rollback disables it',
     'MTK SCO framing is implemented; native voice-route/WBS vendor equivalence still requires real MT6653 evidence',
     'boot image alone does not install the H4 bridge or independent/cached Program-only launch job overrides',
     'keep bootloaders/recovery/modem/persist/partition backups intact; device boot is performed by the user',
@@ -80,6 +81,7 @@ def rollback_boot_options(opts):
         'x9_bt_init': 'x9_bt_init=0',
         'x9_bt_fc': 'x9_bt_fc=0',
         'x9_bt_settings_diag': 'x9_bt_settings_diag=0',
+        'x9_bt_audio_diag': 'x9_bt_audio_diag=0',
     }
     # The install candidate preflight requires explicit root/init/fc.
     # Leave an absent diagnostic selector absent (kernel default is off);
@@ -178,6 +180,9 @@ def build(a):
     diagnostic_args = [t for t in opts['boot_args'] if t.partition('=')[0] == 'x9_bt_settings_diag']
     if diagnostic_args not in ([], ['x9_bt_settings_diag=0'], ['x9_bt_settings_diag=1']):
         raise ValueError('x9_bt_settings_diag accepts only one explicit 0 or 1')
+    audio_args = [t for t in opts['boot_args'] if t.partition('=')[0] == 'x9_bt_audio_diag']
+    if audio_args not in ([], ['x9_bt_audio_diag=0'], ['x9_bt_audio_diag=1']):
+        raise ValueError('x9_bt_audio_diag accepts only one explicit 0 or 1')
     embed_root = bool(root_args)
     if embed_root != bool(a.apple_originals):
         raise ValueError('x9_bt_root=1 and --apple-originals must be given together')

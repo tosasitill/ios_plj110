@@ -95,5 +95,41 @@ class RenderBudgetTests(unittest.TestCase):
             '&&request.bytes>=(4u<<20)', src)
 
 
+
+class RenderScopePreFixTests(unittest.TestCase):
+    def test_publish_phase_never_skips_on_scope(self):
+        """2026-11-28 round3: the frontend-scope (x9_cache_scope) skip in
+        the publish walk was a second CPU->GPU maintenance skip the
+        COH-PROBE never counted (it counts only the coherent class), and
+        the round3 acceptance boot died with it at ~16.9 MB/job while the
+        probe read 0. Publish must not skip on scope; the covered bytes
+        fall through to the scope_hold accounting and full maintenance."""
+        src = ENGINE.read_text()
+        self.assertNotIn('scope_skip[0]+=r.bytes;continue', src)
+        self.assertIn('st->scope_hold_bytes[0]+=r.bytes', src)
+        self.assertIn('scope_skip[0] therefore stays 0', src)
+
+    def test_post_phase_scope_skip_retained(self):
+        """The reap (post) phase keeps its scope skip: a job's own
+        acquires are still held at reap time, so it never fired in any
+        recorded boot (post_skip_avg=0 in A/B/C/round3), and the
+        predicate/snapshot machinery stays for it and the accounting."""
+        src = ENGINE.read_text()
+        self.assertIn('scope_skip[1]+=r.bytes;continue', src)
+        self.assertEqual(src.count('render_scope_skips(st,r)'), 1)
+        self.assertIn('x9_render_scope_snapshot', src)
+
+    def test_frontend_scope_telemetry_kept(self):
+        """The cache-frontend-scope line must keep printing with its
+        pre_skip_avg sourced from scope_total[0]: after the fix the
+        on-device acceptance reads pre_skip_avg=0 on that line (and a
+        matching rise in cache-scope-hold pre_avg) instead of the
+        counter being deleted and the signal lost."""
+        src = ENGINE.read_text()
+        self.assertIn('cache-frontend-scope', src)
+        self.assertIn('scope_total[0]/count', src)
+        self.assertIn('cache-scope-hold', src)
+
+
 if __name__ == '__main__':
     unittest.main()

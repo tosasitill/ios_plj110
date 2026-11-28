@@ -20,6 +20,7 @@ UUID = 'AA9424E8-0648-34E2-B3CF-E6C793B9D471'
 STOCK_SHA = '8b7c0a0bea51544db82269d7f2775ab7996b8740927283428c4753e032df3a8f'
 SETTINGS_PATH = '/System/Library/PrivateFrameworks/PreferencesUI.framework/Settings.plist'
 SETTINGS_DIAG_PATH = '/usr/lib/X9SettingsBTDiag.dylib'
+AUDIO_DIAG_PATH = '/usr/lib/X9BTAudioDiag.dylib'
 SETTINGS_SHA = 'eaa1d66b12febdb8f03aec21ae0724916830e499c14657d3da712039280d0957'
 BINARIES = {
     'btctl': '/usr/bin/x9-btctl',
@@ -27,6 +28,7 @@ BINARIES = {
     'X9BluetoothLaunch': '/usr/libexec/X9BluetoothLaunch',
     'X9BlueTool': '/usr/libexec/X9BlueTool',
     'X9SettingsBTDiag.dylib': '/usr/lib/X9SettingsBTDiag.dylib',
+    'X9BTAudioDiag.dylib': '/usr/lib/X9BTAudioDiag.dylib',
 }
 JOBS = (
     ('com.apple.bluetoothd', '/usr/sbin/bluetoothd', [],
@@ -95,6 +97,14 @@ def package(runtime, out, settings_original=None):
                 'mobile_bluetooth_uuid': 'FDE5B98E-2257-35C8-B323-92B824492207',
                 'hook_count': 8, 'boot_arg': 'x9_bt_settings_diag=1',
                 'log_interface': 'kern.x9_bt_note', 'manager_state_modified': False,
+            }
+            or value.get('audio_diagnostic') != 'X9BTAudioDiag.dylib'
+            or value.get('audio_diagnostic_default') is not False
+            or value.get('audio_diagnostic_contract') != {
+                'driver_uuid': '9899D1C1-2F49-3AAB-9223-DFAD564CFE2E',
+                'bluetoothd_uuid': 'AA9424E8-0648-34E2-B3CF-E6C793B9D471',
+                'hook_count': 4, 'boot_arg': 'x9_bt_audio_diag=1',
+                'log_interface': 'kern.x9_bt_note', 'values_modified': False,
             }
             or value.get('power_interface') != 'kern.x9_bt_power'
             or value.get('power_lifecycle') != 'closed-transport-only'):
@@ -181,6 +191,8 @@ def package(runtime, out, settings_original=None):
         'power_interface': 'kern.x9_bt_power', 'power_lifecycle': 'closed-transport-only',
         'settings_diagnostic': SETTINGS_DIAG_PATH, 'settings_diagnostic_default': False,
         'settings_diagnostic_contract': value['settings_diagnostic_contract'],
+        'audio_diagnostic': AUDIO_DIAG_PATH, 'audio_diagnostic_default': False,
+        'audio_diagnostic_contract': value['audio_diagnostic_contract'],
         'files': entries, 'original_jobs': backups[:2],
         'original_launchd_cache': backups[2],
         'original_settings': backups[3] if settings is not None else None,

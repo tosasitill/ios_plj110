@@ -58,6 +58,15 @@ class DiagnosticChecks(unittest.TestCase):
             self.assertEqual(rollback['options'], opts['options'])
             self.assertIn('x9_bt_root=1', opts['boot_args'])
             self.assertEqual(len(' '.join(rollback['boot_args'])), len(' '.join(tokens)))
+        for audio in (['x9_bt_audio_diag=0'], ['x9_bt_audio_diag=1']):
+            tokens = ['-v', 'x9_bt=1', 'x9_bt_init=1', 'x9_bt_fc=1', 'x9_bt_root=1', *audio]
+            opts = {'boot_args': tokens, 'options': ['--pstore-mirror']}
+            rollback = candidate.rollback_boot_options(opts)
+            self.assertEqual(rollback['boot_args'],
+                             ['-v', 'x9_bt=1', 'x9_bt_init=0', 'x9_bt_fc=0', 'x9_bt_root=2',
+                              'x9_bt_audio_diag=0'])
+            self.assertEqual(rollback['options'], opts['options'])
+            self.assertEqual(len(' '.join(rollback['boot_args'])), len(' '.join(tokens)))
 
     def test_pinned_abi_and_forwarding(self):
         source = (HERE / 'X9SettingsBTDiag.c').read_text()
@@ -207,6 +216,13 @@ class DiagnosticChecks(unittest.TestCase):
                          'mobile_bluetooth_uuid': 'FDE5B98E-2257-35C8-B323-92B824492207',
                          'hook_count': 8, 'boot_arg': 'x9_bt_settings_diag=1',
                          'log_interface': 'kern.x9_bt_note', 'manager_state_modified': False},
+                     'audio_diagnostic': 'X9BTAudioDiag.dylib',
+                     'audio_diagnostic_default': False,
+                     'audio_diagnostic_contract': {
+                         'driver_uuid': '9899D1C1-2F49-3AAB-9223-DFAD564CFE2E',
+                         'bluetoothd_uuid': 'AA9424E8-0648-34E2-B3CF-E6C793B9D471',
+                         'hook_count': 4, 'boot_arg': 'x9_bt_audio_diag=1',
+                         'log_interface': 'kern.x9_bt_note', 'values_modified': False},
                      'power_interface': 'kern.x9_bt_power',
                      'power_lifecycle': 'closed-transport-only',
                      'launchd': {'installed': False, 'originals': 'launchd-originals',
@@ -220,7 +236,7 @@ class DiagnosticChecks(unittest.TestCase):
                 package.package(runtime, out)
             manifest = json.loads((out / 'root-payload.json').read_text())
             entries = manifest['files']
-            self.assertEqual(len(entries), 8)
+            self.assertEqual(len(entries), 9)
             self.assertEqual(manifest['install_order'], [entry['path'] for entry in entries])
             self.assertEqual(entries[-1]['path'], cache.CACHE_PATH)
             self.assertFalse(manifest['settings_diagnostic_default'])
@@ -232,7 +248,13 @@ class DiagnosticChecks(unittest.TestCase):
             self.assertEqual(diagnostic['mode'], '0755')
             self.assertEqual(diagnostic['sha256'], hashlib.sha256(data).hexdigest())
             self.assertEqual(diagnostic['size'], len(data))
-            self.assertEqual([entry['mode'] for entry in entries], ['0755'] * 5 + ['0644'] * 3)
+            self.assertEqual([entry['mode'] for entry in entries], ['0755'] * 6 + ['0644'] * 3)
+            self.assertFalse(manifest['audio_diagnostic_default'])
+            self.assertEqual(manifest['audio_diagnostic'], package.AUDIO_DIAG_PATH)
+            self.assertEqual(manifest['audio_diagnostic_contract'], build['audio_diagnostic_contract'])
+            audio = next(entry for entry in entries if entry['path'] == package.AUDIO_DIAG_PATH)
+            self.assertEqual(audio['mode'], '0755')
+            self.assertEqual(audio['precondition'], {'absent': True})
         finally:
             shutil.rmtree(scratch)
 
